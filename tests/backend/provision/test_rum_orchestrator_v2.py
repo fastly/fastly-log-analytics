@@ -623,11 +623,21 @@ class TestEnableRumWithFaroVersion:
 
     def test_enable_rum_faro_upload_failure_restores_previous_faro_version(self):
         """Verify config is rolled back to the pre-attempt faro_version (and
-        rum_enabled=False) if the Faro bundle upload fails."""
-        service_id = "srv_test"
-        cfg = self._cfg(service_id, rum={"faro_version": "1.0.0"})
+        rum_enabled=False) if the Faro bundle upload fails.
 
-        with patch("backend.config.load_config", return_value=dict(cfg)):
+        Uses two DISTINCT config objects for the initial load vs. the
+        rollback's reload (rather than one shared object returned twice) so
+        this actually exercises "reload from disk before restoring" instead
+        of silently passing via object-identity aliasing — a real disk read
+        never returns the same object twice."""
+        service_id = "srv_test"
+        cfg_initial = self._cfg(service_id, rum={"faro_version": "1.0.0"})
+        # Distinct object representing what's actually on disk by the time
+        # the rollback reloads it (mirrors upgrade_faro_version's own reload).
+        cfg_on_disk_at_rollback = dict(cfg_initial)
+        cfg_on_disk_at_rollback["unrelated_marker"] = "present-after-reload"
+
+        with patch("backend.config.load_config", side_effect=[cfg_initial, cfg_on_disk_at_rollback]):
             with patch("backend.config.save_config") as mock_save:
                 with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
                     with patch(
@@ -643,14 +653,22 @@ class TestEnableRumWithFaroVersion:
         last_saved = mock_save.call_args_list[-1][0][1]
         assert last_saved["rum_enabled"] is False
         assert last_saved["rum"]["faro_version"] == "1.0.0"
+        # Only present if the rollback actually reloaded from disk.
+        assert last_saved["unrelated_marker"] == "present-after-reload"
 
     def test_enable_rum_faro_reconcile_failure_restores_previous_faro_version(self):
         """Verify config is rolled back to the pre-attempt faro_version if
-        reconcile_vcl_state fails after the bundle was already uploaded."""
-        service_id = "srv_test"
-        cfg = self._cfg(service_id, rum={"faro_version": "1.0.0"})
+        reconcile_vcl_state fails after the bundle was already uploaded.
 
-        with patch("backend.config.load_config", return_value=dict(cfg)):
+        Same two-distinct-objects setup as the upload-failure test above, to
+        prove the rollback reloads fresh disk state rather than reusing the
+        stale in-memory cfg (Minor 1 from the task-6 review)."""
+        service_id = "srv_test"
+        cfg_initial = self._cfg(service_id, rum={"faro_version": "1.0.0"})
+        cfg_on_disk_at_rollback = dict(cfg_initial)
+        cfg_on_disk_at_rollback["unrelated_marker"] = "present-after-reload"
+
+        with patch("backend.config.load_config", side_effect=[cfg_initial, cfg_on_disk_at_rollback]):
             with patch("backend.config.save_config") as mock_save:
                 with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
                     with patch(
@@ -668,6 +686,42 @@ class TestEnableRumWithFaroVersion:
         last_saved = mock_save.call_args_list[-1][0][1]
         assert last_saved["rum_enabled"] is False
         assert last_saved["rum"]["faro_version"] == "1.0.0"
+        assert last_saved["unrelated_marker"] == "present-after-reload"
+
+    def test_enable_rum_missing_fos_config_raises_before_any_save(self):
+        """Verify the FOS bucket/credentials check runs BEFORE any config
+        mutation is persisted (task-6 review Important finding) — cfg["rum"]
+        (and rum_enabled) must be left exactly as it was on disk when FOS
+        isn't configured yet, not just "an exception propagated"."""
+        service_id = "srv_test"
+        cfg = {
+            "service_id": service_id,
+            "rum_enabled": False,
+            "rum": {"faro_version": "1.0.0"},
+            "last_activated_version": 1,
+            # Deliberately missing fos_bucket / fos_region / fos_access_key_id /
+            # fos_secret_access_key.
+        }
+        original_rum_block = dict(cfg["rum"])
+
+        with patch("backend.config.load_config", return_value=cfg):
+            with patch("backend.config.save_config") as mock_save:
+                with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
+                    with patch(
+                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro"
+                    ) as mock_download_upload:
+                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                            with pytest.raises(RuntimeError, match="missing FOS configuration"):
+                                enable_rum(service_id, "test_token", faro_version="2.0.0")
+
+        # Nothing was ever persisted, so cfg on "disk" (our mock) is provably
+        # unchanged — not just that the exception propagated.
+        mock_save.assert_not_called()
+        mock_upload.assert_not_called()
+        mock_download_upload.assert_not_called()
+        mock_reconcile.assert_not_called()
+        assert cfg["rum"] == original_rum_block
+        assert cfg["rum_enabled"] is False
 
     def test_enable_rum_without_faro_version_unaffected(self):
         """Verify omitting faro_version never touches download_and_upload_faro."""

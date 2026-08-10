@@ -253,14 +253,22 @@ def _purge_faro_surrogate_key(cfg: dict[str, Any], token: str) -> None:
     Deliberately duplicated (not imported) from
     ``backend.cron.jobs.rum_sync._faro_purge_surrogate_key`` — provision code
     must not import from cron modules (see task-6 report). Keep both in sync
-    if the purge shape ever changes.
+    if the purge shape ever changes, including this never-raise contract: a
+    missing CDN service/token or a purge failure must never surface here —
+    the upload/reconcile this purge follows has already succeeded, and a
+    stale cache is a warning, not a failed upgrade. Callers may still wrap
+    this in their own try/except for status_cb reporting; that's belt and
+    suspenders, not a requirement.
     """
     cdn_service_id = cfg.get("cdn_service_id", "")
     if not cdn_service_id or not token:
         return
-    from backend.core.fastly.client import fastly
+    try:
+        from backend.core.fastly.client import fastly
 
-    fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+        fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+    except Exception:
+        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", cfg.get("service_id"), exc_info=True)
 
 
 def enable_rum(
@@ -282,6 +290,16 @@ def enable_rum(
         faro_version: Optional pinned Faro Web SDK version (``X.Y.Z``) to self-host
             alongside enabling RUM. When omitted, behavior is exactly as before
             this parameter existed — no Faro bundle is uploaded or served.
+
+    Note:
+        If RUM is already enabled for this service, this function returns
+        immediately (the pre-existing idempotent early-return below) WITHOUT
+        looking at ``faro_version`` at all — no validation, upload, or config
+        write happens, even if a version is passed. Calling
+        ``enable_rum(..., faro_version="X.Y.Z")`` on an already-enabled service
+        is silently a no-op with respect to the version. Use
+        ``upgrade_faro_version`` to pin/change the version on a service that
+        already has RUM enabled.
 
     Returns:
         {
@@ -305,7 +323,8 @@ def enable_rum(
     if status_cb:
         status_cb(f"⏳ Enabling RUM for {logging_service_id}...")
 
-    # Step 1: Update config to enable RUM
+    # Step 1: Idempotency check — see the "already enabled" Note above:
+    # faro_version is deliberately not consulted here.
     if cfg.get("rum_enabled", False):
         ok("RUM already enabled")
         return {
@@ -314,6 +333,29 @@ def enable_rum(
             "activated": False,
         }
 
+    # Step 2: Verify FOS bucket (use existing if configured, skip provisioning)
+    # RUM shares the bucket from request logging if enabled, or uses its own if standalone.
+    # If config already has fos_bucket (from logging or prior RUM), skip provisioning.
+    #
+    # MUST run before any config mutation/save below: this check can raise,
+    # and nothing has been persisted yet at this point, so there is nothing
+    # to roll back — a service must never end up with rum_enabled=True or a
+    # pinned faro_version on disk when FOS credentials were never even present.
+    bucket_name = cfg.get("fos_bucket")
+    region = cfg.get("fos_region")
+    access_key = cfg.get("fos_access_key_id")
+    secret_key = cfg.get("fos_secret_access_key")
+
+    if not all([bucket_name, region, access_key, secret_key]):
+        raise RuntimeError(
+            f"Service {logging_service_id} missing FOS configuration (bucket, region, access_key_id, secret_access_key)"
+        )
+
+    ok(f"Using FOS bucket: {bucket_name}")
+    if status_cb:
+        status_cb(f"✅ Using FOS bucket '{bucket_name}'.")
+
+    # Step 3: Update config to enable RUM (+ pin faro_version if given)
     previous_rum_cfg = dict(cfg.get("rum") or {})
 
     cfg["rum_enabled"] = True
@@ -332,30 +374,22 @@ def enable_rum(
     ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
 
     def _rollback_config() -> None:
+        # Reload from disk first (mirrors upgrade_faro_version's rollback):
+        # a step between here and the save above (e.g. download_and_upload_faro)
+        # may have written its own config changes that the stale in-memory
+        # `cfg` wouldn't reflect. Mutate `cfg` in place (rather than rebind it)
+        # so its declared type stays non-Optional for mypy's benefit.
+        latest = svcconfig.load_config(logging_service_id)
+        if latest is not None:
+            cfg.clear()
+            cfg.update(latest)
         cfg["rum_enabled"] = False
         cfg.pop("rum_vcl_sha", None)
         if faro_version is not None:
             cfg["rum"] = dict(previous_rum_cfg)
         svcconfig.save_config(logging_service_id, cfg)
 
-    # Step 2: Verify FOS bucket (use existing if configured, skip provisioning)
-    # RUM shares the bucket from request logging if enabled, or uses its own if standalone.
-    # If config already has fos_bucket (from logging or prior RUM), skip provisioning.
-    bucket_name = cfg.get("fos_bucket")
-    region = cfg.get("fos_region")
-    access_key = cfg.get("fos_access_key_id")
-    secret_key = cfg.get("fos_secret_access_key")
-
-    if not all([bucket_name, region, access_key, secret_key]):
-        raise RuntimeError(
-            f"Service {logging_service_id} missing FOS configuration (bucket, region, access_key_id, secret_access_key)"
-        )
-
-    ok(f"Using FOS bucket: {bucket_name}")
-    if status_cb:
-        status_cb(f"✅ Using FOS bucket '{bucket_name}'.")
-
-    # Step 3: Upload RUM tracker JS to FOS (blocks RUM enable if upload fails)
+    # Step 4: Upload RUM tracker JS to FOS (blocks RUM enable if upload fails)
     # The asset-fetch VCL snippet (backend/core/fastly/rum_provisioning.py) routes
     # client requests from GET /js/rum.js to /rum/rum-tracker.js on FOS.
     # This path MUST match the upload path (rum_assets.py: "rum/rum-tracker.js").
@@ -371,7 +405,7 @@ def enable_rum(
         fail(f"JS upload failed: {e}")
         raise
 
-    # Step 3.5: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
+    # Step 4.5: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
     # /js/faro-sdk.js to an object that actually exists.
     if faro_version is not None:
@@ -388,7 +422,7 @@ def enable_rum(
     if status_cb:
         status_cb("⏳ Reconciling VCL state...")
 
-    # Step 4: Reconcile desired state with Fastly
+    # Step 5: Reconcile desired state with Fastly
     try:
         result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb, activate=activate)
     except Exception as e:
