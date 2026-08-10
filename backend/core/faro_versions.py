@@ -26,6 +26,17 @@ import httpx
 REGISTRY_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk"
 BUNDLE_URL_TEMPLATE = "https://unpkg.com/@grafana/faro-web-sdk@{version}/dist/bundle/faro-web-sdk.iife.js"
 
+# Single source of truth for "the version we self-host when nothing else is
+# pinned." The generated RUM tracker JS unconditionally loads the first-party
+# /js/faro-sdk.js (no third-party CDN fallback), so a version must always be
+# pinned once RUM is enabled. ``enable_rum`` applies this default when a
+# caller omits an explicit faro_version, and the RUM sync cron
+# (backend/cron/jobs/rum_sync.py) adopts it to self-heal a service that was
+# enabled before this default existed and never got a version pinned.
+# Chosen by the operator to match npm's dist-tags.latest as of this task;
+# bump deliberately when a new version is vetted, not automatically.
+DEFAULT_FARO_VERSION = "2.9.0"
+
 _TIMEOUT = 10.0
 
 # SRI integrity strings are "<algo>-<base64 digest>". Only algorithms with a

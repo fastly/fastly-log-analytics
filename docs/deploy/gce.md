@@ -215,22 +215,32 @@ connection (which presents a loopback IP) and serves `/admin`.
 ## 8. RUM: pin the self-hosted Faro Web SDK version
 
 Before self-hosting, the RUM tracker loaded the Faro Web SDK from jsDelivr
-with a floating `@^1` range — which resolves to `1.19.0` as of this writing.
-Self-hosting (see `backend/provision/rum_assets.py`) replaces that CDN load
-with a version pinned explicitly in each service's config
-(`cfg["rum"]["faro_version"]`), uploaded to the service's FOS bucket. An
-un-pinned service (`faro_version` unset) never gets a bundle uploaded at all
-— pinning is what actually turns RUM on for the self-hosted asset.
+with a floating `@^1` range — which resolved to `1.19.0` as of that writing.
+That CDN load no longer exists in any form: the generated tracker JS
+(`backend/provision/rum_assets.py::generate_rum_tracker_js`) unconditionally
+loads the Faro SDK from `/js/faro-sdk.js` — a relative, first-party path on
+the service's own domain, served from FOS via the RUM asset-fetch VCL. There
+is no CDN fallback and no code path that can produce one.
 
-**What it's for**: give a demo/production service a known-good version that
-won't silently change out from under it. The backend's contract stays as-is
-— `faro_version=None` means "not pinned"; nothing on the backend side
-auto-defaults a service to any particular version.
+Because of that, RUM can no longer be enabled without a self-hosted bundle
+behind `/js/faro-sdk.js`. `enable_rum()` pins an explicit version
+(`cfg["rum"]["faro_version"]`) when given one, and otherwise defaults to
+`backend.core.faro_versions.DEFAULT_FARO_VERSION` (currently `2.9.0`,
+npm's `dist-tags.latest` as of this task) — enabling RUM always downloads,
+integrity-verifies, and uploads a bundle to the service's FOS bucket.
+A service that was enabled *before* this default existed and still has no
+`faro_version` self-heals on its next RUM sync cron tick: the cron adopts
+`DEFAULT_FARO_VERSION`, uploads the bundle, and persists the pin, so it
+never depends on this script being run manually.
 
-**When to run it**: once, when first pinning a service to the self-hosted
-bundle (e.g. right after provisioning, or when migrating a service off the
-old floating-CDN tracker), and again any time you want to move that service
-to a specific version outside of the admin UI's upgrade flow.
+**What this script is for**: pin a service to a *specific* version instead
+of the default — a known-good version that won't move when the default
+changes, or rolling back to an older one.
+
+**When to run it**: any time you want to move a service to a specific
+version outside of the admin UI's upgrade flow. You do not need to run it
+just to "turn on" self-hosting — enabling RUM already does that
+automatically.
 
 ```sh
 # Pins to 2.9.0 (current npm dist-tags.latest) by default:

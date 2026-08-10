@@ -34,12 +34,22 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     """Generate the Faro Web SDK wrapper JS.
 
     This creates a minimal loader that:
-    1. Loads the Faro Web SDK from a CDN
+    1. Loads the self-hosted Faro Web SDK bundle from this service's own
+       domain — always the relative, first-party ``/js/faro-sdk.js``, never
+       a third-party CDN. That path is served from FOS via the RUM asset
+       fetch VCL (backend/core/fastly/rum_provisioning.py), which routes it
+       to the pinned bundle uploaded by ``download_and_upload_faro``.
     2. Initializes it with the service's beacon endpoint
     3. Sends beacons back to the origin
 
     The beacon endpoint defaults to /rum-beacon
     but can be customized if needed.
+
+    This body is identical regardless of which Faro version is pinned (the
+    URL is always the constant "/js/faro-sdk.js"), so it never needs
+    re-uploading on a version bump — only once, the first time RUM is
+    enabled for a service, which ``upload_rum_tracker_js``'s MD5-vs-ETag
+    check already handles idempotently.
     """
     beacon_url = beacon_endpoint.format(service_id=service_id)
 
@@ -53,7 +63,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
   if (typeof Faro === 'undefined') {{
     var script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/@grafana/faro-web-sdk@^1/dist/bundle/faro-web-sdk.iife.js';
+    script.src = '/js/faro-sdk.js';
     script.async = true;
     script.onload = function() {{
       Faro = window.Faro || window.GrafanaFaroWebSdk;

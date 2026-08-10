@@ -101,8 +101,15 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     downloads a bundle from unpkg on every call, so running it every tick
     would mean an unpkg round trip per service per cron tick.
 
-    This never bumps ``faro_version`` — upgrades are an explicit operator
-    action (later tasks). It only re-syncs the *pinned* version's content.
+    This never bumps ``faro_version`` to a *different* version — upgrades are
+    an explicit operator action. The one exception is adopting
+    ``DEFAULT_FARO_VERSION`` for a service that is RUM-enabled but has no
+    version pinned at all: since the tracker JS unconditionally loads the
+    first-party ``/js/faro-sdk.js`` (no CDN fallback), an unpinned service has
+    no bundle behind that path and would 404 for every visitor. That state
+    only exists for services enabled before this default existed (self-heal,
+    one-time — the next tick sees a pinned version and skips straight to the
+    normal integrity check, so this never repeats or thrashes).
 
     Must never raise: wrapped end to end so a transient unpkg/FOS outage
     degrades to "bundle not refreshed this tick", never to "beacon ingest
@@ -113,6 +120,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     import asyncio
 
     from backend import config as svcconfig
+    from backend.core.faro_versions import DEFAULT_FARO_VERSION
     from backend.cron_progress import add_progress
     from backend.provision.rum_assets import detect_faro_version_change, download_and_upload_faro
 
@@ -126,12 +134,38 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
         if not cfg:
             return
         rum_cfg = cfg.get("rum")
-        if not isinstance(rum_cfg, dict) or not rum_cfg.get("enabled"):
-            return
-        pinned_version = rum_cfg.get("faro_version")
-        if not pinned_version:
+        rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+        # Mirrors the OR-pattern used elsewhere (e.g. routers/rum.py,
+        # cron/scheduler.py): the declarative enable_rum() path only ever
+        # sets the top-level rum_enabled flag, while the older imperative
+        # provisioning path also sets rum.enabled — either one means RUM is
+        # actually on for this service.
+        if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
             return
         token = cfg.get("fastly_api_key", "")
+
+        pinned_version = rum_cfg.get("faro_version")
+        if not pinned_version:
+            # Self-heal: a service enabled before every enable path pinned a
+            # version by default. Adopt the default rather than leave
+            # /js/faro-sdk.js 404ing for every visitor.
+            report(f"RUM enabled with no pinned Faro version; adopting default v{DEFAULT_FARO_VERSION}")
+            try:
+                asyncio.run(download_and_upload_faro(service_id, DEFAULT_FARO_VERSION, token))
+                _faro_purge_surrogate_key(cfg, token)
+                report(f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS")
+                pinned_version = DEFAULT_FARO_VERSION
+                # Reload: download_and_upload_faro just persisted
+                # faro_version/faro_content_hash/faro_fos_etag_md5 via its
+                # own save_config call, which the stale in-memory cfg above
+                # wouldn't reflect. Without this, the integrity check right
+                # below would see no stored etag, treat the bundle it just
+                # uploaded as "not intact", and re-upload it a second time
+                # this same tick.
+                cfg = svcconfig.load_config(service_id) or cfg
+            except Exception:
+                logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
+                return
 
         # 1. Cheap integrity check — every tick.
         if not _faro_bundle_intact(cfg, pinned_version):

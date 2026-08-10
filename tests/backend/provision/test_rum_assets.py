@@ -12,6 +12,7 @@ its own network behavior is already covered by ``test_faro_versions.py``.
 from __future__ import annotations
 
 import hashlib
+import re
 
 import httpx
 import pytest
@@ -332,3 +333,23 @@ def test_generate_rum_tracker_js_warns_when_no_error_instrumentation_found():
 
     assert "console.warn" in js
     assert "no error instrumentation export found" in js
+
+
+def test_generate_rum_tracker_js_loads_the_sdk_from_the_first_party_path():
+    """The whole point of self-hosting: the browser must load the Faro SDK
+    from this service's own domain, not a third-party CDN. Regression test
+    for the Critical gap where the tracker hardcoded jsDelivr and nothing
+    ever consumed the self-hosted bundle uploaded to FOS."""
+    js = generate_rum_tracker_js("svc_test")
+
+    assert "script.src = '/js/faro-sdk.js';" in js
+    assert "cdn.jsdelivr.net" not in js
+    assert "unpkg.com" not in js
+
+
+def test_generate_rum_tracker_js_contains_no_absolute_url_at_all():
+    """Belt-and-braces: no absolute http(s):// URL anywhere in the generated
+    tracker, so a future edit can't silently reintroduce a CDN dependency."""
+    js = generate_rum_tracker_js("svc_test")
+
+    assert not re.search(r"https?://", js)

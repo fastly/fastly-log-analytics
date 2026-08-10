@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from backend import config as svcconfig
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.rum_provisioning import _assert_faro_version_safe
 from backend.provision.declarative.reconciler import reconcile_vcl_state
 from backend.provision.fos_setup import ensure_fos_bucket  # noqa: F401
@@ -287,9 +288,12 @@ def enable_rum(
         logging_service_id: Fastly service ID.
         token: Fastly API token.
         status_cb: Optional callback for status updates.
-        faro_version: Optional pinned Faro Web SDK version (``X.Y.Z``) to self-host
-            alongside enabling RUM. When omitted, behavior is exactly as before
-            this parameter existed — no Faro bundle is uploaded or served.
+        faro_version: Pinned Faro Web SDK version (``X.Y.Z``) to self-host
+            alongside enabling RUM. When omitted, defaults to
+            ``backend.core.faro_versions.DEFAULT_FARO_VERSION`` — RUM can no
+            longer be enabled without a self-hosted bundle behind it, since
+            the tracker JS unconditionally loads the first-party, relative
+            ``/js/faro-sdk.js`` (there is no third-party CDN fallback).
 
     Note:
         If RUM is already enabled for this service, this function returns
@@ -299,7 +303,10 @@ def enable_rum(
         ``enable_rum(..., faro_version="X.Y.Z")`` on an already-enabled service
         is silently a no-op with respect to the version. Use
         ``upgrade_faro_version`` to pin/change the version on a service that
-        already has RUM enabled.
+        already has RUM enabled. A service that was enabled before this
+        default existed and never got a version pinned self-heals via the
+        RUM sync cron's per-tick reconcile instead
+        (backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle).
 
     Returns:
         {
@@ -312,8 +319,8 @@ def enable_rum(
         ValueError: if faro_version is provided but not a plain X.Y.Z string.
         RuntimeError: if enable fails.
     """
-    if faro_version is not None:
-        _assert_faro_version_safe(faro_version)
+    resolved_faro_version = faro_version if faro_version is not None else DEFAULT_FARO_VERSION
+    _assert_faro_version_safe(resolved_faro_version)
 
     cfg = svcconfig.load_config(logging_service_id)
     if not cfg:
@@ -365,9 +372,10 @@ def enable_rum(
     # Persist the pinned version BEFORE reconciling so the generator (which
     # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
     # rollback below restores previous_rum_cfg so config never claims a
-    # version that isn't actually deployed.
-    if faro_version is not None:
-        _set_faro_version(cfg, faro_version)
+    # version that isn't actually deployed. Always pinned now — there is no
+    # more "enabled but unpinned" state, since the tracker's unconditional
+    # /js/faro-sdk.js load requires a bundle to always be behind that path.
+    _set_faro_version(cfg, resolved_faro_version)
 
     # Save updated config
     svcconfig.save_config(logging_service_id, cfg)
@@ -385,8 +393,7 @@ def enable_rum(
             cfg.update(latest)
         cfg["rum_enabled"] = False
         cfg.pop("rum_vcl_sha", None)
-        if faro_version is not None:
-            cfg["rum"] = dict(previous_rum_cfg)
+        cfg["rum"] = dict(previous_rum_cfg)
         svcconfig.save_config(logging_service_id, cfg)
 
     # Step 4: Upload RUM tracker JS to FOS (blocks RUM enable if upload fails)
@@ -407,17 +414,18 @@ def enable_rum(
 
     # Step 4.5: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
-    # /js/faro-sdk.js to an object that actually exists.
-    if faro_version is not None:
-        try:
-            if status_cb:
-                status_cb(f"⏳ Downloading and uploading Faro Web SDK v{faro_version}...")
-            asyncio.run(download_and_upload_faro(logging_service_id, faro_version, token, status_cb=status_cb))
-            ok(f"Faro Web SDK v{faro_version} uploaded")
-        except Exception as e:
-            _rollback_config()
-            fail(f"Faro Web SDK upload failed: {e}")
-            raise
+    # /js/faro-sdk.js to an object that actually exists. Unconditional now:
+    # the tracker JS always loads /js/faro-sdk.js, so RUM can never be
+    # enabled without a bundle behind that path.
+    try:
+        if status_cb:
+            status_cb(f"⏳ Downloading and uploading Faro Web SDK v{resolved_faro_version}...")
+        asyncio.run(download_and_upload_faro(logging_service_id, resolved_faro_version, token, status_cb=status_cb))
+        ok(f"Faro Web SDK v{resolved_faro_version} uploaded")
+    except Exception as e:
+        _rollback_config()
+        fail(f"Faro Web SDK upload failed: {e}")
+        raise
 
     if status_cb:
         status_cb("⏳ Reconciling VCL state...")

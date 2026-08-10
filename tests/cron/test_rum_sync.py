@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.cron.jobs import rum_sync as rum_sync_mod
 
 SERVICE_ID = "svc_test"
@@ -472,20 +473,138 @@ def test_skips_when_rum_not_enabled(config_store, frozen_now, mock_fos, mock_dow
     assert download_calls == []
 
 
-def test_skips_when_no_pinned_version(config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge):
+def test_top_level_rum_enabled_flag_alone_is_sufficient(
+    config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge
+):
+    """The declarative enable_rum() orchestration path only ever sets the
+    top-level ``rum_enabled`` flag (never ``rum.enabled``) — the reconcile
+    must not treat such a service as disabled."""
     download_calls, _ = mock_download
     cfg = _cfg()
-    del cfg["rum"]["faro_version"]
+    del cfg["rum"]["enabled"]
+    cfg["rum_enabled"] = True
     config_store[SERVICE_ID] = cfg
 
+    seen_methods: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("FOS must not be contacted with no pinned version")
+        seen_methods.append(request.method)
+        return _head_response(200, etag="stored-hash-abc123")
 
     mock_fos(handler)
 
     rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
 
+    # Proves the integrity check actually ran instead of returning early —
+    # an incorrectly-skipped service would also leave download_calls empty.
+    assert seen_methods == ["HEAD"]
     assert download_calls == []
+
+
+# ── self-heal: RUM enabled, no version pinned at all ────────────────────
+
+
+def test_self_heals_missing_pinned_version_to_default(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+):
+    """A service that's RUM-enabled but has never had a version pinned (the
+    real-world case: a service enabled through the older imperative
+    provisioning path, or before every enable path pinned a version by
+    default) must self-heal to DEFAULT_FARO_VERSION and upload a bundle —
+    the tracker JS unconditionally loads /js/faro-sdk.js with no CDN
+    fallback, so leaving it unpinned means a permanent 404 for every
+    visitor."""
+    cfg = _cfg()
+    del cfg["rum"]["faro_version"]
+    del cfg["rum"]["faro_content_hash"]
+    del cfg["rum"]["faro_fos_etag_md5"]
+    config_store[SERVICE_ID] = cfg
+
+    calls: list[tuple] = []
+
+    async def fake_download(service_id, version, token, *, status_cb=None):
+        calls.append((service_id, version, token))
+        # Mirror the real download_and_upload_faro's persistence (it saves
+        # faro_version/faro_content_hash/faro_fos_etag_md5 via its own
+        # save_config call) so the integrity check right after self-heal
+        # sees a matching bundle, same as it would in production.
+        stored = config_store[service_id]
+        rum_cfg = dict(stored.get("rum") or {})
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = "adopted-hash"
+        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
+        stored["rum"] = rum_cfg
+        return {"version": version}
+
+    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+
+    assert calls == [(SERVICE_ID, DEFAULT_FARO_VERSION, "fake-fastly-token")]
+    assert config_store[SERVICE_ID]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
+    assert len(mock_purge) == 1
+
+
+def test_self_heal_does_not_thrash_on_the_next_tick(
+    config_store, frozen_now, mock_fos, mock_detect, mock_purge, monkeypatch
+):
+    """Once self-healed, the next tick must see a pinned version and an
+    intact bundle and do nothing further — the adoption is one-time, not a
+    per-tick re-download."""
+    _, install_detect = mock_detect
+    install_detect(result=False)
+
+    cfg = _cfg()
+    del cfg["rum"]["faro_version"]
+    del cfg["rum"]["faro_content_hash"]
+    del cfg["rum"]["faro_fos_etag_md5"]
+    config_store[SERVICE_ID] = cfg
+
+    calls: list[tuple] = []
+
+    async def fake_download(service_id, version, token, *, status_cb=None):
+        calls.append((service_id, version, token))
+        stored = config_store[service_id]
+        rum_cfg = dict(stored.get("rum") or {})
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = "adopted-hash"
+        rum_cfg["faro_fos_etag_md5"] = "adopted-etag"
+        stored["rum"] = rum_cfg
+        return {"version": version}
+
+    monkeypatch.setattr("backend.provision.rum_assets.download_and_upload_faro", fake_download)
+    mock_fos(lambda request: _head_response(200, etag="adopted-etag"))
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+    assert len(calls) == 1
+
+    # Second tick: version is now pinned and the bundle is intact — no
+    # further adoption, no further download.
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)
+    assert len(calls) == 1
+
+
+def test_self_heal_adoption_failure_does_not_raise(
+    config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge
+):
+    """An unpkg/FOS outage during self-heal adoption must degrade to a
+    logged warning, never an exception out of the reconcile step."""
+    download_calls, install_download = mock_download
+    install_download(raises=RuntimeError("unpkg unreachable"))
+    cfg = _cfg()
+    del cfg["rum"]["faro_version"]
+    config_store[SERVICE_ID] = cfg
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no FOS HEAD should be attempted when adoption itself fails")
+
+    mock_fos(handler)
+
+    rum_sync_mod._reconcile_faro_bundle(SERVICE_ID, None)  # must not raise
+
+    assert download_calls == [(SERVICE_ID, DEFAULT_FARO_VERSION, "fake-fastly-token")]
+    assert "faro_version" not in config_store[SERVICE_ID]["rum"]
 
 
 def test_skips_when_no_rum_config_at_all(config_store, frozen_now, mock_fos, mock_download, mock_detect, mock_purge):

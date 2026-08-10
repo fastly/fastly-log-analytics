@@ -10,10 +10,11 @@ Real file I/O is tested; FOS operations are mocked.
 import datetime as _dt
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum
 
 
@@ -80,52 +81,66 @@ class TestRUMIntegration:
 
         with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket") as mock_bucket:
             with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                    # Setup mocks
-                    mock_bucket.return_value = None  # ensure_fos_bucket returns None
-                    mock_upload.return_value = {
-                        "path": "rum/rum-tracker.js",
-                        "bytes_uploaded": 1000,
-                        "fos_key": "s3://test-bucket/rum/rum-tracker.js",
-                    }
-                    mock_reconcile.return_value = MagicMock(
-                        activated_version=2,
-                        activated_version_set=True,
-                        changes_applied={},
-                    )
+                with patch(
+                    "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                    new_callable=AsyncMock,
+                    return_value={"version": DEFAULT_FARO_VERSION},
+                ) as mock_download_faro:
+                    with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                        # Setup mocks
+                        mock_bucket.return_value = None  # ensure_fos_bucket returns None
+                        mock_upload.return_value = {
+                            "path": "rum/rum-tracker.js",
+                            "bytes_uploaded": 1000,
+                            "fos_key": "s3://test-bucket/rum/rum-tracker.js",
+                        }
+                        mock_reconcile.return_value = MagicMock(
+                            activated_version=2,
+                            activated_version_set=True,
+                            changes_applied={},
+                        )
 
-                    # Call enable_rum
-                    result = enable_rum(service_id, token, status_cb=mock_status_cb)
+                        # Call enable_rum
+                        result = enable_rum(service_id, token, status_cb=mock_status_cb)
 
-                    # Verify config was written with rum_enabled=True and timestamp
-                    config_content = config_path.read_text()
-                    config = json.loads(config_content)
-                    assert config["rum_enabled"] is True
-                    assert "rum_enabled_at" in config
-                    assert config["service_id"] == service_id
+                        # Verify config was written with rum_enabled=True and timestamp
+                        config_content = config_path.read_text()
+                        config = json.loads(config_content)
+                        assert config["rum_enabled"] is True
+                        assert "rum_enabled_at" in config
+                        assert config["service_id"] == service_id
+                        # No CDN fallback exists, so enabling RUM without an
+                        # explicit faro_version must still pin and upload a
+                        # self-hosted bundle rather than leaving it unpinned.
+                        assert config["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
-                    # Verify bucket provisioning was bypassed since bucket was already configured
-                    assert mock_bucket.call_count == 0
+                        # Verify bucket provisioning was bypassed since bucket was already configured
+                        assert mock_bucket.call_count == 0
 
-                    # Verify JS upload was called once
-                    assert mock_upload.call_count == 1
-                    upload_call = mock_upload.call_args
-                    assert upload_call[0][0] == service_id
-                    assert upload_call[0][1] == token
+                        # Verify JS upload was called once
+                        assert mock_upload.call_count == 1
+                        upload_call = mock_upload.call_args
+                        assert upload_call[0][0] == service_id
+                        assert upload_call[0][1] == token
 
-                    # Verify reconciliation was called once
-                    assert mock_reconcile.call_count == 1
+                        # Verify the Faro Web SDK bundle was uploaded with the default version
+                        mock_download_faro.assert_called_once_with(
+                            service_id, DEFAULT_FARO_VERSION, token, status_cb=mock_status_cb
+                        )
 
-                    # Verify result
-                    assert result["activated"] is True
-                    assert result["logging_service_active_version"] == 2
-                    assert "enabled_at" in result
+                        # Verify reconciliation was called once
+                        assert mock_reconcile.call_count == 1
 
-                    # Verify status callbacks fired for all stages
-                    assert len(status_messages) >= 3  # At least: bucket, upload, reconcile
-                    assert any("Using FOS bucket" in msg for msg in status_messages)
-                    assert any("Uploading RUM tracker JS" in msg for msg in status_messages)
-                    assert any("Reconciling VCL state" in msg for msg in status_messages)
+                        # Verify result
+                        assert result["activated"] is True
+                        assert result["logging_service_active_version"] == 2
+                        assert "enabled_at" in result
+
+                        # Verify status callbacks fired for all stages
+                        assert len(status_messages) >= 3  # At least: bucket, upload, reconcile
+                        assert any("Using FOS bucket" in msg for msg in status_messages)
+                        assert any("Uploading RUM tracker JS" in msg for msg in status_messages)
+                        assert any("Reconciling VCL state" in msg for msg in status_messages)
 
     def test_disable_rum_full_flow(self, temp_config_dir):
         """Test full disable_rum flow: config write → delete JS → reconcile.

@@ -66,7 +66,15 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
 fi
 
 SERVICE_ID="$1"
-VERSION="${2:-$DEFAULT_VERSION}"
+if [[ $# -eq 2 ]]; then
+  # An explicit second argument — even an empty string — must not be
+  # silently treated as "omitted". Let it fall through to the format check
+  # below like any other invalid value, so `pin-rum-faro-version.sh svc ""`
+  # errors instead of quietly pinning DEFAULT_VERSION.
+  VERSION="$2"
+else
+  VERSION="$DEFAULT_VERSION"
+fi
 
 if [[ ! "$VERSION" =~ $VERSION_RE ]]; then
   echo "ERROR: version '${VERSION}' is not a plain X.Y.Z string (e.g. 2.9.0) — refusing to write." >&2
@@ -90,12 +98,26 @@ if ! jq empty "$CONFIG_FILE" >/dev/null 2>&1; then
   exit 1
 fi
 
-CURRENT_VERSION="$(jq -r '.rum.faro_version // empty' "$CONFIG_FILE")"
+# Structurally-invalid input (e.g. "rum" being a non-object, like a string
+# or array) makes jq exit non-zero with its own message on stderr; capture
+# that and re-report it as a clean ERROR: line rather than letting a raw
+# "jq: error (...)" reach the operator directly. Nothing has been written
+# yet at this point, so a failure here needs no cleanup beyond exiting.
+if ! CURRENT_VERSION="$(jq -r '.rum.faro_version // empty' "$CONFIG_FILE" 2>&1)"; then
+  echo "ERROR: failed to read rum.faro_version from ${CONFIG_FILE}: ${CURRENT_VERSION}" >&2
+  exit 1
+fi
 
 if [[ "$CURRENT_VERSION" == "$VERSION" ]]; then
   echo "[pin-rum-faro-version] ${SERVICE_ID} already pinned to ${VERSION} — no change."
   exit 0
 fi
+
+# Preserve the original file's permission bits. These are credential files
+# (FOS access/secret keys) — mktemp always creates its file at mode 0600,
+# which could silently tighten (or otherwise diverge from) whatever mode the
+# operator/deployment actually has set on CONFIG_FILE.
+ORIGINAL_MODE="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE")"
 
 TMP_FILE="$(mktemp "${CONFIGS_DIR}/.${SERVICE_ID}.json.XXXXXX")"
 cleanup() {
@@ -106,7 +128,17 @@ trap cleanup EXIT
 # jq auto-vivifies .rum as an object if it's absent, and this path assignment
 # touches nothing else — sibling keys (including cron-owned faro_content_hash
 # / faro_fos_etag_md5) and every other top-level key pass through untouched.
-jq --arg version "$VERSION" '.rum.faro_version = $version' "$CONFIG_FILE" > "$TMP_FILE"
+# Structurally-invalid input (e.g. "rum" being a non-object) makes jq exit
+# non-zero with its own message on stderr; capture that and re-report it as
+# a clean ERROR: line instead of letting a raw "jq: error (...)" reach the
+# operator directly. The EXIT trap above still fires on this path, so a
+# failure here still leaves no stray temp file and CONFIG_FILE untouched.
+if ! JQ_ERR="$(jq --arg version "$VERSION" '.rum.faro_version = $version' "$CONFIG_FILE" 2>&1 1>"$TMP_FILE")"; then
+  echo "ERROR: failed to set rum.faro_version in ${CONFIG_FILE}: ${JQ_ERR}" >&2
+  exit 1
+fi
+
+chmod "$ORIGINAL_MODE" "$TMP_FILE"
 
 # Atomic: mv within the same directory is a single rename on the same
 # filesystem, so a crash mid-write never leaves CONFIG_FILE truncated.

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, upgrade_faro_version
 
 
@@ -247,16 +248,20 @@ class TestEnableRumUploadArgs:
             with patch("backend.config.save_config"):
                 with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
                     with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                            mock_load.return_value = cfg
-                            mock_upload.return_value = {"path": "rum/rum-tracker.js", "bytes_uploaded": 1000}
-                            mock_reconcile.return_value = MagicMock(activated_version=2)
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                mock_load.return_value = cfg
+                                mock_upload.return_value = {"path": "rum/rum-tracker.js", "bytes_uploaded": 1000}
+                                mock_reconcile.return_value = MagicMock(activated_version=2)
 
-                            # Call
-                            enable_rum(service_id, token, status_cb=mock_status_cb)
+                                # Call
+                                enable_rum(service_id, token, status_cb=mock_status_cb)
 
-                            # Verify upload was called with correct arguments
-                            mock_upload.assert_called_once_with(service_id, token, status_cb=mock_status_cb)
+                                # Verify upload was called with correct arguments
+                                mock_upload.assert_called_once_with(service_id, token, status_cb=mock_status_cb)
 
     def test_enable_rum_upload_called_without_status_cb(self):
         """Verify upload_rum_tracker_js is called with status_cb=None when no callback provided."""
@@ -276,16 +281,20 @@ class TestEnableRumUploadArgs:
             with patch("backend.config.save_config"):
                 with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
                     with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js") as mock_upload:
-                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                            mock_load.return_value = cfg
-                            mock_upload.return_value = {"path": "rum/rum-tracker.js", "bytes_uploaded": 1000}
-                            mock_reconcile.return_value = MagicMock(activated_version=2)
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                mock_load.return_value = cfg
+                                mock_upload.return_value = {"path": "rum/rum-tracker.js", "bytes_uploaded": 1000}
+                                mock_reconcile.return_value = MagicMock(activated_version=2)
 
-                            # Call without status_cb
-                            enable_rum(service_id, token)
+                                # Call without status_cb
+                                enable_rum(service_id, token)
 
-                            # Verify upload was called with status_cb=None
-                            mock_upload.assert_called_once_with(service_id, token, status_cb=None)
+                                # Verify upload was called with status_cb=None
+                                mock_upload.assert_called_once_with(service_id, token, status_cb=None)
 
 
 class TestEnableRumCallOrder:
@@ -495,17 +504,21 @@ class TestRumOrchestratorBypassActivation:
             with patch("backend.config.save_config"):
                 with patch("backend.provision.rum_orchestrator_v2.ensure_fos_bucket"):
                     with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
-                        with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
-                            # Reconciler returned a draft version but no activated version
-                            mock_reconcile.return_value = MagicMock(activated_version=None, draft_version=3)
+                        with patch(
+                            "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                            new_callable=AsyncMock,
+                        ):
+                            with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
+                                # Reconciler returned a draft version but no activated version
+                                mock_reconcile.return_value = MagicMock(activated_version=None, draft_version=3)
 
-                            result = enable_rum(service_id, "test_token", activate=False)
+                                result = enable_rum(service_id, "test_token", activate=False)
 
-                            mock_reconcile.assert_called_once_with(
-                                service_id, "test_token", dry_run=False, status_cb=None, activate=False
-                            )
-                            assert result["logging_service_active_version"] == 3
-                            assert result["activated"] is False
+                                mock_reconcile.assert_called_once_with(
+                                    service_id, "test_token", dry_run=False, status_cb=None, activate=False
+                                )
+                                assert result["logging_service_active_version"] == 3
+                                assert result["activated"] is False
 
     def test_disable_rum_bypasses_activation(self):
         service_id = "srv_test"
@@ -723,22 +736,31 @@ class TestEnableRumWithFaroVersion:
         assert cfg["rum"] == original_rum_block
         assert cfg["rum_enabled"] is False
 
-    def test_enable_rum_without_faro_version_unaffected(self):
-        """Verify omitting faro_version never touches download_and_upload_faro."""
+    def test_enable_rum_without_faro_version_defaults_to_default_faro_version(self):
+        """Omitting faro_version must NOT leave RUM enabled-but-unpinned:
+        the tracker JS unconditionally loads /js/faro-sdk.js with no CDN
+        fallback, so enabling RUM must always pin and upload a bundle."""
         service_id = "srv_test"
         cfg = self._cfg(service_id)
+        saved_snapshots = []
+
+        def mock_save(_service_id, saved_cfg):
+            saved_snapshots.append(dict(saved_cfg))
 
         with patch("backend.config.load_config", return_value=cfg):
-            with patch("backend.config.save_config"):
+            with patch("backend.config.save_config", side_effect=mock_save):
                 with patch("backend.provision.rum_orchestrator_v2.upload_rum_tracker_js"):
                     with patch(
-                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro"
+                        "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                        new_callable=AsyncMock,
+                        return_value={"version": DEFAULT_FARO_VERSION},
                     ) as mock_download_upload:
                         with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
                             mock_reconcile.return_value = MagicMock(activated_version=2, draft_version=None)
                             enable_rum(service_id, "test_token")
 
-        mock_download_upload.assert_not_called()
+        mock_download_upload.assert_called_once_with(service_id, DEFAULT_FARO_VERSION, "test_token", status_cb=None)
+        assert saved_snapshots[0]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
 
 class TestUpgradeFaroVersion:
