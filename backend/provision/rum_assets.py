@@ -210,26 +210,50 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       samplingRate: 1.0,
       // Filter to only send important events (drop resource tracking, session events)
       beforeSend: function(event) {{
-        // Filter events to keep only exceptions and performance navigation
-        // Drop: session_start, faro.performance.resource (50-100+ per page), and other non-critical events
+        if (!event) {{
+          return null;
+        }}
+
+        // 1. If it's a batch payload structure (older Faro/fallback check)
         if (event.events && Array.isArray(event.events)) {{
           event.events = event.events.filter(function(e) {{
             var name = e.name || '';
-            // Keep only exceptions and navigation (drop resource tracking and session events)
             return name === 'faro.exception' || name === 'faro.performance.navigation';
           }});
         }}
-
-        // Keep only web-vitals measurements (LCP, CLS, INP, FCP, TTFB)
         if (event.measurements && Array.isArray(event.measurements)) {{
           event.measurements = event.measurements.filter(function(m) {{
             return m.type === 'web-vitals';
           }});
         }}
+        if (event.events || event.measurements) {{
+          var hasData = (event.events && event.events.length > 0) || (event.measurements && event.measurements.length > 0);
+          return hasData ? event : null;
+        }}
 
-        // Only send beacons that have meaningful data after filtering
-        var hasData = (event.events && event.events.length > 0) || (event.measurements && event.measurements.length > 0);
-        return hasData ? event : null;
+        // 2. Otherwise, treat as Faro's standard individual transport item (Faro v1/v2 spec)
+        if (event.type === 'event') {{
+          var name = (event.payload && event.payload.name) || '';
+          if (name === 'faro.exception' || name === 'faro.performance.navigation') {{
+            return event;
+          }}
+          return null;
+        }}
+
+        if (event.type === 'measurement') {{
+          var mType = (event.payload && event.payload.type) || '';
+          if (mType === 'web-vitals') {{
+            return event;
+          }}
+          return null;
+        }}
+
+        if (event.type === 'exception') {{
+          return event;
+        }}
+
+        // For other types (logs, traces etc.), default to returning event
+        return event;
       }}
     }};
 
