@@ -10,14 +10,16 @@ This eliminates state collisions and orphaned assets.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import logging
 from typing import Any
 
 from backend import config as svcconfig
+from backend.core.fastly.rum_provisioning import _assert_faro_version_safe
 from backend.provision.declarative.reconciler import reconcile_vcl_state
 from backend.provision.fos_setup import ensure_fos_bucket  # noqa: F401
-from backend.provision.rum_assets import upload_rum_tracker_js
+from backend.provision.rum_assets import cleanup_old_faro_versions, download_and_upload_faro, upload_rum_tracker_js
 from backend.provision.utils import BOLD, _c, fail, info, ok, warn
 
 logger = logging.getLogger(__name__)
@@ -235,12 +237,39 @@ def rum_vcl_fingerprint(logging_service_id: str) -> str:
     return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
 
 
+def _set_faro_version(cfg: dict[str, Any], version: str | None) -> None:
+    """Set (or clear) ``cfg["rum"]["faro_version"]`` in place, preserving other keys."""
+    rum_cfg = dict(cfg.get("rum") or {})
+    if version is None:
+        rum_cfg.pop("faro_version", None)
+    else:
+        rum_cfg["faro_version"] = version
+    cfg["rum"] = rum_cfg
+
+
+def _purge_faro_surrogate_key(cfg: dict[str, Any], token: str) -> None:
+    """Fire-and-forget CDN surrogate-key purge after a Faro bundle upload.
+
+    Deliberately duplicated (not imported) from
+    ``backend.cron.jobs.rum_sync._faro_purge_surrogate_key`` — provision code
+    must not import from cron modules (see task-6 report). Keep both in sync
+    if the purge shape ever changes.
+    """
+    cdn_service_id = cfg.get("cdn_service_id", "")
+    if not cdn_service_id or not token:
+        return
+    from backend.core.fastly.client import fastly
+
+    fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+
+
 def enable_rum(
     logging_service_id: str,
     token: str,
     *,
     activate: bool = True,
     status_cb=None,
+    faro_version: str | None = None,
 ) -> dict[str, Any]:
     """Enable RUM for the logging service via declarative reconciliation.
 
@@ -250,6 +279,9 @@ def enable_rum(
         logging_service_id: Fastly service ID.
         token: Fastly API token.
         status_cb: Optional callback for status updates.
+        faro_version: Optional pinned Faro Web SDK version (``X.Y.Z``) to self-host
+            alongside enabling RUM. When omitted, behavior is exactly as before
+            this parameter existed — no Faro bundle is uploaded or served.
 
     Returns:
         {
@@ -259,8 +291,12 @@ def enable_rum(
         }
 
     Raises:
+        ValueError: if faro_version is provided but not a plain X.Y.Z string.
         RuntimeError: if enable fails.
     """
+    if faro_version is not None:
+        _assert_faro_version_safe(faro_version)
+
     cfg = svcconfig.load_config(logging_service_id)
     if not cfg:
         raise RuntimeError(f"No config found for logging service {logging_service_id}")
@@ -278,13 +314,29 @@ def enable_rum(
             "activated": False,
         }
 
+    previous_rum_cfg = dict(cfg.get("rum") or {})
+
     cfg["rum_enabled"] = True
     cfg["rum_enabled_at"] = _dt.datetime.now(_dt.UTC).isoformat()
     cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id)
 
+    # Persist the pinned version BEFORE reconciling so the generator (which
+    # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
+    # rollback below restores previous_rum_cfg so config never claims a
+    # version that isn't actually deployed.
+    if faro_version is not None:
+        _set_faro_version(cfg, faro_version)
+
     # Save updated config
     svcconfig.save_config(logging_service_id, cfg)
     ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
+
+    def _rollback_config() -> None:
+        cfg["rum_enabled"] = False
+        cfg.pop("rum_vcl_sha", None)
+        if faro_version is not None:
+            cfg["rum"] = dict(previous_rum_cfg)
+        svcconfig.save_config(logging_service_id, cfg)
 
     # Step 2: Verify FOS bucket (use existing if configured, skip provisioning)
     # RUM shares the bucket from request logging if enabled, or uses its own if standalone.
@@ -315,12 +367,23 @@ def enable_rum(
         ok("RUM tracker JS uploaded")
 
     except Exception as e:
-        # Rollback config on JS upload failure
-        cfg["rum_enabled"] = False
-        cfg.pop("rum_vcl_sha", None)
-        svcconfig.save_config(logging_service_id, cfg)
+        _rollback_config()
         fail(f"JS upload failed: {e}")
         raise
+
+    # Step 3.5: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
+    # if it fails) so the VCL the reconciler is about to deploy routes
+    # /js/faro-sdk.js to an object that actually exists.
+    if faro_version is not None:
+        try:
+            if status_cb:
+                status_cb(f"⏳ Downloading and uploading Faro Web SDK v{faro_version}...")
+            asyncio.run(download_and_upload_faro(logging_service_id, faro_version, token, status_cb=status_cb))
+            ok(f"Faro Web SDK v{faro_version} uploaded")
+        except Exception as e:
+            _rollback_config()
+            fail(f"Faro Web SDK upload failed: {e}")
+            raise
 
     if status_cb:
         status_cb("⏳ Reconciling VCL state...")
@@ -329,10 +392,7 @@ def enable_rum(
     try:
         result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb, activate=activate)
     except Exception as e:
-        # Rollback config
-        cfg["rum_enabled"] = False
-        cfg.pop("rum_vcl_sha", None)
-        svcconfig.save_config(logging_service_id, cfg)
+        _rollback_config()
         fail(f"Reconciliation failed: {e}")
         raise
 
@@ -346,6 +406,119 @@ def enable_rum(
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
         "enabled_at": cfg.get("rum_enabled_at", ""),
+        "activated": result.activated_version is not None,
+    }
+
+
+def upgrade_faro_version(
+    logging_service_id: str,
+    version: str,
+    token: str,
+    *,
+    activate: bool = True,
+    status_cb=None,
+) -> dict[str, Any]:
+    """Upgrade the self-hosted Faro Web SDK bundle to a new pinned version.
+
+    Downloads and uploads the new bundle to FOS, persists the version to
+    config, then reconciles VCL state so the deployed routing matches. On
+    upload or reconcile failure, config is rolled back to the previous
+    ``faro_version`` so it never claims a version that isn't actually
+    deployed (Task 3's cron and the status endpoint both trust this
+    invariant). A best-effort surrogate-key purge and old-version cleanup
+    follow a successful reconcile; neither failure fails the upgrade.
+
+    Args:
+        logging_service_id: Fastly service ID.
+        version: New Faro Web SDK version to pin (plain ``X.Y.Z``).
+        token: Fastly API token.
+        activate: If False, draft is compiled and validated but not activated.
+        status_cb: Optional callback for status updates.
+
+    Returns:
+        {
+            "previous_version": str | None,
+            "version": str,
+            "logging_service_active_version": int (post-activate),
+            "activated": bool (whether new version was activated),
+        }
+
+    Raises:
+        ValueError: if version is not a plain X.Y.Z string.
+        RuntimeError: if RUM is not enabled, or the upgrade fails.
+    """
+    _assert_faro_version_safe(version)
+
+    cfg = svcconfig.load_config(logging_service_id)
+    if not cfg:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
+
+    if not cfg.get("rum_enabled", False):
+        raise RuntimeError(f"RUM is not enabled for {logging_service_id}; enable RUM before upgrading Faro version")
+
+    previous_rum_cfg = dict(cfg.get("rum") or {})
+    previous_version = previous_rum_cfg.get("faro_version")
+
+    info(f"Upgrading Faro Web SDK for {_c(BOLD, logging_service_id)} to v{version}")
+    if status_cb:
+        status_cb(f"⏳ Upgrading Faro Web SDK to v{version}...")
+
+    # Step 1: Download + upload the new bundle. download_and_upload_faro
+    # persists cfg["rum"]["faro_version"]/faro_content_hash itself on success,
+    # so config already reflects the new version once this returns.
+    try:
+        if status_cb:
+            status_cb(f"⏳ Downloading and uploading Faro Web SDK v{version}...")
+        asyncio.run(download_and_upload_faro(logging_service_id, version, token, status_cb=status_cb))
+        ok(f"Faro Web SDK v{version} uploaded")
+    except Exception as e:
+        fail(f"Faro Web SDK upload failed: {e}")
+        raise
+
+    if status_cb:
+        status_cb("⏳ Reconciling VCL state...")
+
+    # Step 2: Reconcile so the deployed VCL routes to the new version.
+    try:
+        result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb, activate=activate)
+    except Exception as e:
+        # Reconcile failed after the bundle was already uploaded/persisted:
+        # config must not claim a version whose VCL isn't actually deployed.
+        # Restore the whole previous rum block (not just faro_version) so a
+        # stale faro_content_hash from the failed upgrade can't linger either.
+        cfg = svcconfig.load_config(logging_service_id) or cfg
+        cfg["rum"] = dict(previous_rum_cfg)
+        svcconfig.save_config(logging_service_id, cfg)
+        fail(f"Reconciliation failed: {e}")
+        raise
+
+    if result.activated_version:
+        ok(f"Faro Web SDK upgraded to v{version}: version {result.activated_version} activated")
+    elif result.draft_version:
+        ok(f"Faro Web SDK upgraded to v{version} in draft version {result.draft_version} (activation bypassed)")
+    else:
+        ok("Faro Web SDK already in desired state (no changes needed)")
+
+    # Step 3: Best-effort purge of the cached bundle so the CDN stops serving
+    # the old version. A purge failure is a warning, never an upgrade failure.
+    try:
+        if status_cb:
+            status_cb("⏳ Purging cached Faro bundle...")
+        cfg = svcconfig.load_config(logging_service_id) or cfg
+        _purge_faro_surrogate_key(cfg, token)
+        ok("Purged rum-faro-sdk surrogate key")
+    except Exception as e:
+        warn(f"Failed to purge rum-faro-sdk surrogate key: {e}")
+        if status_cb:
+            status_cb(f"⚠️  Purge failed (non-blocking): {e}")
+
+    # Step 4: Best-effort cleanup of now-stale bundle versions in FOS.
+    asyncio.run(cleanup_old_faro_versions(logging_service_id, keep_current=True))
+
+    return {
+        "previous_version": previous_version,
+        "version": version,
+        "logging_service_active_version": result.activated_version or result.draft_version,
         "activated": result.activated_version is not None,
     }
 

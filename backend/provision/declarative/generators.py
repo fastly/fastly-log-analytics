@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 
 from backend.core.fastly.rum_provisioning import (
+    RUM_FARO_FETCH_NAME,
+    _assert_faro_version_safe,
     generate_rum_asset_fetch_vcl,
     generate_rum_vcl,
 )
@@ -259,6 +261,18 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {{
     set req.http.X-FOS-Request = "1";
     return(lookup);
 }}"""
+        # Same duplication as backend/core/fastly/rum_provisioning.py's
+        # _generate_asset_fetch_vcl — left as-is (see task-6 report), just
+        # extended here so faro_version=None stays byte-identical.
+        if state.faro_version is not None:
+            _assert_faro_version_safe(state.faro_version)
+            faro_routing = f"""# Fetch the self-hosted Faro Web SDK bundle from FOS (same backend + signing as rum.js)
+if (req.url.path == "/js/faro-sdk.js" && req.method == "GET") {{
+    set req.backend = {backend_str};
+    set req.http.X-FOS-Request = "1";
+    return(lookup);
+}}"""
+            rum_routing = rum_routing + "\n\n" + faro_routing
         sections.append(rum_routing)
 
     # C. Session Scoring Enforcement (Section 4)
@@ -392,13 +406,13 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     if not state.rum_enabled:
         return ""
 
-    rum_vcl_dict = generate_rum_vcl(state.service_id)
+    rum_vcl_dict = generate_rum_vcl(state.service_id, state.faro_version)
     shield_pop = state.cdn_shield
     if not shield_pop:
         from backend.core.fastly.utils import SHIELD_MAP
 
         shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
-    asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop)
+    asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
 
     # Map subroutine names to snippet names from the generator
     # Phase 1: recv + deliver
@@ -447,6 +461,8 @@ if (req.url.path == "/js/rum.js") {
     set beresp.cacheable = true;
     set beresp.http.Cache-Control = "max-age=86400, public, immutable";
 }"""
+        if RUM_FARO_FETCH_NAME in asset_fetch_dict:
+            body = body + "\n\n" + asset_fetch_dict[RUM_FARO_FETCH_NAME]
         return f"# Section 5: RUM ({subroutine})\n{body}"
 
     return ""

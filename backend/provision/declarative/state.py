@@ -69,6 +69,7 @@ class FeatureState:
 
     # Feature Toggles & Parameter Blocks
     rum_enabled: bool = False
+    faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
 
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -169,6 +170,7 @@ class FeatureState:
         logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
         rum_cfg = cfg.get("rum", {})
         rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
+        faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
 
         # Extract feature toggles
         rum_enabled = cfg.get("rum_enabled", False)
@@ -342,6 +344,7 @@ class FeatureState:
             logging_endpoint_name=logging_endpoint_name,
             rum_endpoint_name=rum_endpoint_name,
             rum_enabled=rum_enabled,
+            faro_version=faro_version,
             cmcd=cmcd_config,
             scoring=scoring_config,
             log_fields=log_fields_config,
@@ -370,6 +373,7 @@ class FeatureState:
             "logging_endpoint_name": self.logging_endpoint_name,
             "rum_endpoint_name": self.rum_endpoint_name,
             "rum_enabled": self.rum_enabled,
+            "faro_version": self.faro_version,
             "cmcd_enabled": self.cmcd.enabled,
             "cmcd_mode": self.cmcd.mode,
             "cmcd_version": self.cmcd.version,

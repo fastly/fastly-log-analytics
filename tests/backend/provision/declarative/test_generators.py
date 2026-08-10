@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 from backend.provision.declarative.generators import (
     desired_backends,
     desired_logging_endpoints,
@@ -494,3 +496,103 @@ class TestLoggingServiceSnippets:
         # Should have recv (Capture), miss, pass, and optionally fetch/deliver/error for Group L
         assert "Fastly Log Analysis Capture" in names
         assert "Fastly Log Analysis Miss" in names or len(snippets) >= 1
+
+
+class TestFaroVersionThreading:
+    """Test that cfg["rum"]["faro_version"] threads through FeatureState into generated VCL."""
+
+    def _rum_state(self, faro_version=None):
+        cfg = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "sample_rate": 100,
+            "rum_enabled": True,
+        }
+        if faro_version is not None:
+            cfg["rum"] = {"faro_version": faro_version}
+        return FeatureState.from_config(cfg)
+
+    def test_from_config_defaults_faro_version_to_none(self):
+        """No cfg["rum"] block at all -> faro_version stays None."""
+        state = FeatureState.from_config(
+            {"service_id": "srv_test", "log_period": 60, "sample_rate": 100, "rum_enabled": True}
+        )
+        assert state.faro_version is None
+
+    def test_from_config_reads_pinned_faro_version(self):
+        """cfg["rum"]["faro_version"] is threaded onto FeatureState.faro_version."""
+        state = self._rum_state(faro_version="2.9.0")
+        assert state.faro_version == "2.9.0"
+
+    def test_faro_version_none_output_is_byte_identical_to_baseline(self):
+        """Regression guard: a service with no pinned Faro version must see
+        no change whatsoever in generated VCL — the exact snippet bodies
+        that existed before faro_version was threaded through."""
+        state = self._rum_state(faro_version=None)
+
+        vcl_recv = generate_consolidated_snippet(state, "vcl_recv")
+        assert "/js/faro-sdk.js" not in vcl_recv
+        assert (
+            """# Fetch RUM tracker JS from FOS with SigV4 signing
+if (req.url.path == "/js/rum.js" && req.method == "GET") {
+    # Backend points to FOS endpoint (shared with logging)
+    set req.backend = fastly.try_select_shield(ssl_shield_iad_va_us, F_fos_origin);
+    # Flag for SigV4 signing in miss/pass (req.backend.name not available there)
+    set req.http.X-FOS-Request = "1";
+    return(lookup);
+}"""
+            in vcl_recv
+        )
+
+        vcl_fetch = generate_consolidated_snippet(state, "vcl_fetch")
+        assert "faro-sdk" not in vcl_fetch
+        assert "rum-faro-sdk" not in vcl_fetch
+        assert (
+            vcl_fetch
+            == """# Section 5: RUM (vcl_fetch)
+# Cache RUM tracker JS aggressively; updates use ?v=X query string busting
+if (req.url.path == "/js/rum.js") {
+    set beresp.ttl = 86400s;
+    set beresp.cacheable = true;
+    set beresp.http.Cache-Control = "max-age=86400, public, immutable";
+}"""
+        )
+
+        vcl_miss = generate_consolidated_snippet(state, "vcl_miss")
+        assert "faro-sdk" not in vcl_miss
+        assert "/js/rum.js" in vcl_miss
+
+    def test_faro_version_pinned_adds_recv_routing(self):
+        """A pinned faro_version adds a GET /js/faro-sdk.js route in vcl_recv."""
+        state = self._rum_state(faro_version="2.9.0")
+        vcl_recv = generate_consolidated_snippet(state, "vcl_recv")
+        assert '"/js/faro-sdk.js" && req.method == "GET"' in vcl_recv
+        # Existing /js/rum.js route must remain untouched alongside the new one.
+        assert '"/js/rum.js" && req.method == "GET"' in vcl_recv
+
+    def test_faro_version_pinned_rewrites_object_path_in_miss(self):
+        """A pinned faro_version rewrites bereq.url to the versioned FOS object path."""
+        state = self._rum_state(faro_version="2.9.0")
+        vcl_miss = generate_consolidated_snippet(state, "vcl_miss")
+        assert '"/rum/faro-web-sdk-v2.9.0.iife.js"' in vcl_miss
+        # Existing rum.js rewrite must remain untouched.
+        assert '"/rum/rum-tracker.js"' in vcl_miss
+
+    def test_faro_version_pinned_adds_purgeable_fetch_caching(self):
+        """A pinned faro_version adds the RUM_FARO_FETCH_NAME caching snippet to vcl_fetch,
+        keyed off the exact surrogate key the cron purges."""
+        state = self._rum_state(faro_version="2.9.0")
+        vcl_fetch = generate_consolidated_snippet(state, "vcl_fetch")
+        assert '"/js/faro-sdk.js" && req.http.X-FOS-Request == "1"' in vcl_fetch
+        assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk";' in vcl_fetch
+        assert "set beresp.ttl = 604800s;" in vcl_fetch
+        # Existing rum.js caching must remain untouched.
+        assert "set beresp.ttl = 86400s;" in vcl_fetch
+
+    def test_faro_version_invalid_rejected_at_generation(self):
+        """An invalid faro_version string is rejected, not silently interpolated."""
+        state = self._rum_state(faro_version="not-a-version")
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            generate_consolidated_snippet(state, "vcl_recv")
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            generate_consolidated_snippet(state, "vcl_miss")
