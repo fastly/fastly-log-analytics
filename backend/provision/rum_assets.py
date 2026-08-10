@@ -25,6 +25,15 @@ FARO_KEY_SUFFIX = ".iife.js"
 
 _S3_LIST_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
+# Sentinel distinguishing "caller passed no expectation" (write unconditionally
+# — the default, used by explicit operator actions like enable_rum/
+# upgrade_faro_version) from "caller expects the pin to still be None" (a
+# real, meaningful expectation) in download_and_upload_faro's
+# expected_current_version compare-and-set guard. `None` itself can't serve
+# as that sentinel because it's also a legitimate expected value (an
+# unpinned service).
+_NO_EXPECTATION = object()
+
 
 def _faro_fos_key(version: str) -> str:
     return f"{FARO_KEY_PREFIX}{version}{FARO_KEY_SUFFIX}"
@@ -354,6 +363,7 @@ async def download_and_upload_faro(
     token: str,
     *,
     status_cb=None,
+    expected_current_version: Any = _NO_EXPECTATION,
 ) -> dict[str, Any]:
     """Download a pinned Faro Web SDK version and upload it to the service's FOS bucket.
 
@@ -369,6 +379,25 @@ async def download_and_upload_faro(
         that comparison needs an MD5 specifically, independent of whichever
         algorithm ``faro_content_hash`` uses.
 
+    ``expected_current_version`` guards against a cron/upgrade race (F-5
+    audit finding): the RUM sync cron calls this to *restore* or *re-sync*
+    whatever version is CURRENTLY pinned — never to change the pin — but the
+    download from unpkg + upload to FOS between reading that pinned version
+    and persisting the config below can take long enough for an operator's
+    concurrent ``upgrade_faro_version`` call to land in between. Without a
+    guard, the cron's write lands last and reverts ``cfg["rum"]["faro_version"]``
+    back to the version it originally read — which then makes
+    ``cleanup_old_faro_versions(keep_current=True)`` (run right after a
+    successful upgrade) compute its "keep" key from the reverted, stale
+    version and delete the FOS object the live VCL actually routes to.
+    Pass the version the caller observed before starting this (possibly
+    slow) download+upload; immediately before persisting, config is
+    reloaded fresh and the write is skipped (bytes are still uploaded to
+    this version's own FOS key — that part is unaffected) if the stored pin
+    no longer matches. Left at its default (no expectation) — the
+    unconditional, "this IS the new pin" behavior — for explicit operator
+    actions (``enable_rum``, ``upgrade_faro_version``), which must always win.
+
     Returns:
         {
             "version": str,
@@ -376,6 +405,8 @@ async def download_and_upload_faro(
             "bytes_uploaded": int,
             "content_hash": str (sha256 hex digest),
             "fos_key": str (s3://bucket/path),
+            "config_updated": bool (False only when the compare-and-set
+                guard above skipped the config write),
         }
     """
     from backend.provision.utils import info, ok, warn
@@ -450,12 +481,34 @@ async def download_and_upload_faro(
             status_cb(f"❌ {fail_msg}")
         raise RuntimeError(fail_msg) from exc
 
-    rum_cfg = dict(cfg.get("rum") or {})
+    # Reload fresh immediately before persisting (F-5): the download+upload
+    # above may have taken long enough for a concurrent, explicit pin change
+    # to land. See the expected_current_version note in this function's
+    # docstring.
+    fresh_cfg = svcconfig.load_config(service_id) or cfg
+    rum_cfg = dict(fresh_cfg.get("rum") or {})
+    if expected_current_version is not _NO_EXPECTATION and rum_cfg.get("faro_version") != expected_current_version:
+        warn(
+            f"Faro pin for {service_id} changed concurrently while syncing v{version} "
+            f"(expected {expected_current_version!r}, found {rum_cfg.get('faro_version')!r}); "
+            "bundle bytes uploaded to their own FOS key but config left untouched"
+        )
+        if status_cb:
+            status_cb(f"⚠️  Faro pin changed concurrently; v{version} uploaded but config not overwritten")
+        return {
+            "version": version,
+            "path": fos_key,
+            "bytes_uploaded": len(bundle),
+            "content_hash": content_hash,
+            "fos_key": f"s3://{bucket}/{fos_key}",
+            "config_updated": False,
+        }
+
     rum_cfg["faro_version"] = version
     rum_cfg["faro_content_hash"] = content_hash
     rum_cfg["faro_fos_etag_md5"] = etag_md5
-    cfg["rum"] = rum_cfg
-    svcconfig.save_config(service_id, cfg)
+    fresh_cfg["rum"] = rum_cfg
+    svcconfig.save_config(service_id, fresh_cfg)
 
     return {
         "version": version,
@@ -463,6 +516,7 @@ async def download_and_upload_faro(
         "bytes_uploaded": len(bundle),
         "content_hash": content_hash,
         "fos_key": f"s3://{bucket}/{fos_key}",
+        "config_updated": True,
     }
 
 

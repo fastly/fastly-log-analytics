@@ -151,6 +151,97 @@ async def test_download_and_upload_faro_preserves_existing_rum_keys(monkeypatch,
     assert saved["cfg"]["rum"]["faro_version"] == "2.9.0"
 
 
+async def test_download_and_upload_faro_compare_and_set_skips_stale_pin_write(monkeypatch, mock_fos, mock_fetch_bundle):
+    """F-5 audit finding, reproduced end to end: the cron re-syncs whatever
+    version it observed as pinned — never a version change — but the
+    download-from-unpkg + upload-to-FOS round trip between reading that
+    pinned version and persisting config can take long enough for a
+    concurrent, explicit ``upgrade_faro_version`` call to land in between.
+
+    Sequence reproduced here:
+      1. Config is pinned to 2.9.0 (what the cron read before starting).
+      2. An operator upgrade completes concurrently, moving the pin to
+         3.0.0 (simulated by mutating the shared config store directly,
+         standing in for the real upgrade_faro_version call that would
+         have run on another thread/process while this download was in
+         flight).
+      3. The cron's re-sync for the STALE "2.9.0" it originally observed
+         now completes and tries to persist.
+
+    Without the ``expected_current_version`` guard, step 3's write lands
+    last and reverts the pin back to 2.9.0 — which then makes
+    ``cleanup_old_faro_versions(keep_current=True)`` (run right after the
+    real upgrade) compute its "keep" key from the reverted, stale version
+    and delete the FOS object the live VCL actually routes to. The pin
+    must survive untouched; the bundle bytes for 2.9.0 are still fine to
+    have uploaded to their own, separate FOS key.
+    """
+    import copy
+
+    store: dict[str, dict] = {
+        "svc_test": {**FAKE_CFG, "rum": {"faro_version": "2.9.0", "faro_content_hash": "old-hash"}}
+    }
+
+    def fake_load(service_id):
+        return copy.deepcopy(store.get(service_id))
+
+    def fake_save(service_id, new_cfg):
+        store[service_id] = copy.deepcopy(new_cfg)
+
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", fake_load)
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", fake_save)
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    mock_fos(lambda request: httpx.Response(200))
+
+    # Step 2: the concurrent upgrade lands while this call's download+upload
+    # is "in flight" (there's nothing to actually await here — the point is
+    # that by the time THIS function reloads config to persist, below, the
+    # store already reflects the newer pin).
+    store["svc_test"]["rum"] = {"faro_version": "3.0.0", "faro_content_hash": "new-hash"}
+
+    # Step 3: the cron's re-sync for the stale "2.9.0" it observed earlier.
+    result = await download_and_upload_faro("svc_test", "2.9.0", "tok", expected_current_version="2.9.0")
+
+    # The upload itself still happened (bytes for 2.9.0 landed at their own,
+    # separate FOS key) ...
+    assert result["version"] == "2.9.0"
+    assert result["config_updated"] is False
+    # ... but the pin was NOT reverted: the operator's newer pin wins.
+    assert store["svc_test"]["rum"]["faro_version"] == "3.0.0"
+    assert store["svc_test"]["rum"]["faro_content_hash"] == "new-hash"
+
+
+async def test_download_and_upload_faro_compare_and_set_writes_when_pin_unchanged(
+    monkeypatch, mock_fos, mock_fetch_bundle
+):
+    """Sanity check for the guard added above: when nothing raced —
+    ``expected_current_version`` still matches what's stored — the write
+    proceeds normally. Guards against a fix that's so conservative it never
+    writes at all."""
+    import copy
+
+    store: dict[str, dict] = {
+        "svc_test": {**FAKE_CFG, "rum": {"faro_version": "2.9.0", "faro_content_hash": "old-hash"}}
+    }
+
+    def fake_load(service_id):
+        return copy.deepcopy(store.get(service_id))
+
+    def fake_save(service_id, new_cfg):
+        store[service_id] = copy.deepcopy(new_cfg)
+
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", fake_load)
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", fake_save)
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    mock_fos(lambda request: httpx.Response(200))
+
+    result = await download_and_upload_faro("svc_test", "2.9.0", "tok", expected_current_version="2.9.0")
+
+    assert result["config_updated"] is True
+    expected_hash = hashlib.sha256(SAMPLE_BUNDLE).hexdigest()
+    assert store["svc_test"]["rum"]["faro_content_hash"] == expected_hash
+
+
 async def test_download_and_upload_faro_raises_on_upload_failure(monkeypatch, mock_fos, mock_fetch_bundle):
     """A FOS-side failure must surface as RuntimeError, and must not persist
     a version/hash for a bundle that was never actually stored."""
