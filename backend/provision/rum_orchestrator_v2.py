@@ -226,15 +226,51 @@ def merge_rum_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
     return kept + [dict(cf) for cf in _RUM_CUSTOM_FIELDS]
 
 
-def rum_vcl_fingerprint(logging_service_id: str) -> str:
+def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = None) -> str:
     """Content hash of the RUM VCL the current generator produces for this service.
-    Used for drift detection in /rum/status (comparing deployed vs. current)."""
+
+    Used for drift detection in /rum/status (comparing deployed vs. current).
+
+    Covers BOTH the Phase 1 snippets (recv beacon + deliver cookie) and the
+    Phase 3 Faro asset-fetch snippets (asset routing, SigV4 object-path
+    rewrite, fetch-cache policy) — the latter is where a pinned
+    ``faro_version`` actually surfaces in generated VCL. Before this fix
+    (F-4 audit finding) this function called ``generate_rum_vcl()`` alone,
+    whose Phase 1 output never varies with ``faro_version`` at all — the
+    fingerprint was structurally incapable of detecting drift in the faro
+    snippets, e.g. a service whose VCL was generated with
+    ``faro_version=None`` (never reconciled after a version was pinned)
+    would report no drift.
+
+    Args:
+        logging_service_id: Fastly service ID.
+        cfg: When given, used directly instead of reloading config from
+            disk — callers that are mid-mutation of their own in-memory cfg
+            (``enable_rum``, ``disable_rum``'s rollback, ``upgrade_faro_version``)
+            pass it here so the fingerprint reflects the state they are
+            about to persist, not whatever is still on disk. Callers that
+            just want "what would today's generator produce for this
+            service's current on-disk config" (e.g. ``/rum/status``) omit it.
+    """
     import hashlib
     import json
 
-    from backend.core.fastly.rum_provisioning import generate_rum_vcl
+    from backend.core.fastly.rum_provisioning import generate_rum_asset_fetch_vcl, generate_rum_vcl
 
-    snippets = generate_rum_vcl(logging_service_id)
+    if cfg is None:
+        cfg = svcconfig.load_config(logging_service_id) or {}
+    rum_raw = cfg.get("rum")
+    rum_cfg = rum_raw if isinstance(rum_raw, dict) else {}
+    faro_version = rum_cfg.get("faro_version")
+
+    shield_pop = cfg.get("cdn_shield") or ""
+    if not shield_pop:
+        from backend.core.fastly.utils import SHIELD_MAP
+
+        shield_pop = SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
+
+    snippets = generate_rum_vcl(logging_service_id, faro_version)
+    snippets.update(generate_rum_asset_fetch_vcl(shield_pop, faro_version))
     return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
 
 
@@ -248,28 +284,38 @@ def _set_faro_version(cfg: dict[str, Any], version: str | None) -> None:
     cfg["rum"] = rum_cfg
 
 
-def _purge_faro_surrogate_key(cfg: dict[str, Any], token: str) -> None:
-    """Fire-and-forget CDN surrogate-key purge after a Faro bundle upload.
+def _purge_faro_surrogate_key(logging_service_id: str, token: str) -> None:
+    """Fire-and-forget surrogate-key purge on the logging service after a Faro bundle upload.
+
+    Purges on ``logging_service_id`` — NOT the CDN service fronting FOS for
+    log downloads (F-1 audit finding). ``Surrogate-Key: rum-faro-sdk`` is
+    set only in the RUM fetch-cache snippet
+    (``backend.core.fastly.rum_provisioning._generate_faro_fetch_vcl``),
+    which is deployed to the instrumented *logging* service by
+    ``reconcile_vcl_state(logging_service_id, ...)`` — it never exists on
+    the CDN service, so a purge targeting the CDN service can never match
+    anything. This mirrors (and previously miscopied) the CDN-purge
+    precedent in ``backend.core.iceberg._core._purge_surrogate_key``, where
+    the CDN service IS the correct target for a different, unrelated key.
 
     Deliberately duplicated (not imported) from
     ``backend.cron.jobs.rum_sync._faro_purge_surrogate_key`` — provision code
     must not import from cron modules (see task-6 report). Keep both in sync
     if the purge shape ever changes, including this never-raise contract: a
-    missing CDN service/token or a purge failure must never surface here —
+    missing service id/token or a purge failure must never surface here —
     the upload/reconcile this purge follows has already succeeded, and a
     stale cache is a warning, not a failed upgrade. Callers may still wrap
     this in their own try/except for status_cb reporting; that's belt and
     suspenders, not a requirement.
     """
-    cdn_service_id = cfg.get("cdn_service_id", "")
-    if not cdn_service_id or not token:
+    if not logging_service_id or not token:
         return
     try:
         from backend.core.fastly.client import fastly
 
-        fastly("POST", f"/service/{cdn_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
+        fastly("POST", f"/service/{logging_service_id}/purge/rum-faro-sdk", token=token, expect_empty=True)
     except Exception:
-        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", cfg.get("service_id"), exc_info=True)
+        logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", logging_service_id, exc_info=True)
 
 
 def enable_rum(
@@ -367,7 +413,6 @@ def enable_rum(
 
     cfg["rum_enabled"] = True
     cfg["rum_enabled_at"] = _dt.datetime.now(_dt.UTC).isoformat()
-    cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id)
 
     # Persist the pinned version BEFORE reconciling so the generator (which
     # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
@@ -376,6 +421,12 @@ def enable_rum(
     # more "enabled but unpinned" state, since the tracker's unconditional
     # /js/faro-sdk.js load requires a bundle to always be behind that path.
     _set_faro_version(cfg, resolved_faro_version)
+
+    # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
+    # depends on the pinned version (F-4 fix), so it must be derived from
+    # THIS in-memory cfg (not a stale on-disk read from before the version
+    # was set) to reflect the state about to be deployed.
+    cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
 
     # Save updated config
     svcconfig.save_config(logging_service_id, cfg)
@@ -564,21 +615,41 @@ def upgrade_faro_version(
     else:
         ok("Faro Web SDK already in desired state (no changes needed)")
 
-    # Step 3: Best-effort purge of the cached bundle so the CDN stops serving
-    # the old version. A purge failure is a warning, never an upgrade failure.
+    # Step 2.5: Refresh the stored VCL fingerprint once the new version is
+    # actually live. Without this, /rum/status's vcl_drift would read
+    # "drifted" forever after every upgrade — rum_vcl_fingerprint's hash
+    # depends on faro_version (F-4 fix), so the fingerprint stored at the
+    # last enable/upgrade (the OLD version) would never again match the
+    # generator's current output (the NEW version) even though the VCL is
+    # correctly reconciled. Gated on activation for the same reason as the
+    # cleanup below (F-6): with activate=False the live VCL still serves the
+    # old version, so the stored fingerprint must keep reflecting that.
+    if result.activated_version is not None:
+        cfg = svcconfig.load_config(logging_service_id) or cfg
+        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
+        svcconfig.save_config(logging_service_id, cfg)
+
+    # Step 3: Best-effort purge of the cached bundle so the edge stops
+    # serving the old version. A purge failure is a warning, never an
+    # upgrade failure.
     try:
         if status_cb:
             status_cb("⏳ Purging cached Faro bundle...")
-        cfg = svcconfig.load_config(logging_service_id) or cfg
-        _purge_faro_surrogate_key(cfg, token)
+        _purge_faro_surrogate_key(logging_service_id, token)
         ok("Purged rum-faro-sdk surrogate key")
     except Exception as e:
         warn(f"Failed to purge rum-faro-sdk surrogate key: {e}")
         if status_cb:
             status_cb(f"⚠️  Purge failed (non-blocking): {e}")
 
-    # Step 4: Best-effort cleanup of now-stale bundle versions in FOS.
-    asyncio.run(cleanup_old_faro_versions(logging_service_id, keep_current=True))
+    # Step 4: Best-effort cleanup of now-stale bundle versions in FOS — only
+    # once the new version is actually live (F-6 audit finding). With
+    # activate=False the draft was validated but never activated, so the
+    # OLD bundle is still what the live VCL serves; deleting it here would
+    # take down production while config already claims the new,
+    # not-yet-live pin.
+    if result.activated_version is not None:
+        asyncio.run(cleanup_old_faro_versions(logging_service_id, keep_current=True))
 
     return {
         "previous_version": previous_version,
@@ -664,7 +735,7 @@ def disable_rum(
     except Exception as e:
         # Rollback config
         cfg["rum_enabled"] = True
-        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id)
+        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
         svcconfig.save_config(logging_service_id, cfg)
         fail(f"Reconciliation failed: {e}")
         raise

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, upgrade_faro_version
+from backend.provision.rum_orchestrator_v2 import disable_rum, enable_rum, rum_vcl_fingerprint, upgrade_faro_version
 
 
 class TestEnableRumProvisionsBucket:
@@ -1012,6 +1012,49 @@ class TestUpgradeFaroVersion:
 
         mock_upload_tracker.assert_not_called()
 
+    def test_upgrade_faro_version_activate_false_skips_cleanup_and_sha_update(self):
+        """F-6 audit finding: with activate=False, the draft is compiled and
+        validated but never went live — the OLD bundle is still what the
+        live VCL serves. cleanup_old_faro_versions(keep_current=True) reads
+        the NEW (not-yet-live) pin from config and would delete the OLD,
+        still-live bundle if run here; the stored rum_vcl_sha must likewise
+        stay pointed at the deployed (old) VCL, not the compiled-but-inactive
+        draft."""
+        service_id = "srv_test"
+        cfg = self._cfg(service_id, faro_version="1.0.0")
+
+        with patch("backend.config.load_config", return_value=cfg):
+            with patch("backend.config.save_config") as mock_save:
+                with patch(
+                    "backend.provision.rum_orchestrator_v2.download_and_upload_faro",
+                    new_callable=AsyncMock,
+                    return_value={"version": "2.0.0"},
+                ):
+                    with patch(
+                        "backend.provision.rum_orchestrator_v2.reconcile_vcl_state",
+                        return_value=MagicMock(activated_version=None, draft_version=8),
+                    ):
+                        with patch("backend.provision.rum_orchestrator_v2._purge_faro_surrogate_key") as mock_purge:
+                            with patch(
+                                "backend.provision.rum_orchestrator_v2.cleanup_old_faro_versions",
+                                new_callable=AsyncMock,
+                            ) as mock_cleanup:
+                                result = upgrade_faro_version(service_id, "2.0.0", "test_token", activate=False)
+
+        mock_cleanup.assert_not_called()
+        # Purge is unconditional (best-effort, harmless either way) — only
+        # cleanup and the rum_vcl_sha update are activation-gated.
+        mock_purge.assert_called_once()
+        assert result["activated"] is False
+        assert result["logging_service_active_version"] == 8
+        # save_config must not have been called with a payload carrying a
+        # freshly-recomputed rum_vcl_sha (the activation-gated write this
+        # fix adds) — every save_config call in this flow before that point
+        # is download_and_upload_faro's own persistence, which this test
+        # mocks out entirely, so ANY save_config call here would have to be
+        # the (incorrectly, for activate=False) added sha update.
+        mock_save.assert_not_called()
+
 
 class TestEnableRumSkipsTrackerWhenNotActivated:
     """Test that enable_rum() does not publish the tracker when the VCL
@@ -1050,3 +1093,65 @@ class TestEnableRumSkipsTrackerWhenNotActivated:
 
         mock_upload.assert_not_called()
         assert result["activated"] is False
+
+
+class TestRumVclFingerprint:
+    """F-4 audit finding: rum_vcl_fingerprint must actually reflect a pinned
+    faro_version, since that's the whole point of using it for /rum/status's
+    vcl_drift — before this fix it called generate_rum_vcl() alone, whose
+    Phase 1 output never varies with faro_version at all, so a service
+    whose deployed VCL was generated with faro_version=None (never
+    reconciled after a version was pinned) would report no drift."""
+
+    def _cfg(self, **overrides):
+        cfg = {
+            "service_id": "srv_test",
+            "fos_region": "us-east-1",
+            "cdn_shield": "",
+            "rum": {"faro_version": "2.9.0"},
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_different_faro_versions_produce_different_fingerprints(self):
+        """The whole point of the fix: two services differing ONLY in
+        pinned faro_version must get different fingerprints."""
+        cfg_a = self._cfg(rum={"faro_version": "2.9.0"})
+        cfg_b = self._cfg(rum={"faro_version": "3.0.0"})
+
+        assert rum_vcl_fingerprint("srv_test", cfg_a) != rum_vcl_fingerprint("srv_test", cfg_b)
+
+    def test_unpinned_and_pinned_produce_different_fingerprints(self):
+        """A service with faro_version=None (VCL missing the /js/faro-sdk.js
+        route entirely) must not collide with one that has a version
+        pinned — this is the exact drift case F-4 was about."""
+        unpinned = self._cfg(rum={})
+        pinned = self._cfg(rum={"faro_version": "2.9.0"})
+
+        assert rum_vcl_fingerprint("srv_test", unpinned) != rum_vcl_fingerprint("srv_test", pinned)
+
+    def test_same_faro_version_is_deterministic(self):
+        """Same inputs, same output — this is a cache-comparison fingerprint,
+        it must not vary run to run."""
+        cfg = self._cfg()
+        assert rum_vcl_fingerprint("srv_test", cfg) == rum_vcl_fingerprint("srv_test", cfg)
+
+    def test_reads_faro_version_from_disk_when_cfg_omitted(self, monkeypatch):
+        """Callers that don't pass cfg (e.g. /rum/status) must get a
+        fingerprint reflecting the service's current on-disk config."""
+        disk_cfg = self._cfg(rum={"faro_version": "1.2.3"})
+        monkeypatch.setattr("backend.config.load_config", lambda service_id: disk_cfg)
+
+        from_disk = rum_vcl_fingerprint("srv_test")
+        explicit = rum_vcl_fingerprint("srv_test", disk_cfg)
+
+        assert from_disk == explicit
+
+    def test_cdn_shield_falls_back_to_shield_map_by_region(self):
+        """No explicit cdn_shield — shield selection must derive from
+        fos_region (mirroring _generate_rum_section_vcl's own fallback), not
+        silently default to a fixed shield regardless of region."""
+        cfg_iad = self._cfg(fos_region="us-east-1", cdn_shield="")
+        cfg_lon = self._cfg(fos_region="uk-east-1", cdn_shield="")
+
+        assert rum_vcl_fingerprint("srv_test", cfg_iad) != rum_vcl_fingerprint("srv_test", cfg_lon)
