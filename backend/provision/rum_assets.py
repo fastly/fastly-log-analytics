@@ -150,6 +150,118 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
   var SERVICE_ID = '{service_id}';
   var BEACON_ENDPOINT = '{beacon_url}';
 
+  // Monkeypatch fetch and XMLHttpRequest to enrich RUM beacon query parameters from JSON bodies.
+  // This allows edge VCL (which cannot read request bodies) to capture and log critical metrics.
+  function enrichRumUrl(url, bodyStr) {{
+    if (typeof url !== 'string' || url.indexOf('/rum-beacon') === -1 || !bodyStr) {{
+      return url;
+    }}
+    try {{
+      var payload = JSON.parse(bodyStr);
+      var metricName = '';
+      var metricValue = '';
+      var metricRating = '';
+
+      // 1. Extract Web Vitals measurement
+      if (payload.measurements && Array.isArray(payload.measurements)) {{
+        var webVitals = payload.measurements.filter(function(m) {{ return m.type === 'web-vitals'; }});
+        if (webVitals.length > 0) {{
+          var values = webVitals[0].values || {{}};
+          metricName = Object.keys(values)[0] || '';
+          metricValue = values[metricName] || '';
+          metricRating = (webVitals[0].meta && webVitals[0].meta.rating) || '';
+        }}
+      }}
+
+      // 2. Extract Faro performance navigation timing
+      if (!metricName && payload.events && Array.isArray(payload.events)) {{
+        var navs = payload.events.filter(function(e) {{ return e.name === 'faro.performance.navigation'; }});
+        if (navs.length > 0) {{
+          var values = navs[0].values || {{}};
+          if (values.pageLoadTime !== undefined) {{
+            metricName = 'pageLoadTime';
+            metricValue = values.pageLoadTime;
+          }}
+        }}
+      }}
+
+      // 3. Extract JS exception message
+      var errorMessage = '';
+      if (payload.exceptions && Array.isArray(payload.exceptions)) {{
+        var exc = payload.exceptions[0];
+        errorMessage = exc.value || exc.message || '';
+      }}
+
+      var extra = '';
+      if (metricName) {{
+        extra += '&rum_metric_name=' + encodeURIComponent(metricName) + '&rum_metric_value=' + encodeURIComponent(metricValue);
+        if (metricRating) {{
+          extra += '&rum_metric_rating=' + encodeURIComponent(metricRating);
+        }}
+      }}
+      if (errorMessage) {{
+        extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
+      }}
+
+      // Extract rum_cid session cookie
+      var cid = '';
+      var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
+      if (cookieMatch) {{
+        cid = cookieMatch[1];
+      }}
+      if (cid) {{
+        extra += '&cid=' + encodeURIComponent(cid);
+      }}
+
+      extra += '&rum_pathname=' + encodeURIComponent(window.location.pathname);
+      return url + extra;
+    }} catch (e) {{
+      console.error('RUM: URL enrichment failed:', e);
+      return url;
+    }}
+  }}
+
+  // Intercept window.fetch
+  if (typeof window.fetch === 'function') {{
+    var originalFetch = window.fetch;
+    window.fetch = function(input, init) {{
+      if (typeof input === 'string' && input.indexOf('/rum-beacon') !== -1) {{
+        var body = init && init.body;
+        if (body && typeof body === 'string') {{
+          input = enrichRumUrl(input, body);
+        }}
+      }}
+      return originalFetch.apply(this, arguments);
+    }};
+  }}
+
+  // Intercept XMLHttpRequest
+  if (typeof XMLHttpRequest === 'function') {{
+    var originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {{
+      if (typeof url === 'string' && url.indexOf('/rum-beacon') !== -1) {{
+        this._rumBeacon = true;
+        this._rumUrl = url;
+      }}
+      return originalOpen.apply(this, arguments);
+    }};
+
+    var originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {{
+      if (this._rumBeacon && typeof body === 'string') {{
+        try {{
+          var enrichedUrl = enrichRumUrl(this._rumUrl, body);
+          if (enrichedUrl !== this._rumUrl) {{
+            originalOpen.call(this, 'POST', enrichedUrl, true);
+          }}
+        }} catch (e) {{
+          console.error('RUM: XHR URL enrichment failed:', e);
+        }}
+      }}
+      return originalSend.apply(this, arguments);
+    }};
+  }}
+
   // Check if Faro is present (either via window.Faro or window.GrafanaFaroWebSdk)
   var Faro = window.Faro || window.GrafanaFaroWebSdk;
 

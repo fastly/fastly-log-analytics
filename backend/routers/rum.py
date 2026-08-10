@@ -831,7 +831,14 @@ async def rum_analytics(
                     pass
 
             # Also extract load_time from flat key if present
-            load_time_flat = b.get("load_time") or b.get("duration") or b.get("pageLoadTime")
+            load_time_flat = (
+                b.get("load_time")
+                or b.get("duration")
+                or b.get("pageLoadTime")
+                or (
+                    b.get("value") if b.get("name") in ("pageLoadTime", "navigation", "duration", "load_time") else None
+                )
+            )
             if load_time_flat is not None:
                 try:
                     pages_dict[path]["total_load_time"] += float(load_time_flat)
