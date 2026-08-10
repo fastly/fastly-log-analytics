@@ -78,6 +78,45 @@ def test_valid_query_param_payload_is_persisted(monkeypatch):
     _clear(service_id)
 
 
+def test_valid_post_body_payload_is_persisted(monkeypatch):
+    """Faro SDK format: JSON body, no ``?payload=`` query param — the actual
+    wire format the deployed tracker sends. Was dead code before the
+    ``request: Any`` -> ``request: Request`` fix (FastAPI treated ``request``
+    as an always-empty query param, so this body was never read)."""
+    service_id = "test_rum_beacon_ingest_post_body"
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid} if sid == service_id else None)
+    _clear(service_id)
+
+    beacon = {"pathname": "/from-body", "events": [{"name": "faro.performance.navigation"}]}
+    r = client.post(
+        "/api/services/rum-beacon",
+        params={"service_id": service_id},
+        json=beacon,
+    )
+    assert r.status_code == 204
+
+    rows = _beacon_rows(service_id)
+    assert len(rows) == 1
+    stored = json.loads(rows[0][1])
+    assert stored["pathname"] == "/from-body"
+    _clear(service_id)
+
+
+def test_oversized_post_body_rejected_with_413(monkeypatch):
+    service_id = "test_rum_beacon_ingest_oversized_body"
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid} if sid == service_id else None)
+    _clear(service_id)
+
+    huge_beacon = {"pad": "x" * 60000}
+    r = client.post(
+        "/api/services/rum-beacon",
+        params={"service_id": service_id},
+        json=huge_beacon,
+    )
+    assert r.status_code == 413
+    assert _beacon_rows(service_id) == []
+
+
 def test_malformed_json_payload_is_swallowed_and_nothing_is_persisted(monkeypatch):
     service_id = "test_rum_beacon_ingest_malformed"
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid} if sid == service_id else None)

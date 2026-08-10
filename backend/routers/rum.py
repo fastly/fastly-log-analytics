@@ -394,9 +394,9 @@ async def rum_beacon_health(service_id: str = Path(...)) -> dict[str, Any]:
 
 @router.post("/rum-beacon", include_in_schema=False)
 async def rum_beacon_ingest(
+    request: Request,
     service_id: str = Query(None),
     payload: str = Query(None),
-    request: Any = None,
 ) -> Response:
     """Ingest RUM beacon data (no auth required).
 
@@ -405,6 +405,20 @@ async def rum_beacon_ingest(
     2. POST body (Faro SDK): JSON with service_id in query
 
     Returns 204 No Content to match browser expectation.
+
+    In production this route is never actually hit: the edge VCL intercepts
+    ``req.url.path == "/rum-beacon"`` on the first hop and returns a
+    synthetic 204 before the request ever reaches the origin (see
+    ``backend/core/fastly/rum_provisioning.py`` / ``rum_log_condition``) —
+    beacon fields are captured to FOS via ``x-fos-edge-data:*`` headers and
+    ingested by the ``rum_sync`` cron job instead. This handler only fires
+    when a request bypasses the edge (local dev without a fronting Fastly
+    service, a restart, or a direct/manual call), but when it does, the
+    deployed tracker's Faro SDK transport always POSTs the beacon as a raw
+    JSON body — it never sends ``?payload=``. The previous ``request: Any``
+    annotation made FastAPI treat ``request`` as an ordinary (always-empty)
+    query parameter, so that body branch was unreachable dead code; ``Request``
+    restores the real ASGI request so ``await request.body()`` works.
     """
     if not service_id:
         return Response(status_code=204)
@@ -423,16 +437,21 @@ async def rum_beacon_ingest(
         except Exception:
             pass
 
-    # If no query param, try POST body (Faro SDK format)
-    if not beacon_data and request:
+    # If no query param, try POST body (Faro SDK format) — the actual
+    # wire format the deployed tracker uses on the rare path that reaches
+    # this handler at all.
+    if not beacon_data:
         try:
             body = await request.body()
-            if body:
-                if isinstance(body, bytes):
-                    body = body.decode("utf-8")
-                beacon_data = json.loads(body) if isinstance(body, str) else body
         except Exception:
-            pass
+            body = b""
+        if body:
+            if len(body) >= 50000:
+                return Response(status_code=413)
+            try:
+                beacon_data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+            except Exception:
+                pass
 
     if not beacon_data:
         return Response(status_code=204)
