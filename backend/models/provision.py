@@ -67,6 +67,7 @@ class ProvisionExecuteRequest(BaseModel):
     cmcd_version: int | None = None
     logging_enabled: bool = True
     rum_enabled: bool = False
+    faro_version: str | None = None
 
 
 class ProvisionValidateRequest(BaseModel):

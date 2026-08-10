@@ -9015,6 +9015,8 @@ export interface components {
              * @default false
              */
             rum_enabled: boolean;
+            /** Faro Version */
+            faro_version?: string | null;
         };
         /** ProvisionIngestResponse */
         ProvisionIngestResponse: {

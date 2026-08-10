@@ -46146,6 +46146,17 @@
             "type": "boolean",
             "title": "Rum Enabled",
             "default": false
+          },
+          "faro_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Faro Version"
           }
         },
         "type": "object",

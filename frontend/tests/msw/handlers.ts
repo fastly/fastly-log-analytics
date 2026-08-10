@@ -165,6 +165,17 @@ export const handlers = [
       readiness_days: 7,
     }),
   ),
+  // RumVersionPicker (ProvisionWizard StorageStep) fetches this directly.
+  // Default mirrors a fresh, never-provisioned service: nothing pinned yet.
+  // Per-test overrides via server.use() cover the 503/empty-list branches.
+  http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+    HttpResponse.json({
+      available: [],
+      current: null,
+      latest: null,
+      update_available: false,
+    }),
+  ),
 
   // ── Dashboard / analytics aggregates (default: empty results) ─────
   http.post(`${API_BASE}/api/dashboard/aggregates`, () =>

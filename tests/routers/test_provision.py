@@ -1181,6 +1181,81 @@ def test_provision_execute_allows_cdn_domain_with_dns_unavailable_reason():
     assert r.status_code == 200
 
 
+def test_provision_execute_threads_faro_version_into_rum_config():
+    """The wizard's RUM version picker (Task 7) must reach
+    cfg["rum"]["faro_version"] so the declarative generator can pin the
+    Faro Web SDK bundle for a brand-new service. Pinned because this field
+    was silently dropped (Pydantic default extra=ignore) before the
+    ProvisionExecuteRequest field existed — an operator's picker choice
+    would have had zero effect on the deployed service."""
+    captured = {}
+
+    def fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="x"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision", side_effect=fake_provision),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
+        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        r = c.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc-1",
+                "fos_bucket_name": "valid-bucket",
+                "rum_enabled": True,
+                "faro_version": "1.2.3",
+            },
+        )
+
+    assert r.status_code == 200
+    assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
+
+
+def test_provision_execute_omits_faro_version_when_operator_does_not_pin_one():
+    """No version chosen (registry outage, or operator skipped the picker)
+    must produce a cfg["rum"] with no faro_version key at all — not a
+    None/empty-string entry — so a fresh service's generated VCL is
+    byte-identical to before this field existed."""
+    captured = {}
+
+    def fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="x"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision", side_effect=fake_provision),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
+        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        r = c.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc-1",
+                "fos_bucket_name": "valid-bucket",
+                "rum_enabled": True,
+            },
+        )
+
+    assert r.status_code == 200
+    assert "faro_version" not in captured["cfg"]["rum"]
+
+
 def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():
     """If the workspace list comes back empty AND ``/tokens/self``
     returns a token without ``user_id`` (automation token), include

@@ -154,6 +154,10 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/rum/health',
   'GET /api/services/:service_id/rum/vitals',
   'GET /api/services/:service_id/rum/errors',
+  // rum/versions has a real default handler (RumVersionPicker consumes it
+  // directly). rum/upgrade is the not-yet-built admin "upgrade pinned
+  // version" card — SSE-streamed, same pattern as rum/enable / rum/disable.
+  'POST /api/services/:service_id/rum/upgrade',
 
   // Control Room — Phase 0 stubs. Tab GET returns canned data, mutation
   // endpoints are 501 placeholders, SSE is a heartbeat. Covered by

@@ -228,6 +228,7 @@ export function runDeploy(args: DeployArgs) {
     cmcd_version: config.cmcd_version,
     logging_enabled: config.logging_enabled,
     rum_enabled: config.rum_enabled,
+    faro_version: config.faro_version || null,
   };
   if (config.cdn_prefix) {
     body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`;

@@ -25,6 +25,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
 import { PERIOD_LABELS, REGION_LABELS, SHIELD_LABELS } from "../types";
+import { RumVersionPicker } from "../RumVersionPicker";
 
 const RETENTION_OPTIONS = [
   { value: "1", label: "1 day" },
@@ -559,6 +560,16 @@ export function StorageStep({ s }: { s: WizardState }) {
                 </div>
               )}
             </div>
+
+            {config.rum_enabled && s.selectedService?.id && (
+              <div className="pt-1">
+                <RumVersionPicker
+                  serviceId={s.selectedService.id}
+                  value={config.faro_version}
+                  onChange={(v) => setConfig({ ...config, faro_version: v })}
+                />
+              </div>
+            )}
           </div>
 
           <div

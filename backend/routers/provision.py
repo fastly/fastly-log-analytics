@@ -639,6 +639,11 @@ def provision_execute(req: ProvisionExecuteRequest):
             "enabled": True,
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
+        # Wizard-selected pin (Task 7 version picker). Omitted entirely when
+        # unset so a fresh service with no chosen version generates
+        # byte-identical VCL to before this field existed (see generators.py).
+        if req.faro_version:
+            cfg["rum"]["faro_version"] = req.faro_version
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])

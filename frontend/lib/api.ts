@@ -147,6 +147,13 @@ const SERVICELESS_PATH_PREFIXES = [
   // forever (its query aborts with NO_SERVICE and the panel only checks
   // !data). The prefix also covers the /{source_id}/refresh subpath.
   "/api/admin/bot-sources",
+  // The provisioning wizard's Faro version picker (StorageStep) queries
+  // this for the Fastly service id chosen a few steps earlier — before
+  // /api/provision/execute has ever run, so there is no service config on
+  // disk yet and (on a fresh install with zero services) no active service
+  // at all. Match on the route suffix rather than a /api/services prefix so
+  // every OTHER service-scoped route still aborts without one.
+  "/rum/versions",
 ];
 
 // 403 error codes that indicate the session itself is dead (not just
