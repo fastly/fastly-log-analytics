@@ -39,6 +39,89 @@ def _faro_fos_key(version: str) -> str:
     return f"{FARO_KEY_PREFIX}{version}{FARO_KEY_SUFFIX}"
 
 
+def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
+    """Cheap SigV4 HEAD check: True only if FOS already holds the pinned
+    bundle with an ETag matching the stored content hash.
+
+    Any failure (missing FOS creds, no stored hash, 404/non-200, mismatched
+    ETag, network error) returns False. This is the shared home for the
+    check: the cron's every-tick integrity check
+    (``backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle``) and the
+    tracker-publish readiness gate (``faro_tracker_ready`` below, used by
+    ``upload_rum_tracker_js``) both need it, and it must live where neither
+    ``backend/provision`` nor ``backend/cron`` imports the other — putting
+    it in ``rum_assets.py`` (already imported by both) avoids a
+    provision-to-cron import edge. Must stay cheap (no unpkg traffic) and
+    must never raise.
+
+    Compares against ``faro_fos_etag_md5`` (not ``faro_content_hash``): a
+    single-part PUT's S3/FOS ``ETag`` is protocol-mandated MD5 of the
+    object bytes, so this check needs an MD5 value specifically —
+    independent of whatever algorithm ``faro_content_hash`` (the
+    content-drift marker ``detect_faro_version_change`` reads) uses.
+    """
+    access_key = cfg.get("fos_access_key_id")
+    secret_key = cfg.get("fos_secret_access_key")
+    bucket = cfg.get("fos_bucket")
+    region = cfg.get("fos_region", "us-east-1")
+    stored_hash = (cfg.get("rum") or {}).get("faro_fos_etag_md5")
+
+    if not all([access_key, secret_key, bucket]) or not stored_hash:
+        return False
+
+    assert access_key is not None and secret_key is not None
+
+    fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
+    fos_host = region_endpoint(region)
+    fos_url = f"https://{fos_host}/{bucket}/{fos_key}"
+
+    try:
+        headers = sign_fos_request(
+            method="HEAD",
+            url=fos_url,
+            headers={},
+            body=b"",
+            access_key_id=access_key,
+            secret_access_key=secret_key,
+            region=region,
+        )
+        with httpx.Client(verify=certifi.where()) as client:
+            response = client.head(fos_url, headers=headers, timeout=10.0)
+        if response.status_code != 200:
+            return False
+        etag = response.headers.get("ETag", "").strip('"')
+        return etag == stored_hash
+    except Exception:
+        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
+        return False
+
+
+def faro_tracker_ready(cfg: dict) -> tuple[bool, str]:
+    """True only if the faro-referencing tracker is safe to publish.
+
+    ``generate_rum_tracker_js`` references ``/js/faro-sdk.js``
+    unconditionally, but that route only serves real content once (1) a
+    Faro version is pinned in config and (2) that version's bundle actually
+    exists in FOS. Activation succeeding is NOT sufficient on its own — an
+    activation can complete with no faro route at all if ``faro_version``
+    was never pinned. Publishing the tracker without both conditions
+    strands it pointing at a route that falls through to the origin's
+    generic 2-byte "OK" response, so Faro never initializes and no beacons
+    are collected — this is the exact live-production failure this check
+    exists to prevent.
+
+    Returns ``(ready, reason)``: ``reason`` is a human-readable explanation
+    when not ready, empty string when ready.
+    """
+    rum_cfg = cfg.get("rum") or {}
+    pinned_version = rum_cfg.get("faro_version")
+    if not pinned_version:
+        return False, "no Faro version pinned (cfg['rum']['faro_version'] is unset)"
+    if not faro_bundle_intact(cfg, pinned_version):
+        return False, f"Faro bundle v{pinned_version} is not present/intact in FOS"
+    return True, ""
+
+
 def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon") -> str:
     """Generate the Faro Web SDK wrapper JS.
 
@@ -169,11 +252,20 @@ def upload_rum_tracker_js(
 ) -> dict[str, Any]:
     """Generate and upload rum-tracker.js to the service's FOS bucket.
 
+    Gated on ``faro_tracker_ready``: the tracker unconditionally references
+    ``/js/faro-sdk.js``, so publishing it before a Faro version is pinned
+    AND its bundle genuinely exists in FOS would strand it pointing at a
+    dead route (no CDN fallback exists by design). When not ready, this is
+    a deliberate no-op — whatever tracker is already in FOS (or none, for a
+    brand-new service) is left untouched, which is strictly better than
+    publishing one that can never initialize Faro.
+
     Returns:
         {
             "path": "rum/rum-tracker.js",
             "bytes_uploaded": int,
-            "fos_key": str (s3://bucket/rum/rum-tracker.js)
+            "fos_key": str (s3://bucket/rum/rum-tracker.js),
+            "skipped": bool (present and True only when readiness failed),
         }
     """
     from backend.provision.utils import info, ok, warn
@@ -195,6 +287,22 @@ def upload_rum_tracker_js(
     fos_key = "rum/rum-tracker.js"
     fos_host = region_endpoint(region)
     fos_url = f"https://{fos_host}/{bucket}/{fos_key}"
+
+    ready, reason = faro_tracker_ready(cfg)
+    if not ready:
+        msg = (
+            f"Skipping RUM tracker JS upload for {service_id}: {reason} — "
+            "publishing now would strand the tracker at a route with no bundle behind it"
+        )
+        warn(msg)
+        if status_cb:
+            status_cb(f"⚠️  Skipping RUM tracker JS upload: {reason}")
+        return {
+            "path": fos_key,
+            "bytes_uploaded": 0,
+            "fos_key": f"s3://{bucket}/{fos_key}",
+            "skipped": True,
+        }
 
     # Generate the JS file first so we can check if it differs
     js_content = generate_rum_tracker_js(service_id)
@@ -372,9 +480,11 @@ async def download_and_upload_faro(
       - ``faro_content_hash`` (sha256): our own content-drift marker, read
         back by ``detect_faro_version_change`` to decide whether upstream
         re-released this version string with different bytes.
-      - ``faro_fos_etag_md5`` (MD5): read by the cron's cheap FOS HEAD
-        integrity check (``backend/cron/jobs/rum_sync.py::_faro_bundle_intact``),
-        which compares it against the object's S3/FOS ``ETag`` header — a
+      - ``faro_fos_etag_md5`` (MD5): read by ``faro_bundle_intact`` above,
+        used both by the cron's cheap FOS HEAD integrity check
+        (``backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle``) and by
+        ``faro_tracker_ready``'s publish-readiness gate. It compares this
+        hash against the object's S3/FOS ``ETag`` header — a
         single-part PUT's ETag is protocol-mandated MD5 of the bytes, so
         that comparison needs an MD5 specifically, independent of whichever
         algorithm ``faro_content_hash`` uses.

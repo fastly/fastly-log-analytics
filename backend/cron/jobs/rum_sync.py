@@ -38,64 +38,6 @@ def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
         logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", logging_service_id, exc_info=True)
 
 
-def _faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
-    """Cheap SigV4 HEAD check: True only if FOS already holds the pinned
-    bundle with an ETag matching the stored content hash.
-
-    Any failure (missing FOS creds, no stored hash, 404/non-200, mismatched
-    ETag, network error) returns False so the caller re-uploads. This is the
-    every-tick integrity check — it must stay cheap (no unpkg traffic on the
-    steady-state path) and must never raise.
-
-    Compares against ``faro_fos_etag_md5`` (not ``faro_content_hash``): a
-    single-part PUT's S3/FOS ``ETag`` is protocol-mandated MD5 of the
-    object bytes, so this check needs an MD5 value specifically —
-    independent of whatever algorithm ``faro_content_hash`` (the
-    content-drift marker ``detect_faro_version_change`` reads) uses.
-    """
-    import certifi
-    import httpx
-
-    from backend.core.fastly.utils import region_endpoint
-    from backend.provision.rum_assets import FARO_KEY_PREFIX, FARO_KEY_SUFFIX
-    from backend.utils.fos_signing import sign_fos_request
-
-    access_key = cfg.get("fos_access_key_id")
-    secret_key = cfg.get("fos_secret_access_key")
-    bucket = cfg.get("fos_bucket")
-    region = cfg.get("fos_region", "us-east-1")
-    stored_hash = (cfg.get("rum") or {}).get("faro_fos_etag_md5")
-
-    if not all([access_key, secret_key, bucket]) or not stored_hash:
-        return False
-
-    assert access_key is not None and secret_key is not None
-
-    fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
-    fos_host = region_endpoint(region)
-    fos_url = f"https://{fos_host}/{bucket}/{fos_key}"
-
-    try:
-        headers = sign_fos_request(
-            method="HEAD",
-            url=fos_url,
-            headers={},
-            body=b"",
-            access_key_id=access_key,
-            secret_access_key=secret_key,
-            region=region,
-        )
-        with httpx.Client(verify=certifi.where()) as client:
-            response = client.head(fos_url, headers=headers, timeout=10.0)
-        if response.status_code != 200:
-            return False
-        etag = response.headers.get("ETag", "").strip('"')
-        return etag == stored_hash
-    except Exception:
-        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
-        return False
-
-
 def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     """Keep the operator's pinned Faro bundle present and intact in FOS.
 
@@ -144,7 +86,11 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     from backend import config as svcconfig
     from backend.core.faro_versions import DEFAULT_FARO_VERSION
     from backend.cron_progress import add_progress
-    from backend.provision.rum_assets import detect_faro_version_change, download_and_upload_faro
+    from backend.provision.rum_assets import (
+        detect_faro_version_change,
+        download_and_upload_faro,
+        faro_bundle_intact,
+    )
 
     def report(msg: str) -> None:
         logger.info(msg)
@@ -225,7 +171,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
                 )
 
         # 1. Cheap integrity check — every tick.
-        if not _faro_bundle_intact(cfg, pinned_version):
+        if not faro_bundle_intact(cfg, pinned_version):
             report(f"Faro bundle v{pinned_version} missing/corrupt in FOS, restoring")
             try:
                 asyncio.run(

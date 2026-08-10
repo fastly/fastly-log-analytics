@@ -22,7 +22,10 @@ from backend.provision.rum_assets import (
     cleanup_old_faro_versions,
     detect_faro_version_change,
     download_and_upload_faro,
+    faro_bundle_intact,
+    faro_tracker_ready,
     generate_rum_tracker_js,
+    upload_rum_tracker_js,
 )
 
 FAKE_CFG = {
@@ -444,3 +447,152 @@ def test_generate_rum_tracker_js_contains_no_absolute_url_at_all():
     js = generate_rum_tracker_js("svc_test")
 
     assert not re.search(r"https?://", js)
+
+
+# ── faro_tracker_ready / upload_rum_tracker_js readiness gate ───────────────
+#
+# Regression coverage for the live-production failure: a reconcile can
+# succeed with NO Faro route deployed at all (faro_version never pinned), yet
+# generate_rum_tracker_js unconditionally references /js/faro-sdk.js. Before
+# this gate, upload_rum_tracker_js would publish that tracker anyway — every
+# visitor's browser then fetches a route with no VCL behind it and gets the
+# origin's 2-byte "OK" fallthrough instead of the SDK, so Faro never
+# initializes and zero beacons are collected.
+
+
+def test_faro_tracker_ready_false_when_no_version_pinned():
+    """The exact live failure: reconcile succeeded, but faro_version was
+    never written to cfg["rum"]. Must not be reported ready — this is the
+    case that must fail without the fix."""
+    cfg = {**FAKE_CFG, "rum": {"enabled": True}}  # no faro_version key at all
+
+    ready, reason = faro_tracker_ready(cfg)
+
+    assert ready is False
+    assert "no Faro version pinned" in reason
+
+
+def test_faro_tracker_ready_false_when_pinned_but_bundle_missing_in_fos(mock_fos):
+    """A version is pinned in config, but the FOS object behind it is gone
+    (wiped bucket, interrupted upload, etc.) — HEAD 404s. Must not be
+    reported ready."""
+    cfg = {
+        **FAKE_CFG,
+        "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": "deadbeef"},
+    }
+    mock_fos(lambda request: httpx.Response(404))
+
+    ready, reason = faro_tracker_ready(cfg)
+
+    assert ready is False
+    assert "not present/intact in FOS" in reason
+
+
+def test_faro_tracker_ready_true_when_pinned_and_bundle_present(mock_fos):
+    """A version is pinned AND its bundle's ETag matches what FOS actually
+    holds — the only case that should be considered ready to publish."""
+    etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    cfg = {
+        **FAKE_CFG,
+        "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": etag_md5},
+    }
+    mock_fos(lambda request: httpx.Response(200, headers={"ETag": f'"{etag_md5}"'}))
+
+    ready, reason = faro_tracker_ready(cfg)
+
+    assert ready is True
+    assert reason == ""
+
+
+def test_faro_bundle_intact_is_the_shared_implementation_behind_readiness(mock_fos):
+    """faro_bundle_intact lives in rum_assets.py specifically so the cron's
+    every-tick integrity check and this readiness gate share one
+    implementation instead of drifting — sanity-check it's callable directly
+    with the same semantics faro_tracker_ready relies on."""
+    etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    cfg = {**FAKE_CFG, "rum": {"faro_fos_etag_md5": etag_md5}}
+    mock_fos(lambda request: httpx.Response(200, headers={"ETag": f'"{etag_md5}"'}))
+
+    assert faro_bundle_intact(cfg, "2.9.0") is True
+
+
+def test_upload_rum_tracker_js_skips_publish_when_no_faro_version_pinned(monkeypatch):
+    """This is the stranded-tracker scenario end to end through the real
+    publish function: a service with RUM config but no faro_version pinned
+    (e.g. an activation that never wrote the pin) must NOT get a
+    faro-referencing tracker published — the FOS PUT for rum-tracker.js
+    must never happen."""
+    cfg = {**FAKE_CFG, "rum": {"enabled": True}}
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda service_id: dict(cfg))
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", lambda *a, **k: None)
+
+    put_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            put_calls.append(str(request.url))
+        raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
+
+    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+
+    result = upload_rum_tracker_js("svc_test", "tok")
+
+    assert result["skipped"] is True
+    assert result["bytes_uploaded"] == 0
+    assert put_calls == []
+
+
+def test_upload_rum_tracker_js_skips_publish_when_pinned_but_bundle_missing(monkeypatch):
+    """A version is pinned, but the bundle isn't actually in FOS (HEAD
+    404s) — must still skip the tracker publish rather than trust the pin
+    alone."""
+    cfg = {
+        **FAKE_CFG,
+        "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": "deadbeef"},
+    }
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda service_id: dict(cfg))
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", lambda *a, **k: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD" and "faro-web-sdk-v" in request.url.path:
+            return httpx.Response(404)
+        raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
+
+    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+
+    result = upload_rum_tracker_js("svc_test", "tok")
+
+    assert result["skipped"] is True
+
+
+def test_upload_rum_tracker_js_publishes_when_pinned_and_bundle_present(monkeypatch):
+    """The genuinely-ready case: version pinned, bundle's ETag matches FOS —
+    the tracker publish must proceed and actually PUT the tracker JS."""
+    etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    cfg = {
+        **FAKE_CFG,
+        "rum": {"faro_version": "2.9.0", "faro_fos_etag_md5": etag_md5},
+    }
+    monkeypatch.setattr(rum_assets.svcconfig, "load_config", lambda service_id: dict(cfg))
+    monkeypatch.setattr(rum_assets.svcconfig, "save_config", lambda *a, **k: None)
+
+    put_bodies: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "HEAD" and "faro-web-sdk-v" in path:
+            return httpx.Response(200, headers={"ETag": f'"{etag_md5}"'})
+        if request.method == "HEAD" and path.endswith("rum-tracker.js"):
+            return httpx.Response(404)  # never uploaded before
+        if request.method == "PUT" and path.endswith("rum-tracker.js"):
+            put_bodies["tracker"] = request.content
+            return httpx.Response(200)
+        raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
+
+    monkeypatch.setattr(rum_assets.httpx, "Client", _mock_client_factory(handler))
+
+    result = upload_rum_tracker_js("svc_test", "tok")
+
+    assert "skipped" not in result
+    assert result["bytes_uploaded"] > 0
+    assert "/js/faro-sdk.js" in put_bodies["tracker"].decode()

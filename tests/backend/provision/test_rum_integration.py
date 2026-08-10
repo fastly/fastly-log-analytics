@@ -279,6 +279,12 @@ class TestFaroSelfHostingEndToEnd:
             if request.method == "PUT" and path.endswith(f"faro-web-sdk-v{chosen_version}.iife.js"):
                 uploads["bundle"] = request.content
                 return httpx.Response(200)
+            if request.method == "HEAD" and path.endswith(f"faro-web-sdk-v{chosen_version}.iife.js"):
+                # upload_rum_tracker_js's faro_tracker_ready gate HEADs the
+                # bundle it just uploaded to confirm the route it references
+                # is genuinely backed by real content in FOS.
+                etag = hashlib.md5(_SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+                return httpx.Response(200, headers={"ETag": f'"{etag}"'})
             if request.method == "HEAD" and path.endswith("rum-tracker.js"):
                 # Never uploaded before — force upload_rum_tracker_js past
                 # its up-to-date short-circuit.
@@ -352,6 +358,12 @@ class TestFaroSelfHostingEndToEnd:
             path = request.url.path
             if request.method == "PUT" and "faro-web-sdk-v" in path:
                 return httpx.Response(200)
+            if request.method == "HEAD" and "faro-web-sdk-v" in path:
+                # upload_rum_tracker_js's faro_tracker_ready gate HEADs the
+                # bundle it just uploaded to confirm the route it references
+                # is genuinely backed by real content in FOS.
+                etag = hashlib.md5(_SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+                return httpx.Response(200, headers={"ETag": f'"{etag}"'})
             if request.method == "HEAD" and path.endswith("rum-tracker.js"):
                 return httpx.Response(404)
             if request.method == "PUT" and path.endswith("rum-tracker.js"):
