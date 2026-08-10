@@ -1,17 +1,28 @@
 """Faro Web SDK version discovery and bundle downloading.
 
-Fetches available versions from the npm registry and downloads IIFE bundles
-from unpkg.com. Both functions wrap every transport/parse failure in
-``ValueError`` so callers have a single exception type to handle.
+Fetches available versions from the npm registry and downloads the IIFE
+bundle by pulling the published npm **tarball** from the registry itself
+(no third-party CDN involved) and extracting the one file we need.
 
-The bundle is downloaded from a different origin (unpkg.com) than the one
-that publishes its version list (registry.npmjs.org), and unpkg serves the
-bytes with no integrity guarantee of its own. ``fetch_faro_bundle``
-verifies the downloaded bytes against the npm registry's published
-``dist.integrity`` (SRI hash) / ``dist.shasum`` for that exact version
-before returning — a mismatch raises rather than warns, so a mutated or
-poisoned unpkg artifact never reaches the operator's FOS bucket (F2 audit
-finding).
+npm's registry publishes ``dist.integrity`` (SRI hash) / ``dist.shasum`` for
+each version, but those hashes are computed over the package **tarball**
+(the full ``.tgz``, e.g. ~570 files for ``@grafana/faro-web-sdk``) — never
+over any single file inside it. An earlier version of this module fetched
+the standalone ``dist/bundle/faro-web-sdk.iife.js`` from unpkg.com and
+compared *those* bytes against ``dist.integrity``; that comparison can never
+succeed for any real release, because the hashes describe different byte
+sequences (confirmed empirically for 2.9.0: the tarball hash matches the
+tarball, and does not match the unpkg-served single file). Every download
+was therefore silently rejected as a "failed integrity verification",
+regardless of whether unpkg served the genuine file.
+
+The fix: download the tarball (the only artifact the registry's hash
+actually describes), verify the *tarball* bytes against
+``dist.integrity``/``dist.shasum``, and only after that succeeds extract
+``package/dist/bundle/faro-web-sdk.iife.js`` from the verified archive. This
+is real supply-chain verification — it checks exactly what npm published —
+and it removes the unpkg dependency entirely: one request, one third-party
+host, one signature the registry actually vouches for.
 """
 
 from __future__ import annotations
@@ -19,12 +30,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
+import tarfile
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 REGISTRY_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk"
-BUNDLE_URL_TEMPLATE = "https://unpkg.com/@grafana/faro-web-sdk@{version}/dist/bundle/faro-web-sdk.iife.js"
+
+# npm tarballs use a fixed leading "package/" path component (mandated by
+# the packing tool, not per-package config), so the member path inside the
+# archive is stable across versions.
+_BUNDLE_MEMBER_NAME = "package/dist/bundle/faro-web-sdk.iife.js"
 
 # Single source of truth for "the version we self-host when nothing else is
 # pinned." The generated RUM tracker JS unconditionally loads the first-party
@@ -38,11 +56,29 @@ BUNDLE_URL_TEMPLATE = "https://unpkg.com/@grafana/faro-web-sdk@{version}/dist/bu
 DEFAULT_FARO_VERSION = "2.9.0"
 
 _TIMEOUT = 10.0
+# The tarball (~180 KB for 2.9.0, includes source maps, README, etc.) is
+# larger than the single extracted file (~98 KB) and originates from the
+# same registry host as the metadata call, so it gets a slightly longer
+# timeout than the plain JSON lookups.
+_TARBALL_TIMEOUT = 20.0
+
+# Real-world tarball is ~180 KB. This ceiling is generous headroom against a
+# future release bloating the package, while still bounding memory/CPU
+# spent hashing and un-gzipping a response before it's been verified as the
+# artifact the registry actually published.
+_TARBALL_MAX_BYTES = 10 * 1024 * 1024
+# Real-world extracted bundle is ~98 KB.
+_BUNDLE_MAX_BYTES = 5 * 1024 * 1024
 
 # SRI integrity strings are "<algo>-<base64 digest>". Only algorithms with a
 # hashlib constructor of the same name are attempted; npm publishes sha512
 # almost universally, sha256/sha384 are supported as a courtesy.
 _SRI_ALGOS = ("sha512", "sha384", "sha256")
+
+# The registry is the only origin this module trusts for both the integrity
+# metadata AND the tarball bytes it describes — a ``dist.tarball`` URL
+# pointing anywhere else is refused before it is ever fetched.
+_TRUSTED_TARBALL_HOST = "registry.npmjs.org"
 
 
 def _version_sort_key(version: str) -> tuple[int, ...]:
@@ -132,20 +168,44 @@ async def _fetch_version_dist(client: httpx.AsyncClient, version: str) -> dict[s
     return dist
 
 
-def _verify_bundle_integrity(bundle: bytes, dist: dict[str, Any]) -> bool:
-    """Verify ``bundle`` bytes against the registry's published ``dist``.
+def _tarball_url_from_dist(dist: dict[str, Any], version: str) -> str:
+    """Return the registry-published tarball URL for ``version``, host-pinned.
 
-    Prefers the SRI ``integrity`` field (``"<algo>-<base64 digest>"``,
-    npm publishes sha512 almost universally); falls back to the legacy
-    ``shasum`` (sha1 hex digest) field when integrity is absent. Returns
-    False — never raises — when neither field is present/usable so the
-    caller can raise a single, consistent "failed verification" error.
+    ``dist.tarball`` is the only URL this module trusts for the bytes that
+    ``dist.integrity``/``dist.shasum`` actually describe. It is expected to
+    live on the same origin as the metadata call itself; refusing anything
+    else is cheap defense-in-depth against a malformed or tampered
+    ``tarball`` field pointing the download at an untrusted host.
+    """
+    tarball = dist.get("tarball")
+    if not isinstance(tarball, str) or not tarball:
+        raise ValueError(f"Failed to verify Faro bundle {version}: registry dist has no tarball URL")
+
+    parsed = urlsplit(tarball)
+    if parsed.scheme != "https" or parsed.hostname != _TRUSTED_TARBALL_HOST:
+        raise ValueError(
+            f"Failed to verify Faro bundle {version}: refusing untrusted tarball URL host {parsed.hostname!r}"
+        )
+    return tarball
+
+
+def _verify_artifact_integrity(artifact: bytes, dist: dict[str, Any]) -> bool:
+    """Verify ``artifact`` bytes against the registry's published ``dist``.
+
+    ``artifact`` must be the raw tarball bytes — ``dist.integrity`` /
+    ``dist.shasum`` are computed by npm over the packed ``.tgz``, never over
+    any single file extracted from it. Prefers the SRI ``integrity`` field
+    (``"<algo>-<base64 digest>"``, npm publishes sha512 almost universally);
+    falls back to the legacy ``shasum`` (sha1 hex digest) field when
+    integrity is absent. Returns False — never raises — when neither field
+    is present/usable so the caller can raise a single, consistent "failed
+    verification" error.
     """
     integrity = dist.get("integrity")
     if isinstance(integrity, str) and integrity:
         algo, sep, expected_b64 = integrity.partition("-")
         if sep and algo in _SRI_ALGOS and expected_b64:
-            digest = hashlib.new(algo, bundle).digest()
+            digest = hashlib.new(algo, artifact).digest()
             actual_b64 = base64.b64encode(digest).decode()
             return hmac.compare_digest(actual_b64, expected_b64)
 
@@ -153,54 +213,109 @@ def _verify_bundle_integrity(bundle: bytes, dist: dict[str, Any]) -> bool:
     if isinstance(shasum, str) and shasum:
         # npm's legacy ``dist.shasum`` field is always sha1 — not our
         # choice of algorithm, just matching what the registry publishes.
-        actual_hex = hashlib.sha1(bundle, usedforsecurity=False).hexdigest()  # noqa: S324
+        actual_hex = hashlib.sha1(artifact, usedforsecurity=False).hexdigest()  # noqa: S324
         return hmac.compare_digest(actual_hex, shasum.lower())
 
     return False
 
 
-async def fetch_faro_bundle(version: str) -> bytes:
-    """Download the Faro Web SDK IIFE bundle from unpkg.com and verify it
-    against the npm registry's published integrity hash before returning.
+def _extract_bundle_from_tarball(tarball: bytes, version: str) -> bytes:
+    """Extract the IIFE bundle from an *already-integrity-verified* tarball.
 
-    The registry (registry.npmjs.org) and the bundle CDN (unpkg.com) are
-    different origins, and unpkg serves bytes with no integrity guarantee
-    of its own — those exact bytes get uploaded to the operator's FOS
-    bucket and served to every visitor of the customer's website. This
-    fetches the registry's ``dist.integrity`` / ``dist.shasum`` for
-    ``version`` and verifies the downloaded bundle against it; a mismatch
-    raises rather than warns.
+    Never call this before ``_verify_artifact_integrity`` has returned True
+    for ``tarball`` — extracting from an unverified archive defeats the
+    point of verifying it.
+
+    Reads exactly one member, by its exact expected name — never
+    ``extractall()``. There is deliberately no "extraction root" for a
+    traversal to escape: a member whose name isn't byte-for-byte
+    ``_BUNDLE_MEMBER_NAME`` (an absolute path, a ``..``-laden path, or any
+    other name) simply never matches and is ignored, so a maliciously named
+    entry elsewhere in the archive can't affect anything. The matched member
+    is additionally required to be a plain file (rejects a symlink/hardlink
+    masquerading under the expected name) and is read with a hard size cap
+    rather than trusted at face value.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+            member = None
+            for candidate in tar.getmembers():
+                name = candidate.name
+                # Defense-in-depth: reject unsafe-looking paths outright,
+                # even though the exact-match below already can't select
+                # one (belt-and-suspenders against a future refactor that
+                # loosens the match to e.g. a suffix comparison).
+                if name.startswith("/") or any(part == ".." for part in name.split("/")):
+                    continue
+                if name == _BUNDLE_MEMBER_NAME:
+                    member = candidate
+                    break
+
+            if member is None:
+                raise ValueError(f"Faro tarball {version} is missing expected member {_BUNDLE_MEMBER_NAME!r}")
+            if not member.isfile():
+                raise ValueError(f"Faro tarball {version} member {_BUNDLE_MEMBER_NAME!r} is not a regular file")
+            if member.size > _BUNDLE_MAX_BYTES:
+                raise ValueError(f"Faro tarball {version} member {_BUNDLE_MEMBER_NAME!r} exceeds size ceiling")
+
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                raise ValueError(f"Faro tarball {version} member {_BUNDLE_MEMBER_NAME!r} could not be read")
+            data = extracted.read(_BUNDLE_MAX_BYTES + 1)
+    except tarfile.TarError as exc:
+        raise ValueError(f"Faro tarball {version} is not a valid gzipped tar archive: {exc}") from exc
+
+    if len(data) > _BUNDLE_MAX_BYTES:
+        raise ValueError(f"Faro tarball {version} member {_BUNDLE_MEMBER_NAME!r} exceeds size ceiling")
+    return data
+
+
+async def fetch_faro_bundle(version: str) -> bytes:
+    """Download the Faro Web SDK npm tarball, verify it against the
+    registry's published integrity hash, and return the extracted IIFE
+    bundle bytes.
+
+    Verification happens against the tarball — the only artifact
+    ``dist.integrity``/``dist.shasum`` actually describes — never against
+    the extracted file. Extraction only ever runs after verification
+    succeeds.
 
     Args:
         version: Version string (e.g. ``"2.9.0"``).
 
     Returns:
-        Raw, integrity-verified bytes of the IIFE bundle.
+        Raw bytes of ``package/dist/bundle/faro-web-sdk.iife.js``, taken
+        from an integrity-verified tarball.
 
     Raises:
         ValueError: On 404 (unknown version), any other non-200 status, a
-            network error, a registry lookup failure, or an integrity
-            mismatch/absence between the downloaded bytes and the
-            registry's published hash for this version.
+            network error, a registry lookup failure, an untrusted tarball
+            host, an integrity mismatch/absence between the downloaded
+            tarball and the registry's published hash for this version, a
+            tarball that exceeds the size ceiling, or a verified tarball
+            that doesn't contain the expected bundle member.
     """
-    bundle_url = BUNDLE_URL_TEMPLATE.format(version=version)
-
     try:
         async with httpx.AsyncClient() as client:
             dist = await _fetch_version_dist(client, version)
-            response = await client.get(bundle_url, timeout=_TIMEOUT)
+            tarball_url = _tarball_url_from_dist(dist, version)
+            response = await client.get(tarball_url, timeout=_TARBALL_TIMEOUT)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise ValueError(f"Faro version {version} not found (404)") from exc
-        raise ValueError(f"Failed to download Faro bundle {version}: HTTP {exc.response.status_code}") from exc
+        raise ValueError(f"Failed to download Faro tarball {version}: HTTP {exc.response.status_code}") from exc
     except httpx.RequestError as exc:
-        raise ValueError(f"Failed to download Faro bundle {version}: {exc}") from exc
+        raise ValueError(f"Failed to download Faro tarball {version}: {exc}") from exc
 
-    bundle = response.content
-    if not _verify_bundle_integrity(bundle, dist):
+    tarball = response.content
+    if len(tarball) > _TARBALL_MAX_BYTES:
+        raise ValueError(f"Faro tarball {version} exceeds size ceiling ({len(tarball)} bytes)")
+
+    if not _verify_artifact_integrity(tarball, dist):
         raise ValueError(
-            f"Faro bundle {version} failed integrity verification against the npm registry's "
-            "published hash for this version — refusing to return unverified bytes"
+            f"Faro tarball {version} failed integrity verification against the npm registry's "
+            "published hash for this version — refusing to extract from an unverified archive"
         )
-    return bundle
+
+    return _extract_bundle_from_tarball(tarball, version)

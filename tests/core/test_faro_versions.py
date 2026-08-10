@@ -1,24 +1,46 @@
 """Tests for ``backend.core.faro_versions``.
 
-Version discovery (npm registry) and IIFE bundle download (unpkg.com) are
-exercised against a captured registry payload and a synthetic bundle body
+Version discovery (npm registry) and tarball download/verification are
+exercised against a captured registry payload and a synthetic tarball body
 via ``httpx.MockTransport`` — same shape as
 ``tests/utils/test_refresh_fastly_cidrs.py``. No real network calls: the
-npm registry and the unpkg CDN are third-party services whose availability
-must never gate ``make test`` / ``make test-ci``.
+npm registry is a third-party service whose availability must never gate
+``make test`` / ``make test-ci`` (the one exception is
+``test_live_registry_tarball_verifies``, gated behind an env var — see its
+docstring).
+
+Fixture fidelity matters here specifically because the bug this module
+fixes (F2-redux) was originally masked by a fixture that computed
+``dist.integrity`` over the wrong bytes (the extracted file, not the
+tarball) — the same misunderstanding baked into the code it was meant to
+catch. ``_build_fixture_tarball`` below builds a REAL gzipped tar via the
+stdlib ``tarfile`` module and every test computes ``dist.integrity`` /
+``dist.shasum`` from the resulting tarball bytes, the way npm's publish
+pipeline actually does — so a regression back to per-file hashing fails
+these tests rather than passing them.
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import os
+import tarfile
 
 import httpx
 import pytest
 
 from backend.core import faro_versions
-from backend.core.faro_versions import _is_stable_numeric, fetch_available_faro_versions, fetch_faro_bundle
+from backend.core.faro_versions import (
+    _BUNDLE_MEMBER_NAME,
+    _is_stable_numeric,
+    fetch_available_faro_versions,
+    fetch_faro_bundle,
+)
+
+TARBALL_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk/-/faro-web-sdk-2.9.0.tgz"
 
 # Trimmed capture of the registry payload shape (2026-08-09). Deliberately
 # unsorted, and salted with a pre-release + a build-metadata version so the
@@ -39,13 +61,49 @@ SAMPLE_REGISTRY_RESPONSE = {
 # Shape-accurate stand-in for the real IIFE bundle: the browser global the
 # tracker looks for is what downstream tasks actually depend on.
 SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
-MUTATED_BUNDLE = b"!function(e){/* poisoned CDN artifact, different bytes */}(window);"
 
 
-def _sri_integrity(bundle: bytes, algo: str = "sha512") -> str:
-    """Build an SRI integrity string for ``bundle`` — same format npm
-    publishes at ``versions[<v>].dist.integrity``."""
-    digest = hashlib.new(algo, bundle).digest()
+def _add_tar_member(tar: tarfile.TarFile, name: str, content: bytes) -> None:
+    info = tarfile.TarInfo(name=name)
+    info.size = len(content)
+    tar.addfile(info, io.BytesIO(content))
+
+
+def _build_fixture_tarball(
+    *,
+    bundle_name: str = _BUNDLE_MEMBER_NAME,
+    bundle_content: bytes = SAMPLE_BUNDLE,
+    include_bundle: bool = True,
+    extra_files: dict[str, bytes] | None = None,
+) -> bytes:
+    """Build a REAL gzipped tar shaped like an npm package tarball.
+
+    Includes some other package files (the real ``.tgz`` has ~570 of them)
+    specifically so the fixture cannot be "simplified" back into a
+    single-file archive where tarball bytes and bundle bytes coincide.
+    """
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _add_tar_member(tar, "package/package.json", b'{"name": "@grafana/faro-web-sdk", "version": "2.9.0"}')
+        _add_tar_member(tar, "package/README.md", b"# Faro Web SDK\n\nMuch longer than the bundle itself.\n" * 20)
+        _add_tar_member(tar, "package/dist/bundle/faro-web-sdk.iife.js.map", b'{"version":3,"sources":[]}')
+        if include_bundle:
+            _add_tar_member(tar, bundle_name, bundle_content)
+        for name, content in (extra_files or {}).items():
+            _add_tar_member(tar, name, content)
+    return buf.getvalue()
+
+
+# A fixture tarball with the real bundle at the expected path — the shared
+# "happy path" archive most tests verify against.
+SAMPLE_TARBALL = _build_fixture_tarball()
+
+
+def _sri_integrity(data: bytes, algo: str = "sha512") -> str:
+    """Build an SRI integrity string for ``data`` — same format npm
+    publishes at ``versions[<v>].dist.integrity``. Callers must pass the
+    TARBALL bytes, not any file extracted from it — that's what npm hashes."""
+    digest = hashlib.new(algo, data).digest()
     return f"{algo}-{base64.b64encode(digest).decode()}"
 
 
@@ -57,21 +115,23 @@ def _registry_payload_with_dist(version_dist: dict[str, dict]) -> dict:
     }
 
 
-def _route_by_host(*, registry: httpx.Response | None = None, bundle: httpx.Response | None = None):
-    """Return an ``httpx.MockTransport`` handler that routes by request host.
+def _route_by_url(*, registry: httpx.Response | None = None, responses: dict[str, httpx.Response] | None = None):
+    """Return an ``httpx.MockTransport`` handler that routes by exact URL.
 
-    ``fetch_faro_bundle`` now hits two different origins per call
-    (registry.npmjs.org for the integrity lookup, unpkg.com for the bytes)
-    against the SAME mocked ``httpx.AsyncClient``, so tests need to answer
-    differently per host rather than with one blanket response.
+    ``fetch_faro_bundle`` now issues two requests to the SAME origin
+    (registry.npmjs.org) against the same mocked ``httpx.AsyncClient`` — one
+    for the version metadata, one for the tarball ``dist.tarball`` points
+    at — so routing has to key off the full URL, not the host.
     """
+    responses = dict(responses or {})
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "registry.npmjs.org":
-            assert registry is not None, "unexpected registry.npmjs.org request"
+        url = str(request.url)
+        if url == faro_versions.REGISTRY_URL:
+            assert registry is not None, "unexpected registry metadata request"
             return registry
-        assert bundle is not None, "unexpected unpkg.com request"
-        return bundle
+        assert url in responses, f"unexpected request to {url}"
+        return responses[url]
 
     return handler
 
@@ -210,39 +270,55 @@ async def test_fetch_available_faro_versions_raises_when_versions_key_missing(mo
 # ── fetch_faro_bundle ───────────────────────────────────────────────────────
 
 
-async def test_fetch_faro_bundle_returns_bytes(mock_http):
-    """Happy path: correct unpkg URL requested, integrity verified against
-    the registry's published sha512, raw body returned verbatim."""
-    seen: dict[str, str] = {}
-    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+async def test_fetch_faro_bundle_returns_extracted_bundle_bytes(mock_http):
+    """Happy path: registry dist points at a tarball URL, the tarball is
+    verified against the registry's published sha512 of the TARBALL, and
+    the bytes returned are the extracted member — not the tarball itself."""
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "registry.npmjs.org":
-            return httpx.Response(200, content=json.dumps(registry_payload).encode())
-        seen["url"] = str(request.url)
-        return httpx.Response(200, content=SAMPLE_BUNDLE)
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
+        )
+    )
 
-    mock_http(handler)
     bundle = await fetch_faro_bundle("2.9.0")
 
     assert isinstance(bundle, bytes)
     assert bundle == SAMPLE_BUNDLE
     assert b"Faro" in bundle
-    assert seen["url"] == ("https://unpkg.com/@grafana/faro-web-sdk@2.9.0/dist/bundle/faro-web-sdk.iife.js")
+
+
+def test_extracted_bundle_bytes_differ_from_tarball_bytes():
+    """Pins the core fix: the tarball and the file extracted from it are
+    NOT interchangeable. A fixture (or implementation) that collapses these
+    two back into the same bytes would silently resurrect the original bug,
+    where per-file hashes were compared against a whole-tarball digest."""
+    assert SAMPLE_BUNDLE != SAMPLE_TARBALL
+    assert SAMPLE_BUNDLE not in SAMPLE_TARBALL or len(SAMPLE_BUNDLE) < len(SAMPLE_TARBALL)
+    assert len(SAMPLE_TARBALL) > len(SAMPLE_BUNDLE)
 
 
 async def test_fetch_faro_bundle_verifies_against_shasum_fallback(mock_http):
     """When the registry entry has no ``integrity`` field, fall back to the
-    legacy ``shasum`` (sha1 hex) field — older registry snapshots only
-    published shasum."""
+    legacy ``shasum`` (sha1 hex) field computed over the TARBALL — older
+    registry snapshots only published shasum."""
     registry_payload = _registry_payload_with_dist(
-        {"2.9.0": {"shasum": hashlib.sha1(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()}}
+        {
+            "2.9.0": {
+                "shasum": hashlib.sha1(SAMPLE_TARBALL, usedforsecurity=False).hexdigest(),
+                "tarball": TARBALL_URL,
+            }
+        }
     )
 
     mock_http(
-        _route_by_host(
+        _route_by_url(
             registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
-            bundle=httpx.Response(200, content=SAMPLE_BUNDLE),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
         )
     )
 
@@ -251,20 +327,21 @@ async def test_fetch_faro_bundle_verifies_against_shasum_fallback(mock_http):
     assert bundle == SAMPLE_BUNDLE
 
 
-async def test_fetch_faro_bundle_raises_on_integrity_mismatch(mock_http):
-    """The core F2 fix: a downloaded bundle whose bytes don't match the
-    registry's published integrity hash must raise, not warn, and the
-    mismatched bytes must never be returned to the caller (so they can
-    never reach the operator's FOS bucket)."""
-    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+async def test_fetch_faro_bundle_raises_on_tarball_hash_mismatch(mock_http):
+    """The core fix: a downloaded tarball whose bytes don't match the
+    registry's published integrity hash must raise, not warn, and no bytes
+    (extracted or otherwise) must ever reach the caller."""
+    mutated_tarball = _build_fixture_tarball(bundle_content=b"!function(e){/* poisoned */}(window);")
+    registry_payload = _registry_payload_with_dist(
+        # integrity computed over SAMPLE_TARBALL, but the server serves a
+        # DIFFERENT tarball — simulates a mutated/poisoned artifact.
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
 
     mock_http(
-        _route_by_host(
+        _route_by_url(
             registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
-            # unpkg serves DIFFERENT bytes than what the registry's
-            # integrity hash was computed over — simulates a mutated or
-            # poisoned CDN artifact.
-            bundle=httpx.Response(200, content=MUTATED_BUNDLE),
+            responses={TARBALL_URL: httpx.Response(200, content=mutated_tarball)},
         )
     )
 
@@ -272,16 +349,70 @@ async def test_fetch_faro_bundle_raises_on_integrity_mismatch(mock_http):
         await fetch_faro_bundle("2.9.0")
 
 
+async def test_fetch_faro_bundle_raises_when_member_missing_from_verified_archive(mock_http):
+    """A tarball that verifies cleanly but doesn't contain the expected
+    bundle member must still raise — integrity alone isn't the whole
+    contract, the file has to actually be there."""
+    tarball_without_bundle = _build_fixture_tarball(include_bundle=False)
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(tarball_without_bundle), "tarball": TARBALL_URL}}
+    )
+
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=tarball_without_bundle)},
+        )
+    )
+
+    with pytest.raises(ValueError, match="missing expected member"):
+        await fetch_faro_bundle("2.9.0")
+
+
+@pytest.mark.parametrize(
+    "malicious_name",
+    [
+        "/etc/passwd",
+        "../../../etc/passwd",
+        "package/../../../etc/passwd",
+    ],
+)
+async def test_fetch_faro_bundle_rejects_malicious_member_name(mock_http, malicious_name):
+    """An archive whose only bundle-shaped entry uses an absolute path or a
+    ``..``-laden path (instead of the exact expected member name) must be
+    treated as if the bundle were absent — never extracted, never trusted,
+    even though the tarball itself verifies cleanly against its own hash."""
+    hostile_tarball = _build_fixture_tarball(
+        include_bundle=False,
+        extra_files={malicious_name: b"attacker-controlled bytes"},
+    )
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(hostile_tarball), "tarball": TARBALL_URL}}
+    )
+
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=hostile_tarball)},
+        )
+    )
+
+    with pytest.raises(ValueError, match="missing expected member"):
+        await fetch_faro_bundle("2.9.0")
+
+
 async def test_fetch_faro_bundle_raises_when_registry_has_no_dist_for_version(mock_http):
     """No usable integrity target at all (version missing from the registry
     payload) must fail closed — refuse to return unverified bytes rather
     than silently skipping verification."""
-    registry_payload = _registry_payload_with_dist({"1.0.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+    registry_payload = _registry_payload_with_dist(
+        {"1.0.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
 
     mock_http(
-        _route_by_host(
+        _route_by_url(
             registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
-            bundle=httpx.Response(200, content=SAMPLE_BUNDLE),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
         )
     )
 
@@ -289,17 +420,37 @@ async def test_fetch_faro_bundle_raises_when_registry_has_no_dist_for_version(mo
         await fetch_faro_bundle("2.9.0")
 
 
+async def test_fetch_faro_bundle_raises_when_tarball_url_untrusted_host(mock_http):
+    """A ``dist.tarball`` pointing at a host other than the registry itself
+    must be refused before it's ever fetched — this module trusts exactly
+    one origin for both the hash and the bytes it describes."""
+    registry_payload = _registry_payload_with_dist(
+        {
+            "2.9.0": {
+                "integrity": _sri_integrity(SAMPLE_TARBALL),
+                "tarball": "https://evil.example/faro-web-sdk-2.9.0.tgz",
+            }
+        }
+    )
+
+    mock_http(lambda request: httpx.Response(200, content=json.dumps(registry_payload).encode()))
+
+    with pytest.raises(ValueError, match="untrusted tarball URL host"):
+        await fetch_faro_bundle("2.9.0")
+
+
 async def test_fetch_faro_bundle_raises_on_404(mock_http):
-    """Unknown version at the CDN — the message must name the 404 so the
-    admin UI can distinguish 'no such version' from a transient CDN
-    failure. Registry lookup succeeds (the version is real) but unpkg's
-    build for it 404s."""
-    registry_payload = _registry_payload_with_dist({"99.99.99": {"integrity": _sri_integrity(b"irrelevant")}})
+    """Unknown version at the registry's tarball URL — the message must
+    name the 404 so the admin UI can distinguish 'no such version' from a
+    transient failure."""
+    registry_payload = _registry_payload_with_dist(
+        {"99.99.99": {"integrity": _sri_integrity(b"irrelevant"), "tarball": TARBALL_URL}}
+    )
 
     mock_http(
-        _route_by_host(
+        _route_by_url(
             registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
-            bundle=httpx.Response(404, content=b"Cannot find package"),
+            responses={TARBALL_URL: httpx.Response(404, content=b"Cannot find package")},
         )
     )
 
@@ -311,12 +462,14 @@ async def test_fetch_faro_bundle_raises_on_404(mock_http):
 
 async def test_fetch_faro_bundle_raises_on_server_error(mock_http):
     """Non-404 failure status is wrapped too, and must NOT be reported as 404."""
-    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
 
     mock_http(
-        _route_by_host(
+        _route_by_url(
             registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
-            bundle=httpx.Response(503, content=b"service unavailable"),
+            responses={TARBALL_URL: httpx.Response(503, content=b"service unavailable")},
         )
     )
 
@@ -327,18 +480,20 @@ async def test_fetch_faro_bundle_raises_on_server_error(mock_http):
 
 
 async def test_fetch_faro_bundle_raises_on_network_error(mock_http):
-    """Transport-level failure (DNS/TCP) downloading the bundle surfaces as
+    """Transport-level failure (DNS/TCP) downloading the tarball surfaces as
     ValueError, not ConnectError. Registry lookup succeeds first."""
-    registry_payload = _registry_payload_with_dist({"2.9.0": {"integrity": _sri_integrity(SAMPLE_BUNDLE)}})
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "registry.npmjs.org":
+        if str(request.url) == faro_versions.REGISTRY_URL:
             return httpx.Response(200, content=json.dumps(registry_payload).encode())
-        raise httpx.ConnectError("unpkg unreachable", request=request)
+        raise httpx.ConnectError("tarball host unreachable", request=request)
 
     mock_http(handler)
 
-    with pytest.raises(ValueError, match="Failed to download Faro bundle"):
+    with pytest.raises(ValueError, match="Failed to download Faro tarball"):
         await fetch_faro_bundle("2.9.0")
 
 
@@ -347,11 +502,56 @@ async def test_fetch_faro_bundle_raises_on_registry_network_error(mock_http):
     be skipped just because the registry is unreachable."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "registry.npmjs.org":
-            raise httpx.ConnectError("registry unreachable", request=request)
-        raise AssertionError("unpkg must not be contacted when the registry lookup fails")
+        raise httpx.ConnectError("registry unreachable", request=request)
 
     mock_http(handler)
 
     with pytest.raises(ValueError, match="Failed to verify Faro bundle"):
         await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_tarball_exceeds_size_ceiling(mock_http):
+    """A response far larger than any real npm tarball must be refused
+    before it's hashed or unpacked, not silently accepted."""
+    oversized = b"0" * (faro_versions._TARBALL_MAX_BYTES + 1)
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(oversized), "tarball": TARBALL_URL}}
+    )
+
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=oversized)},
+        )
+    )
+
+    with pytest.raises(ValueError, match="exceeds size ceiling"):
+        await fetch_faro_bundle("2.9.0")
+
+
+# ── live registry probe (opt-in, never runs in default/CI runs) ────────────
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    os.environ.get("FARO_LIVE_REGISTRY_TEST") != "1",
+    reason="opt-in live network test against the real npm registry; set FARO_LIVE_REGISTRY_TEST=1 to run",
+)
+async def test_live_registry_tarball_verifies():
+    """Fetches the REAL registry metadata and REAL tarball for a pinned
+    version and asserts verification succeeds end-to-end.
+
+    This is the test that would have caught the original bug: the mocked
+    tests above are only as honest as their fixtures, and the original
+    fixture encoded the same "hash the extracted file" misunderstanding as
+    the code it was meant to catch. This test has no fixture to be wrong
+    about — it hits the actual registry.npmjs.org and verifies against
+    whatever it actually publishes.
+
+    Never runs in `make test` / `make test-ci` / any CI job: gated on
+    ``FARO_LIVE_REGISTRY_TEST=1``, which nothing in this repo's CI sets.
+    """
+    bundle = await fetch_faro_bundle(faro_versions.DEFAULT_FARO_VERSION)
+    assert isinstance(bundle, bytes)
+    assert len(bundle) > 1000
+    assert b"Faro" in bundle or b"faro" in bundle
