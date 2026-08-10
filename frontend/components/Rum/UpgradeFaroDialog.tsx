@@ -102,7 +102,7 @@ export function UpgradeFaroDialog({
   if (!serviceId) return null
 
   const noVersions = availableVersions.length === 0
-  const isNoOp = !selectedVersion || selectedVersion === currentVersion
+  const isNoOp = !selectedVersion
 
   const handleExecute = () => {
     if (noVersions || isNoOp || status === 'streaming') return
@@ -210,7 +210,7 @@ export function UpgradeFaroDialog({
                 onClick={handleExecute}
                 disabled={noVersions || isNoOp}
               >
-                Confirm & Upgrade
+                {selectedVersion === currentVersion ? 'Confirm & Re-deploy' : 'Confirm & Upgrade'}
               </Button>
             </>
           ) : (

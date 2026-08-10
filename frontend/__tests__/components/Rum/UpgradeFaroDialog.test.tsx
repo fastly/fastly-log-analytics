@@ -103,12 +103,12 @@ describe('UpgradeFaroDialog', () => {
     })
   })
 
-  it('disables Confirm when the picked version is a no-op (matches the pinned version)', async () => {
+  it('allows Confirm and changes label to Confirm & Re-deploy when the picked version matches the pinned version', async () => {
     const user = userEvent.setup()
     renderDialog()
     await user.click(screen.getByRole('combobox', { name: /target faro web sdk version/i }))
     await user.click(await screen.findByRole('option', { name: /1\.8\.0/ }))
-    expect(screen.getByRole('button', { name: /confirm & upgrade/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /confirm & re-deploy/i })).toBeEnabled()
   })
 
   it('starts the SSE stream with the default (latest) version on confirm', async () => {

@@ -157,11 +157,11 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
             <div className="flex justify-end">
               <Button
                 onClick={() => setIsUpgradeOpen(true)}
-                disabled={!updateAvailable && !!current}
+                disabled={false}
                 variant={updateAvailable ? 'default' : 'outline'}
                 size="sm"
               >
-                {current ? (updateAvailable ? 'Upgrade' : 'Up to date') : 'Choose version'}
+                {current ? (updateAvailable ? 'Upgrade' : 'Change version') : 'Choose version'}
               </Button>
             </div>
           </div>

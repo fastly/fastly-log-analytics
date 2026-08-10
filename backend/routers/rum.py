@@ -608,13 +608,32 @@ async def rum_analytics(
             path_val = app.get("name") or "/"
         path_val = path_val.replace("//", "/")
 
+        # Extract browser/OS/device string values for robust filtering
+        browser_meta = meta.get("browser") or {}
+        if isinstance(browser_meta, dict):
+            browser_val = browser_meta.get("name") or b.get("browser") or "Unknown"
+        else:
+            browser_val = browser_meta or b.get("browser") or "Unknown"
+
+        os_meta = meta.get("os") or {}
+        if isinstance(os_meta, dict):
+            os_val = os_meta.get("name") or b.get("os") or "Unknown"
+        else:
+            os_val = os_meta or b.get("os") or "Unknown"
+
+        device_meta = meta.get("device") or {}
+        if isinstance(device_meta, dict):
+            device_val = device_meta.get("type") or device_meta.get("name") or b.get("device") or "Unknown"
+        else:
+            device_val = device_meta or b.get("device") or "Unknown"
+
         beacon_values = {
-            "browser": meta.get("browser") or b.get("browser"),
-            "browser_name": meta.get("browser") or b.get("browser"),
-            "os": meta.get("os") or b.get("os"),
-            "os_name": meta.get("os") or b.get("os"),
-            "device": meta.get("device") or b.get("device"),
-            "device_type": meta.get("device") or b.get("device"),
+            "browser": browser_val,
+            "browser_name": browser_val,
+            "os": os_val,
+            "os_name": os_val,
+            "device": device_val,
+            "device_type": device_val,
             "path": path_val,
             "url": path_val,
             "url_path": path_val,
@@ -794,8 +813,17 @@ async def rum_analytics(
             else:
                 browser = browser_meta or b.get("browser") or "Unknown"
 
-            os_name = meta.get("os") or b.get("os") or "Unknown"
-            device = meta.get("device") or b.get("device") or "Unknown"
+            os_meta = meta.get("os") or {}
+            if isinstance(os_meta, dict):
+                os_name = os_meta.get("name") or b.get("os") or "Unknown"
+            else:
+                os_name = os_meta or b.get("os") or "Unknown"
+
+            device_meta = meta.get("device") or {}
+            if isinstance(device_meta, dict):
+                device = device_meta.get("type") or device_meta.get("name") or b.get("device") or "Unknown"
+            else:
+                device = device_meta or b.get("device") or "Unknown"
 
             browsers_dict[browser] = browsers_dict.get(browser, 0) + 1
             os_dict[os_name] = os_dict.get(os_name, 0) + 1

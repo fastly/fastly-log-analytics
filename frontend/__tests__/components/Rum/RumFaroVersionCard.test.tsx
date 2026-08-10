@@ -112,17 +112,14 @@ describe('RumFaroVersionCard', () => {
     expect(screen.getByRole('button', { name: /^upgrade$/i })).toBeEnabled()
   })
 
-  it('disables the upgrade action when already current (no no-op upgrades)', async () => {
+  it('allows changing version/re-deploying when already current', async () => {
     server.use(
       http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
         HttpResponse.json(versions({ current: '1.9.0', latest: '1.9.0', update_available: false })),
       ),
     )
     renderCard()
-    // Both the "Up to date" status badge and the disabled button text match
-    // this string — assert the disabled button specifically, since that's
-    // the behavior under test (no no-op upgrade action available).
-    expect(await screen.findByRole('button', { name: /up to date/i })).toBeDisabled()
+    expect(await screen.findByRole('button', { name: /change version/i })).toBeEnabled()
   })
 
   it('degrades gracefully on a registry 503 without breaking the page', async () => {
