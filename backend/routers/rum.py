@@ -912,7 +912,25 @@ async def rum_live_events(
                             "browser": {"name": browser or "Unknown"},
                             "os": {"name": os or "Unknown"},
                             "device": {"type": device or "Unknown"},
+                            "page": {"url": path or "/"},
                         },
+                        "measurements": [
+                            {
+                                "type": "web-vitals",
+                                "values": {mname: mval} if mname else {},
+                                "context": {"rating": mrating or ""},
+                            }
+                        ]
+                        if mname
+                        else [],
+                        "exceptions": [
+                            {
+                                "type": "Error",
+                                "value": err_msg or "JS Error",
+                            }
+                        ]
+                        if etype == "error"
+                        else [],
                         "cid": cid,
                         "req_id": req_id,
                     },
