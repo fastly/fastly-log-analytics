@@ -9028,6 +9028,141 @@
         }
       }
     },
+    "/api/services/{service_id}/rum/settings": {
+      "post": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Update Rum Settings",
+        "description": "Update RUM capture settings and re-deploy rum-tracker.js (admin-only).",
+        "operationId": "update_rum_settings_api_services__service_id__rum_settings_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RumSettingsUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Update Rum Settings Api Services  Service Id  Rum Settings Post"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/services/{service_id}/rum/beacon-health": {
       "get": {
         "tags": [
@@ -47445,6 +47580,38 @@
         "type": "object",
         "title": "RumSettingsPartial",
         "description": "Partial-update for RUM-specific config (sync interval + retention)."
+      },
+      "RumSettingsUpdateRequest": {
+        "properties": {
+          "capture_vitals": {
+            "type": "boolean",
+            "title": "Capture Vitals",
+            "default": true
+          },
+          "capture_performance": {
+            "type": "boolean",
+            "title": "Capture Performance",
+            "default": true
+          },
+          "capture_errors": {
+            "type": "boolean",
+            "title": "Capture Errors",
+            "default": true
+          },
+          "capture_events": {
+            "type": "boolean",
+            "title": "Capture Events",
+            "default": true
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "RumSettingsUpdateRequest",
+        "description": "Body for ``POST /api/services/{service_id}/rum/settings`` \u2014 update RUM capture toggles."
       },
       "RumUpgradeRequest": {
         "properties": {

@@ -87,6 +87,11 @@ function versions(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   sseState.status = 'idle'
   mockStart.mockClear()
+  server.use(
+    http.post('/api/services/:service_id/rum/settings', () =>
+      HttpResponse.json({ ok: true }),
+    ),
+  )
 })
 
 afterEach(() => {
@@ -112,7 +117,7 @@ describe('RumFaroVersionCard', () => {
     )
     renderCard()
     expect(await screen.findByText(/update available/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^upgrade$/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /rum settings/i })).toBeEnabled()
   })
 
   it('allows changing version/re-deploying when already current', async () => {
@@ -122,7 +127,7 @@ describe('RumFaroVersionCard', () => {
       ),
     )
     renderCard()
-    expect(await screen.findByRole('button', { name: /change version/i })).toBeEnabled()
+    expect(await screen.findByRole('button', { name: /rum settings/i })).toBeEnabled()
   })
 
   it('degrades gracefully on a registry 503 without breaking the page', async () => {
@@ -169,11 +174,12 @@ describe('RumFaroVersionCard', () => {
     )
     const user = userEvent.setup()
     renderCard()
-    await user.click(await screen.findByRole('button', { name: /^upgrade$/i }))
-    expect(await screen.findByText(/choose a faro web sdk version/i)).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: /rum settings/i }))
+    expect(await screen.findByText(/rum tracking settings/i)).toBeInTheDocument()
+    expect(await screen.findByText('Core Web Vitals')).toBeInTheDocument()
     // If the dialog had defaulted to the already-pinned version instead of
     // latest, Confirm would be disabled as a no-op — this fails that case.
-    expect(screen.getByRole('button', { name: /confirm & upgrade/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /apply settings/i })).toBeEnabled()
   })
 
   it('invalidates the versions query once the upgrade stream completes, without a manual reload', async () => {
@@ -188,12 +194,15 @@ describe('RumFaroVersionCard', () => {
     const { rerender } = renderCard()
 
     await waitFor(() => expect(versionCalls).toBe(1))
-    await user.click(await screen.findByRole('button', { name: /^upgrade$/i }))
-    await user.click(await screen.findByRole('button', { name: /confirm & upgrade/i }))
+    await user.click(await screen.findByRole('button', { name: /rum settings/i }))
+    await screen.findByText('Core Web Vitals')
+    await user.click(screen.getByRole('button', { name: /apply settings/i }))
 
-    expect(mockStart).toHaveBeenCalledWith(`/api/services/${SVC}/rum/upgrade`, {
-      version: '1.9.0',
-      activate: true,
+    await waitFor(() => {
+      expect(mockStart).toHaveBeenCalledWith(`/api/services/${SVC}/rum/upgrade`, {
+        version: '1.9.0',
+        activate: true,
+      })
     })
 
     // Simulate the SSE stream reaching 'done' (same mounted instance, not a

@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import { adminFetch, client } from '@/lib/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
-import { UpgradeFaroDialog } from './UpgradeFaroDialog';
+import { RumSettingsDialog } from './RumSettingsDialog';
 
 type RumVersionsResponse = components['schemas']['RumVersionsResponse'];
 
@@ -118,11 +118,11 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
           size="sm"
           className="h-8 text-xs font-semibold px-3"
         >
-          {current ? (updateAvailable ? 'Upgrade' : 'Change Version') : 'Choose Version'}
+          RUM Settings
         </Button>
       </div>
 
-      <UpgradeFaroDialog
+      <RumSettingsDialog
         serviceId={serviceId}
         open={isUpgradeOpen}
         onOpenChange={setIsUpgradeOpen}

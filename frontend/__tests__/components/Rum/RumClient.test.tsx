@@ -109,7 +109,7 @@ describe('RumClient — Faro version card placement', () => {
     // Version card renders too, with real data (not a stub).
     expect(await screen.findByText(/faro sdk:/i)).toBeInTheDocument()
     expect(await screen.findByText('1.8.0')).toBeInTheDocument()
-    expect(screen.getByText('Upgrade')).toBeInTheDocument()
+    expect(screen.getByText('RUM Settings')).toBeInTheDocument()
   })
 
   it('analyst: does not render the version card, and never calls /rum/versions', async () => {

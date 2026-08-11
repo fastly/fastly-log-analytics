@@ -1007,6 +1007,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/services/{service_id}/rum/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Update Rum Settings
+         * @description Update RUM capture settings and re-deploy rum-tracker.js (admin-only).
+         */
+        post: operations["update_rum_settings_api_services__service_id__rum_settings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/rum/beacon-health": {
         parameters: {
             query?: never;
@@ -9464,6 +9484,37 @@ export interface components {
             delete_after?: boolean | null;
         };
         /**
+         * RumSettingsUpdateRequest
+         * @description Body for ``POST /api/services/{service_id}/rum/settings`` — update RUM capture toggles.
+         */
+        RumSettingsUpdateRequest: {
+            /**
+             * Capture Vitals
+             * @default true
+             */
+            capture_vitals: boolean;
+            /**
+             * Capture Performance
+             * @default true
+             */
+            capture_performance: boolean;
+            /**
+             * Capture Errors
+             * @default true
+             */
+            capture_errors: boolean;
+            /**
+             * Capture Events
+             * @default true
+             */
+            capture_events: boolean;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+        };
+        /**
          * RumUpgradeRequest
          * @description Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
          *     Faro Web SDK version and reconcile the deployed bundle to match.
@@ -17694,6 +17745,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_rum_settings_api_services__service_id__rum_settings_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RumSettingsUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Bad request */

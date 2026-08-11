@@ -277,7 +277,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     window.fetch = function(input, init) {{
       if (typeof input === 'string' && input.indexOf('/rum-beacon') !== -1) {{
         flushPendingBeacons(false);
-        return Promise.resolve(new Response('', {{ status: 204, statusText: 'No Content' }}));
+        return Promise.resolve(new Response(null, {{ status: 204, statusText: 'No Content' }}));
       }}
       return originalFetch.call(this, input, init);
     }};
