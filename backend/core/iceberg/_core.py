@@ -840,6 +840,12 @@ def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
         namespace, table_name = _table_identifier(source)
+        if table is not None:
+            tbl_identifier = table.name()
+            if isinstance(tbl_identifier, tuple) and len(tbl_identifier) >= 2:
+                table_name = tbl_identifier[-1]
+            elif isinstance(tbl_identifier, str):
+                table_name = tbl_identifier.split(".")[-1]
 
         # Write to e.g. iceberg/default/logs/metadata_location.txt — the
         # canonical slash-namespace variant. Readers try both this and the
