@@ -392,6 +392,49 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
       {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
 
+      {/* Summary KPI Cards Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Total Beacons</p>
+            <p className="text-2xl font-extrabold text-blue-500">{analytics.beacon_count ?? 0}</p>
+          </div>
+          <div className="p-2.5 bg-blue-500/10 rounded-lg">
+            <Activity className="h-5 w-5 text-blue-500" />
+          </div>
+        </div>
+
+        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Pageviews</p>
+            <p className="text-2xl font-extrabold text-emerald-500">{analytics.pageview_count ?? 0}</p>
+          </div>
+          <div className="p-2.5 bg-emerald-500/10 rounded-lg">
+            <Eye className="h-5 w-5 text-emerald-500" />
+          </div>
+        </div>
+
+        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Interactions</p>
+            <p className="text-2xl font-extrabold text-amber-500">{analytics.interaction_count ?? 0}</p>
+          </div>
+          <div className="p-2.5 bg-amber-500/10 rounded-lg">
+            <Cpu className="h-5 w-5 text-amber-500" />
+          </div>
+        </div>
+
+        <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">JavaScript Errors</p>
+            <p className="text-2xl font-extrabold text-rose-500">{analytics.error_count ?? 0}</p>
+          </div>
+          <div className="p-2.5 bg-rose-500/10 rounded-lg">
+            <ShieldAlert className="h-5 w-5 text-rose-500" />
+          </div>
+        </div>
+      </div>
+
       {/* KPI Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <AnalyticsCard

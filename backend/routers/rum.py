@@ -464,6 +464,39 @@ async def rum_analytics(
             )
             total_beacons = cur_total.fetchone()[0] or 0
 
+            # B2. Pageviews: beacons where there is at least one row in client_vitals that is not an event
+            cur_pvs = con.execute(
+                f"""
+                SELECT COUNT(DISTINCT req_id)
+                FROM client_vitals
+                WHERE {where_sql} AND metric_name NOT LIKE 'event_%'
+            """,
+                params,
+            )
+            pageviews = cur_pvs.fetchone()[0] or 0
+
+            # B3. Interactions: beacons where there is at least one custom event row
+            cur_ints = con.execute(
+                f"""
+                SELECT COUNT(DISTINCT req_id)
+                FROM client_vitals
+                WHERE {where_sql} AND metric_name LIKE 'event_%'
+            """,
+                params,
+            )
+            interactions = cur_ints.fetchone()[0] or 0
+
+            # B4. Errors: beacons from client_errors
+            cur_errs = con.execute(
+                f"""
+                SELECT COUNT(DISTINCT req_id)
+                FROM client_errors
+                WHERE {where_sql}
+            """,
+                params,
+            )
+            errors_count = cur_errs.fetchone()[0] or 0
+
             # C. Vitals metrics, percentiles & distribution
             cur_vitals = con.execute(
                 f"""
@@ -619,6 +652,9 @@ async def rum_analytics(
             return {
                 "no_data": False,
                 "total_beacons": total_beacons,
+                "pageviews": pageviews,
+                "interactions": interactions,
+                "errors_count": errors_count,
                 "vitals_rows": vitals_rows,
                 "browsers": browsers,
                 "os": os_dict,
@@ -636,6 +672,9 @@ async def rum_analytics(
                 "is_mock": False,
                 "no_data": True,
                 "beacon_count": 0,
+                "pageview_count": 0,
+                "interaction_count": 0,
+                "error_count": 0,
                 "message": "Waiting for real-time RUM user events...",
                 "vitals": {
                     "lcp": {"p75": None, "distribution": None},
@@ -784,6 +823,9 @@ async def rum_analytics(
             "is_mock": False,
             "no_data": False,
             "beacon_count": db_res["total_beacons"],
+            "pageview_count": db_res.get("pageviews", 0),
+            "interaction_count": db_res.get("interactions", 0),
+            "error_count": db_res.get("errors_count", 0),
             "vitals": vitals,
             "worst_pages": worst_pages,
             "errors": errors,
@@ -908,44 +950,6 @@ async def rum_live_events(
                 }
             )
 
-        # If no real live events, return realistic live activity ticks
-        if not events:
-            now = datetime.datetime.now(datetime.UTC)
-            events = [
-                {
-                    "time": (now - datetime.timedelta(seconds=i * 12)).isoformat(),
-                    "type": "pageview" if i % 4 != 1 else "error",
-                    "path": "/" if i != 2 else "/pricing",
-                    "desc": "Page load complete" if i % 4 != 1 else "ReferenceError: analyticsTrack is not defined",
-                    "browser": "Chrome",
-                    "os": "macOS",
-                    "raw_log": {
-                        "meta": {
-                            "sdk": {"name": "faro-web", "version": "2.9.0"},
-                            "app": {"name": "rum-app", "version": "1.0.0"},
-                            "browser": {"name": "Chrome", "version": "120.0.0.0", "os": "macOS"},
-                            "page": {
-                                "url": "https://fastly-se-demo.global.ssl.fastly.net" + ("/" if i != 2 else "/pricing")
-                            },
-                        },
-                        "measurements": [
-                            {"type": "web-vitals", "values": {"lcp": 1450, "fcp": 780, "cls": 0.02, "ttfb": 230}}
-                        ]
-                        if i % 4 != 1
-                        else [],
-                        "exceptions": [
-                            {
-                                "type": "ReferenceError",
-                                "value": "analyticsTrack is not defined",
-                                "stacktrace": "at index.js:14",
-                            }
-                        ]
-                        if i % 4 == 1
-                        else [],
-                    },
-                }
-                for i in range(5)
-            ]
         return events
     except Exception as e:
         logger.error(f"[rum] Failed to fetch live events for {service_id}: {e}")

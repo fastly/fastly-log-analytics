@@ -168,13 +168,16 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
                         }
                     )
 
-    # 2. Performance Navigation Timing events
+    # 2. Performance Navigation Timing and Custom Events (Interactions)
     events = payload.get("events") or []
     if isinstance(events, list):
         for e in events:
             if not isinstance(e, dict):
                 continue
-            if e.get("name") == "faro.performance.navigation":
+            name = e.get("name")
+            if not name:
+                continue
+            if name == "faro.performance.navigation":
                 attrs = e.get("attributes") or e.get("values") or {}
                 for k, v in attrs.items():
                     extracted.append(
@@ -189,6 +192,39 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
                             "device": device_type,
                         }
                     )
+            else:
+                # Custom/interaction event (like user click)
+                extracted.append(
+                    {
+                        "metric_name": f"event_{name}",
+                        "metric_value": 1.0,
+                        "metric_rating": "",
+                        "pathname": pathname,
+                        "cid": cid,
+                        "browser": browser_name,
+                        "os": os_name,
+                        "device": device_type,
+                    }
+                )
+
+    # 3. Custom logs
+    logs = payload.get("logs") or []
+    if isinstance(logs, list):
+        for log_item in logs:
+            if not isinstance(log_item, dict):
+                continue
+            extracted.append(
+                {
+                    "metric_name": "log",
+                    "metric_value": 1.0,
+                    "metric_rating": log_item.get("level") or "info",
+                    "pathname": pathname,
+                    "cid": cid,
+                    "browser": browser_name,
+                    "os": os_name,
+                    "device": device_type,
+                }
+            )
 
     # 3. Exceptions
     exceptions = payload.get("exceptions") or []
@@ -224,6 +260,21 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
                     "error_col": err_col,
                 }
             )
+
+    if not extracted:
+        # Fallback pageview entry if we got a payload but no specific vitals/events were extracted
+        extracted.append(
+            {
+                "metric_name": "pageview",
+                "metric_value": 1.0,
+                "metric_rating": "",
+                "pathname": pathname,
+                "cid": cid,
+                "browser": browser_name,
+                "os": os_name,
+                "device": device_type,
+            }
+        )
 
     return extracted
 

@@ -33,6 +33,9 @@ function analytics(overrides: Record<string, unknown> = {}) {
     no_data: false,
     is_mock: false,
     beacon_count: 42,
+    pageview_count: 30,
+    interaction_count: 10,
+    error_count: 2,
     vitals: {
       lcp: { p75: 2.1, distribution: { good: 80, needs_improvement: 15, poor: 5 } },
       cls: { p75: 0.05, distribution: { good: 90, needs_improvement: 8, poor: 2 } },
