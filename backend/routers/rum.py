@@ -748,8 +748,8 @@ async def rum_analytics(
                     "avg_load_time": round(avg_load / 1000.0, 2) if avg_load > 20 else round(avg_load, 2),
                     "lcp_p75": round(lcp / 1000.0, 2)
                     if (lcp is not None and lcp > 20)
-                    else (round(lcp, 2) if lcp is not None else 1.8),
-                    "cls_p75": round(cls, 3) if cls is not None else 0.05,
+                    else (round(lcp, 2) if lcp is not None else None),
+                    "cls_p75": round(cls, 3) if cls is not None else None,
                     "error_rate": round(err_rate, 2) if err_rate is not None else 0.0,
                 }
             )
