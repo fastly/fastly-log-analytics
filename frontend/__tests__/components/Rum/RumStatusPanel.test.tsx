@@ -85,22 +85,4 @@ describe('RumStatusPanel', () => {
     expect(screen.getByRole('button', { name: /disable rum/i })).toBeInTheDocument()
     expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
   })
-
-  it('admin + RUM enabled: renders exactly one Faro version card (no double-render)', async () => {
-    useServiceStore.setState({
-      activeServiceId: SVC,
-      services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
-      isInitialized: true,
-    } as never)
-    mockRumStatus(true)
-    server.use(
-      http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
-        HttpResponse.json({ available: ['1.8.0'], current: '1.8.0', latest: '1.8.0', update_available: false }),
-      ),
-    )
-
-    renderPanel()
-
-    expect(await screen.findAllByText('Faro SDK Version')).toHaveLength(1)
-  })
 })

@@ -21,9 +21,10 @@ import { createTestQueryClient, makeQueryWrapper } from '../../helpers/query'
 import { server } from '../../../tests/msw/server'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
-import { RumClient } from '@/app/rum/_sections/RumClient'
+import RumPageClient from '@/app/rum/_sections/RumPageClient'
 
 vi.mock('@/components/PlotlyChart', () => ({ PlotlyChart: () => <div data-testid="plotly-chart" /> }))
+vi.mock('@/components/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => <div data-testid="timeseries-chart" /> }))
 
 const API_BASE = getApiBase()
 const SVC = 'svc-rum-client'
@@ -83,7 +84,7 @@ function mockRumEndpoints({ versionsHandler }: { versionsHandler?: () => Respons
 function renderClient() {
   const qc = createTestQueryClient()
   return render(
-    <RumClient serviceId={SVC} startTime={null} endTime={null} filterPayload={{}} />,
+    <RumPageClient initialServiceId={SVC} />,
     { wrapper: makeQueryWrapper(qc) },
   )
 }
@@ -106,9 +107,9 @@ describe('RumClient — Faro version card placement', () => {
     // Vitals dashboard content renders.
     expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
     // Version card renders too, with real data (not a stub).
-    expect(await screen.findByText('Faro SDK Version')).toBeInTheDocument()
+    expect(await screen.findByText(/faro sdk:/i)).toBeInTheDocument()
     expect(await screen.findByText('1.8.0')).toBeInTheDocument()
-    expect(screen.getByText('1.9.0')).toBeInTheDocument()
+    expect(screen.getByText('Upgrade')).toBeInTheDocument()
   })
 
   it('analyst: does not render the version card, and never calls /rum/versions', async () => {
@@ -129,7 +130,7 @@ describe('RumClient — Faro version card placement', () => {
 
     // Dashboard still renders for the analyst.
     expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
-    expect(screen.queryByText('Faro SDK Version')).not.toBeInTheDocument()
+    expect(screen.queryByText(/faro sdk:/i)).not.toBeInTheDocument()
 
     // Give any stray query a moment to fire, then assert it never did.
     await new Promise((r) => setTimeout(r, 50))
@@ -150,7 +151,7 @@ describe('RumClient — Faro version card placement', () => {
 
     expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
     await waitFor(() => {
-      expect(screen.getByText(/couldn.t reach the npm registry/i)).toBeInTheDocument()
+      expect(screen.getByText(/versions offline/i)).toBeInTheDocument()
     })
     // The rest of the dashboard is unaffected by the version-card error.
     expect(screen.getByText('Cumulative Layout Shift (CLS)')).toBeInTheDocument()

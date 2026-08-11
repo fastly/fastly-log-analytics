@@ -8,6 +8,9 @@ import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 
 import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
+import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
+import { useTimezone } from '@/hooks/useTimezone';
+import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
 import { adminFetch } from '@/lib/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
@@ -102,6 +105,7 @@ function getInpColors(p75: number | null | undefined): CwvColors {
 }
 
 export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
+  const timezone = useTimezone();
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
 
   const columns = React.useMemo<ColumnDef<RumLiveEvent>[]>(() => [
@@ -131,7 +135,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       header: 'Time',
       cell: ({ row }) => (
         <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">
-          {new Date(row.original.time).toLocaleTimeString()}
+          {formatDate(row.original.time, timezone, 'HH:mm:ss')}
         </span>
       )
     },
@@ -258,7 +262,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         </div>
       )
     }
-  ], []);
+  ], [timezone]);
 
   // Fetch status
   const { data: status, isLoading: isStatusLoading } = useQuery({
@@ -290,6 +294,12 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,
   });
+
+  const formattedTimestamps = React.useMemo(() => {
+    return (analytics?.trends?.timestamps || []).map((t: string) =>
+      formatDate(t, timezone, 'yyyy-MM-dd HH:mm:ss')
+    );
+  }, [analytics?.trends?.timestamps, timezone]);
 
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
@@ -474,24 +484,24 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       {/* Beacons Over Time Row */}
       <div className="mb-6">
         <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
-          <PlotlyChart
+          <TimeSeriesChart
             data={[
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.pageviews || [],
                 name: 'Pageviews',
                 type: 'bar',
                 marker: { color: '#3b82f6' },
               },
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.interactions || [],
                 name: 'Interactions',
                 type: 'bar',
                 marker: { color: '#10b981' },
               },
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.errors || [],
                 name: 'Errors',
                 type: 'bar',
@@ -500,7 +510,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             ]}
             layout={{
               barmode: 'stack',
-              height: 250,
               margin: { t: 30, b: 40, l: 30, r: 10 },
               legend: {
                 orientation: 'h',
@@ -510,7 +519,10 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 yanchor: 'bottom',
               },
             }}
-            a11yTitle="Beacons Over Time Chart"
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height={250}
           />
         </AnalyticsCard>
       </div>
@@ -518,10 +530,10 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       {/* Trends Row */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Web Vitals Trend" icon={<TrendingUp />}>
-          <PlotlyChart
+          <TimeSeriesChart
             data={[
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.lcp,
                 name: 'LCP (s)',
                 type: 'scatter',
@@ -529,7 +541,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 line: { color: '#10b981' },
               },
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.cls,
                 name: 'CLS',
                 type: 'scatter',
@@ -538,7 +550,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
               },
             ]}
             layout={{
-              height: 250,
               margin: { t: 30, b: 40, l: 30, r: 10 },
               legend: {
                 orientation: 'h',
@@ -548,15 +559,18 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 yanchor: 'bottom',
               },
             }}
-            a11yTitle="Web Vitals Trend Chart"
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height={250}
           />
         </AnalyticsCard>
 
         <AnalyticsCard title="JS Error Rate Trend" icon={<TrendingUp className="text-rose-500" />}>
-          <PlotlyChart
+          <TimeSeriesChart
             data={[
               {
-                x: analytics.trends.timestamps,
+                x: formattedTimestamps,
                 y: analytics.trends.error_rate,
                 name: 'Error Rate (%)',
                 type: 'scatter',
@@ -566,7 +580,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
               },
             ]}
             layout={{
-              height: 250,
               margin: { t: 30, b: 40, l: 30, r: 10 },
               legend: {
                 orientation: 'h',
@@ -576,7 +589,10 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 yanchor: 'bottom',
               },
             }}
-            a11yTitle="JS Error Rate Trend Chart"
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height={250}
           />
         </AnalyticsCard>
       </div>
@@ -743,7 +759,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 <div className="grid grid-cols-2 gap-4 bg-muted/20 p-4 rounded-lg border border-border">
                   <div>
                     <span className="text-muted-foreground block mb-1">Timestamp</span>
-                    <span className="font-mono">{new Date(selectedEvent.time).toLocaleString()}</span>
+                    <span className="font-mono">{formatDate(selectedEvent.time, timezone, 'yyyy-MM-dd HH:mm:ss (zzz)')}</span>
                   </div>
                   <div>
                     <span className="text-muted-foreground block mb-1">Event Type</span>

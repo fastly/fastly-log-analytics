@@ -47,7 +47,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
       if (!response.ok) throw new Error(`status ${response.status}`);
       return data as RumVersionsResponse;
     },
-    enabled: !!serviceId && rumEnabled,
+    enabled: !!serviceId && rumEnabled && !isAnalyst,
     retry: false,
   });
 
