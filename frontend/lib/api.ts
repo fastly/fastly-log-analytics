@@ -106,6 +106,12 @@ export function adminFetch(
       headers.set("x-service-id", sid)
     }
   } catch { /* SSR pre-hydration — fall through without the header */ }
+  try {
+    const debug = useDebugStore.getState()
+    if ((debug.enabled || debug.apiCallsEnabled) && !headers.has("x-debug-responses")) {
+      headers.set("x-debug-responses", "1")
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
   return fetch(input, { ...init, headers })
 }
 

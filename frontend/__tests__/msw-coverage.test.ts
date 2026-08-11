@@ -149,6 +149,7 @@ const ALLOWED_GAPS = new Set<string>([
   // Health/vitals/errors are Phase 3 stubs; beacon-health validates setup
   // (checks if beacons are arriving), exercised via admin tests.
   'GET /api/services/:service_id/rum/status',
+  'POST /api/services/:service_id/rum/settings',
   'POST /api/services/:service_id/rum/enable',
   'POST /api/services/:service_id/rum/disable',
   'GET /api/services/:service_id/rum/beacon-health',

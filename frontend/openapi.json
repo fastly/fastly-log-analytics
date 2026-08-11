@@ -45941,6 +45941,17 @@
               }
             ],
             "title": "Edge Ratio"
+          },
+          "rum_beacons_per_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Beacons Per Day"
           }
         },
         "type": "object",

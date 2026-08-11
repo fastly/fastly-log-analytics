@@ -583,9 +583,9 @@ def test_migration_010_adds_table_name_and_rebuilds_ingest_in_flight(tmp_path):
         # Pre-condition
         assert "table_name" not in _columns(con, "ingested_files")
 
-        # Run migration 10 & 11 (apply_pending will run both)
+        # Run migration 10 & 11 & 12 (apply_pending will run them)
         applied = sqlite_migrations.apply_pending(con)
-        assert applied == 2
+        assert applied == 3
 
         # Post-condition
         assert "table_name" in _columns(con, "ingested_files")
@@ -645,12 +645,74 @@ def test_migration_011_drops_rum_beacons(tmp_path):
         tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         assert "rum_beacons" in tables
 
-        # Run migration 11 (apply_pending will run it)
+        # Run migration 11 & 12 (apply_pending will run them)
         applied = sqlite_migrations.apply_pending(con)
-        assert applied == 1
+        assert applied == 2
 
         # Post-condition: table dropped
         tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         assert "rum_beacons" not in tables
+    finally:
+        con.close()
+
+
+def test_migration_012_rum_file_date(tmp_path):
+    """Test that migration 012 successfully backfills RUM file dates from folder paths."""
+    path = str(tmp_path / "svc.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        # Create the ingested_files table in pre-migration 12 state
+        con.execute(
+            """CREATE TABLE ingested_files (
+                file_name TEXT PRIMARY KEY,
+                source_name TEXT,
+                ingested_at TEXT DEFAULT (datetime('now')),
+                row_count INTEGER,
+                file_size_bytes INTEGER,
+                error_count INTEGER DEFAULT 0,
+                file_date DATE,
+                table_name TEXT NOT NULL DEFAULT 'logs'
+            )"""
+        )
+        # Insert a mix of standard logs and RUM partition logs with file_date IS NULL
+        con.execute(
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s3://bucket/raw/2026-05-01T12-34-56Z_hash.gz", "svc", 100, 1000, "2026-05-01", "logs"),
+        )
+        con.execute(
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s3://bucket/rum/raw/2026/08/11/16/rum_log_34.json.gz", "svc", 50, 500, None, "client_vitals"),
+        )
+        con.execute(
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s3://bucket/rum/raw/2026-09-15_hash.gz", "svc", 30, 300, None, "client_errors"),
+        )
+        # Explicitly set version to 11 so migration 12 is applied
+        con.execute("PRAGMA user_version = 11")
+        con.commit()
+    finally:
+        con.close()
+
+    con = sqlite3.connect(path)
+    try:
+        # Run migration 12
+        applied = sqlite_migrations.apply_pending(con)
+        assert applied == 1
+
+        # Post-condition: check that dates are correctly backfilled
+        rows = con.execute("SELECT file_name, file_date, table_name FROM ingested_files ORDER BY table_name").fetchall()
+        assert len(rows) == 3
+
+        # client_errors: parsed loosely from 2026-09-15_hash.gz
+        assert rows[0][2] == "client_errors"
+        assert rows[0][1] == "2026-09-15"
+
+        # client_vitals: parsed from directory structure 2026/08/11
+        assert rows[1][2] == "client_vitals"
+        assert rows[1][1] == "2026-08-11"
+
+        # logs: preserved
+        assert rows[2][2] == "logs"
+        assert rows[2][1] == "2026-05-01"
     finally:
         con.close()

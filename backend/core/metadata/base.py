@@ -58,6 +58,7 @@ _ingested_filenames_cache_lock = threading.Lock()
 # Matches the GLOB in _migration_002 / get_log_accounting_counts so legacy
 # and runtime parsing agree.
 _FILE_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})T")
+_RUM_FILE_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/")
 
 
 def _parse_file_date(file_name: str) -> str | None:
@@ -70,7 +71,15 @@ def _parse_file_date(file_name: str) -> str | None:
     if not file_name:
         return None
     m = _FILE_DATE_RE.search(file_name)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m_rum = _RUM_FILE_DATE_RE.search(file_name)
+    if m_rum:
+        return f"{m_rum.group(1)}-{m_rum.group(2)}-{m_rum.group(3)}"
+    m_loose = re.search(r"(\d{4})-(\d{2})-(\d{2})", file_name)
+    if m_loose:
+        return f"{m_loose.group(1)}-{m_loose.group(2)}-{m_loose.group(3)}"
+    return None
 
 
 def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:

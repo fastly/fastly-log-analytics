@@ -35,6 +35,7 @@ class PrefillResponse(_PrefillRatesBase):
     requests_per_day: int | None = None
     edge_requests_per_day: int | None = None
     edge_ratio: float | None = None
+    rum_beacons_per_day: int | None = None
 
 
 class PrefillRatesResponse(_PrefillRatesBase):

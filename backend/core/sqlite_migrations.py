@@ -369,6 +369,35 @@ def _migration_011_drop_rum_beacons(con: sqlite3.Connection) -> None:
     con.execute("DROP TABLE IF EXISTS rum_beacons")
 
 
+def _migration_012_rum_file_date(con: sqlite3.Connection) -> None:
+    """Backfill ``ingested_files.file_date`` for RUM logs with YYYY/MM/DD directory structure."""
+    if not _has_table(con, "ingested_files"):
+        return
+    import re
+
+    # Find all rows in ingested_files where file_date is NULL and process them
+    rows = con.execute("SELECT file_name FROM ingested_files WHERE file_date IS NULL").fetchall()
+
+    rum_pat = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/")
+    loose_pat = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+    updates = []
+    for row in rows:
+        fn = row[0] if isinstance(row, tuple) else row["file_name"]
+        m_rum = rum_pat.search(fn)
+        if m_rum:
+            dt = f"{m_rum.group(1)}-{m_rum.group(2)}-{m_rum.group(3)}"
+            updates.append((dt, fn))
+        else:
+            m_loose = loose_pat.search(fn)
+            if m_loose:
+                dt = f"{m_loose.group(1)}-{m_loose.group(2)}-{m_loose.group(3)}"
+                updates.append((dt, fn))
+
+    if updates:
+        con.executemany("UPDATE ingested_files SET file_date = ? WHERE file_name = ?", updates)
+
+
 # Insertion order = application order. Use integer keys. The key=3 slot
 # (a rebuild of usage_log_hourly_summary) was retired alongside the
 # legacy usage_log schema; the gap is intentional and apply_pending
@@ -384,6 +413,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     9: _migration_009_quarantined_error_size,
     10: _migration_010_rum_duckdb_iceberg,
     11: _migration_011_drop_rum_beacons,
+    12: _migration_012_rum_file_date,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

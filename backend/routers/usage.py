@@ -113,6 +113,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
+        "rum_beacons_per_day": 0,
     }
 
     prov: dict = {}
@@ -198,6 +199,28 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         avg = metadata_db.get_node_count_avg(source["name"])
         if avg:
             result["avg_nodes_per_flush"] = round(float(avg))
+    except Exception:
+        pass
+
+    # Extract historical RUM beacons per day for prefill.
+    try:
+        from backend.core.metadata import get_con
+
+        db = get_con(source["name"])
+        cur = db.execute(
+            """
+            SELECT AVG(daily_beacons) FROM (
+                SELECT SUM(row_count) as daily_beacons
+                FROM ingested_files
+                WHERE source_name = ?
+                  AND table_name IN ('client_vitals', 'client_errors')
+                GROUP BY file_date
+            )
+            """,
+            (source["name"],),
+        )
+        val = cur.fetchone()[0]
+        result["rum_beacons_per_day"] = round(float(val)) if val is not None else 0
     except Exception:
         pass
 

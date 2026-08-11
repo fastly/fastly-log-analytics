@@ -8808,6 +8808,8 @@ export interface components {
             edge_requests_per_day?: number | null;
             /** Edge Ratio */
             edge_ratio?: number | null;
+            /** Rum Beacons Per Day */
+            rum_beacons_per_day?: number | null;
         };
         /** ProvisionCheckConfigItem */
         ProvisionCheckConfigItem: {
