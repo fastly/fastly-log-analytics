@@ -228,6 +228,7 @@ export function runDeploy(args: DeployArgs) {
     cmcd_version: config.cmcd_version,
     logging_enabled: config.logging_enabled,
     rum_enabled: config.rum_enabled,
+    rum_custom_condition: config.rum_custom_condition,
     faro_version: config.faro_version || null,
   };
   if (config.cdn_prefix) {
@@ -368,6 +369,7 @@ export async function runAdminIngest(args: AdminIngestArgs) {
         log_retention_days: config.log_retention_days,
         rum_retention_days: config.rum_retention_days,
         log_fields: config.log_fields,
+        rum_custom_condition: config.rum_custom_condition,
         fos_access_key: config.fos_access_key,
         fos_secret_key: config.fos_secret_key,
       } as any,

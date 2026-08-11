@@ -650,6 +650,8 @@ def provision_execute(req: ProvisionExecuteRequest):
         # RUM can never be enabled without a version pinned behind it; see
         # rum_orchestrator_v2.enable_rum, which applies the same fallback.
         cfg["rum"]["faro_version"] = req.faro_version or DEFAULT_FARO_VERSION
+        rum_cond = getattr(req, "rum_custom_condition", None) or ""
+        cfg["rum"]["custom_condition"] = rum_cond.strip()
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
@@ -1051,6 +1053,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         state["rum"] = {
             "enabled": True,
             "enabled_at": existing_rum.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            "custom_condition": body.get("rum_custom_condition") or existing_rum.get("custom_condition") or "",
         }
         # Preserve an already-pinned faro_version (+ its persisted upload
         # hashes) when this ingest re-run's body doesn't carry one (#1 audit

@@ -570,6 +570,25 @@ export function StorageStep({ s }: { s: WizardState }) {
                 />
               </div>
             )}
+
+            {config.rum_enabled && (
+              <div className="space-y-1.5 pt-2">
+                <LabelWithInfo
+                  htmlFor="rumCustomCondition"
+                  label="Optional RUM Log Condition"
+                  info="An additional VCL condition to filter RUM beacons (e.g., req.url.path !~ '^/api/'). The expression will be wrapped in parentheses and added to the RUM beacon condition logic."
+                />
+                <Input
+                  id="rumCustomCondition"
+                  placeholder="e.g. req.url.path !~ '^/api/'"
+                  value={config.rum_custom_condition}
+                  onChange={(e) =>
+                    setConfig({ ...config, rum_custom_condition: e.target.value })
+                  }
+                  className="h-9 font-mono text-xs"
+                />
+              </div>
+            )}
           </div>
 
           <div

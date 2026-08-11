@@ -46674,6 +46674,17 @@
               }
             ],
             "title": "Faro Version"
+          },
+          "rum_custom_condition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Custom Condition"
           }
         },
         "type": "object",

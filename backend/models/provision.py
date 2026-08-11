@@ -68,6 +68,7 @@ class ProvisionExecuteRequest(BaseModel):
     logging_enabled: bool = True
     rum_enabled: bool = False
     faro_version: str | None = None
+    rum_custom_condition: str | None = None
 
 
 class ProvisionValidateRequest(BaseModel):

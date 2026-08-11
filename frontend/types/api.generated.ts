@@ -9056,6 +9056,8 @@ export interface components {
             rum_enabled: boolean;
             /** Faro Version */
             faro_version?: string | null;
+            /** Rum Custom Condition */
+            rum_custom_condition?: string | null;
         };
         /** ProvisionIngestResponse */
         ProvisionIngestResponse: {
