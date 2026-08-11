@@ -348,6 +348,7 @@ def ingest_rum_logs(
                                                 "os": metric["os"],
                                                 "device": metric["device"],
                                                 "raw_log": log_data,
+                                                "faro_payload": payload,
                                                 "meta": {
                                                     "browser": metric["browser"],
                                                     "os": metric["os"],

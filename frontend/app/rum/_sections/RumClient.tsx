@@ -643,45 +643,81 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             </DialogDescription>
           </DialogHeader>
 
-          {selectedEvent && (
-            <div className="space-y-4 my-2 text-xs">
-              {/* Event Metadata Grid */}
-              <div className="grid grid-cols-2 gap-4 bg-muted/20 p-4 rounded-lg border border-border">
-                <div>
-                  <span className="text-muted-foreground block mb-1">Timestamp</span>
-                  <span className="font-mono">{new Date(selectedEvent.time).toLocaleString()}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground block mb-1">Event Type</span>
-                  <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}>
-                    {selectedEvent.type}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground block mb-1">Url Path</span>
-                  <span className="font-mono font-semibold">{selectedEvent.path}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground block mb-1">Client Platform</span>
-                  <span>{selectedEvent.browser} on {selectedEvent.os}</span>
-                </div>
-                <div className="col-span-2">
-                  <span className="text-muted-foreground block mb-1">Description</span>
-                  <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-muted/40 text-foreground'}`}>
-                    {selectedEvent.desc}
-                  </span>
-                </div>
-              </div>
+          {selectedEvent && (() => {
+            let faroPayload: any = null;
+            let edgeMetadata: any = null;
 
-              {/* Raw JSON Block */}
-              <div className="space-y-2">
-                <span className="text-muted-foreground font-semibold block">Raw Beacon Log JSON</span>
-                <div className="bg-muted/30 border border-border rounded-lg p-4 overflow-auto max-h-[300px] font-mono text-[11px] leading-relaxed text-foreground">
-                  <pre>{JSON.stringify(selectedEvent.raw_log || {}, null, 2)}</pre>
+            const rawLog = selectedEvent.raw_log;
+            if (rawLog) {
+              if (rawLog.faro_payload) {
+                faroPayload = rawLog.faro_payload;
+                edgeMetadata = { ...rawLog };
+                delete edgeMetadata.faro_payload;
+              } else if (rawLog.meta && (rawLog.measurements || rawLog.events)) {
+                faroPayload = rawLog;
+                edgeMetadata = {
+                  time: selectedEvent.time,
+                  type: selectedEvent.type,
+                  path: selectedEvent.path,
+                  desc: selectedEvent.desc,
+                  browser: selectedEvent.browser,
+                  os: selectedEvent.os
+                };
+              } else {
+                edgeMetadata = rawLog;
+              }
+            }
+
+            return (
+              <div className="space-y-4 my-2 text-xs">
+                {/* Event Metadata Grid */}
+                <div className="grid grid-cols-2 gap-4 bg-muted/20 p-4 rounded-lg border border-border">
+                  <div>
+                    <span className="text-muted-foreground block mb-1">Timestamp</span>
+                    <span className="font-mono">{new Date(selectedEvent.time).toLocaleString()}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground block mb-1">Event Type</span>
+                    <span className={`capitalize font-semibold ${selectedEvent.type === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}>
+                      {selectedEvent.type}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground block mb-1">Url Path</span>
+                    <span className="font-mono font-semibold">{selectedEvent.path}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground block mb-1">Client Platform</span>
+                    <span>{selectedEvent.browser} on {selectedEvent.os}</span>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground block mb-1">Description</span>
+                    <span className={`font-mono block p-2 rounded ${selectedEvent.type === 'error' ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-muted/40 text-foreground'}`}>
+                      {selectedEvent.desc}
+                    </span>
+                  </div>
+                </div>
+
+                {faroPayload && (
+                  <div className="space-y-2">
+                    <span className="text-muted-foreground font-semibold block">Client Faro JSON Payload (Full)</span>
+                    <div className="bg-emerald-950/5 dark:bg-emerald-950/15 border border-emerald-500/15 rounded-lg p-4 overflow-auto max-h-[250px] font-mono text-[11px] leading-relaxed text-foreground">
+                      <pre>{JSON.stringify(faroPayload, null, 2)}</pre>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <span className="text-muted-foreground font-semibold block">
+                    {faroPayload ? "Edge Log Representation (Extracted Row Metadata)" : "Raw Beacon Log JSON"}
+                  </span>
+                  <div className="bg-muted/30 border border-border rounded-lg p-4 overflow-auto max-h-[250px] font-mono text-[11px] leading-relaxed text-foreground">
+                    <pre>{JSON.stringify(edgeMetadata || rawLog || {}, null, 2)}</pre>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </DialogContent>
       </Dialog>
     </div>
