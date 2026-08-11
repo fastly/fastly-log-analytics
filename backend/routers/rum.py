@@ -310,7 +310,7 @@ async def upgrade_rum_handler(
 
 
 @router.post("/{service_id}/rum/settings")
-async def update_rum_settings(
+def update_rum_settings(
     service_id: str = Path(...),
     body: RumSettingsUpdateRequest = Body(...),
 ) -> dict[str, Any]:
@@ -318,6 +318,11 @@ async def update_rum_settings(
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": f"No config found for service {service_id}"})
+
+    # Backup original configuration in case of deployment failure
+    import copy
+
+    original_cfg = copy.deepcopy(cfg)
 
     if "rum" not in cfg:
         cfg["rum"] = {}
@@ -338,6 +343,11 @@ async def update_rum_settings(
     try:
         res = upload_rum_tracker_js(service_id, token, overwrite=True)
     except Exception as e:
+        # Roll back on FOS upload failure
+        try:
+            svcconfig.save_config(service_id, original_cfg)
+        except Exception as rollback_err:
+            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
         raise HTTPException(status_code=500, detail={"error": f"Failed to upload RUM tracker wrapper to FOS: {e}"})
 
     # Reconcile VCL state so the new custom condition is deployed to Fastly
@@ -346,6 +356,11 @@ async def update_rum_settings(
     try:
         reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
     except Exception as e:
+        # Roll back on Fastly reconciliation failure
+        try:
+            svcconfig.save_config(service_id, original_cfg)
+        except Exception as rollback_err:
+            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
         raise HTTPException(
             status_code=500,
             detail={"error": f"Failed to reconcile and deploy updated RUM conditions to Fastly: {e}"},

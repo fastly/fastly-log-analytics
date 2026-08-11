@@ -210,7 +210,12 @@ export function RumSettingsDialog({
 
       if (!settingsRes.ok) {
         const errorJson = await settingsRes.json().catch(() => ({}))
-        throw new Error(errorJson.detail?.error || errorJson.error || 'Failed to update RUM settings')
+        const errorMsg =
+          (typeof errorJson.detail === 'object' && errorJson.detail?.error) ||
+          (typeof errorJson.detail === 'string' && errorJson.detail) ||
+          errorJson.error ||
+          'Failed to update RUM settings'
+        throw new Error(errorMsg)
       }
 
       setLocalLogs((prev) => [
