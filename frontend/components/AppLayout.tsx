@@ -874,7 +874,12 @@ export function AppLayout({
               !hasServices short-circuit stays so the onboarding
               redirect at lines 163-188 has time to fire without
               flashing a half-loaded page. */}
-          {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? (
+          {isLoading && !bootstrapData ? (
+            <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
+              <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
+              Loading app configuration…
+            </div>
+          ) : !hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
               <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
               Setting up your workspace…
