@@ -625,7 +625,9 @@ async def rum_analytics(
                         DATE_TRUNC('hour', timestamp) AS hour,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('LCP', 'lcp')) AS lcp,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('CLS', 'cls')) AS cls,
-                        COUNT(DISTINCT {distinct_id}) AS views
+                        COUNT(DISTINCT {distinct_id}) AS views,
+                        COUNT(DISTINCT {distinct_id}) FILTER (WHERE metric_name NOT LIKE 'event_%') AS pageviews,
+                        COUNT(DISTINCT {distinct_id}) FILTER (WHERE metric_name LIKE 'event_%') AS interactions
                     FROM client_vitals
                     WHERE {where_sql}
                     GROUP BY hour
@@ -642,6 +644,9 @@ async def rum_analytics(
                     COALESCE(v.hour, e.hour) AS hour_ts,
                     v.lcp,
                     v.cls,
+                    COALESCE(v.pageviews, 0) AS pageviews,
+                    COALESCE(v.interactions, 0) AS interactions,
+                    COALESCE(e.errors, 0) AS errors,
                     COALESCE(e.errors, 0) * 100.0 / NULLIF(COALESCE(v.views, 0) + COALESCE(e.errors, 0), 0) AS error_rate
                 FROM hourly_vitals v
                 FULL OUTER JOIN hourly_errors e ON v.hour = e.hour
@@ -758,7 +763,7 @@ async def rum_analytics(
         # Format trends
         span_hours = (until - since).total_seconds() / 3600.0
         use_hourly = span_hours <= 48
-        trend_buckets: dict[str, dict[str, float | None]] = {}
+        trend_buckets: dict[str, dict[str, float | int | None]] = {}
 
         curr = (
             since.replace(minute=0, second=0, microsecond=0)
@@ -775,10 +780,17 @@ async def rum_analytics(
 
         while curr <= target:
             bucket_key = curr.strftime(fmt)
-            trend_buckets[bucket_key] = {"lcp": None, "cls": None, "error_rate": None}
+            trend_buckets[bucket_key] = {
+                "lcp": None,
+                "cls": None,
+                "error_rate": None,
+                "pageviews": 0,
+                "interactions": 0,
+                "errors": 0,
+            }
             curr += step
 
-        for hour_ts, lcp, cls, error_rate in db_res["trends_rows"]:
+        for hour_ts, lcp, cls, pvs, ints, errs, error_rate in db_res["trends_rows"]:
             if not hour_ts:
                 continue
             if isinstance(hour_ts, str):
@@ -799,6 +811,9 @@ async def rum_analytics(
                     "lcp": lcp_val,
                     "cls": round(cls, 3) if cls is not None else None,
                     "error_rate": round(error_rate, 2) if error_rate is not None else 0.0,
+                    "pageviews": int(pvs or 0),
+                    "interactions": int(ints or 0),
+                    "errors": int(errs or 0),
                 }
 
         sorted_keys = sorted(trend_buckets.keys())
@@ -806,6 +821,9 @@ async def rum_analytics(
         trend_lcps: list[float | None] = []
         trend_clss: list[float | None] = []
         trend_error_rates: list[float | None] = []
+        trend_pageviews: list[int] = []
+        trend_interactions: list[int] = []
+        trend_errors: list[int] = []
 
         for k in sorted_keys:
             try:
@@ -820,6 +838,9 @@ async def rum_analytics(
             trend_lcps.append(stats["lcp"])
             trend_clss.append(stats["cls"])
             trend_error_rates.append(stats["error_rate"])
+            trend_pageviews.append(int(stats["pageviews"] or 0))
+            trend_interactions.append(int(stats["interactions"] or 0))
+            trend_errors.append(int(stats["errors"] or 0))
 
         return {
             "is_mock": False,
@@ -836,6 +857,9 @@ async def rum_analytics(
                 "lcp": trend_lcps,
                 "cls": trend_clss,
                 "error_rate": trend_error_rates,
+                "pageviews": trend_pageviews,
+                "interactions": trend_interactions,
+                "errors": trend_errors,
             },
             "environments": {
                 "browsers": db_res["browsers"],

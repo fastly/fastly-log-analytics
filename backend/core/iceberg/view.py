@@ -785,10 +785,15 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
 
+    base_service_id = source_key.split("::")[0]
+    _svc_name = cfg.get("name", base_service_id) if cfg else base_service_id
+    _display_srv = f"{_svc_name} ({base_service_id})" if _svc_name != base_service_id else base_service_id
+    _display = f"{_display_srv}::{source_key.split('::', 1)[1]}" if "::" in source_key else _display_srv
+
     dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config, table_name=target_table)
     dynamic_schema_field_names = {f.name for f in dynamic_arrow_schema}
 
-    logger.info("▶️  %s %s (%s): View refresh started...", _core_mod._ICE_PLAIN, source_key, target_table)
+    logger.info("▶️  %s %s (%s): View refresh started...", _core_mod._ICE_PLAIN, _display, target_table)
 
     # Try to load from persistent cache if memory cache is empty
     _load_persistent_cache(source)
@@ -895,7 +900,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
                 _snapshot_files_cache[cache_key] = (metadata_loc, snapshot_id, iceberg_loc, local_iceberg_files)
                 _save_persistent_cache(source)
             except Exception as e:
-                logger.warning("[iceberg] plan_files() failed for %s: %s", source_key, e)
+                logger.warning("[iceberg] plan_files() failed for %s: %s", _display, e)
                 if isinstance(e, FileNotFoundError):
                     # pyiceberg raises FileNotFoundError specifically when a
                     # manifest/manifest-list referenced by the manifest
@@ -937,7 +942,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             logger.info(
                 "[iceberg] %s: skipping empty-view downgrade (catalog re-fetch "
                 "returned no data but cached view is non-empty — likely transient)",
-                source_key,
+                _display,
             )
             return
 
@@ -978,7 +983,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
                 "[iceberg] %s: skipping empty-view downgrade — have data "
                 "(ingest rollup %d rows / %d files, last-known-good %d rows); "
                 "catalog blind this poll, not a fresh service",
-                source_key,
+                _display,
                 ingested_rows,
                 ingested_files,
                 last_good_rows,
@@ -1038,7 +1043,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
                 logger.info(
                     "[iceberg] %s: plan_files returned 0 local paths but %s/ has %d parquets — "
                     "using local glob anyway to avoid cloud reads",
-                    source_key,
+                    _display,
                     sub_dir,
                     len(disk_parquets),
                 )
@@ -1067,17 +1072,25 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         )
 
     use_iceberg_scan = False
-    if iceberg_loc and source.get("access_level") != "read_only" and not iceberg_unreadable:
+    if (iceberg_loc or metadata_loc) and source.get("access_level") != "read_only" and not iceberg_unreadable:
         # If there are S3 paths (or we are not local-only and have no local paths), we must scan from S3
         if s3_paths or (not local_paths and not _core_mod._is_local_only_source(source)):
             use_iceberg_scan = True
 
-    if use_iceberg_scan and iceberg_loc:
-        parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
+    if use_iceberg_scan:
+        if metadata_loc:
+            # Pointing directly to the metadata JSON file avoids DuckDB's native iceberg version-guessing
+            # logic, which otherwise fails with: "Could not guess Iceberg table version".
+            # Note: Do NOT use allow_moved_paths=true here, as it treats the file path as a directory
+            # and appends /metadata/ to it.
+            parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(metadata_loc)}')"))
+        elif iceberg_loc:
+            parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
+
         logger.info(
             "%s Using iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",
             _core_mod._ICE,
-            source_key,
+            _display,
             len(s3_paths),
             len(local_iceberg_files),
         )
@@ -1096,7 +1109,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             "serving an empty view instead of iceberg_scan (which would crash the process). "
             "Run a Delete Data reset on this service to recover.",
             _core_mod._ICE,
-            source_key,
+            _display,
         )
     elif s3_paths:
         # Demoted from INFO to DEBUG (2026-06-01): this fires on every
@@ -1254,7 +1267,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     t_end = time.time()
     duration_ms = (t_end - t_start) * 1000
     logger.info(
-        "⏹️  %s %s (%s): View refresh complete (%.0f ms).", _core_mod._ICE_PLAIN, source_key, target_table, duration_ms
+        "⏹️  %s %s (%s): View refresh complete (%.0f ms).", _core_mod._ICE_PLAIN, _display, target_table, duration_ms
     )
     _view_cache[cache_key] = (
         metadata_loc,

@@ -41,7 +41,7 @@ function analytics(overrides: Record<string, unknown> = {}) {
       cls: { p75: 0.05, distribution: { good: 90, needs_improvement: 8, poor: 2 } },
       inp: { p75: 150, distribution: { good: 85, needs_improvement: 10, poor: 5 } },
     },
-    trends: { timestamps: [], lcp: [], cls: [], error_rate: [] },
+    trends: { timestamps: [], lcp: [], cls: [], error_rate: [], pageviews: [], interactions: [], errors: [] },
     worst_pages: [],
     errors: [],
     environments: { browsers: {}, os: {}, devices: {} },

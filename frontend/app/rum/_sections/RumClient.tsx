@@ -103,7 +103,6 @@ function getInpColors(p75: number | null | undefined): CwvColors {
 
 export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
-  const isAnalyst = useIsAnalyst();
 
   const columns = React.useMemo<ColumnDef<RumLiveEvent>[]>(() => [
     {
@@ -469,6 +468,50 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             <p className={`text-xs ${inpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.inp.distribution)}
           </div>
+        </AnalyticsCard>
+      </div>
+
+      {/* Beacons Over Time Row */}
+      <div className="mb-6">
+        <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
+          <PlotlyChart
+            data={[
+              {
+                x: analytics.trends.timestamps,
+                y: analytics.trends.pageviews || [],
+                name: 'Pageviews',
+                type: 'bar',
+                marker: { color: '#3b82f6' },
+              },
+              {
+                x: analytics.trends.timestamps,
+                y: analytics.trends.interactions || [],
+                name: 'Interactions',
+                type: 'bar',
+                marker: { color: '#10b981' },
+              },
+              {
+                x: analytics.trends.timestamps,
+                y: analytics.trends.errors || [],
+                name: 'Errors',
+                type: 'bar',
+                marker: { color: '#f43f5e' },
+              },
+            ]}
+            layout={{
+              barmode: 'stack',
+              height: 250,
+              margin: { t: 30, b: 40, l: 30, r: 10 },
+              legend: {
+                orientation: 'h',
+                y: 1.08,
+                x: 0.5,
+                xanchor: 'center',
+                yanchor: 'bottom',
+              },
+            }}
+            a11yTitle="Beacons Over Time Chart"
+          />
         </AnalyticsCard>
       </div>
 

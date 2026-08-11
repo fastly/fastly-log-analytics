@@ -517,7 +517,14 @@ def _get_fos_catalog_class() -> type:
         def load_table(self, identifier):  # type: ignore[override]
             source = getattr(self, "_fos_source", None)
             if source is not None:
-                ident = _table_identifier(source) if isinstance(identifier, str) else tuple(identifier)
+                if isinstance(identifier, str):
+                    from pyiceberg.catalog import identifier_to_tuple
+
+                    ident = identifier_to_tuple(identifier)
+                    if len(ident) == 1:
+                        ident = ("default", ident[0])
+                else:
+                    ident = tuple(identifier)
                 latest_loc = _read_metadata_pointer(source, ident)
                 if latest_loc:
                     cached = _get_cached_table(source, ident, latest_loc)

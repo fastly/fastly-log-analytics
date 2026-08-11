@@ -428,9 +428,10 @@ def _bootstrap_sync(
                 with _ConnectionHolder(rum_source, read_only=True) as rum_con:
 
                     def _query_rum_bootstrap(con):
+                        distinct_id = "COALESCE(NULLIF(req_id, ''), concat(cid, '_', cast(timestamp as varchar)))"
                         cnt = (
                             con.execute(
-                                "SELECT COUNT(DISTINCT req_id) FROM (SELECT req_id FROM client_vitals UNION ALL SELECT req_id FROM client_errors)"
+                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
                             ).fetchone()[0]
                             or 0
                         )
