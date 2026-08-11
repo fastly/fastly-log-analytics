@@ -116,6 +116,7 @@ class FeatureState:
     # Feature Toggles & Parameter Blocks
     rum_enabled: bool = False
     faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
+    rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
 
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -217,6 +218,7 @@ class FeatureState:
         rum_cfg = cfg.get("rum", {})
         rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
         faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
+        rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
 
         # Extract feature toggles
         rum_enabled = cfg.get("rum_enabled", False)
@@ -391,6 +393,7 @@ class FeatureState:
             rum_endpoint_name=rum_endpoint_name,
             rum_enabled=rum_enabled,
             faro_version=faro_version,
+            rum_custom_condition=rum_custom_condition,
             cmcd=cmcd_config,
             scoring=scoring_config,
             log_fields=log_fields_config,
@@ -420,6 +423,7 @@ class FeatureState:
             "rum_endpoint_name": self.rum_endpoint_name,
             "rum_enabled": self.rum_enabled,
             "faro_version": self.faro_version,
+            "rum_custom_condition": self.rum_custom_condition,
             "cmcd_enabled": self.cmcd.enabled,
             "cmcd_mode": self.cmcd.mode,
             "cmcd_version": self.cmcd.version,

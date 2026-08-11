@@ -117,9 +117,15 @@ def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str |
 
     Routes GET /js/rum.js to FOS origin. Signing is handled in miss/pass
     VCL snippet (same pattern as CDN service). When ``faro_version`` is
-    given, an identical GET route is added for /js/faro-sdk.js — same
-    backend selection, same X-FOS-Request flag; the actual FOS object path
-    rewrite happens in ``_generate_sigv4_sign_vcl``.
+    given, /js/faro-sdk.js joins the SAME route — the two paths only ever
+    differed in the FOS object they resolve to, and that rewrite happens in
+    ``_generate_sigv4_sign_vcl``, not here. Emitting one block with an
+    or-ed path condition rather than two identical blocks means the backend
+    selection and X-FOS-Request flag cannot drift between them.
+
+    With no ``faro_version`` the condition stays single-path, so the route
+    is absent for services that have not pinned a bundle (and the emitted
+    VCL is byte-identical to before Faro support existed).
 
     This is the single source of truth for the recv-stage asset-fetch
     routing block: ``backend.provision.declarative.generators.
@@ -135,31 +141,26 @@ def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str |
     else:
         backend_str = "F_fos_origin"
 
-    base = f"""# Fetch RUM tracker JS from FOS with SigV4 signing
-if (req.url.path == "/js/rum.js" && req.method == "GET") {{
+    if faro_version is None:
+        path_condition = 'req.url.path == "/js/rum.js"'
+    else:
+        # faro_version is never interpolated into this function's output (only
+        # its presence gates whether /js/faro-sdk.js joins the condition) — this
+        # call exists to fail fast rather than silently add the route for a value
+        # that will later be rejected. The actual interpolation site (the
+        # object-path rewrite that DOES need this guard) is
+        # _generate_sigv4_sign_vcl below.
+        _assert_faro_version_safe(faro_version)
+        path_condition = '(req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js")'
+
+    return f"""# Fetch RUM tracker JS from FOS with SigV4 signing
+if ({path_condition} && req.method == "GET") {{
     # Backend points to FOS endpoint (shared with logging)
     set req.backend = {backend_str};
     # Flag for SigV4 signing in miss/pass (req.backend.name not available there)
     set req.http.X-FOS-Request = "1";
     return(lookup);
 }}"""
-
-    if faro_version is None:
-        return base
-
-    # faro_version is never interpolated into this function's output (only its
-    # presence gates whether the /js/faro-sdk.js block below is emitted) — this
-    # call exists to fail fast rather than silently add the route for a value
-    # that will later be rejected. The actual interpolation site (the object-path
-    # rewrite that DOES need this guard) is _generate_sigv4_sign_vcl below.
-    _assert_faro_version_safe(faro_version)
-    faro_block = f"""# Fetch the self-hosted Faro Web SDK bundle from FOS (same backend + signing as rum.js)
-if (req.url.path == "/js/faro-sdk.js" && req.method == "GET") {{
-    set req.backend = {backend_str};
-    set req.http.X-FOS-Request = "1";
-    return(lookup);
-}}"""
-    return base + "\n\n" + faro_block
 
 
 def _generate_sigv4_sign_vcl(faro_version: str | None = None) -> str:

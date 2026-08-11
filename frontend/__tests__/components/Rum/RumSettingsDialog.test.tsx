@@ -124,6 +124,7 @@ describe('RumSettingsDialog', () => {
         capture_performance: true,
         capture_errors: true,
         capture_events: true,
+        custom_condition: '',
       }),
     })
 
@@ -146,6 +147,7 @@ describe('RumSettingsDialog', () => {
         capture_performance: true,
         capture_errors: true,
         capture_events: true,
+        custom_condition: '',
       }),
     })
 

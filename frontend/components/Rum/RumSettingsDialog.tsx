@@ -14,6 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -82,6 +83,7 @@ export function RumSettingsDialog({
   const [capturePerformance, setCapturePerformance] = useState(true)
   const [captureErrors, setCaptureErrors] = useState(true)
   const [captureEvents, setCaptureEvents] = useState(true)
+  const [customCondition, setCustomCondition] = useState('')
 
   // Local log lines to show during synchronous settings saving
   const [localLogs, setLocalLogs] = useState<string[]>([])
@@ -131,12 +133,14 @@ export function RumSettingsDialog({
       setCapturePerformance(statusData.capture_performance ?? true)
       setCaptureErrors(statusData.capture_errors ?? true)
       setCaptureEvents(statusData.capture_events ?? true)
+      setCustomCondition(statusData.custom_condition ?? '')
     }
   }, [
     statusData?.capture_vitals,
     statusData?.capture_performance,
     statusData?.capture_errors,
     statusData?.capture_events,
+    statusData?.custom_condition,
   ])
 
   const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop, reset: sseReset } = useSSE()
@@ -200,6 +204,7 @@ export function RumSettingsDialog({
           capture_performance: capturePerformance,
           capture_errors: captureErrors,
           capture_events: captureEvents,
+          custom_condition: customCondition,
         }),
       })
 
@@ -361,6 +366,28 @@ export function RumSettingsDialog({
                     </div>
                   </div>
                 )}
+              </div>
+
+              {/* Optional RUM VCL Condition */}
+              <div className="space-y-4 rounded-lg border bg-muted/20 p-5">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">RUM Routing Exclusions</h4>
+                <div className="space-y-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="rum-custom-condition" className="text-sm font-semibold leading-none">
+                      Optional Log Condition
+                    </Label>
+                    <p className="text-xs text-muted-foreground leading-normal">
+                      An additional VCL condition to filter RUM beacons (e.g. <code>req.url.path !~ "^/api/"</code>).
+                    </p>
+                  </div>
+                  <Input
+                    id="rum-custom-condition"
+                    placeholder="e.g. client.ip != '192.168.1.1' && req.url.path !~ '^/api/'"
+                    value={customCondition}
+                    onChange={(e) => setCustomCondition(e.target.value)}
+                    className="h-9 font-mono text-xs mt-2"
+                  />
+                </div>
               </div>
 
               {/* Version picker section */}

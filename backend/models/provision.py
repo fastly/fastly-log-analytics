@@ -144,6 +144,7 @@ class RumSettingsUpdateRequest(BaseModel):
     capture_performance: bool = True
     capture_errors: bool = True
     capture_events: bool = True
+    custom_condition: str = ""
     token: str = ""
 
 

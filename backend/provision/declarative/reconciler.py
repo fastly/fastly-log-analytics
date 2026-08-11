@@ -822,6 +822,12 @@ def _apply_diff(
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
         statement = 'req.url.path == "/rum-beacon"'
+        if (
+            desired_state
+            and getattr(desired_state, "rum_custom_condition", None)
+            and desired_state.rum_custom_condition.strip()
+        ):
+            statement = f"{statement} && ({desired_state.rum_custom_condition.strip()})"
         try:
             ensure_condition(
                 name="rum_log_condition",

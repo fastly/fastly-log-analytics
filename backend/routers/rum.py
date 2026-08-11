@@ -225,6 +225,7 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
         "capture_performance": rum_cfg.get("capture_performance", True),
         "capture_errors": rum_cfg.get("capture_errors", True),
         "capture_events": rum_cfg.get("capture_events", True),
+        "custom_condition": rum_cfg.get("custom_condition", ""),
     }
 
 
@@ -325,6 +326,7 @@ async def update_rum_settings(
     cfg["rum"]["capture_performance"] = body.capture_performance
     cfg["rum"]["capture_errors"] = body.capture_errors
     cfg["rum"]["capture_events"] = body.capture_events
+    cfg["rum"]["custom_condition"] = body.custom_condition
 
     svcconfig.save_config(service_id, cfg)
 
