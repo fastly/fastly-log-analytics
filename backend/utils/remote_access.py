@@ -438,11 +438,13 @@ def _local_host_allowed(host_header: str) -> bool:
 
 
 def _remote_host_allowed(host_header: str) -> bool:
-    mgr = get_tunnel_manager()
-    state = mgr.state
     if not host_header:
         return False
     base = host_header.split(":")[0].lower()
+    if base in _LOCAL_HOST_ALLOWLIST:
+        return True
+    mgr = get_tunnel_manager()
+    state = mgr.state
     candidates: list[str] = []
     if state.public_endpoint:
         from urllib.parse import urlparse

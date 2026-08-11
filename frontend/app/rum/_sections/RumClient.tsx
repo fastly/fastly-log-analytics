@@ -161,14 +161,22 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     },
     {
       id: 'environment',
-      accessorFn: (row) => `${row.browser} on ${row.os}`,
+      accessorFn: (row) => {
+        const b = typeof row.browser === 'object' && row.browser ? ((row.browser as any).name || 'Unknown') : (row.browser || 'Unknown');
+        const o = typeof row.os === 'object' && row.os ? ((row.os as any).name || 'Unknown') : (row.os || 'Unknown');
+        return `${b} on ${o}`;
+      },
       meta: { label: 'Environment' },
       header: 'Environment',
-      cell: ({ row }) => (
-        <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={`${row.original.browser} on ${row.original.os}`}>
-          {row.original.browser} on {row.original.os}
-        </span>
-      )
+      cell: ({ row }) => {
+        const b = typeof row.original.browser === 'object' && row.original.browser ? ((row.original.browser as any).name || 'Unknown') : (row.original.browser || 'Unknown');
+        const o = typeof row.original.os === 'object' && row.original.os ? ((row.original.os as any).name || 'Unknown') : (row.original.os || 'Unknown');
+        return (
+          <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={`${b} on ${o}`}>
+            {b} on {o}
+          </span>
+        );
+      }
     },
     {
       id: 'geo',

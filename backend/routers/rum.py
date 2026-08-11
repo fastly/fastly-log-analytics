@@ -1250,14 +1250,29 @@ async def rum_live_events(service_id: str = Path(...)) -> list[dict[str, Any]]:
                         desc += f" ({data['rating'].upper()})"
 
                 meta = data.get("meta", {})
+
+                # Robust browser extraction
+                browser_meta = meta.get("browser") or data.get("browser") or {}
+                if isinstance(browser_meta, dict):
+                    browser_name = browser_meta.get("name") or "Unknown"
+                else:
+                    browser_name = str(browser_meta) or "Unknown"
+
+                # Robust os extraction
+                os_meta = meta.get("os") or data.get("os") or {}
+                if isinstance(os_meta, dict):
+                    os_name = os_meta.get("name") or "Unknown"
+                else:
+                    os_name = str(os_meta) or "Unknown"
+
                 events.append(
                     {
                         "time": row[0],
                         "type": etype,
                         "path": path,
                         "desc": desc,
-                        "browser": meta.get("browser") or data.get("browser") or "Unknown",
-                        "os": meta.get("os") or data.get("os") or "Unknown",
+                        "browser": browser_name,
+                        "os": os_name,
                         "raw_log": data,
                     }
                 )
