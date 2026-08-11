@@ -124,6 +124,16 @@ class RumUpgradeRequest(BaseModel):
     activate: bool = True
 
 
+class RumSettingsUpdateRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/settings`` — update RUM capture toggles."""
+
+    capture_vitals: bool = True
+    capture_performance: bool = True
+    capture_errors: bool = True
+    capture_events: bool = True
+    token: str = ""
+
+
 class ProvisionConfigRequest(BaseModel):
     """Body shape shared by ``/provision/terraform/preview``,
     ``/provision/terraform/export``, and ``/provision/ingest``.

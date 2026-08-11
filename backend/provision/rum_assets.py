@@ -145,10 +145,22 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     """
     beacon_url = beacon_endpoint.format(service_id=service_id)
 
+    cfg = svcconfig.load_config(service_id) or {}
+    rum_cfg = cfg.get("rum") or {}
+
+    capture_vitals = rum_cfg.get("capture_vitals", True)
+    capture_performance = rum_cfg.get("capture_performance", True)
+    capture_errors = rum_cfg.get("capture_errors", True)
+    capture_events = rum_cfg.get("capture_events", True)
+
     return f"""/* Faro Web SDK wrapper for service {service_id} */
 (function() {{
   var SERVICE_ID = '{service_id}';
   var BEACON_ENDPOINT = '{beacon_url}';
+  var CAPTURE_VITALS = {str(capture_vitals).lower()};
+  var CAPTURE_PERFORMANCE = {str(capture_performance).lower()};
+  var CAPTURE_ERRORS = {str(capture_errors).lower()};
+  var CAPTURE_EVENTS = {str(capture_events).lower()};
   var pendingBeacons = [];
 
   // Helper to synchronously unroll individual Faro transport items and queue them
@@ -168,6 +180,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       var errorCol = 0;
 
       if (item.type === 'measurement' && item.payload) {{
+        if (!CAPTURE_VITALS) return;
         var m = item.payload;
         if (m.type === 'web-vitals') {{
           var values = m.values || {{}};
@@ -181,14 +194,17 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       }} else if (item.type === 'event' && item.payload) {{
         var e = item.payload;
         if (e.name === 'faro.performance.navigation') {{
+          if (!CAPTURE_PERFORMANCE) return;
           var attrs = e.attributes || e.values || {{}};
           Object.keys(attrs).forEach(function(k) {{
             metrics.push({{ name: k, value: attrs[k], rating: '' }});
           }});
         }} else if (e.name && e.name.indexOf('faro.') !== 0) {{
+          if (!CAPTURE_EVENTS) return;
           metrics.push({{ name: 'event_' + e.name, value: 1.0, rating: '' }});
         }}
       }} else if (item.type === 'exception' && item.payload) {{
+        if (!CAPTURE_ERRORS) return;
         var exc = item.payload;
         errorMessage = exc.value || exc.message || '';
         if (exc.stacktrace && exc.stacktrace.frames && exc.stacktrace.frames.length > 0) {{

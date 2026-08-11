@@ -32,7 +32,7 @@ from backend.provision.declarative.generators import (
     desired_logging_endpoints,
     desired_snippets,
 )
-from backend.provision.declarative.state import CmcdConfig, FeatureState, ScoringConfig
+from backend.provision.declarative.state import _AUTO_INJECTED_NAMES, CmcdConfig, FeatureState, ScoringConfig
 from backend.provision.rum_assets import upload_rum_tracker_js
 
 logger = logging.getLogger(__name__)
@@ -616,7 +616,12 @@ def _clone_active_version(service_id: str, token: str, desired_state: FeatureSta
         if desired_state.cmcd and desired_state.cmcd.enabled:
             enabled_features.append("CMCD")
 
-        num_custom_fields = len(desired_state.log_fields.custom_fields) if desired_state.log_fields else 0
+        user_custom_fields = (
+            [cf for cf in desired_state.log_fields.custom_fields if cf.get("name") not in _AUTO_INJECTED_NAMES]
+            if desired_state.log_fields
+            else []
+        )
+        num_custom_fields = len(user_custom_fields)
         if num_custom_fields > 0:
             enabled_features.append(f"{num_custom_fields} Custom Field{'s' if num_custom_fields > 1 else ''}")
 

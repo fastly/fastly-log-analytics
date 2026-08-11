@@ -11,6 +11,52 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+_AUTO_INJECTED_NAMES: set[str] = {
+    # RUM fields
+    "rum_cid",
+    "fastly_req_id",
+    "rum_metric_name",
+    "rum_metric_value",
+    "rum_metric_rating",
+    "rum_error_message",
+    "rum_error_stack",
+    "rum_trace_id",
+    "rum_span_id",
+    "rum_pathname",
+    "rum_connection_speed",
+    "rum_dns_ms",
+    "rum_tcp_ms",
+    "rum_tls_ms",
+    "rum_ttfb_ms",
+    "rum_raw_query",
+    "rum_body",
+    # Scoring fields
+    "edge_score",
+    "edge_score_l1",
+    "edge_score_l2",
+    "edge_cookie_compliance",
+    "edge_score_reason",
+    "edge_sid",
+    "edge_score_rtt_us",
+    "edge_score_exec_us",
+    "edge_matrix_version",
+    # CMCD fields
+    "cmcd_sid",
+    "cmcd_cid",
+    "cmcd_br",
+    "cmcd_bl",
+    "cmcd_bs",
+    "cmcd_d",
+    "cmcd_dl",
+    "cmcd_mtp",
+    "cmcd_ot",
+    "cmcd_sf",
+    "cmcd_st",
+    "cmcd_su",
+    "cmcd_tb",
+    "cmcd_rtp",
+}
+
 
 @dataclass(frozen=True)
 class CmcdConfig:

@@ -32,7 +32,13 @@ from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import _ConnectionHolder
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import RumDisableRequest, RumEnableRequest, RumUpgradeRequest, RumVersionsResponse
+from backend.models.provision import (
+    RumDisableRequest,
+    RumEnableRequest,
+    RumSettingsUpdateRequest,
+    RumUpgradeRequest,
+    RumVersionsResponse,
+)
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator_v2 import (
     disable_rum,
@@ -215,6 +221,10 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
         "deployed_vcl_sha": deployed_sha,
         "current_vcl_sha": current_sha,
         "vcl_drift": vcl_drift,
+        "capture_vitals": rum_cfg.get("capture_vitals", True),
+        "capture_performance": rum_cfg.get("capture_performance", True),
+        "capture_errors": rum_cfg.get("capture_errors", True),
+        "capture_events": rum_cfg.get("capture_events", True),
     }
 
 
@@ -298,6 +308,43 @@ async def upgrade_rum_handler(
     return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
 
 
+@router.post("/{service_id}/rum/settings")
+async def update_rum_settings(
+    service_id: str = Path(...),
+    body: RumSettingsUpdateRequest = Body(...),
+) -> dict[str, Any]:
+    """Update RUM capture settings and re-deploy rum-tracker.js (admin-only)."""
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail={"error": f"No config found for service {service_id}"})
+
+    if "rum" not in cfg:
+        cfg["rum"] = {}
+
+    cfg["rum"]["capture_vitals"] = body.capture_vitals
+    cfg["rum"]["capture_performance"] = body.capture_performance
+    cfg["rum"]["capture_errors"] = body.capture_errors
+    cfg["rum"]["capture_events"] = body.capture_events
+
+    svcconfig.save_config(service_id, cfg)
+
+    # Re-deploy tracker JS wrapper with the new compiled settings inside it
+    token = body.token or _get_fastly_token(service_id)
+
+    from backend.provision.rum_assets import upload_rum_tracker_js
+
+    try:
+        res = upload_rum_tracker_js(service_id, token, overwrite=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": f"Failed to upload RUM tracker wrapper to FOS: {e}"})
+
+    return {
+        "ok": True,
+        "message": "RUM capture settings updated and wrapper re-deployed successfully!",
+        "skipped": res.get("skipped", False),
+    }
+
+
 @router.get("/{service_id}/rum/beacon-health")
 async def rum_beacon_health(
     ctx: RequestContext = Depends(build_request_context),
@@ -324,19 +371,25 @@ async def rum_beacon_health(
 
         def _get_health(con):
             one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+            from backend.utils.telemetry import track_query
 
             # Count recent beacons in the last 1 hour
-            cur_recent = con.execute(
+            with track_query(
+                con,
                 "SELECT COUNT(*) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors) WHERE timestamp > ?",
                 [one_hour_ago],
-            )
-            recent_count = cur_recent.fetchone()[0] or 0
+                "rum_health_recent",
+            ) as cur_recent:
+                recent_count = cur_recent.fetchone()[0] or 0
 
             # Get max timestamp overall
-            cur_last = con.execute(
-                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
-            )
-            last_dt = cur_last.fetchone()[0]
+            with track_query(
+                con,
+                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)",
+                [],
+                "rum_health_last",
+            ) as cur_last:
+                last_dt = cur_last.fetchone()[0]
 
             return recent_count, last_dt
 
@@ -443,17 +496,25 @@ async def rum_analytics(
     try:
 
         def _get_analytics(con):
+            from backend.utils.telemetry import track_query
+
             # A. Check if any data exists at all
-            cur_any = con.execute("""
+            with track_query(
+                con,
+                """
                 SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END
-            """)
-            if not cur_any.fetchone()[0]:
-                return {"no_data": True}
+                """,
+                [],
+                "rum_any_data",
+            ) as cur_any:
+                if not cur_any.fetchone()[0]:
+                    return {"no_data": True}
 
             distinct_id = "COALESCE(NULLIF(req_id, ''), concat(cid, '_', cast(timestamp as varchar)))"
 
             # B. Total match count within bounds
-            cur_total = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT COUNT(DISTINCT {distinct_id}) FROM (
                     SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_vitals
@@ -461,46 +522,54 @@ async def rum_analytics(
                     SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_errors
                 )
                 WHERE {where_sql}
-            """,
+                """,
                 params,
-            )
-            total_beacons = cur_total.fetchone()[0] or 0
+                "rum_total_beacons",
+            ) as cur_total:
+                total_beacons = cur_total.fetchone()[0] or 0
 
             # B2. Pageviews: beacons where there is at least one row in client_vitals that is not an event
-            cur_pvs = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql} AND metric_name NOT LIKE 'event_%'
-            """,
+                """,
                 params,
-            )
-            pageviews = cur_pvs.fetchone()[0] or 0
+                "rum_pageviews",
+            ) as cur_pvs:
+                pageviews = cur_pvs.fetchone()[0] or 0
 
             # B3. Interactions: beacons where there is at least one custom event row
-            cur_ints = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql} AND metric_name LIKE 'event_%'
-            """,
+                """,
                 params,
-            )
-            interactions = cur_ints.fetchone()[0] or 0
+                "rum_interactions",
+            ) as cur_ints:
+                interactions = cur_ints.fetchone()[0] or 0
 
             # B4. Errors: beacons from client_errors
-            cur_errs = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_errors
                 WHERE {where_sql}
-            """,
+                """,
                 params,
-            )
-            errors_count = cur_errs.fetchone()[0] or 0
+                "rum_errors_count",
+            ) as cur_errs:
+                errors_count = cur_errs.fetchone()[0] or 0
 
             # C. Vitals metrics, percentiles & distribution
-            cur_vitals = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT
                     metric_name,
@@ -512,56 +581,55 @@ async def rum_analytics(
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY metric_name
-            """,
+                """,
                 params,
-            )
-            vitals_rows = cur_vitals.fetchall()
+                "rum_vitals_summary",
+            ) as cur_vitals:
+                vitals_rows = cur_vitals.fetchall()
 
             # D. Environments
-            browsers = {
-                row[0]: row[1]
-                for row in con.execute(
-                    f"""
+            with track_query(
+                con,
+                f"""
                 SELECT COALESCE(browser, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY browser
-            """,
-                    params,
-                ).fetchall()
-                if row[0]
-            }
+                """,
+                params,
+                "rum_browsers_distribution",
+            ) as cur_browsers:
+                browsers = {row[0]: row[1] for row in cur_browsers.fetchall() if row[0]}
 
-            os_dict = {
-                row[0]: row[1]
-                for row in con.execute(
-                    f"""
+            with track_query(
+                con,
+                f"""
                 SELECT COALESCE(os, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY os
-            """,
-                    params,
-                ).fetchall()
-                if row[0]
-            }
+                """,
+                params,
+                "rum_os_distribution",
+            ) as cur_os:
+                os_dict = {row[0]: row[1] for row in cur_os.fetchall() if row[0]}
 
-            devices = {
-                row[0]: row[1]
-                for row in con.execute(
-                    f"""
+            with track_query(
+                con,
+                f"""
                 SELECT COALESCE(device, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY device
-            """,
-                    params,
-                ).fetchall()
-                if row[0]
-            }
+                """,
+                params,
+                "rum_devices_distribution",
+            ) as cur_devices:
+                devices = {row[0]: row[1] for row in cur_devices.fetchall() if row[0]}
 
             # E. Worst pages
-            cur_pages = con.execute(
+            with track_query(
+                con,
                 f"""
                 WITH page_metrics AS (
                     SELECT
@@ -593,13 +661,15 @@ async def rum_analytics(
                 LEFT JOIN page_errors e ON m.path = e.path
                 ORDER BY error_rate DESC, m.avg_load_time DESC
                 LIMIT 5
-            """,
+                """,
                 params + params,
-            )
-            worst_pages_rows = cur_pages.fetchall()
+                "rum_worst_pages",
+            ) as cur_pages:
+                worst_pages_rows = cur_pages.fetchall()
 
             # F. Top Exceptions
-            cur_errors = con.execute(
+            with track_query(
+                con,
                 f"""
                 SELECT
                     error_message,
@@ -612,13 +682,15 @@ async def rum_analytics(
                 GROUP BY error_message, error_file, error_line, error_col
                 ORDER BY count DESC
                 LIMIT 3
-            """,
+                """,
                 params,
-            )
-            errors_rows = cur_errors.fetchall()
+                "rum_top_exceptions",
+            ) as cur_errors:
+                errors_rows = cur_errors.fetchall()
 
             # G. Trend buckets
-            cur_trends = con.execute(
+            with track_query(
+                con,
                 f"""
                 WITH hourly_vitals AS (
                     SELECT
@@ -651,10 +723,11 @@ async def rum_analytics(
                 FROM hourly_vitals v
                 FULL OUTER JOIN hourly_errors e ON v.hour = e.hour
                 ORDER BY hour_ts DESC
-            """,
+                """,
                 params + params,
-            )
-            trends_rows = cur_trends.fetchall()
+                "rum_hourly_trends",
+            ) as cur_trends:
+                trends_rows = cur_trends.fetchall()
 
             return {
                 "no_data": False,
@@ -894,7 +967,11 @@ async def rum_live_events(
     try:
 
         def _get_live_events(con):
-            cur = con.execute("""
+            from backend.utils.telemetry import track_query
+
+            with track_query(
+                con,
+                """
                 SELECT
                     'pageview' AS type,
                     timestamp,
@@ -926,8 +1003,11 @@ async def rum_live_events(
                 FROM client_errors
                 ORDER BY timestamp DESC
                 LIMIT 10
-            """)
-            return cur.fetchall()
+                """,
+                [],
+                "rum_live_events",
+            ) as cur:
+                return cur.fetchall()
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
             rows = execute_with_stale_view_retry(rum_con, rum_source, _get_live_events)

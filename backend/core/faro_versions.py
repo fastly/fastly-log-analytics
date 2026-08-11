@@ -119,8 +119,11 @@ async def fetch_available_faro_versions() -> list[str]:
             or a payload without a usable ``versions`` map.
     """
     try:
+        from backend.utils.telemetry import tracked_call
+
         async with httpx.AsyncClient() as client:
-            response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
+            with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
+                response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -148,7 +151,10 @@ async def _fetch_version_dist(client: httpx.AsyncClient, version: str) -> dict[s
     than silently skip verification on a registry hiccup.
     """
     try:
-        response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
+        from backend.utils.telemetry import tracked_call
+
+        with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
+            response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
         response.raise_for_status()
         data = response.json()
     except httpx.HTTPStatusError as exc:
@@ -296,10 +302,13 @@ async def fetch_faro_bundle(version: str) -> bytes:
             that doesn't contain the expected bundle member.
     """
     try:
+        from backend.utils.telemetry import tracked_call
+
         async with httpx.AsyncClient() as client:
             dist = await _fetch_version_dist(client, version)
             tarball_url = _tarball_url_from_dist(dist, version)
-            response = await client.get(tarball_url, timeout=_TARBALL_TIMEOUT)
+            with tracked_call("GET", tarball_url, service="NPM Registry"):
+                response = await client.get(tarball_url, timeout=_TARBALL_TIMEOUT)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
