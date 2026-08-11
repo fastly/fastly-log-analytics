@@ -149,80 +149,47 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 (function() {{
   var SERVICE_ID = '{service_id}';
   var BEACON_ENDPOINT = '{beacon_url}';
+  var pendingBeacons = [];
 
-  // Monkeypatch fetch and XMLHttpRequest to unroll and enrich RUM beacons from JSON bodies.
-  // This allows edge VCL (which cannot read request bodies) to capture and log ALL critical metrics.
-  function unrollAndSendBeacons(url, bodyStr, useBeacon) {{
-    if (typeof url !== 'string' || url.indexOf('/rum-beacon') === -1 || !bodyStr) {{
-      return;
-    }}
+  // Helper to synchronously unroll individual Faro transport items and queue them
+  function queueUnrolledBeacons(item) {{
+    if (!item) return;
     try {{
-      var payload = JSON.parse(bodyStr);
-      var metrics = [];
-
-      // Extract rum_cid session cookie
       var cid = '';
       var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
       if (cookieMatch) {{
         cid = cookieMatch[1];
       }}
-
       var pathname = window.location.pathname;
-
-      // 1. Extract ALL Web Vitals measurements
-      if (payload.measurements && Array.isArray(payload.measurements)) {{
-        var webVitals = payload.measurements.filter(function(m) {{ return m.type === 'web-vitals'; }});
-        webVitals.forEach(function(m) {{
-          var values = m.values || {{}};
-          var rating = (m.context && m.context.rating) || (m.meta && m.meta.rating) || '';
-          Object.keys(values).forEach(function(k) {{
-            if (k !== 'delta') {{
-              metrics.push({{
-                name: k,
-                value: values[k],
-                rating: rating
-              }});
-            }}
-          }});
-        }});
-      }}
-
-      // 2. Extract ALL Faro performance navigation timings
-      if (payload.events && Array.isArray(payload.events)) {{
-        var navs = payload.events.filter(function(e) {{ return e.name === 'faro.performance.navigation'; }});
-        navs.forEach(function(n) {{
-          var attrs = n.attributes || n.values || {{}};
-          Object.keys(attrs).forEach(function(k) {{
-            metrics.push({{
-              name: k,
-              value: attrs[k],
-              rating: ''
-            }});
-          }});
-        }});
-      }}
-
-      // 2b. Extract ALL custom events (user-pushed interactions)
-      if (payload.events && Array.isArray(payload.events)) {{
-        var customs = payload.events.filter(function(e) {{
-          return e.name && e.name !== 'faro.performance.navigation' && e.name.indexOf('faro.') !== 0;
-        }});
-        customs.forEach(function(e) {{
-          metrics.push({{
-            name: 'event_' + e.name,
-            value: 1.0,
-            rating: ''
-          }});
-        }});
-      }}
-
-      // 3. Extract JS exception messages
+      var metrics = [];
       var errorMessage = '';
       var errorFile = '';
       var errorLine = 0;
       var errorCol = 0;
-      if (payload.exceptions && Array.isArray(payload.exceptions)) {{
-        var exc = payload.exceptions[0];
+
+      if (item.type === 'measurement' && item.payload) {{
+        var m = item.payload;
+        if (m.type === 'web-vitals') {{
+          var values = m.values || {{}};
+          var rating = (m.context && m.context.rating) || (m.meta && m.meta.rating) || '';
+          Object.keys(values).forEach(function(k) {{
+            if (k !== 'delta') {{
+              metrics.push({{ name: k, value: values[k], rating: rating }});
+            }}
+          }});
+        }}
+      }} else if (item.type === 'event' && item.payload) {{
+        var e = item.payload;
+        if (e.name === 'faro.performance.navigation') {{
+          var attrs = e.attributes || e.values || {{}};
+          Object.keys(attrs).forEach(function(k) {{
+            metrics.push({{ name: k, value: attrs[k], rating: '' }});
+          }});
+        }} else if (e.name && e.name.indexOf('faro.') !== 0) {{
+          metrics.push({{ name: 'event_' + e.name, value: 1.0, rating: '' }});
+        }}
+      }} else if (item.type === 'exception' && item.payload) {{
+        var exc = item.payload;
         errorMessage = exc.value || exc.message || '';
         if (exc.stacktrace && exc.stacktrace.frames && exc.stacktrace.frames.length > 0) {{
           var frame = exc.stacktrace.frames[0];
@@ -236,30 +203,10 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         metrics.forEach(function(m) {{
           var extra = '?service_id=' + SERVICE_ID;
           extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
-          if (m.rating) {{
-            extra += '&rum_metric_rating=' + encodeURIComponent(m.rating);
-          }}
-          if (errorMessage) {{
-            extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
-            if (errorFile) extra += '&rum_error_file=' + encodeURIComponent(errorFile);
-            if (errorLine) extra += '&rum_error_line=' + errorLine;
-            if (errorCol) extra += '&rum_error_col=' + errorCol;
-          }}
-          if (cid) {{
-            extra += '&cid=' + encodeURIComponent(cid);
-          }}
+          if (m.rating) extra += '&rum_metric_rating=' + encodeURIComponent(m.rating);
+          if (cid) extra += '&cid=' + encodeURIComponent(cid);
           extra += '&rum_pathname=' + encodeURIComponent(pathname);
-
-          var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-          if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
-            navigator.sendBeacon(cleanBeaconUrl, '');
-          }} else if (typeof originalFetch === 'function') {{
-            originalFetch.call(window, cleanBeaconUrl, {{
-              method: 'POST',
-              headers: {{ 'Content-Type': 'text/plain' }},
-              body: ''
-            }}).catch(function() {{}});
-          }}
+          pendingBeacons.push(extra);
         }});
       }} else if (errorMessage) {{
         var extra = '?service_id=' + SERVICE_ID;
@@ -267,75 +214,85 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         if (errorFile) extra += '&rum_error_file=' + encodeURIComponent(errorFile);
         if (errorLine) extra += '&rum_error_line=' + errorLine;
         if (errorCol) extra += '&rum_error_col=' + errorCol;
-        if (cid) {{
-          extra += '&cid=' + encodeURIComponent(cid);
-        }}
+        if (cid) extra += '&cid=' + encodeURIComponent(cid);
         extra += '&rum_pathname=' + encodeURIComponent(pathname);
-
-        var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-        if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
-          navigator.sendBeacon(cleanBeaconUrl, '');
-        }} else if (typeof originalFetch === 'function') {{
-          originalFetch.call(window, cleanBeaconUrl, {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'text/plain' }},
-            body: ''
-          }}).catch(function() {{}});
-        }}
+        pendingBeacons.push(extra);
       }}
     }} catch (e) {{
-      console.error('RUM: Unroll and send beacons failed:', e);
+      console.error('RUM: failed to queue unrolled beacon:', e);
     }}
   }}
 
-  // Intercept navigator.sendBeacon to unroll metrics on page unload/visibilitychange
+  // Helper to synchronously flush queued unrolled beacons
+  function flushPendingBeacons(useBeacon) {{
+    if (pendingBeacons.length === 0) return;
+    var beaconsToSend = pendingBeacons.slice();
+    pendingBeacons = [];
+
+    beaconsToSend.forEach(function(extra) {{
+      var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
+      if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
+        originalSendBeacon.call(navigator, cleanBeaconUrl, '');
+      }} else if (typeof originalFetch === 'function') {{
+        originalFetch.call(window, cleanBeaconUrl, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'text/plain' }},
+          body: ''
+        }}).catch(function() {{}});
+      }}
+    }});
+  }}
+
+  // 1. Intercept navigator.sendBeacon to flush synchronously on unload
   if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
     var originalSendBeacon = navigator.sendBeacon;
     navigator.sendBeacon = function(url, data) {{
       if (typeof url === 'string' && url.indexOf('/rum-beacon') !== -1) {{
-        if (typeof data === 'string') {{
-          unrollAndSendBeacons(url, data, true);
-          return true;
-        }} else if (data instanceof Blob) {{
-          data.text().then(function(text) {{
-            unrollAndSendBeacons(url, text, true);
-          }}).catch(function() {{}});
-          return true;
-        }}
+        flushPendingBeacons(true);
+        return true;
       }}
       return originalSendBeacon.call(this, url, data);
     }};
   }}
 
-  // Intercept window.fetch
+  // 2. Intercept fetch
   if (typeof window.fetch === 'function') {{
     var originalFetch = window.fetch;
     window.fetch = function(input, init) {{
       if (typeof input === 'string' && input.indexOf('/rum-beacon') !== -1) {{
-        var body = init && init.body;
-        if (body && typeof body === 'string') {{
-          unrollAndSendBeacons(input, body);
-        }}
+        flushPendingBeacons(false);
+        return Promise.resolve(new Response('', {{ status: 204, statusText: 'No Content' }}));
       }}
       return originalFetch.call(this, input, init);
     }};
   }}
 
-  // Intercept XMLHttpRequest
+  // 3. Intercept XMLHttpRequest
   if (typeof XMLHttpRequest === 'function') {{
     var originalOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {{
       if (typeof url === 'string' && url.indexOf('/rum-beacon') !== -1) {{
         this._rumBeacon = true;
-        this._rumUrl = url;
       }}
       return originalOpen.apply(this, arguments);
     }};
 
     var originalSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function(body) {{
-      if (this._rumBeacon && typeof body === 'string') {{
-        unrollAndSendBeacons(this._rumUrl, body);
+      if (this._rumBeacon) {{
+        flushPendingBeacons(false);
+        var self = this;
+        setTimeout(function() {{
+          Object.defineProperty(self, 'readyState', {{ value: 4, writable: true }});
+          Object.defineProperty(self, 'status', {{ value: 204, writable: true }});
+          if (typeof self.onreadystatechange === 'function') {{
+            self.onreadystatechange();
+          }}
+          if (typeof self.onload === 'function') {{
+            self.onload();
+          }}
+        }}, 0);
+        return;
       }}
       return originalSend.apply(this, arguments);
     }};
@@ -414,10 +371,11 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         if (!event) {{
           return null;
         }}
-        console.log('Faro beforeSend:', JSON.stringify(event));
 
+        // Push to our synchronous unrolled queue
+        queueUnrolledBeacons(event);
 
-        // 1. If it's a batch payload structure (older Faro/fallback check)
+        // Keep the existing filtering logic to let Faro handle tracking states
         if (event.events && Array.isArray(event.events)) {{
           event.events = event.events.filter(function(e) {{
             var name = e.name || '';
