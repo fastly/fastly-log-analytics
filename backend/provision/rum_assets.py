@@ -150,59 +150,15 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
   var SERVICE_ID = '{service_id}';
   var BEACON_ENDPOINT = '{beacon_url}';
 
-  // Monkeypatch fetch and XMLHttpRequest to enrich RUM beacon query parameters from JSON bodies.
-  // This allows edge VCL (which cannot read request bodies) to capture and log critical metrics.
-  function enrichRumUrl(url, bodyStr) {{
+  // Monkeypatch fetch and XMLHttpRequest to unroll and enrich RUM beacons from JSON bodies.
+  // This allows edge VCL (which cannot read request bodies) to capture and log ALL critical metrics.
+  function unrollAndSendBeacons(url, bodyStr) {{
     if (typeof url !== 'string' || url.indexOf('/rum-beacon') === -1 || !bodyStr) {{
-      return url;
+      return;
     }}
     try {{
       var payload = JSON.parse(bodyStr);
-      var metricName = '';
-      var metricValue = '';
-      var metricRating = '';
-
-      // 1. Extract Web Vitals measurement
-      if (payload.measurements && Array.isArray(payload.measurements)) {{
-        var webVitals = payload.measurements.filter(function(m) {{ return m.type === 'web-vitals'; }});
-        if (webVitals.length > 0) {{
-          var values = webVitals[0].values || {{}};
-          metricName = Object.keys(values)[0] || '';
-          metricValue = values[metricName] || '';
-          metricRating = (webVitals[0].meta && webVitals[0].meta.rating) || '';
-        }}
-      }}
-
-      // 2. Extract Faro performance navigation timing
-      if (!metricName && payload.events && Array.isArray(payload.events)) {{
-        var navs = payload.events.filter(function(e) {{ return e.name === 'faro.performance.navigation'; }});
-        if (navs.length > 0) {{
-          var attrs = navs[0].attributes || navs[0].values || {{}};
-          var plt = attrs.pageLoadTime !== undefined ? attrs.pageLoadTime : attrs.duration;
-          if (plt !== undefined) {{
-            metricName = 'pageLoadTime';
-            metricValue = plt;
-          }}
-        }}
-      }}
-
-      // 3. Extract JS exception message
-      var errorMessage = '';
-      if (payload.exceptions && Array.isArray(payload.exceptions)) {{
-        var exc = payload.exceptions[0];
-        errorMessage = exc.value || exc.message || '';
-      }}
-
-      var extra = '';
-      if (metricName) {{
-        extra += '&rum_metric_name=' + encodeURIComponent(metricName) + '&rum_metric_value=' + encodeURIComponent(metricValue);
-        if (metricRating) {{
-          extra += '&rum_metric_rating=' + encodeURIComponent(metricRating);
-        }}
-      }}
-      if (errorMessage) {{
-        extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
-      }}
+      var metrics = [];
 
       // Extract rum_cid session cookie
       var cid = '';
@@ -210,15 +166,107 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       if (cookieMatch) {{
         cid = cookieMatch[1];
       }}
-      if (cid) {{
-        extra += '&cid=' + encodeURIComponent(cid);
+
+      var pathname = window.location.pathname;
+
+      // 1. Extract ALL Web Vitals measurements
+      if (payload.measurements && Array.isArray(payload.measurements)) {{
+        var webVitals = payload.measurements.filter(function(m) {{ return m.type === 'web-vitals'; }});
+        webVitals.forEach(function(m) {{
+          var values = m.values || {{}};
+          var rating = (m.context && m.context.rating) || (m.meta && m.meta.rating) || '';
+          Object.keys(values).forEach(function(k) {{
+            if (k !== 'delta') {{
+              metrics.push({{
+                name: k,
+                value: values[k],
+                rating: rating
+              }});
+            }}
+          }});
+        }});
       }}
 
-      extra += '&rum_pathname=' + encodeURIComponent(window.location.pathname);
-      return url + extra;
+      // 2. Extract ALL Faro performance navigation timings
+      if (payload.events && Array.isArray(payload.events)) {{
+        var navs = payload.events.filter(function(e) {{ return e.name === 'faro.performance.navigation'; }});
+        navs.forEach(function(n) {{
+          var attrs = n.attributes || n.values || {{}};
+          Object.keys(attrs).forEach(function(k) {{
+            metrics.push({{
+              name: k,
+              value: attrs[k],
+              rating: ''
+            }});
+          }});
+        }});
+      }}
+
+      // 3. Extract JS exception messages
+      var errorMessage = '';
+      var errorFile = '';
+      var errorLine = 0;
+      var errorCol = 0;
+      if (payload.exceptions && Array.isArray(payload.exceptions)) {{
+        var exc = payload.exceptions[0];
+        errorMessage = exc.value || exc.message || '';
+        if (exc.stacktrace && exc.stacktrace.frames && exc.stacktrace.frames.length > 0) {{
+          var frame = exc.stacktrace.frames[0];
+          errorFile = frame.filename || '';
+          errorLine = frame.lineno || 0;
+          errorCol = frame.colno || 0;
+        }}
+      }}
+
+      if (metrics.length > 0) {{
+        metrics.forEach(function(m) {{
+          var extra = '?service_id=' + SERVICE_ID;
+          extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
+          if (m.rating) {{
+            extra += '&rum_metric_rating=' + encodeURIComponent(m.rating);
+          }}
+          if (errorMessage) {{
+            extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
+            if (errorFile) extra += '&rum_error_file=' + encodeURIComponent(errorFile);
+            if (errorLine) extra += '&rum_error_line=' + errorLine;
+            if (errorCol) extra += '&rum_error_col=' + errorCol;
+          }}
+          if (cid) {{
+            extra += '&cid=' + encodeURIComponent(cid);
+          }}
+          extra += '&rum_pathname=' + encodeURIComponent(pathname);
+
+          var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
+          if (typeof originalFetch === 'function') {{
+            originalFetch.call(window, cleanBeaconUrl, {{
+              method: 'POST',
+              headers: {{ 'Content-Type': 'text/plain' }},
+              body: ''
+            }}).catch(function() {{}});
+          }}
+        }});
+      }} else if (errorMessage) {{
+        var extra = '?service_id=' + SERVICE_ID;
+        extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
+        if (errorFile) extra += '&rum_error_file=' + encodeURIComponent(errorFile);
+        if (errorLine) extra += '&rum_error_line=' + errorLine;
+        if (errorCol) extra += '&rum_error_col=' + errorCol;
+        if (cid) {{
+          extra += '&cid=' + encodeURIComponent(cid);
+        }}
+        extra += '&rum_pathname=' + encodeURIComponent(pathname);
+
+        var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
+        if (typeof originalFetch === 'function') {{
+          originalFetch.call(window, cleanBeaconUrl, {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'text/plain' }},
+            body: ''
+          }}).catch(function() {{}});
+        }}
+      }}
     }} catch (e) {{
-      console.error('RUM: URL enrichment failed:', e);
-      return url;
+      console.error('RUM: Unroll and send beacons failed:', e);
     }}
   }}
 
@@ -229,7 +277,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       if (typeof input === 'string' && input.indexOf('/rum-beacon') !== -1) {{
         var body = init && init.body;
         if (body && typeof body === 'string') {{
-          input = enrichRumUrl(input, body);
+          unrollAndSendBeacons(input, body);
         }}
       }}
       return originalFetch.call(this, input, init);
@@ -250,14 +298,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     var originalSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function(body) {{
       if (this._rumBeacon && typeof body === 'string') {{
-        try {{
-          var enrichedUrl = enrichRumUrl(this._rumUrl, body);
-          if (enrichedUrl !== this._rumUrl) {{
-            originalOpen.call(this, 'POST', enrichedUrl, true);
-          }}
-        }} catch (e) {{
-          console.error('RUM: XHR URL enrichment failed:', e);
-        }}
+        unrollAndSendBeacons(this._rumUrl, body);
       }}
       return originalSend.apply(this, arguments);
     }};
