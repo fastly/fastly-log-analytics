@@ -1146,33 +1146,34 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs") -
     else:
         union_sql = " UNION ALL BY NAME ".join(parts)
 
-        from backend.utils import field_codes as fc
+        if target_table == "logs":
+            from backend.utils import field_codes as fc
 
-        c_speed_case = fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE)
-        p_type_case = fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE)
-        p_desc_case = fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE)
+            c_speed_case = fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE)
+            p_type_case = fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE)
+            p_desc_case = fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE)
 
-        # ttl/age are stored as FLOAT in iceberg (Fastly emits jittery
-        # microsecond-precision values, e.g. "3600.027s"), but they're integer
-        # seconds semantically. Surface them as INTEGER so Top-N GROUP BY
-        # buckets cleanly instead of fragmenting into ~10 sub-second values.
-        # Only EXCLUDE columns that exist in the schema — group B is optional.
-        exclude_cols = ["c_speed", "p_type", "p_desc"]
-        select_extras = [
-            f"{c_speed_case} AS c_speed",
-            f"{p_type_case} AS p_type",
-            f"{p_desc_case} AS p_desc",
-        ]
-        if "ttl" in dynamic_schema_field_names:
-            exclude_cols.append("ttl")
-            select_extras.append('CAST(ROUND("ttl") AS INTEGER) AS ttl')
-        if "age" in dynamic_schema_field_names:
-            exclude_cols.append("age")
-            select_extras.append('CAST(ROUND("age") AS INTEGER) AS age')
+            # ttl/age are stored as FLOAT in iceberg (Fastly emits jittery
+            # microsecond-precision values, e.g. "3600.027s"), but they're integer
+            # seconds semantically. Surface them as INTEGER so Top-N GROUP BY
+            # buckets cleanly instead of fragmenting into ~10 sub-second values.
+            # Only EXCLUDE columns that exist in the schema — group B is optional.
+            exclude_cols = ["c_speed", "p_type", "p_desc"]
+            select_extras = [
+                f"{c_speed_case} AS c_speed",
+                f"{p_type_case} AS p_type",
+                f"{p_desc_case} AS p_desc",
+            ]
+            if "ttl" in dynamic_schema_field_names:
+                exclude_cols.append("ttl")
+                select_extras.append('CAST(ROUND("ttl") AS INTEGER) AS ttl')
+            if "age" in dynamic_schema_field_names:
+                exclude_cols.append("age")
+                select_extras.append('CAST(ROUND("age") AS INTEGER) AS age')
 
-        # Wrap the union to decode any previously ingested raw enum values
-        # and coerce float-stored integer fields to integer.
-        union_sql = f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({union_sql})"
+            # Wrap the union to decode any previously ingested raw enum values
+            # and coerce float-stored integer fields to integer.
+            union_sql = f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({union_sql})"
 
         # Apply strict time-bounding for analyst manual imports so they don't see
         # the "ragged edges" of the underlying hourly files.
