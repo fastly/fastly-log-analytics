@@ -646,12 +646,15 @@ if (req.url.path == "/js/rum.js") {
         assert "/js/rum.js" in vcl_miss
 
     def test_faro_version_pinned_adds_recv_routing(self):
-        """A pinned faro_version adds a GET /js/faro-sdk.js route in vcl_recv."""
+        """A pinned faro_version puts GET /js/faro-sdk.js on the SAME route as
+        /js/rum.js — one or-ed condition, not a second copied block, so the
+        backend selection and X-FOS-Request flag cannot drift apart."""
         state = self._rum_state(faro_version="2.9.0")
         vcl_recv = generate_consolidated_snippet(state, "vcl_recv")
-        assert '"/js/faro-sdk.js" && req.method == "GET"' in vcl_recv
-        # Existing /js/rum.js route must remain untouched alongside the new one.
-        assert '"/js/rum.js" && req.method == "GET"' in vcl_recv
+        assert (
+            'if ((req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js") && req.method == "GET")'
+            in vcl_recv
+        )
 
     def test_faro_version_pinned_rewrites_object_path_in_miss(self):
         """A pinned faro_version rewrites bereq.url to the versioned FOS object path."""

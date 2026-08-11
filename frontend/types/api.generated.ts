@@ -9535,6 +9535,11 @@ export interface components {
              */
             capture_events: boolean;
             /**
+             * Custom Condition
+             * @default
+             */
+            custom_condition: string;
+            /**
              * Token
              * @default
              */

@@ -80,9 +80,10 @@ def test_faro_version_adds_route_rewrite_and_surrogate_key():
     assert set(snippets.keys()) == {RUM_ASSET_FETCH_NAME, RUM_SIGV4_SIGN_NAME, RUM_FARO_FETCH_NAME}
 
     recv = snippets[RUM_ASSET_FETCH_NAME]
-    assert 'req.url.path == "/js/faro-sdk.js" && req.method == "GET"' in recv
-    # Existing /js/rum.js route must still be present, unmodified in shape.
-    assert 'req.url.path == "/js/rum.js" && req.method == "GET"' in recv
+    # Both paths ride ONE route — they only ever differed in the FOS object
+    # they resolve to, and that rewrite lives in the SigV4 snippet below.
+    assert 'if ((req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js") && req.method == "GET")' in recv
+    assert recv.count("return(lookup);") == 1
 
     sigv4 = snippets[RUM_SIGV4_SIGN_NAME]
     assert 'bereq.url.path == "/js/faro-sdk.js"' in sigv4
@@ -164,17 +165,19 @@ def test_faro_version_present_in_asset_fetch_but_generate_rum_vcl_still_clean():
 
 
 def test_faro_asset_fetch_respects_shield_pop_selection():
-    """The Faro route reuses the exact same backend-selection expression as
-    the existing rum.js route (same shield_pop threading)."""
+    """Both asset paths share one backend-selection expression, so the
+    shield_pop threading cannot diverge between them."""
     snippets = generate_rum_asset_fetch_vcl("frankfurt-de", faro_version="1.0.0")
     recv = snippets[RUM_ASSET_FETCH_NAME]
-    assert recv.count("fastly.try_select_shield(ssl_shield_frankfurt_de, F_fos_origin)") == 2
+    assert recv.count("fastly.try_select_shield(ssl_shield_frankfurt_de, F_fos_origin)") == 1
+    assert '"/js/faro-sdk.js"' in recv
 
 
 def test_faro_asset_fetch_shield_none():
     snippets = generate_rum_asset_fetch_vcl("none", faro_version="1.0.0")
     recv = snippets[RUM_ASSET_FETCH_NAME]
-    assert recv.count("set req.backend = F_fos_origin;") == 2
+    assert recv.count("set req.backend = F_fos_origin;") == 1
+    assert '"/js/faro-sdk.js"' in recv
 
 
 # ── faro_version validation: reject anything unsafe to interpolate ─────────

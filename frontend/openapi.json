@@ -47621,6 +47621,11 @@
             "title": "Capture Events",
             "default": true
           },
+          "custom_condition": {
+            "type": "string",
+            "title": "Custom Condition",
+            "default": ""
+          },
           "token": {
             "type": "string",
             "title": "Token",
