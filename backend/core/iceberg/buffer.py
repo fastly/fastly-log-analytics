@@ -315,7 +315,7 @@ def buffer_files(source: dict, table_name: str = "logs") -> list[str]:
     tombstoned = _tombstoned_parquet_paths(buf)
     return sorted(
         p
-        for p in _glob.glob(os.path.join(buf, "**", "*.parquet"), recursive=True)
+        for p in _glob.glob(os.path.join(buf, "*.parquet"))
         if os.path.isfile(p) and p not in tombstoned and not _is_tombstone_marker(os.path.basename(p))
     )
 

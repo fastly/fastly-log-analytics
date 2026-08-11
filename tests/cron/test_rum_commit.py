@@ -41,7 +41,9 @@ def test_success_path_starts_and_finalizes_run(monkeypatch):
     assert log_args[3] == "success"
     assert log_kwargs["rows_ingested"] == 0
     assert log_kwargs["run_id"] == 42
-    finalize.assert_called_once_with("svc-1", "rum_commit", 42)
+    finalize.assert_called_once_with(
+        {"name": "svc-1", "service_id": "svc-1", "access_level": "read_write"}, "rum_commit", 42
+    )
 
 
 def test_exception_logs_error_status_finalizes_and_reraises(monkeypatch):
@@ -85,4 +87,6 @@ def test_exception_logs_error_status_finalizes_and_reraises(monkeypatch):
     assert error_kwargs["run_id"] == 99
 
     # finally always finalizes, even though the function re-raised.
-    finalize.assert_called_once_with("svc-1", "rum_commit", 99)
+    finalize.assert_called_once_with(
+        {"name": "svc-1", "service_id": "svc-1", "access_level": "read_write"}, "rum_commit", 99
+    )

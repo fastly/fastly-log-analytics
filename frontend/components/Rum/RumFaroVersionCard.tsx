@@ -110,7 +110,6 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
     <>
       <AnalyticsCard
         title="Faro SDK Version"
-        description="The self-hosted Grafana Faro Web SDK bundle served from Object Storage."
         headerAction={
           <Button
             variant="ghost"
@@ -127,43 +126,35 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
         {noVersions ? (
           <p className="text-sm text-muted-foreground">No versions available from the registry right now.</p>
         ) : (
-          <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pinned</p>
-                <p className="font-mono">{current ?? 'Not pinned'}</p>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pinned:</span>
+                <span className="font-mono">{current ?? 'Not pinned'}</span>
               </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Latest</p>
-                <p className="font-mono">{latest ?? '—'}</p>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Latest:</span>
+                <span className="font-mono">{latest ?? '—'}</span>
               </div>
               {updateAvailable ? (
-                <Badge variant="warning">Update available</Badge>
+                <div className="flex items-center gap-2">
+                  <Badge variant="warning" className="text-[10px] py-0 px-2 h-5">Update available</Badge>
+                  <span className="sr-only">New Faro Web SDK version available</span>
+                </div>
               ) : current ? (
-                <Badge variant="success">Up to date</Badge>
+                <Badge variant="success" className="text-[10px] py-0 px-2 h-5">Up to date</Badge>
               ) : null}
             </div>
 
-            {updateAvailable && (
-              <Alert className="border-amber-300 bg-amber-50/60 dark:bg-amber-950/20 text-amber-900 dark:text-amber-300">
-                <ArrowUpCircle className="h-4 w-4" />
-                <AlertTitle className="text-sm font-bold">New Faro Web SDK version available</AlertTitle>
-                <AlertDescription className="text-[13px]">
-                  v{latest} is available (currently pinned to v{current}).
-                </AlertDescription>
-              </Alert>
-            )}
-
-            <div className="flex justify-end">
-              <Button
-                onClick={() => setIsUpgradeOpen(true)}
-                disabled={false}
-                variant={updateAvailable ? 'default' : 'outline'}
-                size="sm"
-              >
-                {current ? (updateAvailable ? 'Upgrade' : 'Change version') : 'Choose version'}
-              </Button>
-            </div>
+            <Button
+              onClick={() => setIsUpgradeOpen(true)}
+              disabled={false}
+              variant={updateAvailable ? 'default' : 'outline'}
+              size="sm"
+              className="h-8 text-xs font-semibold px-3"
+            >
+              {current ? (updateAvailable ? 'Upgrade' : 'Change version') : 'Choose version'}
+            </Button>
           </div>
         )}
       </AnalyticsCard>

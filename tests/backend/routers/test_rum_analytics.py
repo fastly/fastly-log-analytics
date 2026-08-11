@@ -200,16 +200,37 @@ def test_rum_analytics_fallback(setup_temp_rum_db) -> None:
 
 
 def test_rum_live_events(setup_temp_rum_db) -> None:
+    # 1. When empty, should return a clean empty list
     response = client.get("/api/services/svc-test-rum-fallback/rum/live-events")
     assert response.status_code == 200
     events = response.json()
     assert isinstance(events, list)
-    assert 0 < len(events) <= 10
-    for e in events:
-        assert "time" in e
-        assert "type" in e
-        assert "path" in e
-        assert "desc" in e
+    assert len(events) == 0
+
+    # 2. Insert a real test beacon
+    _insert_beacons(
+        setup_temp_rum_db,
+        [
+            {
+                "pathname": "/live-test",
+                "load_time": 1.5,
+                "lcp": 1.7,
+                "cls": 0.01,
+                "inp": 100,
+                "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
+            }
+        ],
+    )
+
+    # 3. Verify they are now returned in the ticker
+    response = client.get("/api/services/svc-test-rum-fallback/rum/live-events")
+    assert response.status_code == 200
+    events = response.json()
+    assert isinstance(events, list)
+    assert len(events) == 4
+    assert events[0]["path"] == "/live-test"
+    assert events[0]["browser"] == "Chrome"
+    assert events[0]["os"] == "macOS"
 
 
 def test_rum_analytics_real_data(setup_temp_rum_db) -> None:

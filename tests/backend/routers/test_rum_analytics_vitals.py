@@ -285,7 +285,7 @@ def test_path_extraction_falls_back_to_page_url_when_no_pathname(setup_temp_rum_
     assert paths == ["/from-url//nested"]
 
 
-def test_processing_exception_falls_back_to_mock_response(setup_temp_rum_db):
+def test_processing_exception_returns_500(setup_temp_rum_db):
     service_id = "test_vitals_mock_fallback"
     _insert(setup_temp_rum_db, [_faro_beacon("/x", 1.0, 0.01, 50, 1.0) for _ in range(11)])
 
@@ -299,10 +299,8 @@ def test_processing_exception_falls_back_to_mock_response(setup_temp_rum_db):
     rum_module.execute_with_stale_view_retry = _exploding_execute
     try:
         r = client.get(f"/api/services/{service_id}/rum/analytics")
-        assert r.status_code == 200
+        assert r.status_code == 500
         data = r.json()
-        assert data["is_mock"] is True
-        assert data["vitals"]["lcp"]["p75"] == 2.0
-        assert len(data["trends"]["timestamps"]) > 0
+        assert "RUM analytics query failed" in data["detail"]["message"]
     finally:
         rum_module.execute_with_stale_view_retry = original

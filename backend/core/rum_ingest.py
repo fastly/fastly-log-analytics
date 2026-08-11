@@ -549,12 +549,13 @@ def ingest_rum_logs(
                                         req_id_val = log_data.get("fastly_req_id") or ""
 
                                         # Append client telemetry if available
-                                        is_exception = log_data.get("rum_error_message") is not None
+                                        is_exception = bool(log_data.get("rum_error_message"))
                                         if is_exception:
                                             errors_rows.append(
                                                 {
                                                     "timestamp": dt,
-                                                    "error_message": log_data["rum_error_message"] or "Unknown error",
+                                                    "error_message": log_data.get("rum_error_message")
+                                                    or "Unknown error",
                                                     "error_file": log_data.get("rum_error_file") or "unknown.js",
                                                     "error_line": safe_int(log_data.get("rum_error_line")),
                                                     "error_col": safe_int(log_data.get("rum_error_col")),
@@ -603,7 +604,17 @@ def ingest_rum_logs(
                     metadata_db.record_in_flight(
                         service_id, buf_filename, vitals_batch_records, table_name="client_vitals"
                     )
-                    vitals_table = pa.Table.from_pylist(vitals_rows, schema=CLIENT_VITALS_ARROW_SCHEMA)
+                    # Safeguard: Ensure no None/missing values in required fields
+                    cleaned_vitals = []
+                    for r in vitals_rows:
+                        if not r.get("timestamp"):
+                            continue
+                        r["metric_name"] = r.get("metric_name") or "unknown"
+                        # metric_value is a required double column in Iceberg
+                        val = safe_float(r.get("metric_value"))
+                        r["metric_value"] = val if val is not None else 0.0
+                        cleaned_vitals.append(r)
+                    vitals_table = pa.Table.from_pylist(cleaned_vitals, schema=CLIENT_VITALS_ARROW_SCHEMA)
                     iceberg.write_to_buffer(src, vitals_table, buf_filename, table_name="client_vitals")
                     metadata_db.insert_ingested_files(service_id, vitals_batch_records, table_name="client_vitals")
                     metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_vitals")
@@ -615,7 +626,14 @@ def ingest_rum_logs(
                     metadata_db.record_in_flight(
                         service_id, buf_filename, errors_batch_records, table_name="client_errors"
                     )
-                    errors_table = pa.Table.from_pylist(errors_rows, schema=CLIENT_ERRORS_ARROW_SCHEMA)
+                    # Safeguard: Ensure no None/missing values in required fields
+                    cleaned_errors = []
+                    for r in errors_rows:
+                        if not r.get("timestamp"):
+                            continue
+                        r["error_message"] = r.get("error_message") or "Unknown error"
+                        cleaned_errors.append(r)
+                    errors_table = pa.Table.from_pylist(cleaned_errors, schema=CLIENT_ERRORS_ARROW_SCHEMA)
                     iceberg.write_to_buffer(src, errors_table, buf_filename, table_name="client_errors")
                     metadata_db.insert_ingested_files(service_id, errors_batch_records, table_name="client_errors")
                     metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_errors")

@@ -202,6 +202,20 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         }});
       }}
 
+      // 2b. Extract ALL custom events (user-pushed interactions)
+      if (payload.events && Array.isArray(payload.events)) {{
+        var customs = payload.events.filter(function(e) {{
+          return e.name && e.name !== 'faro.performance.navigation' && e.name.indexOf('faro.') !== 0;
+        }});
+        customs.forEach(function(e) {{
+          metrics.push({{
+            name: 'event_' + e.name,
+            value: 1.0,
+            rating: ''
+          }});
+        }});
+      }}
+
       // 3. Extract JS exception messages
       var errorMessage = '';
       var errorFile = '';
@@ -365,17 +379,26 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       // Can be configured per-service via rum_sampling_rate in config
       // Examples: 0.1 = 10%, 0.5 = 50%, 1.0 = 100%
       samplingRate: 1.0,
+      batching: {{
+        enabled: true,
+        sendTimeout: 10,
+        itemLimit: 1
+      }},
+
+
       // Filter to only send important events (drop resource tracking, session events)
       beforeSend: function(event) {{
         if (!event) {{
           return null;
         }}
+        console.log('Faro beforeSend:', JSON.stringify(event));
+
 
         // 1. If it's a batch payload structure (older Faro/fallback check)
         if (event.events && Array.isArray(event.events)) {{
           event.events = event.events.filter(function(e) {{
             var name = e.name || '';
-            return name === 'faro.exception' || name === 'faro.performance.navigation';
+            return name === 'faro.exception' || name === 'faro.performance.navigation' || name.indexOf('faro.') !== 0;
           }});
         }}
         if (event.measurements && Array.isArray(event.measurements)) {{
@@ -391,7 +414,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         // 2. Otherwise, treat as Faro's standard individual transport item (Faro v1/v2 spec)
         if (event.type === 'event') {{
           var name = (event.payload && event.payload.name) || '';
-          if (name === 'faro.exception' || name === 'faro.performance.navigation') {{
+          if (name === 'faro.exception' || name === 'faro.performance.navigation' || name.indexOf('faro.') !== 0) {{
             return event;
           }}
           return null;

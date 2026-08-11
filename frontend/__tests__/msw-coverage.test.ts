@@ -87,6 +87,7 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/backfill-window',
   'POST /api/admin/backfill-bundle-rollups',
   'POST /api/admin/usage-logging',
+  'POST /api/admin/reset-rum',
   'POST /api/provision/teardown',
   'PATCH /api/provision/services/:service_id/ngwaf-workspace',
 

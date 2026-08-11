@@ -450,13 +450,15 @@ async def rum_analytics(
             if not cur_any.fetchone()[0]:
                 return {"no_data": True}
 
+            distinct_id = "COALESCE(NULLIF(req_id, ''), concat(cid, '_', cast(timestamp as varchar)))"
+
             # B. Total match count within bounds
             cur_total = con.execute(
                 f"""
-                SELECT COUNT(DISTINCT req_id) FROM (
-                    SELECT req_id, timestamp, browser, os, device, pathname FROM client_vitals
+                SELECT COUNT(DISTINCT {distinct_id}) FROM (
+                    SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_vitals
                     UNION ALL
-                    SELECT req_id, timestamp, browser, os, device, pathname FROM client_errors
+                    SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_errors
                 )
                 WHERE {where_sql}
             """,
@@ -467,7 +469,7 @@ async def rum_analytics(
             # B2. Pageviews: beacons where there is at least one row in client_vitals that is not an event
             cur_pvs = con.execute(
                 f"""
-                SELECT COUNT(DISTINCT req_id)
+                SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql} AND metric_name NOT LIKE 'event_%'
             """,
@@ -478,7 +480,7 @@ async def rum_analytics(
             # B3. Interactions: beacons where there is at least one custom event row
             cur_ints = con.execute(
                 f"""
-                SELECT COUNT(DISTINCT req_id)
+                SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql} AND metric_name LIKE 'event_%'
             """,
@@ -489,7 +491,7 @@ async def rum_analytics(
             # B4. Errors: beacons from client_errors
             cur_errs = con.execute(
                 f"""
-                SELECT COUNT(DISTINCT req_id)
+                SELECT COUNT(DISTINCT {distinct_id})
                 FROM client_errors
                 WHERE {where_sql}
             """,
@@ -520,7 +522,7 @@ async def rum_analytics(
                 row[0]: row[1]
                 for row in con.execute(
                     f"""
-                SELECT COALESCE(browser, 'Unknown'), COUNT(DISTINCT req_id)
+                SELECT COALESCE(browser, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY browser
@@ -534,7 +536,7 @@ async def rum_analytics(
                 row[0]: row[1]
                 for row in con.execute(
                     f"""
-                SELECT COALESCE(os, 'Unknown'), COUNT(DISTINCT req_id)
+                SELECT COALESCE(os, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY os
@@ -548,7 +550,7 @@ async def rum_analytics(
                 row[0]: row[1]
                 for row in con.execute(
                     f"""
-                SELECT COALESCE(device, 'Unknown'), COUNT(DISTINCT req_id)
+                SELECT COALESCE(device, 'Unknown'), COUNT(DISTINCT {distinct_id})
                 FROM client_vitals
                 WHERE {where_sql}
                 GROUP BY device
@@ -564,8 +566,8 @@ async def rum_analytics(
                 WITH page_metrics AS (
                     SELECT
                         pathname AS path,
-                        COUNT(DISTINCT req_id) AS views,
-                        COALESCE(AVG(metric_value) FILTER (WHERE metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad')), 0.0) AS avg_load_time,
+                        COUNT(DISTINCT {distinct_id}) AS views,
+                        COALESCE(AVG(metric_value) FILTER (WHERE metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')), 0.0) AS avg_load_time,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('LCP', 'lcp')) AS lcp,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('CLS', 'cls')) AS cls
                     FROM client_vitals
@@ -575,7 +577,7 @@ async def rum_analytics(
                 page_errors AS (
                     SELECT
                         pathname AS path,
-                        COUNT(DISTINCT req_id) AS error_count
+                        COUNT(DISTINCT {distinct_id}) AS error_count
                     FROM client_errors
                     WHERE {where_sql} AND pathname IS NOT NULL
                     GROUP BY pathname
@@ -623,7 +625,7 @@ async def rum_analytics(
                         DATE_TRUNC('hour', timestamp) AS hour,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('LCP', 'lcp')) AS lcp,
                         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) FILTER (WHERE metric_name IN ('CLS', 'cls')) AS cls,
-                        COUNT(DISTINCT req_id) AS views
+                        COUNT(DISTINCT {distinct_id}) AS views
                     FROM client_vitals
                     WHERE {where_sql}
                     GROUP BY hour
@@ -631,7 +633,7 @@ async def rum_analytics(
                 hourly_errors AS (
                     SELECT
                         DATE_TRUNC('hour', timestamp) AS hour,
-                        COUNT(DISTINCT req_id) AS errors
+                        COUNT(DISTINCT {distinct_id}) AS errors
                     FROM client_errors
                     WHERE {where_sql}
                     GROUP BY hour
@@ -846,7 +848,13 @@ async def rum_analytics(
         logger.error(f"[rum] Analytics query failed for {service_id}: {e}", exc_info=True)
         from fastapi import HTTPException
 
-        raise HTTPException(status_code=500, detail=f"RUM analytics query failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "rum_analytics_failed",
+                "message": f"RUM analytics query failed: {str(e)}",
+            },
+        )
 
 
 @router.get("/{service_id}/rum/live-events")

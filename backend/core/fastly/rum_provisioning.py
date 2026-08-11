@@ -91,6 +91,9 @@ if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
         # - raw query: complete set of event_N_* params, parsed during ingest
         set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");
         set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");
+        if (req.http.x-fos-edge-data:fastly_req_id == "") {
+            set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;
+        }
         set req.http.x-fos-edge-data:rum_raw_query = req.url;
         set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");
         set req.http.x-fos-edge-data:rum_metric_value = querystring.get(req.url, "rum_metric_value");

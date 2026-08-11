@@ -102,7 +102,6 @@ function getInpColors(p75: number | null | undefined): CwvColors {
 }
 
 export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumClientProps) {
-  const [isLiveMode, setIsLiveMode] = useState(true);
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
   const isAnalyst = useIsAnalyst();
 
@@ -290,7 +289,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       return res.ok ? res.json() : null;
     },
     enabled: !!serviceId && !!status?.enabled,
-    refetchInterval: isLiveMode ? 10_000 : false, // Auto-refresh in live mode
+    refetchInterval: false,
   });
 
   // Fetch live ticker
@@ -301,8 +300,8 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       const res = await adminFetch(`/api/services/${serviceId}/rum/live-events`);
       return res.ok ? res.json() : [];
     },
-    enabled: !!serviceId && !!status?.enabled && isLiveMode,
-    refetchInterval: 5000, // Poll ticker every 5s
+    enabled: !!serviceId && !!status?.enabled,
+    refetchInterval: false,
   });
 
   if (isStatusLoading || isLoading) {
@@ -371,25 +370,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   return (
     <div className="space-y-6">
-      {/* Live Toggle & Indicator */}
-      <div className="flex justify-between items-center bg-muted/30 p-3 rounded-lg border">
-        <div className="flex items-center gap-2">
-          <span className={`h-2.5 w-2.5 rounded-full ${isLiveMode ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground'}`} />
-          <span className="text-sm font-semibold">{isLiveMode ? 'Live Updates Active' : 'Live Paused'}</span>
-          {analytics.beacon_count != null && (
-            <span className="ml-2 text-xs bg-blue-500/10 text-blue-500 px-2.5 py-0.5 rounded-full font-semibold">
-              {analytics.beacon_count} beacons
-            </span>
-          )}
-        </div>
-        <button
-          onClick={() => setIsLiveMode(!isLiveMode)}
-          className={`text-xs px-4 py-1.5 rounded-md font-medium transition ${isLiveMode ? 'bg-emerald-500 text-white' : 'bg-primary/10 text-primary hover:bg-primary/20'}`}
-        >
-          {isLiveMode ? 'Pause Auto-Refresh' : 'Go Live'}
-        </button>
-      </div>
-
       {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
 
       {/* Summary KPI Cards Row */}

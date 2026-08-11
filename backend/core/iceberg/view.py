@@ -1066,7 +1066,22 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             f"FROM {read_parquet_expr}"
         )
 
-    if local_paths:
+    use_iceberg_scan = False
+    if iceberg_loc and source.get("access_level") != "read_only" and not iceberg_unreadable:
+        # If there are S3 paths (or we are not local-only and have no local paths), we must scan from S3
+        if s3_paths or (not local_paths and not _core_mod._is_local_only_source(source)):
+            use_iceberg_scan = True
+
+    if use_iceberg_scan and iceberg_loc:
+        parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
+        logger.info(
+            "%s Using iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",
+            _core_mod._ICE,
+            source_key,
+            len(s3_paths),
+            len(local_iceberg_files),
+        )
+    elif local_paths:
         from backend.utils.sql_validator import escape_sql_literal as _esl
 
         safe_data_dir = _esl(f"{data_dir}/**/*.parquet")
@@ -1074,32 +1089,6 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             _strip_computed(
                 f"read_parquet('{safe_data_dir}', union_by_name=true, filename=true, hive_partitioning=false)"
             )
-        )
-
-    # Use iceberg_scan when:
-    # (a) plan_files() returned S3 URIs and no local files are cached yet, OR
-    # (b) plan_files() failed silently but iceberg_loc is known (avoids WHERE false view)
-    #
-    # EXCEPT when plan_files() already proved (via FileNotFoundError, see
-    # above) that the current snapshot references a missing file —
-    # iceberg_scan() would hit the exact same missing file through DuckDB's
-    # native iceberg extension, which crashes the whole process rather than
-    # raising a catchable Python exception. Falls through to the "no
-    # parts" empty-view branch below instead.
-    if (
-        iceberg_loc
-        and not local_paths
-        and (s3_paths or not local_iceberg_files)
-        and source.get("access_level") != "read_only"
-        and not iceberg_unreadable
-    ):
-        parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
-        logger.info(
-            "%s Falling back to iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",
-            _core_mod._ICE,
-            source_key,
-            len(s3_paths),
-            len(local_iceberg_files),
         )
     elif iceberg_unreadable:
         logger.warning(
