@@ -2005,3 +2005,21 @@ def test_object_storage_enabled_delegates_to_product_enabled():
     with patch("backend.provision.fos_setup.product_enabled", return_value=True) as m:
         assert fos_setup.object_storage_enabled("tok") is True
     assert m.call_args.args == ("tok", "object_storage")
+
+
+def test_reconcile_takes_credentials_in_body_not_query_string():
+    """A Fastly API token in a query string lands in every access log, proxy
+    log and Referer along the way. The endpoint must accept service_id/token
+    in the request body, and must NOT declare them as query parameters."""
+    params = app.openapi()["paths"]["/api/provision/reconcile"]["post"].get("parameters", [])
+    assert [p["name"] for p in params if p.get("in") == "query"] == []
+    assert "requestBody" in app.openapi()["paths"]["/api/provision/reconcile"]["post"]
+
+
+def test_reconcile_rejects_missing_credentials():
+    """Empty body must 400 rather than starting a reconcile thread with no token."""
+    client = TestClient(app)
+    with patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_reconcile:
+        response = client.post("/api/provision/reconcile", json={})
+    assert response.status_code == 400
+    mock_reconcile.assert_not_called()

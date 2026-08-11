@@ -27,6 +27,7 @@ from backend.models.provision import (
     ProvisionExecuteRequest,
     ProvisionIngestResponse,
     ProvisionLakeInfoResponse,
+    ProvisionReconcileRequest,
     ProvisionTeardownRequest,
     ProvisionValidateRequest,
     ProvisionValidateResponse,
@@ -758,22 +759,32 @@ def provision_execute(req: ProvisionExecuteRequest):
 
 
 @router.post("/reconcile")
-def provision_reconcile(service_id: str, token: str):
+def provision_reconcile(body: ProvisionReconcileRequest):
     """Reconcile VCL state for a service (auto-detects and removes legacy snippets).
 
     Streams SSE events as the reconciliation proceeds through the 8-step control loop.
     This endpoint is called during UI deployment to ensure clean VCL state and
     automatic migration from pre-2.2 legacy snippets to consolidated VCL.
 
+    ``service_id`` and ``token`` arrive in the request body, never the query
+    string — a Fastly API token in a URL is logged by every hop that sees it.
+
     Args:
-        service_id: Fastly service ID.
-        token: Fastly API token.
+        body: Fastly service ID + API token.
 
     Returns:
         SSE stream with reconciliation status events.
     """
     import queue
     import threading
+
+    service_id = body.service_id
+    token = body.token
+    if not service_id or not token:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("service_id and token are required"),
+        )
 
     from backend.provision.declarative.reconciler import reconcile_vcl_state
 

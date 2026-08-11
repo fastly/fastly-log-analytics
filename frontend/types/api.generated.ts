@@ -2949,9 +2949,11 @@ export interface paths {
          *     This endpoint is called during UI deployment to ensure clean VCL state and
          *     automatic migration from pre-2.2 legacy snippets to consolidated VCL.
          *
+         *     ``service_id`` and ``token`` arrive in the request body, never the query
+         *     string — a Fastly API token in a URL is logged by every hop that sees it.
+         *
          *     Args:
-         *         service_id: Fastly service ID.
-         *         token: Fastly API token.
+         *         body: Fastly service ID + API token.
          *
          *     Returns:
          *         SSE stream with reconciliation status events.
@@ -9081,6 +9083,28 @@ export interface components {
             error?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * ProvisionReconcileRequest
+         * @description Body for ``POST /api/provision/reconcile`` — the service to reconcile
+         *     and the Fastly token to do it with.
+         *
+         *     Both were query parameters until 2026-08-11. A Fastly API token in a
+         *     query string lands in every access log, proxy log and ``Referer`` along
+         *     the way; moving it into the body keeps it out of the URL. ``service_id``
+         *     came along so the two stay in one place.
+         */
+        ProvisionReconcileRequest: {
+            /**
+             * Service Id
+             * @default
+             */
+            service_id: string;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
         };
         /** ProvisionService */
         ProvisionService: {
@@ -28222,15 +28246,16 @@ export interface operations {
     };
     provision_reconcile_api_provision_reconcile_post: {
         parameters: {
-            query: {
-                service_id: string;
-                token: string;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProvisionReconcileRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

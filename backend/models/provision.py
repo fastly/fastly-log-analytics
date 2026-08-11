@@ -79,6 +79,19 @@ class ProvisionValidateRequest(BaseModel):
     service_id: str = ""
 
 
+class ProvisionReconcileRequest(BaseModel):
+    """Body for ``POST /api/provision/reconcile`` — the service to reconcile
+    and the Fastly token to do it with.
+
+    Both were query parameters until 2026-08-11. A Fastly API token in a
+    query string lands in every access log, proxy log and ``Referer`` along
+    the way; moving it into the body keeps it out of the URL. ``service_id``
+    came along so the two stay in one place."""
+
+    service_id: str = ""
+    token: str = ""
+
+
 class ProvisionTeardownRequest(BaseModel):
     """Body for ``POST /api/provision/teardown`` — destructive removal of a
     provisioned service. ``remove_*`` flags toggle each component.

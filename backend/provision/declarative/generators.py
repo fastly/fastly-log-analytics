@@ -224,14 +224,39 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
+
+        # The two RUM scripts we host are excluded structurally, not via
+        # exclude_url_regex. DEFAULT_ASSET_EXT_REGEX does already match
+        # ".js", but that default is operator-overridable — a narrower
+        # override would silently start routing our own asset requests
+        # through the scorer. These paths are infrastructure, not scoreable
+        # visitor navigation, so the guard must not depend on operator
+        # config. Exact path equality (not a regex) mirrors how the
+        # asset-fetch routing itself tests these paths, so the two can't
+        # drift apart.
+        #
+        # This is also a correctness fix, not just noise reduction: the
+        # scoring block ends in return(pass), which exits vcl_recv before
+        # the RUM asset routing below it ever runs. Without this guard a
+        # GET /js/rum.js pays a full scorer round-trip and only reaches FOS
+        # on the post-scoring restart.
+        rum_asset_guard = ""
+        if state.rum_enabled:
+            rum_asset_guard = ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"'
+
         edge_first_hop_statements.append("")
         edge_first_hop_statements.append("  # Section 4: Session Scoring (vcl_recv)")
         edge_first_hop_statements.append("  # Session Scoring: route the first-pass dynamic request to the scorer.")
         edge_first_hop_statements.append(
             "  # Edge-only — fastly.ff.visits_this_service == 0 is true only at the true edge."
         )
+        if rum_asset_guard:
+            edge_first_hop_statements.append(
+                "  # RUM assets we serve ourselves are never scored — see rum_asset_guard in generators.py."
+            )
         edge_first_hop_statements.append(
-            f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected && std.tolower(req.url) !~ "{effective_regex}") {{'
+            f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected{rum_asset_guard}'
+            f' && std.tolower(req.url) !~ "{effective_regex}") {{'
         )
         edge_first_hop_statements.append(f"    set req.backend = {SCORING_BACKEND_VCL_NAME};")
         edge_first_hop_statements.append("    # Skip NGWAF inspection on the scoring sub-fetch ONLY.")
@@ -448,15 +473,26 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     # could reach it — purging only clears the edge. Same decoupling as the
     # Faro bundle: Surrogate-Control (edge-only) long, Cache-Control
     # (browser-visible) short, no `immutable`.
+    #
+    # Gated on beresp.status == 200 for the same reason /js/faro-sdk.js is
+    # (the F-3 audit finding): without the check, a transient FOS 403/404 —
+    # mid-upload, or a bucket-policy blip — gets cached at the edge for a
+    # full day, so every visitor loads a broken tracker until the TTL
+    # expires or someone notices and purges.
     if subroutine == "vcl_fetch":
         body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
 if (req.url.path == "/js/rum.js") {
-    set beresp.ttl = 86400s;
-    set beresp.cacheable = true;
-    set beresp.http.Surrogate-Key = "rum-js";
-    set beresp.http.Surrogate-Control = "max-age=86400";
-    set beresp.http.Cache-Control = "public, max-age=300";
+    if (beresp.status == 200) {
+        set beresp.ttl = 86400s;
+        set beresp.cacheable = true;
+        set beresp.http.Surrogate-Key = "rum-js";
+        set beresp.http.Surrogate-Control = "max-age=86400";
+        set beresp.http.Cache-Control = "public, max-age=300";
+    } else {
+        set beresp.ttl = 0s;
+        set beresp.cacheable = false;
+    }
 }"""
         if RUM_FARO_FETCH_NAME in asset_fetch_dict:
             body = body + "\n\n" + asset_fetch_dict[RUM_FARO_FETCH_NAME]

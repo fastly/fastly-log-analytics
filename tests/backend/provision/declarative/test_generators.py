@@ -125,6 +125,78 @@ class TestGeneratorVCLStructure:
         vcl_disabled = generate_consolidated_snippet(state_disabled, "vcl_fetch")
         assert "set beresp.ttl = 86400s;" not in vcl_disabled
 
+    def test_rum_js_caching_gates_on_200_status(self):
+        """Same F-3 class of bug the Faro bundle was fixed for: without a
+        beresp.status check, a transient FOS 403/404 (mid-upload, or a
+        bucket-policy blip) gets cached at the edge for a full day, so every
+        visitor loads a broken tracker until the TTL expires."""
+        state = FeatureState.from_config(
+            {"service_id": "srv_test", "log_period": 60, "sample_rate": 100, "rum_enabled": True}
+        )
+        vcl = generate_consolidated_snippet(state, "vcl_fetch")
+
+        rum_block = vcl.split('if (req.url.path == "/js/rum.js") {', 1)[1]
+        status_idx = rum_block.index("if (beresp.status == 200)")
+        # Every caching directive must sit inside the 200 branch, not above it.
+        for directive in (
+            "set beresp.ttl = 86400s;",
+            "set beresp.cacheable = true;",
+            'set beresp.http.Surrogate-Key = "rum-js";',
+        ):
+            assert status_idx < rum_block.index(directive)
+        # And the non-200 branch must explicitly refuse to cache.
+        assert "set beresp.cacheable = false;" in rum_block
+
+
+class TestScoringExcludesRumAssets:
+    """Section 4 must never route our own hosted RUM scripts to the scorer."""
+
+    def _state(self, rum_enabled, exclude_url_regex=None):
+        cfg = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "sample_rate": 100,
+            "rum_enabled": rum_enabled,
+            "scoring": {"enabled": True, "request_secret": "s3cret", "domain": "scorer.example.com"},
+        }
+        if exclude_url_regex is not None:
+            cfg["scoring"]["exclude_url_regex"] = exclude_url_regex
+        return FeatureState.from_config(cfg)
+
+    def test_rum_assets_excluded_from_scoring_when_rum_enabled(self):
+        vcl = generate_consolidated_snippet(self._state(rum_enabled=True), "vcl_recv")
+        assert 'req.url.path != "/js/rum.js"' in vcl
+        assert 'req.url.path != "/js/faro-sdk.js"' in vcl
+
+    def test_no_rum_guard_when_rum_disabled(self):
+        """The guard is dead weight on a service with no RUM routes."""
+        vcl = generate_consolidated_snippet(self._state(rum_enabled=False), "vcl_recv")
+        assert 'req.url.path != "/js/rum.js"' not in vcl
+
+    def test_guard_survives_a_narrow_operator_exclude_regex(self):
+        """The load-bearing case. DEFAULT_ASSET_EXT_REGEX happens to match
+        '.js', so with the default in place the exclusion looks fine either
+        way. But exclude_url_regex is operator-overridable — a narrower
+        override must not silently start routing our own asset requests
+        through the scorer, so the guard cannot depend on that config."""
+        vcl = generate_consolidated_snippet(self._state(rum_enabled=True, exclude_url_regex=r"^/static/"), "vcl_recv")
+        assert "^/static/" in vcl
+        assert 'req.url.path != "/js/rum.js"' in vcl
+        assert 'req.url.path != "/js/faro-sdk.js"' in vcl
+
+    def test_guard_precedes_the_scoring_return_pass(self):
+        """The scoring block ends in return(pass), which exits vcl_recv before
+        the RUM asset routing below it runs. The guard therefore has to be
+        part of the same condition — not a separate check after it — or a GET
+        /js/rum.js still pays a scorer round-trip before reaching FOS."""
+        vcl = generate_consolidated_snippet(self._state(rum_enabled=True), "vcl_recv")
+
+        guard_idx = vcl.index('req.url.path != "/js/rum.js"')
+        pass_idx = vcl.index("return(pass);")
+        assert guard_idx < pass_idx
+        # Same VCL statement: no ')' closing the if-condition between them.
+        assert "{" in vcl[guard_idx:pass_idx]
+
 
 class TestLoggingEndpointGeneration:
     """Test logging endpoint generation."""
@@ -556,11 +628,16 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {
 # Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
 if (req.url.path == "/js/rum.js") {
-    set beresp.ttl = 86400s;
-    set beresp.cacheable = true;
-    set beresp.http.Surrogate-Key = "rum-js";
-    set beresp.http.Surrogate-Control = "max-age=86400";
-    set beresp.http.Cache-Control = "public, max-age=300";
+    if (beresp.status == 200) {
+        set beresp.ttl = 86400s;
+        set beresp.cacheable = true;
+        set beresp.http.Surrogate-Key = "rum-js";
+        set beresp.http.Surrogate-Control = "max-age=86400";
+        set beresp.http.Cache-Control = "public, max-age=300";
+    } else {
+        set beresp.ttl = 0s;
+        set beresp.cacheable = false;
+    }
 }"""
         )
 

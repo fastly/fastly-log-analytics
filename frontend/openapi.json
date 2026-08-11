@@ -25242,28 +25242,18 @@
           "provision"
         ],
         "summary": "Provision Reconcile",
-        "description": "Reconcile VCL state for a service (auto-detects and removes legacy snippets).\n\nStreams SSE events as the reconciliation proceeds through the 8-step control loop.\nThis endpoint is called during UI deployment to ensure clean VCL state and\nautomatic migration from pre-2.2 legacy snippets to consolidated VCL.\n\nArgs:\n    service_id: Fastly service ID.\n    token: Fastly API token.\n\nReturns:\n    SSE stream with reconciliation status events.",
+        "description": "Reconcile VCL state for a service (auto-detects and removes legacy snippets).\n\nStreams SSE events as the reconciliation proceeds through the 8-step control loop.\nThis endpoint is called during UI deployment to ensure clean VCL state and\nautomatic migration from pre-2.2 legacy snippets to consolidated VCL.\n\n``service_id`` and ``token`` arrive in the request body, never the query\nstring \u2014 a Fastly API token in a URL is logged by every hop that sees it.\n\nArgs:\n    body: Fastly service ID + API token.\n\nReturns:\n    SSE stream with reconciliation status events.",
         "operationId": "provision_reconcile_api_provision_reconcile_post",
-        "parameters": [
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Id"
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionReconcileRequest"
+              }
             }
           },
-          {
-            "name": "token",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Token"
-            }
-          }
-        ],
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -46775,6 +46765,23 @@
         "type": "object",
         "title": "ProvisionLakeInfoResponse",
         "description": "``fetch_lake_info`` result. Only the branch-stable keys are declared;\nthe table-details payload (row counts / calendar / extents) varies by\nIceberg layout and rides through ``extra``."
+      },
+      "ProvisionReconcileRequest": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id",
+            "default": ""
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ProvisionReconcileRequest",
+        "description": "Body for ``POST /api/provision/reconcile`` \u2014 the service to reconcile\nand the Fastly token to do it with.\n\nBoth were query parameters until 2026-08-11. A Fastly API token in a\nquery string lands in every access log, proxy log and ``Referer`` along\nthe way; moving it into the body keeps it out of the URL. ``service_id``\ncame along so the two stay in one place."
       },
       "ProvisionService": {
         "properties": {
