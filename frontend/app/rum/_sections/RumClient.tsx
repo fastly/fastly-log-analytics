@@ -481,52 +481,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         </AnalyticsCard>
       </div>
 
-      {/* Beacons Over Time Row */}
-      <div className="mb-6">
-        <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
-          <TimeSeriesChart
-            data={[
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.pageviews || [],
-                name: 'Pageviews',
-                type: 'bar',
-                marker: { color: '#3b82f6' },
-              },
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.interactions || [],
-                name: 'Interactions',
-                type: 'bar',
-                marker: { color: '#10b981' },
-              },
-              {
-                x: formattedTimestamps,
-                y: analytics.trends.errors || [],
-                name: 'Errors',
-                type: 'bar',
-                marker: { color: '#f43f5e' },
-              },
-            ]}
-            layout={{
-              barmode: 'stack',
-              margin: { t: 30, b: 40, l: 30, r: 10 },
-              legend: {
-                orientation: 'h',
-                y: 1.08,
-                x: 0.5,
-                xanchor: 'center',
-                yanchor: 'bottom',
-              },
-            }}
-            startTime={startTime}
-            endTime={endTime}
-            timezone={timezone}
-            height={250}
-          />
-        </AnalyticsCard>
-      </div>
-
       {/* Trends Row */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Web Vitals Trend" icon={<TrendingUp />}>
@@ -599,7 +553,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
       {/* Worst Pages & Error tables */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <AnalyticsCard title="Worst Performing Pages" icon={<Monitor />}>
+        <AnalyticsCard title="Worst Performing Pages" icon={<Monitor />} >
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left border-collapse">
               <thead>
@@ -696,6 +650,52 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             ]}
             layout={{ height: 250, margin: { t: 10, b: 10, l: 10, r: 10 }, showlegend: false }}
             a11yTitle="Device Distribution Donut Chart"
+          />
+        </AnalyticsCard>
+      </div>
+
+      {/* Beacons Over Time Row */}
+      <div className="mb-6">
+        <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
+          <TimeSeriesChart
+            data={[
+              {
+                x: formattedTimestamps,
+                y: analytics.trends.pageviews || [],
+                name: 'Pageviews',
+                type: 'bar',
+                marker: { color: '#3b82f6' },
+              },
+              {
+                x: formattedTimestamps,
+                y: analytics.trends.interactions || [],
+                name: 'Interactions',
+                type: 'bar',
+                marker: { color: '#10b981' },
+              },
+              {
+                x: formattedTimestamps,
+                y: analytics.trends.errors || [],
+                name: 'Errors',
+                type: 'bar',
+                marker: { color: '#f43f5e' },
+              },
+            ]}
+            layout={{
+              barmode: 'stack',
+              margin: { t: 30, b: 40, l: 30, r: 10 },
+              legend: {
+                orientation: 'h',
+                y: 1.08,
+                x: 0.5,
+                xanchor: 'center',
+                yanchor: 'bottom',
+              },
+            }}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height={250}
           />
         </AnalyticsCard>
       </div>
