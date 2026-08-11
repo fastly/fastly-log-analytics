@@ -189,7 +189,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
         assert len(rum) == 1, "Should have RUM endpoint when RUM enabled"
-        assert "/raw_rum/" in rum[0].path
+        assert "/rum/raw/" in rum[0].path
         assert rum[0].response_condition == "rum_log_condition"
 
     def test_generator_rum_endpoint_not_created_when_disabled(self):

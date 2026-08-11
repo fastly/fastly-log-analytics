@@ -798,7 +798,7 @@ def disable_rum(
             from backend.provision.fos_setup import delete_fos_prefix
 
             prefix = cfg.get("fos_prefix", "")
-            rum_prefix = f"{prefix.strip('/')}/raw_rum/" if prefix else "raw_rum/"
+            rum_prefix = f"{prefix.strip('/')}/rum/raw/" if prefix else "rum/raw/"
             if status_cb:
                 status_cb("⏳ Deleting RUM cloud files...")
             delete_fos_prefix(

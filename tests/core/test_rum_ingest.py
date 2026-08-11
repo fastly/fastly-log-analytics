@@ -162,7 +162,7 @@ def test_ingest_rum_logs_success(
     mock_paginator.paginate.return_value = [
         {
             "Contents": [
-                {"Key": "raw_rum/rum_log_0.json.gz", "Size": len(gzipped_content)},
+                {"Key": "rum/raw/rum_log_0.json.gz", "Size": len(gzipped_content)},
             ]
         }
     ]
@@ -259,7 +259,7 @@ def test_ingest_rum_logs_faro_dual_fan_out(
     mock_paginator.paginate.return_value = [
         {
             "Contents": [
-                {"Key": "raw_rum/rum_log_1.json.gz", "Size": len(gzipped_content)},
+                {"Key": "rum/raw/rum_log_1.json.gz", "Size": len(gzipped_content)},
             ]
         }
     ]

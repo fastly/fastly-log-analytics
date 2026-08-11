@@ -60,7 +60,7 @@ def test_usage_current_storage_success(
 def test_usage_current_storage_splits_out_rum_bytes(
     mock_load_config, mock_get_storage_stats, mock_get_connection, s3_mock, fos_source, test_client
 ):
-    """RUM beacon objects live under ``raw_rum/`` inside the same bucket as
+    """RUM beacon objects live under ``rum/raw/`` inside the same bucket as
     regular logs. The endpoint must report their size separately
     (``rum_bytes``) and subtract it from the regular-log total
     (``regular_log_bytes``) rather than double-counting it into both."""
@@ -73,7 +73,7 @@ def test_usage_current_storage_splits_out_rum_bytes(
     rum_object_size = 777
     s3_mock.put_object(
         Bucket="test-bucket",
-        Key="test-prefix/raw_rum/2026-08-05T00-00-00.log.gz",
+        Key="test-prefix/rum/raw/2026-08-05T00-00-00.log.gz",
         Body=b"r" * rum_object_size,
     )
 

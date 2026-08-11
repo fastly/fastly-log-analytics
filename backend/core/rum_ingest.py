@@ -73,7 +73,7 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
         prefix = src.get("prefix", "").strip("/")
-        rum_prefix = f"{prefix}/raw_rum/" if prefix else "raw_rum/"
+        rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
 
         cutoff_time = datetime.now(UTC) - timedelta(days=delete_after_days)
         files_deleted = 0
@@ -288,7 +288,7 @@ def ingest_rum_logs(
         # Use the shared list_fos_files helper to discover files in raw_rum/ prefix
         list_gen = list_fos_files(
             src=src,
-            prefix_subpath="raw_rum/",
+            prefix_subpath="rum/raw/",
             already_ingested=already_ingested,
             incremental_only=False,
             elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",

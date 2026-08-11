@@ -493,7 +493,7 @@ def usage_current_storage(
             s3 = _get_fos_client(src)
             bucket = src["bucket"]
             prefix = src.get("prefix", "").strip("/")
-            rum_prefix = f"{prefix}/raw_rum/" if prefix else "raw_rum/"
+            rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
             paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
                 for obj in page.get("Contents", []):
