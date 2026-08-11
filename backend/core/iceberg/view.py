@@ -611,16 +611,17 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     return True
 
 
-def _rebuild_locked(con, source: dict, source_key: str, target_table: str = "logs") -> None:
+def _rebuild_locked(con, source: dict, source_key: str, target_table: str = "logs", force: bool = False) -> None:
     """Run the slow path under the lock and signal completion."""
     ev = threading.Event()
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     with _rebuild_signals_lock:
         _rebuild_signals[cache_key] = ev
     try:
-        _core_mod._update_iceberg_view_locked(con, source, target_table=target_table)
-    except TypeError:
-        _core_mod._update_iceberg_view_locked(con, source)
+        try:
+            _core_mod._update_iceberg_view_locked(con, source, target_table=target_table, force=force)
+        except TypeError:
+            _core_mod._update_iceberg_view_locked(con, source)
     finally:
         ev.set()
         with _rebuild_signals_lock:
@@ -712,12 +713,12 @@ def update_iceberg_view(
                 )
                 return
             try:
-                _rebuild_locked(con, source, source_key, target_table=target_table)
+                _rebuild_locked(con, source, source_key, target_table=target_table, force=force)
             finally:
                 lock.release()
             return
     try:
-        _rebuild_locked(con, source, source_key, target_table=target_table)
+        _rebuild_locked(con, source, source_key, target_table=target_table, force=force)
     finally:
         lock.release()
 
@@ -740,7 +741,7 @@ def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bo
         return False
 
 
-def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs") -> None:
+def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", force: bool = False) -> None:
     import sqlite3
 
     from backend.core.duckdb import _cache_dir, _safe_table_name
@@ -932,7 +933,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs") -
         prior = _view_cache.get(cache_key)
         prior_sql = prior[3] if prior else None
         prior_was_empty = (not prior_sql) or ("WHERE false" in prior_sql)
-        if prior_sql and not prior_was_empty:
+        if not force and prior_sql and not prior_was_empty:
             logger.info(
                 "[iceberg] %s: skipping empty-view downgrade (catalog re-fetch "
                 "returned no data but cached view is non-empty — likely transient)",
@@ -972,7 +973,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs") -
             except Exception:
                 last_good_rows = 0
 
-        if ingested_rows > 0 or last_good_rows > 0:
+        if not force and (ingested_rows > 0 or last_good_rows > 0):
             logger.info(
                 "[iceberg] %s: skipping empty-view downgrade — have data "
                 "(ingest rollup %d rows / %d files, last-known-good %d rows); "
