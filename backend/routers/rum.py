@@ -340,9 +340,20 @@ async def update_rum_settings(
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": f"Failed to upload RUM tracker wrapper to FOS: {e}"})
 
+    # Reconcile VCL state so the new custom condition is deployed to Fastly
+    from backend.provision.declarative.reconciler import reconcile_vcl_state
+
+    try:
+        reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Failed to reconcile and deploy updated RUM conditions to Fastly: {e}"},
+        )
+
     return {
         "ok": True,
-        "message": "RUM capture settings updated and wrapper re-deployed successfully!",
+        "message": "RUM capture settings updated, wrapper re-deployed, and Fastly configuration reconciled!",
         "skipped": res.get("skipped", False),
     }
 
