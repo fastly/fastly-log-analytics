@@ -107,7 +107,10 @@ class TestGeneratorVCLStructure:
         vcl_enabled = generate_consolidated_snippet(state_enabled, "vcl_fetch")
         assert "set beresp.ttl = 86400s;" in vcl_enabled
         assert "set beresp.cacheable = true;" in vcl_enabled
-        assert 'set beresp.http.Cache-Control = "max-age=86400, public, immutable";' in vcl_enabled
+        assert 'set beresp.http.Surrogate-Key = "rum-js";' in vcl_enabled
+        assert 'set beresp.http.Surrogate-Control = "max-age=86400";' in vcl_enabled
+        assert 'set beresp.http.Cache-Control = "public, max-age=300";' in vcl_enabled
+        assert "immutable" not in vcl_enabled
         assert 'req.url.path == "/js/rum.js"' in vcl_enabled
 
         # 2. RUM disabled
@@ -550,11 +553,14 @@ if (req.url.path == "/js/rum.js" && req.method == "GET") {
         assert (
             vcl_fetch
             == """# Section 5: RUM (vcl_fetch)
-# Cache RUM tracker JS aggressively; updates use ?v=X query string busting
+# Cache RUM tracker JS at the edge; browsers get a short TTL so a
+# Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
 if (req.url.path == "/js/rum.js") {
     set beresp.ttl = 86400s;
     set beresp.cacheable = true;
-    set beresp.http.Cache-Control = "max-age=86400, public, immutable";
+    set beresp.http.Surrogate-Key = "rum-js";
+    set beresp.http.Surrogate-Control = "max-age=86400";
+    set beresp.http.Cache-Control = "public, max-age=300";
 }"""
         )
 
@@ -584,10 +590,13 @@ if (req.url.path == "/js/rum.js") {
         state = self._rum_state(faro_version="2.9.0")
         vcl_fetch = generate_consolidated_snippet(state, "vcl_fetch")
         assert '"/js/faro-sdk.js" && req.http.X-FOS-Request == "1"' in vcl_fetch
-        assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk";' in vcl_fetch
+        assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk rum-js";' in vcl_fetch
         assert "set beresp.ttl = 604800s;" in vcl_fetch
         # Existing rum.js caching must remain untouched.
         assert "set beresp.ttl = 86400s;" in vcl_fetch
+        # Both hosted scripts carry the shared key reconciliation purges.
+        keys = re.findall(r'Surrogate-Key = "([^"]+)"', vcl_fetch)
+        assert [set(k.split()) for k in keys] == [{"rum-js"}, {"rum-faro-sdk", "rum-js"}]
 
     def test_faro_version_invalid_rejected_at_generation(self):
         """An invalid faro_version string is rejected, not silently interpolated."""

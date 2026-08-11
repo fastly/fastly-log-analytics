@@ -10,6 +10,7 @@ Phase 3 (deferred):
   - Self-hosted Faro Web SDK bundle (/js/faro-sdk.js), optional via faro_version — same
     FOS backend + SigV4 signing as /js/rum.js, plus a purgeable cache snippet keyed off
     Surrogate-Key "rum-faro-sdk" (matches the cron purge in backend/cron/jobs/rum_sync.py)
+    and "rum-js" (the shared tag on both hosted scripts, purged by reconciliation)
 """
 
 from __future__ import annotations
@@ -301,12 +302,16 @@ def _generate_faro_fetch_vcl() -> str:
     upgrade), while the browser gets a short one so a stale client re-checks
     soon after an upgrade even if a purge is missed.
 
-    Surrogate-Key MUST be exactly "rum-faro-sdk" — the FOS-sync cron
+    Surrogate-Key MUST keep "rum-faro-sdk" — the FOS-sync cron
     (backend/cron/jobs/rum_sync.py::_faro_purge_surrogate_key) and
     upgrade_faro_version (backend/provision/rum_orchestrator_v2.py::
-    _purge_faro_surrogate_key) both purge this exact key after
+    _purge_faro_surrogate_key) both purge that exact key after
     uploading/re-uploading a version, so the cache and the purge path stay
-    pinned together.
+    pinned together. The second key, "rum-js", is the shared tag across
+    BOTH hosted scripts (this bundle and /js/rum.js, tagged in
+    backend.provision.declarative.generators._generate_rum_section_vcl) so
+    reconciliation can invalidate everything it serves with one key purge —
+    see backend.provision.declarative.reconciler._purge_rum_surrogate_key.
 
     Follow-up (not this pass): a version-bearing public path (e.g.
     ``/js/faro-sdk-v{version}.js``) would let the browser cache
@@ -319,7 +324,7 @@ if (req.url.path == "/js/faro-sdk.js" && req.http.X-FOS-Request == "1") {
     if (beresp.status == 200) {
         set beresp.ttl = 604800s;
         set beresp.cacheable = true;
-        set beresp.http.Surrogate-Key = "rum-faro-sdk";
+        set beresp.http.Surrogate-Key = "rum-faro-sdk rum-js";
         set beresp.http.Surrogate-Control = "max-age=604800";
         set beresp.http.Cache-Control = "public, max-age=300";
     } else {

@@ -438,13 +438,25 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
         body = _generate_vcl_error_handler()
         return f"# Section 5: RUM ({subroutine})\n{body}"
 
-    # Handle vcl_fetch: aggressive caching since updates use ?v= query string busting
+    # Handle vcl_fetch: long edge TTL, short browser TTL, tagged for purging.
+    #
+    # The ?v= hash in the embed snippet (frontend/app/rum/_sections/
+    # RumPageClient.tsx) is derived from the service id, NOT the tracker
+    # contents, so the URL is stable across tracker updates. The previous
+    # "max-age=86400, public, immutable" therefore meant a browser kept
+    # serving a stale tracker for up to 24h after a reconcile, and no purge
+    # could reach it — purging only clears the edge. Same decoupling as the
+    # Faro bundle: Surrogate-Control (edge-only) long, Cache-Control
+    # (browser-visible) short, no `immutable`.
     if subroutine == "vcl_fetch":
-        body = """# Cache RUM tracker JS aggressively; updates use ?v=X query string busting
+        body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
+# Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
 if (req.url.path == "/js/rum.js") {
     set beresp.ttl = 86400s;
     set beresp.cacheable = true;
-    set beresp.http.Cache-Control = "max-age=86400, public, immutable";
+    set beresp.http.Surrogate-Key = "rum-js";
+    set beresp.http.Surrogate-Control = "max-age=86400";
+    set beresp.http.Cache-Control = "public, max-age=300";
 }"""
         if RUM_FARO_FETCH_NAME in asset_fetch_dict:
             body = body + "\n\n" + asset_fetch_dict[RUM_FARO_FETCH_NAME]

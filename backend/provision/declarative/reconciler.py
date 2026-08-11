@@ -416,16 +416,6 @@ def reconcile_vcl_state(
                     _activate_draft(service_id, token, draft_version)
                     result.activated_version = draft_version
 
-                    # Purge RUM URLs to invalidate any cached 404s/errors or old scripts
-                    try:
-                        _purge_rum_urls(service_id, token, draft_version)
-                    except Exception as e:
-                        import logging
-
-                        logging.getLogger("backend.scheduler").warning(
-                            f"Failed to purge RUM URLs for service {service_id}: {e}"
-                        )
-
                     # Step 8.5: Upload RUM tracker JS now that the just-
                     # activated VCL actually serves the route it depends on
                     # (/js/faro-sdk.js). Must run AFTER activation — never
@@ -433,6 +423,15 @@ def reconcile_vcl_state(
                     # live yet in that case).
                     if desired_state.rum_enabled:
                         _upload_rum_tracker_best_effort(service_id, token, status_cb)
+
+                    # Purge the shared RUM surrogate key to invalidate cached
+                    # 404s/errors from before the route existed, and any old
+                    # script bytes. Runs AFTER the upload above — purging
+                    # first cannot invalidate bytes that are uploaded
+                    # afterwards. Ungated on rum_enabled on purpose: a
+                    # reconcile that DISABLES RUM still needs the previously
+                    # cached (and still key-tagged) scripts dropped.
+                    _purge_rum_surrogate_key(service_id, token)
 
                     # Update local config with activation metadata
                     cfg = json.loads(config_path.read_text())
@@ -995,66 +994,42 @@ def _upload_state_to_fos(service_id: str, state: FeatureState) -> None:
         pass
 
 
-def _fetch_service_domains(service_id: str, version: int, token: str) -> list[str]:
-    """Retrieve all domains configured on the given service version."""
+RUM_SURROGATE_KEY = "rum-js"
+
+
+def _purge_rum_surrogate_key(service_id: str, token: str) -> None:
+    """Purge the ``rum-js`` surrogate key so the edge drops every cached RUM script.
+
+    Both hosted scripts are tagged ``Surrogate-Key: rum-js`` in vcl_fetch —
+    /js/rum.js in ``backend.provision.declarative.generators.
+    _generate_rum_section_vcl`` and /js/faro-sdk.js in
+    ``backend.core.fastly.rum_provisioning._generate_faro_fetch_vcl`` (which
+    also keeps its own ``rum-faro-sdk`` key for the Faro-only purges in the
+    FOS-sync cron and upgrade_faro_version). One key purge therefore covers
+    both paths and every cached ``?v=`` variant of them, which the previous
+    per-URL purge could only approximate by enumerating domains × guessed
+    query strings — and silently missed anything it failed to guess.
+
+    Keyed purges go to the same service that carries the RUM VCL (the
+    logging service reconciled here), matching the precedent in
+    ``backend.provision.rum_orchestrator_v2._purge_faro_surrogate_key``.
+
+    Never raises: reconciliation has already activated by the time this
+    runs, so a purge failure must not turn a successful reconcile into a
+    reported failure — the objects age out on their edge TTL regardless.
+    """
     import logging
 
     from backend.core.fastly.client import fastly as fastly_client
 
     logger = logging.getLogger("backend.scheduler")
     try:
-        resp = fastly_client("GET", f"/service/{service_id}/version/{version}/domain", token=token)
-        return [d["name"] for d in resp]
+        logger.info(f"Purging RUM surrogate key {RUM_SURROGATE_KEY} on service {service_id}")
+        fastly_client(
+            "POST",
+            f"/service/{service_id}/purge/{RUM_SURROGATE_KEY}",
+            token=token,
+            expect_empty=True,
+        )
     except Exception as e:
-        logger.warning(f"Failed to fetch domains for service {service_id}: {e}")
-        return []
-
-
-def _purge_rum_urls(service_id: str, token: str, version: int) -> None:
-    """Purge RUM-related URLs to prevent cached 404s/errors after activation."""
-    import logging
-
-    from backend.core.fastly.client import fastly as fastly_client
-
-    logger = logging.getLogger("backend.scheduler")
-    domains = _fetch_service_domains(service_id, version, token)
-    if not domains:
-        # Fallback to the configured name if no domains returned
-        config_path = Path(f"configs/{service_id}.json")
-        if config_path.exists():
-            try:
-                cfg = json.loads(config_path.read_text())
-                if cfg.get("name"):
-                    domains = [cfg["name"]]
-            except Exception:
-                pass
-
-    # Calculate deterministic cache-busting query parameter hash to purge query-string variations
-    script_hash = ""
-    if service_id:
-        val_str = f"{service_id}-rum-v1"
-        h = 0
-        for char in val_str:
-            code = ord(char)
-            h = ((h << 5) - h) + code
-            # Force 32-bit signed integer behavior to match JavaScript bitwise operations
-            h = (h + 2**31) % 2**32 - 2**31
-        script_hash = hex(abs(h))[2:][0:8]
-
-    # Include bare URLs, constant v=1 fallback, and the active hashed script version
-    paths = [
-        "js/rum.js",
-        "js/faro-sdk.js",
-        "rum-beacon",
-        "js/rum.js?v=1",
-    ]
-    if script_hash:
-        paths.append(f"js/rum.js?v={script_hash}")
-
-    for domain in domains:
-        for path in paths:
-            try:
-                logger.info(f"Purging cached RUM URL: {domain}/{path}")
-                fastly_client("POST", f"/purge/{domain}/{path}", token=token)
-            except Exception as e:
-                logger.warning(f"Failed to purge {domain}/{path}: {e}")
+        logger.warning(f"Failed to purge surrogate key {RUM_SURROGATE_KEY} for service {service_id}: {e}")

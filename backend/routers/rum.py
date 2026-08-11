@@ -345,8 +345,26 @@ async def update_rum_settings(
     }
 
 
+def _inject_telemetry(res: dict) -> dict:
+    """Helper to manually inject context-local telemetry into a dict response.
+    Needed because Starlette's BaseHTTPMiddleware isolates ContextVars, so RUM
+    endpoints (which bypass BaseResponse's internal .with_telemetry() call and
+    instead return a raw dict) would otherwise return empty lists for telemetry.
+    The response middleware automatically strips these fields if opt-in headers
+    are absent, making inline injection completely safe.
+    """
+    from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
+
+    res["_debug_queries"] = get_queries()
+    res["_debug_sqlite"] = list(get_sqlite_queries())
+    res["_debug_calls"] = get_tracked_calls()
+    res["_is_cached"] = False
+    return res
+
+
 @router.get("/{service_id}/rum/beacon-health")
 async def rum_beacon_health(
+    request: Request,
     ctx: RequestContext = Depends(build_request_context),
 ) -> dict[str, Any]:
     """Check if RUM beacons are arriving (validation endpoint for setup).
@@ -357,14 +375,16 @@ async def rum_beacon_health(
     rum_cfg = cfg.get("rum") or {}
 
     if not cfg.get("rum_enabled", False) and not rum_cfg.get("enabled", False):
-        return {
-            "enabled": False,
-            "beacon_fire_rate": 0,
-            "recent_beacons": 0,
-            "last_beacon_time": None,
-            "setup_complete": False,
-            "message": "RUM not enabled for this service",
-        }
+        return _inject_telemetry(
+            {
+                "enabled": False,
+                "beacon_fire_rate": 0,
+                "recent_beacons": 0,
+                "last_beacon_time": None,
+                "setup_complete": False,
+                "message": "RUM not enabled for this service",
+            }
+        )
 
     try:
         rum_source = rum_source_for(ctx.source)
@@ -408,24 +428,28 @@ async def rum_beacon_health(
                     pass
 
         has_data = recent_count > 0 or last_dt is not None
-        return {
-            "enabled": True,
-            "beacon_fire_rate": recent_count,  # count per hour
-            "recent_beacons": recent_count,  # total in last hour
-            "last_beacon_time": last_beacon_time,
-            "setup_complete": has_data,
-            "message": "Script installed and firing" if has_data else "Waiting for beacons...",
-        }
+        return _inject_telemetry(
+            {
+                "enabled": True,
+                "beacon_fire_rate": recent_count,  # count per hour
+                "recent_beacons": recent_count,  # total in last hour
+                "last_beacon_time": last_beacon_time,
+                "setup_complete": has_data,
+                "message": "Script installed and firing" if has_data else "Waiting for beacons...",
+            }
+        )
     except Exception as e:
         logger.error(f"[rum] Setup check failed for {service_id}: {e}")
-        return {
-            "enabled": True,
-            "beacon_fire_rate": 0,
-            "recent_beacons": 0,
-            "last_beacon_time": None,
-            "setup_complete": False,
-            "message": f"Setup check failed: {e}",
-        }
+        return _inject_telemetry(
+            {
+                "enabled": True,
+                "beacon_fire_rate": 0,
+                "recent_beacons": 0,
+                "last_beacon_time": None,
+                "setup_complete": False,
+                "message": f"Setup check failed: {e}",
+            }
+        )
 
 
 @router.get("/{service_id}/rum/analytics")
@@ -748,25 +772,27 @@ async def rum_analytics(
             db_res = execute_with_stale_view_retry(rum_con, rum_source, _get_analytics)
 
         if db_res.get("no_data", False):
-            return {
-                "is_mock": False,
-                "no_data": True,
-                "beacon_count": 0,
-                "pageview_count": 0,
-                "interaction_count": 0,
-                "error_count": 0,
-                "message": "Waiting for real-time RUM user events...",
-                "vitals": {
-                    "lcp": {"p75": None, "distribution": None},
-                    "cls": {"p75": None, "distribution": None},
-                    "inp": {"p75": None, "distribution": None},
-                    "fid": {"p75": None, "fcp": None, "ttfb": None},
-                },
-                "worst_pages": [],
-                "errors": [],
-                "trends": {"timestamps": [], "lcp": [], "cls": [], "error_rate": []},
-                "environments": {"browsers": {}, "os": {}, "devices": {}},
-            }
+            return _inject_telemetry(
+                {
+                    "is_mock": False,
+                    "no_data": True,
+                    "beacon_count": 0,
+                    "pageview_count": 0,
+                    "interaction_count": 0,
+                    "error_count": 0,
+                    "message": "Waiting for real-time RUM user events...",
+                    "vitals": {
+                        "lcp": {"p75": None, "distribution": None},
+                        "cls": {"p75": None, "distribution": None},
+                        "inp": {"p75": None, "distribution": None},
+                        "fid": {"p75": None, "fcp": None, "ttfb": None},
+                    },
+                    "worst_pages": [],
+                    "errors": [],
+                    "trends": {"timestamps": [], "lcp": [], "cls": [], "error_rate": []},
+                    "environments": {"browsers": {}, "os": {}, "devices": {}},
+                }
+            )
 
         # Format overall vitals
         vitals: dict[str, Any] = {
@@ -915,31 +941,33 @@ async def rum_analytics(
             trend_interactions.append(int(stats["interactions"] or 0))
             trend_errors.append(int(stats["errors"] or 0))
 
-        return {
-            "is_mock": False,
-            "no_data": False,
-            "beacon_count": db_res["total_beacons"],
-            "pageview_count": db_res.get("pageviews", 0),
-            "interaction_count": db_res.get("interactions", 0),
-            "error_count": db_res.get("errors_count", 0),
-            "vitals": vitals,
-            "worst_pages": worst_pages,
-            "errors": errors,
-            "trends": {
-                "timestamps": trend_timestamps,
-                "lcp": trend_lcps,
-                "cls": trend_clss,
-                "error_rate": trend_error_rates,
-                "pageviews": trend_pageviews,
-                "interactions": trend_interactions,
-                "errors": trend_errors,
-            },
-            "environments": {
-                "browsers": db_res["browsers"],
-                "os": db_res["os"],
-                "devices": db_res["devices"],
-            },
-        }
+        return _inject_telemetry(
+            {
+                "is_mock": False,
+                "no_data": False,
+                "beacon_count": db_res["total_beacons"],
+                "pageview_count": db_res.get("pageviews", 0),
+                "interaction_count": db_res.get("interactions", 0),
+                "error_count": db_res.get("errors_count", 0),
+                "vitals": vitals,
+                "worst_pages": worst_pages,
+                "errors": errors,
+                "trends": {
+                    "timestamps": trend_timestamps,
+                    "lcp": trend_lcps,
+                    "cls": trend_clss,
+                    "error_rate": trend_error_rates,
+                    "pageviews": trend_pageviews,
+                    "interactions": trend_interactions,
+                    "errors": trend_errors,
+                },
+                "environments": {
+                    "browsers": db_res["browsers"],
+                    "os": db_res["os"],
+                    "devices": db_res["devices"],
+                },
+            }
+        )
 
     except Exception as e:
         logger.error(f"[rum] Analytics query failed for {service_id}: {e}", exc_info=True)

@@ -173,6 +173,33 @@ describe('RumSettingsDialog', () => {
     expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument()
   })
 
+  it('calculates and displays estimated uncompressed log line size based on active toggles', async () => {
+    const user = userEvent.setup()
+    renderDialog()
+
+    // All toggles (vitals, perf, errors, events) default to true from react-query mock
+    // Total fields: 17
+    // Total typical bytes: 2820
+    // Structural: 2 + 17*5 = 87
+    // Total: 2820 + 87 = 2907 bytes (2.84 KB)
+    expect(screen.getByText(/2\.84 KB/i)).toBeInTheDocument()
+
+    // Toggle JavaScript Errors off
+    await user.click(screen.getByRole('switch', { name: /javascript errors/i }))
+    // Toggle Custom Events off
+    await user.click(screen.getByRole('switch', { name: /custom events/i }))
+    // Toggle Performance Timings off
+    await user.click(screen.getByRole('switch', { name: /performance timings/i }))
+
+    // Only Core Web Vitals remains:
+    // Active fields for Vitals: rum_cid (12), fastly_req_id (12), rum_pathname (256), rum_connection_speed (10), rum_trace_id (32), rum_span_id (16), rum_metric_name (12), rum_metric_value (8), rum_metric_rating (18).
+    // Total fields: 9.
+    // Field bytes: 12 + 12 + 256 + 10 + 32 + 16 + 12 + 8 + 18 = 376.
+    // Structural: 2 + 9 * 5 = 47.
+    // Total: 376 + 47 = 423 B.
+    expect(screen.getByText(/423 B/i)).toBeInTheDocument()
+  })
+
   it('returns null without a serviceId', () => {
     const { container } = renderDialog({ serviceId: null })
     expect(container).toBeEmptyDOMElement()

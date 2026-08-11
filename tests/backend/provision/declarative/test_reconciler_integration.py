@@ -337,6 +337,144 @@ class TestReconciliationFeatures:
         mock_upload_rum_js.assert_not_called()
 
 
+class TestRumSurrogateKeyPurge:
+    """Reconciliation invalidates the hosted RUM scripts by surrogate key, not by URL.
+
+    Both /js/rum.js and /js/faro-sdk.js are tagged ``Surrogate-Key: rum-js``
+    in vcl_fetch, so one keyed purge covers both paths and every cached
+    ``?v=`` variant — the per-URL purge this replaced had to enumerate
+    domains × guessed query strings and silently missed anything it didn't
+    guess.
+    """
+
+    def test_purge_issues_single_keyed_purge_on_the_service(self):
+        from backend.provision.declarative.reconciler import _purge_rum_surrogate_key
+
+        with patch("backend.core.fastly.client.fastly") as mock_fastly:
+            _purge_rum_surrogate_key("srv_test", "token")
+
+        mock_fastly.assert_called_once_with(
+            "POST",
+            "/service/srv_test/purge/rum-js",
+            token="token",
+            expect_empty=True,
+        )
+
+    def test_purge_never_raises_on_api_failure(self):
+        """Reconciliation has already activated by the time this runs, so a
+        purge failure must not turn a successful reconcile into a reported
+        failure — the objects age out on their edge TTL regardless."""
+        from backend.provision.declarative.reconciler import _purge_rum_surrogate_key
+
+        with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("purge 503")):
+            _purge_rum_surrogate_key("srv_test", "token")
+
+    @patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key")
+    @patch("backend.provision.declarative.reconciler._activate_draft")
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler._clone_active_version")
+    @patch("backend.provision.declarative.reconciler._apply_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_purge_runs_after_the_tracker_upload(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_apply_diff,
+        mock_clone_active,
+        mock_validate,
+        mock_activate,
+        mock_purge,
+    ):
+        """Pin the ORDER: purging before the tracker upload cannot invalidate
+        bytes that are uploaded afterwards, so the freshly-published tracker
+        would sit behind the old cached copy for a full edge TTL."""
+        call_order = []
+
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_clone_active.return_value = 2
+        mock_validate.return_value = ""
+        mock_apply_diff.return_value = None
+        mock_activate.side_effect = lambda *a, **k: call_order.append("activate")
+        mock_upload_rum_js.side_effect = lambda *a, **k: call_order.append("upload_tracker")
+        mock_purge.side_effect = lambda *a, **k: call_order.append("purge")
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_text") as mock_read:
+                cfg = {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "rum_enabled": True,
+                    "fos_prefix": "raw",
+                }
+                mock_read.return_value = json.dumps(cfg)
+
+                reconcile_vcl_state("srv_test", "token", dry_run=False)
+
+        assert call_order == ["activate", "upload_tracker", "purge"]
+        mock_purge.assert_called_once_with("srv_test", "token")
+
+    @patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key")
+    @patch("backend.provision.declarative.reconciler._activate_draft")
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler._clone_active_version")
+    @patch("backend.provision.declarative.reconciler._apply_diff")
+    @patch("backend.provision.declarative.reconciler.upload_rum_tracker_js")
+    @patch("backend.provision.declarative.reconciler._fetch_active_version")
+    @patch("backend.provision.declarative.reconciler._fetch_snippets")
+    @patch("backend.provision.declarative.reconciler._fetch_logging_endpoints")
+    @patch("backend.provision.declarative.reconciler._fetch_backends")
+    def test_purge_still_runs_when_rum_is_disabled(
+        self,
+        mock_fetch_backends,
+        mock_fetch_endpoints,
+        mock_fetch_snippets,
+        mock_fetch_active,
+        mock_upload_rum_js,
+        mock_apply_diff,
+        mock_clone_active,
+        mock_validate,
+        mock_activate,
+        mock_purge,
+    ):
+        """A reconcile that DISABLES RUM still has to drop the previously
+        cached (and still key-tagged) scripts, so the purge is deliberately
+        ungated on rum_enabled even though the tracker upload is not."""
+        mock_fetch_active.return_value = 1
+        mock_fetch_snippets.return_value = []
+        mock_fetch_endpoints.return_value = []
+        mock_fetch_backends.return_value = []
+        mock_clone_active.return_value = 2
+        mock_validate.return_value = ""
+        mock_apply_diff.return_value = None
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_text") as mock_read:
+                cfg = {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "rum_enabled": False,
+                    "fos_prefix": "raw",
+                }
+                mock_read.return_value = json.dumps(cfg)
+
+                reconcile_vcl_state("srv_test", "token", dry_run=False)
+
+        mock_upload_rum_js.assert_not_called()
+        mock_purge.assert_called_once_with("srv_test", "token")
+
+
 class TestBackendWhitelistEnforcement:
     """Test Gotcha 5: catastrophic backend deletion prevention."""
 

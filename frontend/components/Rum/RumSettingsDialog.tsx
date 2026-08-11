@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { formatBytes } from '@/lib/format'
 import {
   Dialog,
   DialogContent,
@@ -30,6 +31,26 @@ import {
   panelDialogFooter,
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
+
+const RUM_FIELDS = [
+  { name: 'rum_cid', bytes: 12, categories: ['base'] },
+  { name: 'fastly_req_id', bytes: 12, categories: ['base'] },
+  { name: 'rum_pathname', bytes: 256, categories: ['base'] },
+  { name: 'rum_connection_speed', bytes: 10, categories: ['base'] },
+  { name: 'rum_trace_id', bytes: 32, categories: ['base'] },
+  { name: 'rum_span_id', bytes: 16, categories: ['base'] },
+  { name: 'rum_metric_name', bytes: 12, categories: ['vitals', 'performance', 'events'] },
+  { name: 'rum_metric_value', bytes: 8, categories: ['vitals', 'performance', 'events'] },
+  { name: 'rum_metric_rating', bytes: 18, categories: ['vitals'] },
+  { name: 'rum_dns_ms', bytes: 5, categories: ['performance'] },
+  { name: 'rum_tcp_ms', bytes: 5, categories: ['performance'] },
+  { name: 'rum_tls_ms', bytes: 5, categories: ['performance'] },
+  { name: 'rum_ttfb_ms', bytes: 5, categories: ['performance'] },
+  { name: 'rum_error_message', bytes: 200, categories: ['errors'] },
+  { name: 'rum_error_stack', bytes: 400, categories: ['errors'] },
+  { name: 'rum_raw_query', bytes: 800, categories: ['events'] },
+  { name: 'rum_body', bytes: 1024, categories: ['events'] },
+]
 
 interface RumSettingsDialogProps {
   serviceId: string | null
@@ -69,6 +90,29 @@ export function RumSettingsDialog({
 
   const completedRef = useRef(false)
 
+  // Calculate estimated bytes based on active capture toggles
+  const estimatedBytes = useMemo(() => {
+    const activeCategories = new Set<string>()
+    if (captureVitals) activeCategories.add('vitals')
+    if (capturePerformance) activeCategories.add('performance')
+    if (captureErrors) activeCategories.add('errors')
+    if (captureEvents) activeCategories.add('events')
+
+    if (activeCategories.size > 0) {
+      activeCategories.add('base')
+    }
+
+    const activeFields = RUM_FIELDS.filter(field =>
+      field.categories.some(cat => activeCategories.has(cat))
+    )
+
+    if (activeFields.length === 0) return 0
+
+    const fieldBytes = activeFields.reduce((sum, field) => sum + field.bytes, 0)
+    const structural = 2 + activeFields.length * 5
+    return fieldBytes + structural
+  }, [captureVitals, capturePerformance, captureErrors, captureEvents])
+
   // Fetch full status which includes capture toggles
   const { data: statusData, isLoading: isStatusLoading } = useQuery({
     queryKey: ['rum-status', serviceId],
@@ -88,7 +132,12 @@ export function RumSettingsDialog({
       setCaptureErrors(statusData.capture_errors ?? true)
       setCaptureEvents(statusData.capture_events ?? true)
     }
-  }, [statusData])
+  }, [
+    statusData?.capture_vitals,
+    statusData?.capture_performance,
+    statusData?.capture_errors,
+    statusData?.capture_events,
+  ])
 
   const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop, reset: sseReset } = useSSE()
 
@@ -205,10 +254,17 @@ export function RumSettingsDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className={cn("sm:max-w-xl", panelDialogContent)} showCloseButton={currentStatus !== 'streaming'}>
         <DialogHeader className={panelDialogHeaderSolid}>
-          <DialogTitle className="flex items-center gap-2 text-primary text-xl font-bold">
-            <Settings2 className="h-6 w-6 text-primary" />
-            RUM Tracking Settings
-          </DialogTitle>
+          <div className="flex items-center justify-between w-full">
+            <DialogTitle className="flex items-center gap-2 text-primary text-xl font-bold">
+              <Settings2 className="h-6 w-6 text-primary" />
+              RUM Tracking Settings
+            </DialogTitle>
+            {!isExecuting && !isStatusLoading && (
+              <div className="text-xs font-mono text-muted-foreground bg-muted/50 px-2.5 py-1 rounded-md border shrink-0">
+                Est. ~{formatBytes(estimatedBytes)} / line
+              </div>
+            )}
+          </div>
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto min-h-0">

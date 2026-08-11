@@ -91,8 +91,21 @@ def test_faro_version_adds_route_rewrite_and_surrogate_key():
     assert 'set bereq.url = "/rum/rum-tracker.js";' in sigv4
 
     fetch = snippets[RUM_FARO_FETCH_NAME]
-    assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk";' in fetch
+    assert 'set beresp.http.Surrogate-Key = "rum-faro-sdk rum-js";' in fetch
     assert "set beresp.ttl = 604800s;" in fetch
+
+
+def test_faro_fetch_keeps_faro_key_and_adds_shared_rum_key():
+    """The bundle carries two surrogate keys and must keep both: 'rum-faro-sdk'
+    is what the FOS-sync cron and upgrade_faro_version purge on their own
+    (Faro-only invalidation), while 'rum-js' is the shared tag across BOTH
+    hosted scripts that reconciliation purges in one call. Dropping either
+    silently strands one of those purge paths."""
+    fetch = generate_rum_asset_fetch_vcl("iad-va-us", faro_version="2.9.0")[RUM_FARO_FETCH_NAME]
+
+    match = re.search(r'Surrogate-Key = "([^"]+)"', fetch)
+    assert match, "expected a Surrogate-Key header"
+    assert set(match.group(1).split()) == {"rum-faro-sdk", "rum-js"}
 
 
 # ── F-3: fetch-cache snippet must not cache/immutable-tag error responses ──
@@ -109,7 +122,7 @@ def test_faro_fetch_caching_gates_on_200_status():
     assert "if (beresp.status == 200)" in fetch
     # The caching directives must be inside the 200 branch, not top-level.
     status_check_idx = fetch.index("if (beresp.status == 200)")
-    surrogate_key_idx = fetch.index('set beresp.http.Surrogate-Key = "rum-faro-sdk";')
+    surrogate_key_idx = fetch.index('set beresp.http.Surrogate-Key = "rum-faro-sdk rum-js";')
     assert status_check_idx < surrogate_key_idx
     # Non-200 branch must explicitly refuse to cache.
     assert "set beresp.cacheable = false;" in fetch
