@@ -35,23 +35,7 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
   const [activeServiceId, setActiveServiceId] = useState<string | null>(initialServiceId || null);
   const [copied, setCopied] = useState(false);
 
-  // Generate a simple hash from serviceId for cache-busting
-  // This changes if we modify RUM settings, so users get fresh versions
-  const generateScriptHash = (serviceId: string | null) => {
-    if (!serviceId) return '';
-    const input = `${serviceId}-rum-v1`;
-    let hash = 0;
-    for (let i = 0; i < input.length; i++) {
-      const char = input.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return Math.abs(hash).toString(16).substring(0, 8);
-  };
-
-  const scriptTag = activeServiceId
-    ? `<script src="/js/rum.js?v=${generateScriptHash(activeServiceId)}"></script>`
-    : '<script src="/js/rum.js?v=1"></script>';
+  const scriptTag = '<script src="/js/rum.js"></script>';
 
   return (
     <>
