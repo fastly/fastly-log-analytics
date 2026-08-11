@@ -380,7 +380,7 @@ def reconcile_vcl_state(
                 # Step 5: Clone active version to draft
                 if status_cb:
                     status_cb("⏳ Cloning active version to draft...")
-                draft_version = _clone_active_version(service_id, token)
+                draft_version = _clone_active_version(service_id, token, desired_state)
 
                 # Step 6: Apply diff on draft
                 if status_cb:
@@ -594,7 +594,7 @@ def _fetch_active_version(service_id: str, token: str) -> int:
     return ver
 
 
-def _clone_active_version(service_id: str, token: str) -> int:
+def _clone_active_version(service_id: str, token: str, desired_state: FeatureState | None = None) -> int:
     """Clone active version to a new draft version.
 
     Gotcha 1: If no active version, clone the highest existing version.
@@ -604,6 +604,27 @@ def _clone_active_version(service_id: str, token: str) -> int:
 
     ts = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     comment = f"Fastly Log Analytics Reconciliation at {ts}"
+
+    if desired_state is not None:
+        enabled_features = []
+        if desired_state.logging_enabled:
+            enabled_features.append("Request Logs")
+        if desired_state.rum_enabled:
+            enabled_features.append("RUM")
+        if desired_state.scoring and desired_state.scoring.enabled:
+            enabled_features.append("Session Scoring")
+        if desired_state.cmcd and desired_state.cmcd.enabled:
+            enabled_features.append("CMCD")
+
+        num_custom_fields = len(desired_state.log_fields.custom_fields) if desired_state.log_fields else 0
+        if num_custom_fields > 0:
+            enabled_features.append(f"{num_custom_fields} Custom Field{'s' if num_custom_fields > 1 else ''}")
+
+        if enabled_features:
+            features_str = ", ".join(enabled_features)
+            comment += f" (Enabled: {features_str})"
+        else:
+            comment += " (All Features Disabled / Teardown)"
 
     active_ver = fastly_integration.fetch_active_version(service_id, token)
     if active_ver is not None:

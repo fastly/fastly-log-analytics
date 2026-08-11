@@ -834,3 +834,77 @@ class TestVarDeconfliction:
 
             # In vcl_recv, the declaration must remain intact (no unmanaged snippet in vcl_recv)
             assert "declare local var.fosAccessKey STRING;" in snippet_recv.body
+
+
+class TestCloneActiveVersionComment:
+    """Test rich commentary in _clone_active_version comment string."""
+
+    @patch("backend.provision.declarative.reconciler.fastly_integration.fetch_active_version")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.clone_version")
+    def test_clone_comment_with_features(self, mock_clone_version, mock_fetch_active_version):
+        """Verify comment includes correct features list."""
+        from backend.provision.declarative.reconciler import _clone_active_version
+        from backend.provision.declarative.state import CmcdConfig, FeatureState, LogFieldsConfig, ScoringConfig
+
+        mock_fetch_active_version.return_value = 1
+        mock_clone_version.return_value = 2
+
+        # Create a mock feature state with all features enabled
+        state = FeatureState(
+            service_id="srv_test",
+            log_period=60,
+            sample_rate=100,
+            edge_only=True,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="test.s3.amazonaws.com",
+            logging_enabled=True,
+            rum_enabled=True,
+            scoring=ScoringConfig(enabled=True, domain="test.scoring.domain"),
+            cmcd=CmcdConfig(enabled=True),
+            log_fields=LogFieldsConfig(
+                custom_fields=[
+                    {"name": "field_1", "vcl_log_expression": "1"},
+                    {"name": "field_2", "vcl_log_expression": "2"},
+                ]
+            ),
+        )
+
+        _clone_active_version("srv_test", "token", state)
+        mock_clone_version.assert_called_once()
+        comment = mock_clone_version.call_args[0][3]
+
+        assert "Request Logs" in comment
+        assert "RUM" in comment
+        assert "Session Scoring" in comment
+        assert "CMCD" in comment
+        assert "2 Custom Fields" in comment
+
+    @patch("backend.provision.declarative.reconciler.fastly_integration.fetch_active_version")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.clone_version")
+    def test_clone_comment_all_disabled(self, mock_clone_version, mock_fetch_active_version):
+        """Verify comment for teardown/all features disabled."""
+        from backend.provision.declarative.reconciler import _clone_active_version
+        from backend.provision.declarative.state import CmcdConfig, FeatureState, LogFieldsConfig, ScoringConfig
+
+        mock_fetch_active_version.return_value = 1
+        mock_clone_version.return_value = 2
+
+        state = FeatureState(
+            service_id="srv_test",
+            log_period=60,
+            sample_rate=100,
+            edge_only=True,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="test.s3.amazonaws.com",
+            logging_enabled=False,
+            rum_enabled=False,
+            scoring=ScoringConfig(enabled=False),
+            cmcd=CmcdConfig(enabled=False),
+            log_fields=LogFieldsConfig(custom_fields=[]),
+        )
+
+        _clone_active_version("srv_test", "token", state)
+        comment = mock_clone_version.call_args[0][3]
+        assert "All Features Disabled / Teardown" in comment

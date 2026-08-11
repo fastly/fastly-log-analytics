@@ -156,7 +156,7 @@ def run_draft_only_reconciliation(service_id: str, token: str) -> int:
 
         # 4. Clone active version to draft
         print("Cloning active version to a new draft version on Fastly...")
-        draft_version = _clone_active_version(service_id, token)
+        draft_version = _clone_active_version(service_id, token, desired_state)
         print(f"Created draft version: {draft_version}")
 
         # 5. Apply diff on draft
