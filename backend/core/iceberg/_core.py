@@ -261,7 +261,7 @@ _fields = [
 ]
 
 
-def get_iceberg_schema(log_fields_config: dict | None = None) -> Schema:
+def get_iceberg_schema(log_fields_config: dict | None = None, table_name: str = "logs") -> Schema:
     """Return the Iceberg schema dynamically, including custom fields if configured.
 
     **Field-id stability contract.** Iceberg expects a column's ``field_id``
@@ -277,6 +277,11 @@ def get_iceberg_schema(log_fields_config: dict | None = None) -> Schema:
     ``beta`` would shift ``gamma`` into ``beta``'s old ID slot — a silent
     corruption pattern.
     """
+    if table_name != "logs":
+        from backend.core.iceberg.rum_schema import RUM_ICEBERG_SCHEMAS
+
+        return RUM_ICEBERG_SCHEMAS[table_name]
+
     custom_fields = log_fields_config.get("custom_fields", []) if log_fields_config else []
     base_count = len(_fields)
 
@@ -306,12 +311,16 @@ def get_iceberg_schema(log_fields_config: dict | None = None) -> Schema:
     return Schema(*base_nested, *custom_nested)
 
 
-def get_arrow_schema(log_fields_config: dict | None = None) -> pa.Schema:
-    return schema_to_pyarrow(get_iceberg_schema(log_fields_config))
+def get_arrow_schema(log_fields_config: dict | None = None, table_name: str = "logs") -> pa.Schema:
+    if table_name != "logs":
+        from backend.core.iceberg.rum_schema import RUM_TABLE_SCHEMAS
+
+        return RUM_TABLE_SCHEMAS[table_name]
+    return schema_to_pyarrow(get_iceberg_schema(log_fields_config, table_name=table_name))
 
 
-def get_schema_field_names(log_fields_config: dict | None = None) -> set[str]:
-    return {f.name for f in get_arrow_schema(log_fields_config)}
+def get_schema_field_names(log_fields_config: dict | None = None, table_name: str = "logs") -> set[str]:
+    return {f.name for f in get_arrow_schema(log_fields_config, table_name=table_name)}
 
 
 # ---------------------------------------------------------------------------
@@ -319,15 +328,18 @@ def get_schema_field_names(log_fields_config: dict | None = None) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _buffer_dir(source: dict) -> str:
+def _buffer_dir(source: dict, table_name: str = "logs") -> str:
     from backend.core.duckdb import _cache_dir
 
-    return os.path.join(_cache_dir(source), "buffer")
+    base = os.path.join(_cache_dir(source), "buffer")
+    if table_name != "logs":
+        return os.path.join(base, table_name)
+    return base
 
 
-def _table_identifier(source: dict) -> tuple[str, str]:
+def _table_identifier(source: dict, table_name: str = "logs") -> tuple[str, str]:
     """Return the PyIceberg table identifier tuple (namespace, name)."""
-    return ("default", "logs")
+    return ("default", table_name)
 
 
 def _is_local_only_source(source: dict) -> bool:
@@ -1053,13 +1065,13 @@ def _try_register_from_fos(catalog, source: dict, identifier: tuple):
     return None
 
 
-def init_iceberg_table(source: dict, create: bool = True):
+def init_iceberg_table(source: dict, create: bool = True, table_name: str = "logs"):
     source_key = source.get("name", "default")
     with _get_service_lock(source_key):
-        return _init_iceberg_table_locked(source, create)
+        return _init_iceberg_table_locked(source, create, table_name=table_name)
 
 
-def _init_iceberg_table_locked(source: dict, create: bool = True):
+def _init_iceberg_table_locked(source: dict, create: bool = True, table_name: str = "logs"):
     """Create the Iceberg table in FOS if it does not exist; return the table.
 
     Safe to call on every provision and on every scheduler tick — it is a
@@ -1071,7 +1083,7 @@ def _init_iceberg_table_locked(source: dict, create: bool = True):
     from pyiceberg.transforms import HourTransform, IdentityTransform
 
     catalog = _get_catalog(source)
-    identifier = _table_identifier(source)
+    identifier = _table_identifier(source, table_name=table_name)
     namespace = identifier[0]
 
     # Ensure namespace exists
@@ -1084,7 +1096,7 @@ def _init_iceberg_table_locked(source: dict, create: bool = True):
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
-    dynamic_iceberg_schema = get_iceberg_schema(log_fields_config)
+    dynamic_iceberg_schema = get_iceberg_schema(log_fields_config, table_name=table_name)
 
     try:
         if not create:

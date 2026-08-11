@@ -146,7 +146,7 @@ def is_stale_view_error(exc: BaseException) -> bool:
     return "No files found" in msg or "Catalog Error: Table with name" in msg or "No such file or directory" in msg
 
 
-def execute_with_stale_view_retry(con, source: dict, fn, *args, **kwargs):
+def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs", **kwargs):
     """Run ``fn(con, *args, **kwargs)`` with one stale-view self-heal retry.
 
     On a :func:`is_stale_view_error`-shaped failure, bust the cached view
@@ -175,7 +175,7 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, **kwargs):
         if not is_stale_view_error(e):
             raise
         _core_mod.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
-        _core_mod.update_iceberg_view(con, source, force=True)
+        _core_mod.update_iceberg_view(con, source, force=True, target_table=table_name)
         return fn(con, *args, **kwargs)
 
 
@@ -416,20 +416,22 @@ def _update_snapshot_cache_from_delta(source: dict, table) -> bool:
     return True
 
 
-def _reconcile_snapshot_cache_after_sync(source: dict) -> None:
+def _reconcile_snapshot_cache_after_sync(source: dict, table_name: str = "logs") -> None:
     """Convert any s3:// URI entries in the cache to local paths for files
     that have since been downloaded. Called after sync_data finishes a batch
     so subsequent view builds see the local paths (avoids the URI-vs-glob
     inconsistency that would silently leave us on the iceberg_scan fallback).
     """
     source_key = source.get("name", "default")
-    cached = _snapshot_files_cache.get(source_key)
+    cache_key = f"{source_key}::{table_name}" if table_name != "logs" else source_key
+    cached = _snapshot_files_cache.get(cache_key)
     if not cached:
         return
 
     from backend.core.duckdb import _cache_dir
 
-    cache_dir = os.path.join(_cache_dir(source), "data")
+    sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
+    cache_dir = os.path.join(_cache_dir(source), sub_dir)
     metadata_loc, snapshot_id, iceberg_loc, files = cached
 
     changed = False
@@ -448,7 +450,7 @@ def _reconcile_snapshot_cache_after_sync(source: dict) -> None:
             new_entries.append(p)
 
     if changed:
-        _snapshot_files_cache[source_key] = (metadata_loc, snapshot_id, iceberg_loc, new_entries)
+        _snapshot_files_cache[cache_key] = (metadata_loc, snapshot_id, iceberg_loc, new_entries)
         try:
             _save_persistent_cache(source)
         except Exception:
@@ -487,7 +489,7 @@ def inject_view_debug(debug_list: list, source: dict):
         )
 
 
-def _try_fast_path_view(con, source: dict) -> bool:
+def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     """Bind the per-service view from cache without acquiring the lock.
 
     Returns True if the view was bound; False if a slow-path rebuild is
@@ -505,12 +507,16 @@ def _try_fast_path_view(con, source: dict) -> bool:
 
     t_start = time.time()
     source_key = source.get("name", "default")
+    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     cache_dir = _cache_dir(source)
     catalog_db_path = os.path.join(cache_dir, "iceberg_catalog.db")
 
     configure_duckdb_s3(con)
 
-    buf_files = _core_mod.buffer_files(source)
+    try:
+        buf_files = _core_mod.buffer_files(source, table_name=target_table)
+    except TypeError:
+        buf_files = _core_mod.buffer_files(source)
     buf_set = frozenset(buf_files)
 
     metadata_loc = None
@@ -518,7 +524,8 @@ def _try_fast_path_view(con, source: dict) -> bool:
         if os.path.exists(catalog_db_path):
             with sqlite3.connect(catalog_db_path, timeout=5.0) as cat_con:
                 row = cat_con.execute(
-                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = 'logs'"
+                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = ?",
+                    [target_table],
                 ).fetchone()
                 if row:
                     metadata_loc = row[0]
@@ -529,10 +536,10 @@ def _try_fast_path_view(con, source: dict) -> bool:
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
-    dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config)
+    dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config, table_name=target_table)
     dynamic_schema_field_names = {f.name for f in dynamic_arrow_schema}
 
-    cached = _view_cache.get(source_key)
+    cached = _view_cache.get(cache_key)
 
     # See matching block in _update_iceberg_view_locked: if cached SQL is
     # S3-based but local parquets exist, refuse fast path so caller takes
@@ -541,7 +548,8 @@ def _try_fast_path_view(con, source: dict) -> bool:
         try:
             import glob
 
-            data_dir = os.path.join(cache_dir, "data")
+            sub_dir = f"data_{target_table}" if target_table != "logs" else "data"
+            data_dir = os.path.join(cache_dir, sub_dir)
             if glob.glob(os.path.join(data_dir, "**", "*.parquet"), recursive=True):
                 return False
         except Exception:
@@ -568,11 +576,12 @@ def _try_fast_path_view(con, source: dict) -> bool:
         # per call that adds up across every read-side request.
         from backend.core.duckdb_pool import _get_conn_state, _set_conn_state
 
-        bound_fp = _get_conn_state(con, "fast_path_view_fp")
-        target_fp = (metadata_loc, buf_set, schema_fp, variant_fp)
+        fp_key = f"fast_path_view_fp_{target_table}"
+        bound_fp = _get_conn_state(con, fp_key)
+        target_fp = (metadata_loc, buf_set, schema_fp, variant_fp, target_table)
         if bound_fp == target_fp:
             t_end = time.time()
-            _view_cache[source_key] = (
+            _view_cache[cache_key] = (
                 metadata_loc,
                 buf_set,
                 schema_fp,
@@ -595,10 +604,10 @@ def _try_fast_path_view(con, source: dict) -> bool:
         except Exception as e:
             logger.warning("[iceberg] fast-path view re-bind failed for %s: %s", source_key, e)
             return False
-        _set_conn_state(con, fast_path_view_fp=target_fp)
+        _set_conn_state(con, **{fp_key: target_fp})
 
     t_end = time.time()
-    _view_cache[source_key] = (
+    _view_cache[cache_key] = (
         metadata_loc,
         buf_set,
         tuple(sorted(dynamic_schema_field_names)),
@@ -610,21 +619,26 @@ def _try_fast_path_view(con, source: dict) -> bool:
     return True
 
 
-def _rebuild_locked(con, source: dict, source_key: str) -> None:
+def _rebuild_locked(con, source: dict, source_key: str, target_table: str = "logs") -> None:
     """Run the slow path under the lock and signal completion."""
     ev = threading.Event()
+    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     with _rebuild_signals_lock:
-        _rebuild_signals[source_key] = ev
+        _rebuild_signals[cache_key] = ev
     try:
+        _core_mod._update_iceberg_view_locked(con, source, target_table=target_table)
+    except TypeError:
         _core_mod._update_iceberg_view_locked(con, source)
     finally:
         ev.set()
         with _rebuild_signals_lock:
-            if _rebuild_signals.get(source_key) is ev:
-                del _rebuild_signals[source_key]
+            if _rebuild_signals.get(cache_key) is ev:
+                del _rebuild_signals[cache_key]
 
 
-def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: bool = False) -> None:
+def update_iceberg_view(
+    con, source: dict, lock_timeout: float = 5.0, force: bool = False, target_table: str = "logs"
+) -> None:
     """Refresh the per-service DuckDB view over the Iceberg table + buffer.
 
     ``lock_timeout`` (default 5s) caps how long we wait on the per-service
@@ -648,11 +662,17 @@ def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: boo
     regenerates the SQL.
     """
     source_key = source.get("name", "default")
+    if source_key.endswith("::rum") and target_table == "logs":
+        update_iceberg_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_vitals")
+        update_iceberg_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_errors")
+        return
+
+    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
 
     # Lock-free fast path first. Parallel dashboard reads (6+ endpoints
     # per page load) only need the lock when a real rebuild is required.
     # Skipped on ``force=True`` (see self-heal path in QueryRunner).
-    if not force and _try_fast_path_view(con, source):
+    if not force and _try_fast_path_view(con, source, target_table=target_table):
         return
 
     lock = _get_service_lock(source_key)
@@ -663,9 +683,9 @@ def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: boo
     # of stepping through the lock serially.
     if not lock.acquire(blocking=False):
         with _rebuild_signals_lock:
-            ev = _rebuild_signals.get(source_key)
+            ev = _rebuild_signals.get(cache_key)
         if ev is not None and ev.wait(timeout=lock_timeout):
-            if _try_fast_path_view(con, source):
+            if _try_fast_path_view(con, source, target_table=target_table):
                 return
         # Either we raced ahead of _rebuild_locked setting the signal,
         # or the rebuild produced no fast-path-cacheable result. Fall
@@ -677,38 +697,40 @@ def update_iceberg_view(con, source: dict, lock_timeout: float = 5.0, force: boo
             #   3. Neither — extend the lock wait so the caller has a
             #      view to query (production-observed: restart-during-
             #      sync left RO sessions with "table not found").
-            cached = _view_cache.get(source_key)
+            cached = _view_cache.get(cache_key)
             if cached and cached[3] and len(cached) > 6 and cached[6] == _source_variant_fp(source):
                 try:
                     con.execute(cached[3])
                 except Exception:
                     pass
                 return
-            if _persistent_view_exists(con, source):
+            if _persistent_view_exists(con, source, target_table=target_table):
                 return
             logger.info(
-                "[iceberg] %s: cache empty and no persistent view; extending lock "
+                "[iceberg] %s: cache empty and no persistent view for %s; extending lock "
                 "wait to avoid 'table not found' on caller",
                 source_key,
+                target_table,
             )
             if not lock.acquire(timeout=60.0):
                 logger.warning(
-                    "[iceberg] %s: extended 60s lock wait timed out; view rebuild deferred",
+                    "[iceberg] %s: extended 60s lock wait timed out; view %s rebuild deferred",
                     source_key,
+                    target_table,
                 )
                 return
             try:
-                _rebuild_locked(con, source, source_key)
+                _rebuild_locked(con, source, source_key, target_table=target_table)
             finally:
                 lock.release()
             return
     try:
-        _rebuild_locked(con, source, source_key)
+        _rebuild_locked(con, source, source_key, target_table=target_table)
     finally:
         lock.release()
 
 
-def _persistent_view_exists(con, source: dict) -> bool:
+def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bool:
     """Return True if the per-service Iceberg view already exists on this
     connection's database. Used by ``update_iceberg_view`` to skip the
     extended lock wait when the caller can already query the view (even
@@ -716,7 +738,7 @@ def _persistent_view_exists(con, source: dict) -> bool:
     try:
         from backend.core.duckdb import _safe_table_name
 
-        table_name = _safe_table_name(source["name"])
+        table_name = target_table if target_table != "logs" else _safe_table_name(source["name"])
         row = con.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1",
             [table_name],
@@ -726,7 +748,7 @@ def _persistent_view_exists(con, source: dict) -> bool:
         return False
 
 
-def _update_iceberg_view_locked(con, source: dict) -> None:
+def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs") -> None:
     import sqlite3
 
     from backend.core.duckdb import _cache_dir, _safe_table_name
@@ -734,18 +756,22 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     # Re-check the fast path under the lock — state may have become
     # cacheable while we waited (a concurrent slow-path writer just
     # finished and primed _view_cache).
-    if _try_fast_path_view(con, source):
+    if _try_fast_path_view(con, source, target_table=target_table):
         return
 
     t_start = time.time()
-    table_name = _safe_table_name(source["name"])
+    table_name = target_table if target_table != "logs" else _safe_table_name(source["name"])
     source_key = source.get("name", "default")
+    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     cache_dir = _cache_dir(source)
     catalog_db_path = os.path.join(cache_dir, "iceberg_catalog.db")
 
     configure_duckdb_s3(con)
 
-    buf_files = _core_mod.buffer_files(source)
+    try:
+        buf_files = _core_mod.buffer_files(source, table_name=target_table)
+    except TypeError:
+        buf_files = _core_mod.buffer_files(source)
     buf_set = frozenset(buf_files)
 
     metadata_loc = None
@@ -753,7 +779,8 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         if os.path.exists(catalog_db_path):
             with sqlite3.connect(catalog_db_path, timeout=5.0) as cat_con:
                 row = cat_con.execute(
-                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = 'logs'"
+                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = ?",
+                    [target_table],
                 ).fetchone()
                 if row:
                     metadata_loc = row[0]
@@ -765,10 +792,10 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
 
-    dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config)
+    dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config, table_name=target_table)
     dynamic_schema_field_names = {f.name for f in dynamic_arrow_schema}
 
-    logger.info("▶️  %s %s: View refresh started...", _core_mod._ICE_PLAIN, source_key)
+    logger.info("▶️  %s %s (%s): View refresh started...", _core_mod._ICE_PLAIN, source_key, target_table)
 
     # Try to load from persistent cache if memory cache is empty
     _load_persistent_cache(source)
@@ -788,7 +815,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     iceberg_unreadable = False
 
     # We can skip reading from S3 entirely if ONLY the buffer changed.
-    cached_files = _snapshot_files_cache.get(source_key)
+    cached_files = _snapshot_files_cache.get(cache_key)
     if cached_files and cached_files[0] == metadata_loc:
         snapshot_id = cached_files[1]
         iceberg_loc = cached_files[2]
@@ -809,7 +836,9 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         # The table committed (new metadata_loc) or we had a full cache miss.
         try:
             catalog = _core_mod._get_catalog(source)
-            tbl = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
+            tbl = _core_mod._load_table_cached(
+                source, _core_mod._table_identifier(source, table_name=target_table), catalog
+            )
             snap = tbl.current_snapshot()
             snapshot_id = snap.snapshot_id if snap else None
         except Exception:
@@ -820,7 +849,8 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         if tbl is not None and snap is not None:
             try:
                 iceberg_loc = tbl.location()
-                data_dir = os.path.join(cache_dir, "data")
+                sub_dir = f"data_{target_table}" if target_table != "logs" else "data"
+                data_dir = os.path.join(cache_dir, sub_dir)
 
                 scan = tbl.scan()
                 tr = source.get("time_range")
@@ -869,7 +899,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
                         local_iceberg_files.append(uri)
 
                 # Cache by metadata_loc instead of snapshot_id
-                _snapshot_files_cache[source_key] = (metadata_loc, snapshot_id, iceberg_loc, local_iceberg_files)
+                _snapshot_files_cache[cache_key] = (metadata_loc, snapshot_id, iceberg_loc, local_iceberg_files)
                 _save_persistent_cache(source)
             except Exception as e:
                 logger.warning("[iceberg] plan_files() failed for %s: %s", source_key, e)
@@ -907,7 +937,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         #    a restart poisons the persistent view to "WHERE false" and
         #    no future poll can recover (the next "prior_was_empty" check
         #    lets the same downgrade happen again).
-        prior = _view_cache.get(source_key)
+        prior = _view_cache.get(cache_key)
         prior_sql = prior[3] if prior else None
         prior_was_empty = (not prior_sql) or ("WHERE false" in prior_sql)
         if prior_sql and not prior_was_empty:
@@ -924,7 +954,11 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         try:
             from backend.core import metadata as _meta
 
-            _summary = _meta.get_ingested_files_status_summary(source_key)
+            base_service_id = source_key.split("::")[0]
+            try:
+                _summary = _meta.get_ingested_files_status_summary(base_service_id, table_name=target_table)
+            except TypeError:
+                _summary = _meta.get_ingested_files_status_summary(base_service_id)
             ingested_rows = _summary["total_rows"]
             ingested_files = _summary["file_count"]
         except Exception:
@@ -969,7 +1003,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
         except Exception:
             empty_sql = None
         t_end = time.time()
-        _view_cache[source_key] = (
+        _view_cache[cache_key] = (
             metadata_loc,
             buf_set,
             tuple(sorted(dynamic_schema_field_names)),
@@ -998,7 +1032,8 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
     if _core_mod._is_local_only_source(source) and iceberg_loc and iceberg_loc.startswith("file://"):
         data_dir = os.path.join(iceberg_loc[len("file://") :], "data")
     else:
-        data_dir = os.path.join(cache_dir, "data")
+        sub_dir = f"data_{target_table}" if target_table != "logs" else "data"
+        data_dir = os.path.join(cache_dir, sub_dir)
     if not local_paths:
         try:
             import glob as _glob
@@ -1008,9 +1043,10 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
                 # Synthesize a sentinel so the local-read branch fires below
                 local_paths = disk_parquets[:1]
                 logger.info(
-                    "[iceberg] %s: plan_files returned 0 local paths but data/ has %d parquets — "
+                    "[iceberg] %s: plan_files returned 0 local paths but %s/ has %d parquets — "
                     "using local glob anyway to avoid cloud reads",
                     source_key,
+                    sub_dir,
                     len(disk_parquets),
                 )
         except Exception:
@@ -1221,7 +1257,7 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
             # invalidate column metadata, so it's safe to keep the cache.
             try:
                 new_columns = tuple(sorted(dynamic_schema_field_names))
-                prior = _view_cache.get(source_key)
+                prior = _view_cache.get(cache_key)
                 prior_columns = prior[2] if prior else None
                 if prior_columns != new_columns:
                     from backend.core.duckdb import _clear_schema_cache
@@ -1234,8 +1270,10 @@ def _update_iceberg_view_locked(con, source: dict) -> None:
 
     t_end = time.time()
     duration_ms = (t_end - t_start) * 1000
-    logger.info("⏹️  %s %s: View refresh complete (%.0f ms).", _core_mod._ICE_PLAIN, source_key, duration_ms)
-    _view_cache[source_key] = (
+    logger.info(
+        "⏹️  %s %s (%s): View refresh complete (%.0f ms).", _core_mod._ICE_PLAIN, source_key, target_table, duration_ms
+    )
+    _view_cache[cache_key] = (
         metadata_loc,
         buf_set,
         tuple(sorted(dynamic_schema_field_names)),

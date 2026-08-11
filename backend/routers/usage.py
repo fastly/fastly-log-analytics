@@ -493,7 +493,7 @@ def usage_current_storage(
             s3 = _get_fos_client(src)
             bucket = src["bucket"]
             prefix = src.get("prefix", "").strip("/")
-            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+            rum_prefix = f"{prefix}/raw_rum/" if prefix else "raw_rum/"
             paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
                 for obj in page.get("Contents", []):
@@ -808,25 +808,30 @@ def usage_rum_breakdown(
     global_rates = svcconfig.load_usage_logging_config()
     class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.005))
 
-    # Query RUM beacon count by date from metadata DB
+    # Query RUM beacon count by date from metadata DB using the new DuckDB/Iceberg ingestion tracking
     try:
         db = get_con(service_id)
+        start_date = start_str.split("T")[0]
+        end_date = end_str.split("T")[0]
         cur = db.execute(
             """
             SELECT
-                DATE(received_at) as date,
-                COUNT(*) as beacon_count
-            FROM rum_beacons
-            WHERE received_at >= ? AND received_at < ?
-            GROUP BY DATE(received_at)
+                file_date as date,
+                SUM(row_count) as beacon_count
+            FROM ingested_files
+            WHERE source_name = ?
+              AND table_name IN ('client_vitals', 'client_errors')
+              AND file_date >= ? AND file_date < ?
+            GROUP BY file_date
             ORDER BY date
             """,
-            (start_str, end_str),
+            (service_id, start_date, end_date),
         )
         rows = cur.fetchall()
         beacons_by_date: dict[str, int] = {}
         for row in rows:
-            beacons_by_date[row["date"]] = row["beacon_count"]
+            if row["date"]:
+                beacons_by_date[str(row["date"])] = row["beacon_count"]
     except Exception:
         beacons_by_date = {}
 

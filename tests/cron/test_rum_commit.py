@@ -19,17 +19,26 @@ def test_success_path_starts_and_finalizes_run(monkeypatch):
     start = MagicMock(return_value=42)
     log = MagicMock()
     finalize = MagicMock()
-    monkeypatch.setattr(rum_commit, "start_cron_run", start)
-    monkeypatch.setattr(rum_commit, "log_cron_run", log)
-    monkeypatch.setattr(rum_commit, "finalize_cron_run_if_running", finalize)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", finalize)
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"provisioning": {"cron_sync": {"enabled": True}}})
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid, "access_level": "read_write"},
+    )
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer", lambda *args, **kwargs: {"files_committed": 0, "rows_committed": 0}
+    )
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda *args, **kwargs: None)
 
     rum_commit._run_rum_commit.__wrapped__("svc-1")
 
-    start.assert_called_once_with("svc-1", "rum_commit")
+    start.assert_called_once_with({"name": "svc-1", "service_id": "svc-1", "access_level": "read_write"}, "rum_commit")
     log_args, log_kwargs = log.call_args
-    assert log_args[0] == "svc-1"
+    assert log_args[0] == {"name": "svc-1", "service_id": "svc-1", "access_level": "read_write"}
     assert log_args[1] == "rum_commit"
-    assert log_args[3] == "done"
+    assert log_args[3] == "success"
     assert log_kwargs["rows_ingested"] == 0
     assert log_kwargs["run_id"] == 42
     finalize.assert_called_once_with("svc-1", "rum_commit", 42)
@@ -39,9 +48,18 @@ def test_exception_logs_error_status_finalizes_and_reraises(monkeypatch):
     start = MagicMock(return_value=99)
     log = MagicMock()
     finalize = MagicMock()
-    monkeypatch.setattr(rum_commit, "start_cron_run", start)
-    monkeypatch.setattr(rum_commit, "log_cron_run", log)
-    monkeypatch.setattr(rum_commit, "finalize_cron_run_if_running", finalize)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", finalize)
+    monkeypatch.setattr("backend.config.load_config", lambda sid: {"provisioning": {"cron_sync": {"enabled": True}}})
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda sid: {"name": sid, "service_id": sid, "access_level": "read_write"},
+    )
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer", lambda *args, **kwargs: {"files_committed": 0, "rows_committed": 0}
+    )
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda *args, **kwargs: None)
 
     def _boom(*args, **kwargs):
         raise RuntimeError("compaction backend unavailable")

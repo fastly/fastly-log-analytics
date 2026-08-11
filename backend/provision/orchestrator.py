@@ -842,7 +842,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                 from backend.provision.fos_setup import delete_fos_prefix
 
                 prefix = state.get("fos_prefix", "")
-                exclude = f"{prefix.strip('/')}/raw/rum/" if prefix else "raw/rum/"
                 yield from run_with_events(
                     delete_fos_prefix,
                     state["fos_bucket_name"],
@@ -850,7 +849,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                     temp_key["access_key"],
                     temp_key["secret_key"],
                     prefix,
-                    exclude_prefix=exclude,
                     service_id=state.get("logging_service_id"),
                 )
             finally:
@@ -891,6 +889,17 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
             if os.path.exists(wal):
                 os.remove(wal)
             ok(f"Removed local database: {db_path}")
+
+        # Delete RUM DuckDB if it exists
+        rum_db_path = (
+            db_path.replace(".duckdb", ".rum.duckdb") if db_path.endswith(".duckdb") else db_path + ".rum.duckdb"
+        )
+        if os.path.exists(rum_db_path):
+            os.remove(rum_db_path)
+            rum_wal = rum_db_path + ".wal"
+            if os.path.exists(rum_wal):
+                os.remove(rum_wal)
+            ok(f"Removed local RUM database: {rum_db_path}")
 
         if service_id:
             try:

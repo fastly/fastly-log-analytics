@@ -20,16 +20,11 @@ from backend.core.metadata.base import (
 )
 
 
-def get_ingested_filenames(service_id: str, limit: int | None = None) -> set[str]:
-    """Return the set of file_names already ingested for a service. Used by ingest dedup.
+def get_ingested_filenames(service_id: str, limit: int | None = None, table_name: str = "logs") -> set[str]:
+    """Retrieve the set of file keys already registered to ``ingested_files``.
 
-    ``limit`` (when set) caps the result to the N most-recently ingested files.
-    Cron ingest passes a small limit (a few hundred k) so the 4s+ full-table
-    fetchall on busy services doesn't dominate the per-tick wall time —
-    incremental LIST only returns files within the lookback window, so older
-    rows can't appear in dedup checks anyway. ``None`` preserves the legacy
-    full-load behaviour for manual/full-sweep imports that scan the whole
-    bucket.
+    By default, lists log-side files (``table_name='logs'``). Pass the target table name
+    explicitly when deduping files for custom tables.
 
     Bounded calls (``limit`` is not ``None``) read from a process-wide
     in-memory cache populated on first call and kept in sync by
@@ -38,29 +33,30 @@ def get_ingested_filenames(service_id: str, limit: int | None = None) -> set[str
     Unbounded calls always hit SQLite for ground truth and invalidate the
     cache.
     """
+    cache_key = (service_id, table_name)
     if limit is None:
         with _ingested_filenames_cache_lock:
-            _ingested_filenames_cache.pop(service_id, None)
+            _ingested_filenames_cache.pop(cache_key, None)
         con = get_con(service_id)
         rows = con.execute(
-            "SELECT file_name FROM ingested_files WHERE source_name = ?",
-            (service_id,),
+            "SELECT file_name FROM ingested_files WHERE source_name = ? AND table_name = ?",
+            (service_id, table_name),
         ).fetchall()
         return {r["file_name"] for r in rows}
 
     with _ingested_filenames_cache_lock:
-        cached = _ingested_filenames_cache.get(service_id)
+        cached = _ingested_filenames_cache.get(cache_key)
         if cached is not None:
             return cached.copy()
 
     con = get_con(service_id)
     rows = con.execute(
-        "SELECT file_name FROM ingested_files WHERE source_name = ? ORDER BY ingested_at DESC LIMIT ?",
-        (service_id, limit),
+        "SELECT file_name FROM ingested_files WHERE source_name = ? AND table_name = ? ORDER BY ingested_at DESC LIMIT ?",
+        (service_id, table_name, limit),
     ).fetchall()
     fresh = {r["file_name"] for r in rows}
     with _ingested_filenames_cache_lock:
-        _ingested_filenames_cache[service_id] = fresh
+        _ingested_filenames_cache[cache_key] = fresh
     return fresh.copy()
 
 
@@ -218,7 +214,7 @@ def recompute_ingested_files_summary(con: sqlite3.Connection, service_id: str) -
     return _bootstrap_ingested_files_summary(con, service_id)
 
 
-def get_ingested_files_status_summary(service_id: str) -> dict:
+def get_ingested_files_status_summary(service_id: str, table_name: str = "logs") -> dict:
     """O(1) rollup read for ``get_sync_status`` header fields.
 
     Replaces the per-tick ``list_ingested_files_for_status`` fetchall + Python
@@ -232,6 +228,31 @@ def get_ingested_files_status_summary(service_id: str) -> dict:
     are ingested yet.
     """
     con = get_con(service_id)
+    if table_name != "logs":
+        agg = con.execute(
+            """SELECT COUNT(*) AS file_count,
+                      COALESCE(SUM(row_count), 0) AS total_rows,
+                      COALESCE(SUM(file_size_bytes), 0) AS total_bytes,
+                      COUNT(file_size_bytes) AS count_with_bytes,
+                      MAX(ingested_at) AS last_ingested
+               FROM ingested_files
+               WHERE source_name = ? AND table_name = ?""",
+            (service_id, table_name),
+        ).fetchone()
+        latest_fn_row = con.execute(
+            "SELECT file_name FROM ingested_files WHERE source_name = ? AND table_name = ? "
+            "ORDER BY substr(file_name, instr(file_name, '.gz') + 3, 19) DESC, file_name DESC LIMIT 1",
+            (service_id, table_name),
+        ).fetchone()
+        return {
+            "file_count": (agg["file_count"] if agg else 0) or 0,
+            "total_rows": (agg["total_rows"] if agg else 0) or 0,
+            "total_bytes": (agg["total_bytes"] if agg else 0) or 0,
+            "count_with_bytes": (agg["count_with_bytes"] if agg else 0) or 0,
+            "last_ingested": (agg["last_ingested"] if agg else None),
+            "latest_file_name": (latest_fn_row["file_name"] if latest_fn_row else None),
+        }
+
     row = con.execute(
         "SELECT file_count, total_rows, total_bytes, count_with_bytes, "
         "       latest_file_name, last_ingested "
@@ -241,22 +262,6 @@ def get_ingested_files_status_summary(service_id: str) -> dict:
     if row is None:
         return _bootstrap_ingested_files_summary(con, service_id)
 
-    # Self-healing check for the lexicographical raw/rum vs raw/2026 bug:
-    # If the rollup's latest_file_name contains 'raw/rum' but there are standard raw logs
-    # that are chronologically newer, we heal the rollup once in O(1) via _bootstrap.
-    latest_file_name = row["latest_file_name"]
-    if latest_file_name and "/raw/rum/" in latest_file_name:
-        has_newer_non_rum = (
-            con.execute(
-                "SELECT 1 FROM ingested_files WHERE source_name = ? AND file_name NOT LIKE '%/raw/rum/%' "
-                "AND substr(file_name, instr(file_name, '.gz') + 3, 19) > "
-                "    substr(?, instr(?, '.gz') + 3, 19) LIMIT 1",
-                (service_id, latest_file_name, latest_file_name),
-            ).fetchone()
-            is not None
-        )
-        if has_newer_non_rum:
-            return _bootstrap_ingested_files_summary(con, service_id)
     return {
         "file_count": row["file_count"] or 0,
         "total_rows": row["total_rows"] or 0,
@@ -573,7 +578,7 @@ def get_locally_compacted_basenames(service_id: str) -> set[str]:
     return {row[0] for row in con.execute("SELECT file_name FROM local_compacted_files").fetchall()}
 
 
-def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]]) -> None:
+def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]], table_name: str = "logs") -> None:
     """Bulk-insert/upsert (file_name, row_count, file_size_bytes) rows for a service.
 
     Also maintains the ``ingested_files_summary`` rollup in the same
@@ -610,8 +615,8 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
         placeholders = ",".join(["?"] * len(batch))
         for r in con.execute(
             f"SELECT file_name, row_count, file_size_bytes FROM ingested_files "
-            f"WHERE source_name = ? AND file_name IN ({placeholders})",
-            (service_id, *batch),
+            f"WHERE source_name = ? AND table_name = ? AND file_name IN ({placeholders})",
+            (service_id, table_name, *batch),
         ).fetchall():
             existing[r["file_name"]] = (r["row_count"], r["file_size_bytes"])
 
@@ -653,13 +658,13 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
                 count_with_bytes_delta += 1
 
     con.executemany(
-        """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(file_name, source_name) DO UPDATE SET
+        """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(file_name, source_name, table_name) DO UPDATE SET
                row_count = excluded.row_count,
                file_size_bytes = excluded.file_size_bytes,
                file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
-        [(fn, service_id, rc, sz, _parse_file_date(fn)) for (fn, rc, sz) in rows],
+        [(fn, service_id, rc, sz, _parse_file_date(fn), table_name) for (fn, rc, sz) in rows],
     )
     # Use the just-applied DB clock so last_ingested matches the row's
     # ingested_at default (datetime('now')) — keeps the rollup honest.
@@ -702,8 +707,9 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
     # populated — seeding it here would prematurely cap a fresh process's
     # cache to just this batch when ingested_files already had millions of
     # rows.
+    cache_key = (service_id, table_name)
     with _ingested_filenames_cache_lock:
-        cached = _ingested_filenames_cache.get(service_id)
+        cached = _ingested_filenames_cache.get(cache_key)
         if cached is not None:
             cached.update(file_names)
 
@@ -712,6 +718,7 @@ def record_in_flight(
     service_id: str,
     buffer_filename: str,
     rows: list[tuple[str, int, int | None]],
+    table_name: str = "logs",
 ) -> None:
     """Persist the (file_name, row_count, file_size) tuples that BELONG to a
     buffer Parquet, BEFORE the Parquet is written.
@@ -723,36 +730,36 @@ def record_in_flight(
     """
     con = get_con(service_id)
     con.execute(
-        """INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json, started_at)
-           VALUES (?, ?, ?, datetime('now'))
-           ON CONFLICT(buffer_filename) DO UPDATE SET
+        """INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json, started_at, table_name)
+           VALUES (?, ?, ?, datetime('now'), ?)
+           ON CONFLICT(buffer_filename, table_name) DO UPDATE SET
                source_name = excluded.source_name,
                files_json = excluded.files_json,
                started_at = excluded.started_at""",
-        (buffer_filename, service_id, json.dumps(rows)),
+        (buffer_filename, service_id, json.dumps(rows), table_name),
     )
     con.commit()
 
 
-def clear_in_flight(service_id: str, buffer_filename: str) -> None:
+def clear_in_flight(service_id: str, buffer_filename: str, table_name: str = "logs") -> None:
     """Drop the in_flight row for ``buffer_filename`` after its files have
     been committed to ``ingested_files``. Idempotent."""
     con = get_con(service_id)
     con.execute(
-        "DELETE FROM ingest_in_flight WHERE source_name = ? AND buffer_filename = ?",
-        (service_id, buffer_filename),
+        "DELETE FROM ingest_in_flight WHERE source_name = ? AND buffer_filename = ? AND table_name = ?",
+        (service_id, buffer_filename, table_name),
     )
     con.commit()
 
 
-def list_in_flight(service_id: str) -> list[tuple[str, list[tuple[str, int, int | None]]]]:
+def list_in_flight(service_id: str, table_name: str = "logs") -> list[tuple[str, list[tuple[str, int, int | None]]]]:
     """Return [(buffer_filename, [(file_name, row_count, file_size), ...]), ...]
     for every pending row belonging to this service. Used by the crash-
     recovery sweep at the start of every ingest tick."""
     con = get_con(service_id)
     rows = con.execute(
-        "SELECT buffer_filename, files_json FROM ingest_in_flight WHERE source_name = ?",
-        (service_id,),
+        "SELECT buffer_filename, files_json FROM ingest_in_flight WHERE source_name = ? AND table_name = ?",
+        (service_id, table_name),
     ).fetchall()
     out: list[tuple[str, list[tuple[str, int, int | None]]]] = []
     for r in rows:

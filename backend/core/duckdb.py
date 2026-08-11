@@ -1373,3 +1373,48 @@ class _SchemaCacheAdapter:
 
 
 _CacheRegistry.register("duckdb._schema_cache", _SchemaCacheAdapter())
+
+
+def rum_source_for(source: dict) -> dict:
+    """Return a shallow-copied RUM source dict where name gets suffixed with
+    '::rum' and duckdb_path points to '.rum.duckdb'.
+    """
+    import copy
+
+    rum_source = copy.deepcopy(source)
+    # Isolate connection, view cache, and pool lock automatically
+    base_name = source.get("name") or source.get("service_id") or "default"
+    rum_source["name"] = f"{base_name}::rum"
+
+    # Update duckdb_path to .rum.duckdb
+    db_path = source.get("duckdb_path")
+    if db_path:
+        if db_path.endswith(".duckdb"):
+            rum_source["duckdb_path"] = db_path.replace(".duckdb", ".rum.duckdb")
+        else:
+            rum_source["duckdb_path"] = db_path + ".rum.duckdb"
+    return rum_source
+
+
+def get_or_generate_cid_salt(service_id: str) -> str:
+    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing."""
+    import secrets
+
+    from backend.config import load_config, save_config
+
+    cfg = load_config(service_id)
+    if not cfg:
+        # Fallback if no config exists (e.g. during test mode without a persistent config)
+        return "default_test_salt_static_fallback_value_12345678"
+
+    rum_cfg = cfg.get("rum") or {}
+    if not isinstance(rum_cfg, dict):
+        rum_cfg = {}
+
+    salt = rum_cfg.get("cid_salt")
+    if not salt:
+        salt = secrets.token_hex(32)
+        rum_cfg["cid_salt"] = salt
+        cfg["rum"] = rum_cfg
+        save_config(service_id, cfg)
+    return salt

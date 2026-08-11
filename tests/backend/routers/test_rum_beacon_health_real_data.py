@@ -1,45 +1,104 @@
 """Tests for backend.routers.rum — GET /rum/beacon-health, real-data branch.
 
-test_rum_analytics.py's test_rum_beacon_health_endpoint only exercises the
-"RUM not enabled" short-circuit. These tests cover the real-DB query path:
-beacon counting within the last hour, last_beacon_time conversion, and the
-fail-open except branch when the DB query itself blows up.
+Covers the real-DB query path: beacon counting within the last hour, last_beacon_time conversion,
+and the fail-open except branch when the DB query itself blows up.
 """
 
 from __future__ import annotations
 
 import datetime
 
+import duckdb
+import pytest
 from fastapi.testclient import TestClient
 
-from backend.core.metadata import get_con
 from backend.main import app
 
 client = TestClient(app)
 
 
-def _clear(service_id: str) -> None:
-    db = get_con(service_id)
-    db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (service_id,))
-    db.commit()
+@pytest.fixture
+def setup_temp_rum_db(tmp_path, monkeypatch):
+    """Fixture to set up a temporary DuckDB database for RUM testing."""
+    temp_db_path = tmp_path / "test.duckdb"
+    temp_rum_db_path = tmp_path / "test.rum.duckdb"
 
+    # Disable DuckDB connection pool to prevent cross-test cached connection contamination
+    monkeypatch.setenv("DUCKDB_CONNECTION_POOL", "0")
 
-def test_enabled_with_recent_beacons_reports_fire_rate_and_setup_complete(monkeypatch):
-    service_id = "test_beacon_health_recent"
+    # Mock configuration to return our temporary database path
     monkeypatch.setattr(
         "backend.config.load_config",
-        lambda sid: {"service_id": sid, "rum": {"enabled": True}} if sid == service_id else None,
+        lambda sid: {
+            "service_id": sid,
+            "rum": {"enabled": True},
+            "rum_enabled": True,
+        },
     )
-    _clear(service_id)
-    db = get_con(service_id)
+
+    mock_source = {
+        "name": "test_service",
+        "service_id": "test_service",
+        "duckdb_path": str(temp_db_path),
+        "access_level": "read_write",
+        "endpoint": "localhost",
+        "access_key_id": "mock",
+        "secret_access_key": "mock",
+        "region": "mock",
+    }
+    monkeypatch.setattr("backend.core.request_context._resolve_source", lambda sid: mock_source)
+    monkeypatch.setattr("backend.deps._resolve_source_or_400", lambda sid: mock_source)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: mock_source)
+
+    # Initialize RUM tables
+    con = duckdb.connect(str(temp_rum_db_path))
+    con.execute("""
+        CREATE TABLE client_vitals (
+            timestamp TIMESTAMPTZ,
+            metric_name VARCHAR,
+            metric_value DOUBLE,
+            metric_rating VARCHAR,
+            pathname VARCHAR,
+            browser VARCHAR,
+            os VARCHAR,
+            device VARCHAR,
+            cid VARCHAR,
+            req_id VARCHAR
+        )
+    """)
+    con.execute("""
+        CREATE TABLE client_errors (
+            timestamp TIMESTAMPTZ,
+            error_message VARCHAR,
+            error_file VARCHAR,
+            error_line INTEGER,
+            error_col INTEGER,
+            pathname VARCHAR,
+            browser VARCHAR,
+            os VARCHAR,
+            device VARCHAR,
+            cid VARCHAR,
+            req_id VARCHAR
+        )
+    """)
+    con.close()
+
+    return temp_rum_db_path
+
+
+def test_enabled_with_recent_beacons_reports_fire_rate_and_setup_complete(setup_temp_rum_db):
+    service_id = "test_beacon_health_recent"
+    con = duckdb.connect(str(setup_temp_rum_db))
     recent = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
-    db.execute(
-        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-        (service_id, recent.strftime("%Y-%m-%dT%H:%M:%SZ"), "{}"),
+
+    con.execute(
+        "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (recent, "load_time", 1.5, "good", "/", "Chrome", "macOS", "Desktop", "cid1", "req1"),
     )
-    db.commit()
+    con.close()
 
     r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    print("DEBUG BEACON HEALTH RESP:", r.status_code, r.text)
     assert r.status_code == 200
     data = r.json()
     assert data["enabled"] is True
@@ -48,24 +107,32 @@ def test_enabled_with_recent_beacons_reports_fire_rate_and_setup_complete(monkey
     assert data["setup_complete"] is True
     assert data["message"] == "Script installed and firing"
     assert data["last_beacon_time"] is not None
-    _clear(service_id)
 
 
-def test_enabled_with_no_recent_beacons_reports_waiting(monkeypatch):
+def test_enabled_with_no_recent_beacons_reports_waiting(setup_temp_rum_db):
     service_id = "test_beacon_health_none_recent"
-    monkeypatch.setattr(
-        "backend.config.load_config",
-        lambda sid: {"service_id": sid, "rum": {"enabled": True}} if sid == service_id else None,
-    )
-    _clear(service_id)
-    db = get_con(service_id)
-    # A beacon exists but it's outside the 1-hour window.
+    con = duckdb.connect(str(setup_temp_rum_db))
     stale = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=3)
-    db.execute(
-        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-        (service_id, stale.strftime("%Y-%m-%dT%H:%M:%SZ"), "{}"),
+
+    con.execute(
+        "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (stale, "load_time", 1.5, "good", "/", "Chrome", "macOS", "Desktop", "cid1", "req1"),
     )
-    db.commit()
+    con.close()
+
+    r = client.get(f"/api/services/{service_id}/rum/beacon-health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["recent_beacons"] == 0
+    assert data["setup_complete"] is True
+    assert data["message"] == "Script installed and firing"
+    assert data["last_beacon_time"] is not None
+
+
+def test_enabled_with_absolutely_no_beacons_reports_waiting(setup_temp_rum_db):
+    service_id = "test_beacon_health_empty"
+    # Database is completely empty
 
     r = client.get(f"/api/services/{service_id}/rum/beacon-health")
     assert r.status_code == 200
@@ -75,20 +142,15 @@ def test_enabled_with_no_recent_beacons_reports_waiting(monkeypatch):
     assert data["setup_complete"] is False
     assert data["message"] == "Waiting for beacons..."
     assert data["last_beacon_time"] is None
-    _clear(service_id)
 
 
-def test_db_failure_is_caught_and_reported_in_message(monkeypatch):
+def test_db_failure_is_caught_and_reported_in_message(setup_temp_rum_db, monkeypatch):
     service_id = "test_beacon_health_db_failure"
-    monkeypatch.setattr(
-        "backend.config.load_config",
-        lambda sid: {"service_id": sid, "rum": {"enabled": True}} if sid == service_id else None,
-    )
 
-    def _raise(_sid):
+    def _raise(*args, **kwargs):
         raise RuntimeError("db is locked")
 
-    monkeypatch.setattr("backend.routers.rum.get_con", _raise)
+    monkeypatch.setattr("backend.routers.rum.execute_with_stale_view_retry", _raise)
 
     r = client.get(f"/api/services/{service_id}/rum/beacon-health")
     assert r.status_code == 200

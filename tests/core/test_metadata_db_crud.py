@@ -496,10 +496,10 @@ def test_teardown_invalidates_cache(sid):
     filenames from the previous incarnation."""
     metadata_db.insert_ingested_files(sid, [("a.gz", 1, 100)])
     metadata_db.get_ingested_filenames(sid, limit=200)
-    assert sid in metadata_db._ingested_filenames_cache
+    assert (sid, "logs") in metadata_db._ingested_filenames_cache
 
     metadata_db.teardown(sid)
-    assert sid not in metadata_db._ingested_filenames_cache
+    assert (sid, "logs") not in metadata_db._ingested_filenames_cache
 
 
 def test_dedup_cache_returns_a_copy(sid):

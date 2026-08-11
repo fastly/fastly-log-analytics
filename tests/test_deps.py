@@ -26,7 +26,10 @@ def _call_get_service_id(service=None, sid=None, x_fastly_service_id=None, x_ser
     not None — so calling the function bare would fail the truthiness
     check. This helper bypasses by always passing all four explicitly.
     """
+    request = MagicMock()
+    request.path_params = {}
     return deps.get_service_id(
+        request=request,
         service=service,
         sid=sid,
         x_fastly_service_id=x_fastly_service_id,

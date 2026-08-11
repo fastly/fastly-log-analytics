@@ -26,17 +26,20 @@ def test_client():
 
 def _clear(service_id: str) -> None:
     db = get_con(service_id)
-    db.execute("DELETE FROM rum_beacons WHERE service_id = ?", (service_id,))
+    db.execute(
+        "DELETE FROM ingested_files WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
+        (service_id,),
+    )
     db.commit()
 
 
 def _seed(service_id: str, received_at: str, count: int) -> None:
     db = get_con(service_id)
-    for _ in range(count):
-        db.execute(
-            "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-            (service_id, received_at, "{}"),
-        )
+    date_str = received_at.split("T")[0]
+    db.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name, file_date) VALUES (?, ?, ?, ?, ?, ?)",
+        (f"s3://bucket/{received_at}.parquet", service_id, count, 100, "client_vitals", date_str),
+    )
     db.commit()
 
 

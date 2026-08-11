@@ -826,10 +826,22 @@ def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkey
         config, "get_status", lambda sid: {"local_rows": 7400000, "latest_log_at": "2026-06-29T12:00:00Z"}
     )
 
-    # Mock RUM count in SQLite to return 800
-    mock_meta_con = MagicMock()
-    mock_meta_con.execute.return_value.fetchone.return_value = (800,)
-    monkeypatch.setattr("backend.core.metadata.get_con", lambda sid: mock_meta_con)
+    # Mock RUM count from DuckDB RUM views
+    class MockConnectionHolder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return MagicMock()
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("backend.deps._ConnectionHolder", MockConnectionHolder)
+    monkeypatch.setattr(
+        "backend.core.iceberg.execute_with_stale_view_retry",
+        lambda *args, **kwargs: (800, None),
+    )
 
     # Mock REQUEST count in DuckDB to return 33000 (representing stale/empty view)
     mock_duckdb_con = MagicMock()

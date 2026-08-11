@@ -230,17 +230,15 @@ def reset_service_logs(
         fos = _db._get_fos_client(source)
         bucket = source.get("bucket", "")
         prefix = source.get("prefix", "")
-        iceberg_prefix = f"{prefix}/iceberg/" if prefix else "iceberg/"
-        meta_prefix = f"{prefix}/iceberg/meta/" if prefix else "iceberg/meta/"
+        iceberg_prefix = f"{prefix}/iceberg/default/logs/" if prefix else "iceberg/default/logs/"
         deleted = yield from _purge_prefix(
             fos,
             bucket,
             iceberg_prefix,
             _delete_objects_robust,
-            exclude_prefix=meta_prefix,
-            label="object(s) under iceberg/",
+            label="object(s) under iceberg/default/logs/",
         )
-        yield {"type": "status", "message": f"Deleted {deleted:,} object(s) under iceberg/ (preserved iceberg/meta/)."}
+        yield {"type": "status", "message": f"Deleted {deleted:,} object(s) under iceberg/default/logs/."}
 
         errors_prefix = f"{prefix}/errors/" if prefix else "errors/"
         deleted_errors = yield from _purge_prefix(
@@ -258,15 +256,16 @@ def reset_service_logs(
 
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)
-        for table in (
-            "ingested_files",
-            "ingested_files_summary",
-            "ingest_in_flight",
-            "committed_buffers",
-            "local_compacted_files",
-            "quarantined_files",
-        ):
-            con.execute(f"DELETE FROM {table}")
+        con.execute("DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'", (service_id,))
+        con.execute("DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'", (service_id,))
+        con.execute(
+            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE 'client_vitals%' AND buffer_filename NOT LIKE 'client_errors%'"
+        )
+        con.execute(
+            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE 'client_vitals%' AND file_name NOT LIKE 'client_errors%'"
+        )
+        con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
+        con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
         con.commit()
 
         if not preserve_usage_history:
@@ -304,6 +303,181 @@ def reset_service_logs(
                     reload_scheduler()
             except Exception as e:
                 logger.error("reset_service_logs(%s): failed to resume scheduler: %s", service_id, e)
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
+def reset_service_rum(
+    service_id: str,
+    *,
+    delete_raw_logs: bool = False,
+    actor: str = "ui",
+    reload_scheduler: Callable[[], None] | None = None,
+) -> Iterator[dict]:
+    """Wipe ``service_id``'s RUM telemetry data back to a 0-state while preserving config.
+
+    Yields progress events matching the reset_service_logs contract.
+    """
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+    from backend.core import duckdb_pool as _pool
+    from backend.core import metadata as metadata_db
+    from backend.core.iceberg import _core as iceberg_core
+    from backend.core.iceberg.view import _get_service_lock, clear_source_caches, update_iceberg_view
+    from backend.core.ingest import _delete_objects_robust
+
+    source = _db.get_source_for_service(service_id)
+    if not source:
+        raise ValueError(f"No service found with id {service_id!r}")
+
+    service_key = source.get("name", service_id)
+    rum_source = _db.rum_source_for(source)
+    rum_db_path = os.path.abspath(rum_source["duckdb_path"])
+    rum_service_key = f"{service_key}::rum"
+
+    lock = _get_service_lock(service_key)
+    if not lock.acquire(timeout=_LOCK_TIMEOUT_S):
+        raise RuntimeError("Another operation is in progress for this service. Please wait and try again.")
+
+    paused_cron = False
+    original_rum_enabled = False
+    original_rum_enabled_root = False
+
+    try:
+        if metadata_db.cron_busy(service_id):
+            raise RuntimeError(
+                "Active RUM sync or commit is currently running. Please wait for it to finish before deleting RUM logs."
+            )
+
+        # Pause background RUM sync/commit ticks
+        yield {"type": "status", "message": "Pausing background RUM sync for this service..."}
+        cfg = svcconfig.load_config(service_id) or {}
+        rum_cfg = cfg.setdefault("rum", {})
+        original_rum_enabled = rum_cfg.get("enabled", False)
+        original_rum_enabled_root = cfg.get("rum_enabled", False)
+
+        if original_rum_enabled or original_rum_enabled_root:
+            rum_cfg["enabled"] = False
+            cfg["rum_enabled"] = False
+            svcconfig.save_config(service_id, cfg)
+            paused_cron = True
+            if reload_scheduler:
+                try:
+                    reload_scheduler()
+                except Exception as e:
+                    logger.warning("reset_service_rum(%s): scheduler reload (pause) failed: %s", service_id, e)
+
+        # Drain the RUM DuckDB connection pool and barrier connections
+        yield {"type": "status", "message": "Draining local RUM database connections..."}
+        _db.set_recycle_barrier(rum_db_path, True)
+        try:
+            _pool.begin_drain_pools([rum_service_key])
+            _pool.wait_pools_drained([rum_service_key], _DRAIN_TIMEOUT_S)
+            gc.collect()
+            deadline = time.monotonic() + _DRAIN_GRACE_S
+            while _db.live_connection_count(rum_db_path) > 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+                gc.collect()
+
+            yield {"type": "status", "message": "Wiping local RUM database..."}
+            for f in (rum_db_path, rum_db_path + ".wal", rum_db_path + ".shm"):
+                if os.path.exists(f):
+                    os.remove(f)
+            _db.clear_initialization_state(rum_db_path)
+
+            yield {"type": "status", "message": "Wiping local RUM cache & buffer..."}
+            rum_cache_dir = _db._cache_dir(source)
+            for t_name in ("client_vitals", "client_errors"):
+                # Clean up local cache directory
+                data_dir = os.path.join(rum_cache_dir, f"data_{t_name}")
+                if os.path.exists(data_dir):
+                    removed = yield from _remove_tree_with_progress(data_dir)
+                    shutil.rmtree(data_dir, ignore_errors=True)
+                    yield {"type": "status", "message": f"Removed {removed:,} local cache file(s) for RUM {t_name}."}
+
+                # Clean up local write buffer directory
+                buf_dir = os.path.join(rum_cache_dir, "buffer", t_name)
+                if os.path.exists(buf_dir):
+                    shutil.rmtree(buf_dir, ignore_errors=True)
+        finally:
+            _pool.end_drain_pools([rum_service_key])
+            _db.set_recycle_barrier(rum_db_path, False)
+
+        yield {"type": "status", "message": "Purging cloud Iceberg RUM tables..."}
+        fos = _db._get_fos_client(source)
+        bucket = source.get("bucket", "")
+        prefix = source.get("prefix", "")
+        for t_name in ("client_vitals", "client_errors"):
+            iceberg_prefix = f"{prefix}/iceberg/default/{t_name}/" if prefix else f"iceberg/default/{t_name}/"
+            deleted = yield from _purge_prefix(
+                fos,
+                bucket,
+                iceberg_prefix,
+                _delete_objects_robust,
+                label=f"object(s) under iceberg/default/{t_name}/",
+            )
+            yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}
+
+        if delete_raw_logs:
+            # We don't have distinct raw RUM log prefixes; RUM is usually combined in raw or disjoint.
+            # If RUM-specific raw prefix existed, we'd delete it, but by default we preserve raw.
+            pass
+
+        yield {"type": "status", "message": "Truncating local ingestion indexes for RUM..."}
+        con = metadata_db.get_con(service_id)
+        con.execute(
+            "DELETE FROM ingested_files WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
+            (service_id,),
+        )
+        con.execute(
+            "DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
+            (service_id,),
+        )
+        con.execute(
+            "DELETE FROM committed_buffers WHERE buffer_filename LIKE 'client_vitals%' OR buffer_filename LIKE 'client_errors%'"
+        )
+        con.execute(
+            "DELETE FROM local_compacted_files WHERE file_name LIKE 'client_vitals%' OR file_name LIKE 'client_errors%'"
+        )
+        con.commit()
+
+        metadata_db.recompute_ingested_files_summary(con, service_id)
+
+        yield {"type": "status", "message": "Re-initializing RUM storage catalogs..."}
+        clear_source_caches(rum_service_key)
+        for t_name in ("client_vitals", "client_errors"):
+            iceberg_core.init_iceberg_table(source, create=True, table_name=t_name)
+
+        # Pre-warm/initialize views on a standard connection
+        con2 = _db.get_connection(rum_source)
+        update_iceberg_view(con2, source, force=True, target_table="client_vitals")
+        update_iceberg_view(con2, source, force=True, target_table="client_errors")
+
+        metadata_db.record_audit(
+            service_id,
+            "rum_reset",
+            {"delete_raw_logs": delete_raw_logs},
+            actor=actor,
+        )
+
+        yield {
+            "type": "done",
+            "message": "RUM history deleted. New RUM beacons from the live edge will populate on next sync.",
+        }
+    finally:
+        if paused_cron:
+            try:
+                cfg = svcconfig.load_config(service_id) or {}
+                rum_cfg = cfg.setdefault("rum", {})
+                rum_cfg["enabled"] = original_rum_enabled
+                cfg["rum_enabled"] = original_rum_enabled_root
+                svcconfig.save_config(service_id, cfg)
+                if reload_scheduler:
+                    reload_scheduler()
+            except Exception as e:
+                logger.error("reset_service_rum(%s): failed to resume scheduler: %s", service_id, e)
         try:
             lock.release()
         except RuntimeError:

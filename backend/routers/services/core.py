@@ -165,6 +165,10 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
             if rum_incoming is not None:
                 rum_config = cfg.setdefault("rum", {})
                 rum_config.update({k: v for k, v in rum_incoming.items() if v is not None})
+                if not rum_config.get("cid_salt"):
+                    import secrets
+
+                    rum_config["cid_salt"] = secrets.token_hex(32)
                 cfg["rum"] = rum_config
 
             yield json.dumps({"type": "progress", "current": 2, "total": 4})

@@ -957,15 +957,6 @@ export interface paths {
         /**
          * Rum Status
          * @description Get RUM enable/disable status and VCL drift detection.
-         *
-         *     Analyst-safe sibling shape of /api/log-extents vs /api/sync-status
-         *     (F1 audit finding): the RUM page is analystVisible and gates its whole
-         *     body on this endpoint, so an analyst caller gets the projected
-         *     ``{enabled, enabled_at}`` body. ``deployed_vcl_sha`` / ``current_vcl_sha``
-         *     / ``vcl_drift`` disclose the operator's deployed edge-VCL fingerprint
-         *     and stay admin-only — they're also the expensive-to-compute fields
-         *     (``rum_vcl_fingerprint`` reads the deployed VCL), so skipping them for
-         *     analysts avoids that work entirely.
          */
         get: operations["rum_status_api_services__service_id__rum_status_get"];
         put?: never;
@@ -986,12 +977,6 @@ export interface paths {
         /**
          * Rum Versions
          * @description List available Faro Web SDK versions + the pinned/latest state (admin-only).
-         *
-         *     The npm registry is a third-party dependency outside our control; a
-         *     registry failure surfaces as a clean 503 rather than a 500 (the
-         *     ``ValueError`` ``fetch_available_faro_versions`` raises on transport/
-         *     parse failure) or a silently-empty "no updates available" body that
-         *     would misrepresent an outage as being up to date.
          */
         get: operations["rum_versions_api_services__service_id__rum_versions_get"];
         put?: never;
@@ -1014,11 +999,6 @@ export interface paths {
         /**
          * Upgrade Rum Handler
          * @description Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream).
-         *
-         *     The requested version is validated against the live registry listing
-         *     BEFORE any orchestration work starts, so an unknown version 400s here
-         *     instead of failing deep inside ``upgrade_faro_version`` as a download
-         *     404 (that boundary validation was explicitly deferred to this layer).
          */
         post: operations["upgrade_rum_handler_api_services__service_id__rum_upgrade_post"];
         delete?: never;
@@ -1037,6 +1017,7 @@ export interface paths {
         /**
          * Rum Beacon Health
          * @description Check if RUM beacons are arriving (validation endpoint for setup).
+         *     Queries DuckDB views using execute_with_stale_view_retry.
          */
         get: operations["rum_beacon_health_api_services__service_id__rum_beacon_health_get"];
         put?: never;
@@ -1056,15 +1037,8 @@ export interface paths {
         };
         /**
          * Rum Analytics
-         * @description Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.
-         *
-         *     Analyst invite-window clamp (matches the ``clamp_or_400`` idiom used by
-         *     ``session_scoring._scoring_time_window`` / ``dashboard._analyst_lookback_clamp``
-         *     / ``insights``): tenant scoping is already enforced by the RemoteAccess
-         *     middleware path gate, but without this an analyst on e.g. a 1-hour invite
-         *     could pass an arbitrary ``start_time``/``end_time`` and read the full
-         *     retained beacon history for their own service. Admin (no analyst_session)
-         *     requests pass straight through unclamped.
+         * @description Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
+         *     Wraps execution with execute_with_stale_view_retry.
          */
         get: operations["rum_analytics_api_services__service_id__rum_analytics_get"];
         put?: never;
@@ -1085,6 +1059,7 @@ export interface paths {
         /**
          * Rum Live Events
          * @description Fetch recent live beacons stream to feed frontend ticker.
+         *     Queries unified view records in DuckDB using execute_with_stale_view_retry.
          */
         get: operations["rum_live_events_api_services__service_id__rum_live_events_get"];
         put?: never;
@@ -2203,6 +2178,29 @@ export interface paths {
          *     match the resolved service id.
          */
         post: operations["reset_logs_endpoint_api_admin_reset_logs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/reset-rum": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Rum Endpoint
+         * @description Permanently delete this service's RUM telemetry data (cloud + local) over SSE.
+         *
+         *     Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
+         *     while leaving logs data completely untouched.
+         */
+        post: operations["reset_rum_endpoint_api_admin_reset_rum_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -9281,6 +9279,12 @@ export interface components {
         QueryRequest: {
             /** Sql */
             sql: string;
+            /**
+             * Dataset
+             * @default logs
+             * @enum {string}
+             */
+            dataset: "logs" | "client_vitals" | "client_errors";
             /**
              * Max Rows
              * @default 500
@@ -17777,11 +17781,15 @@ export interface operations {
     };
     rum_beacon_health_api_services__service_id__rum_beacon_health_get: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                service_id: string;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
             };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -17886,11 +17894,14 @@ export interface operations {
                 start_time?: string | null;
                 end_time?: string | null;
                 filters?: string | null;
+                service?: string | null;
+                service_id?: string | null;
             };
-            header?: never;
-            path: {
-                service_id: string;
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
             };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -17991,11 +18002,15 @@ export interface operations {
     };
     rum_live_events_api_services__service_id__rum_live_events_get: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                service_id: string;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
             };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -23670,6 +23685,7 @@ export interface operations {
     iceberg_info_endpoint_api_admin_iceberg_info_get: {
         parameters: {
             query?: {
+                table_name?: "logs" | "client_vitals" | "client_errors";
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -23777,6 +23793,7 @@ export interface operations {
     iceberg_calendar_endpoint_api_admin_iceberg_calendar_get: {
         parameters: {
             query?: {
+                table_name?: "logs" | "client_vitals" | "client_errors";
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -24096,6 +24113,117 @@ export interface operations {
         };
     };
     reset_logs_endpoint_api_admin_reset_logs_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetLogsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reset_rum_endpoint_api_admin_reset_rum_post: {
         parameters: {
             query?: {
                 service?: string | null;

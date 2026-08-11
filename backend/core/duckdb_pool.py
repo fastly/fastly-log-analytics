@@ -231,6 +231,17 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     try:
         from backend.core.iceberg._core import _buffer_dir
 
+        if src.get("name", "").endswith("::rum"):
+            path_vitals = _buffer_dir(src, table_name="client_vitals")
+            path_errors = _buffer_dir(src, table_name="client_errors")
+            mtimes = []
+            for p in (path_vitals, path_errors):
+                try:
+                    mtimes.append(os.path.getmtime(p))
+                except Exception:
+                    pass
+            return max(mtimes) if mtimes else None
+
         path = _buffer_dir(src)
         return os.path.getmtime(path)
     except Exception:

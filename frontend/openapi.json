@@ -8655,7 +8655,7 @@
           "rum"
         ],
         "summary": "Rum Status",
-        "description": "Get RUM enable/disable status and VCL drift detection.\n\nAnalyst-safe sibling shape of /api/log-extents vs /api/sync-status\n(F1 audit finding): the RUM page is analystVisible and gates its whole\nbody on this endpoint, so an analyst caller gets the projected\n``{enabled, enabled_at}`` body. ``deployed_vcl_sha`` / ``current_vcl_sha``\n/ ``vcl_drift`` disclose the operator's deployed edge-VCL fingerprint\nand stay admin-only \u2014 they're also the expensive-to-compute fields\n(``rum_vcl_fingerprint`` reads the deployed VCL), so skipping them for\nanalysts avoids that work entirely.",
+        "description": "Get RUM enable/disable status and VCL drift detection.",
         "operationId": "rum_status_api_services__service_id__rum_status_get",
         "parameters": [
           {
@@ -8780,7 +8780,7 @@
           "rum"
         ],
         "summary": "Rum Versions",
-        "description": "List available Faro Web SDK versions + the pinned/latest state (admin-only).\n\nThe npm registry is a third-party dependency outside our control; a\nregistry failure surfaces as a clean 503 rather than a 500 (the\n``ValueError`` ``fetch_available_faro_versions`` raises on transport/\nparse failure) or a silently-empty \"no updates available\" body that\nwould misrepresent an outage as being up to date.",
+        "description": "List available Faro Web SDK versions + the pinned/latest state (admin-only).",
         "operationId": "rum_versions_api_services__service_id__rum_versions_get",
         "parameters": [
           {
@@ -8903,7 +8903,7 @@
           "rum"
         ],
         "summary": "Upgrade Rum Handler",
-        "description": "Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream).\n\nThe requested version is validated against the live registry listing\nBEFORE any orchestration work starts, so an unknown version 400s here\ninstead of failing deep inside ``upgrade_faro_version`` as a download\n404 (that boundary validation was explicitly deferred to this layer).",
+        "description": "Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream).",
         "operationId": "upgrade_rum_handler_api_services__service_id__rum_upgrade_post",
         "parameters": [
           {
@@ -9034,16 +9034,71 @@
           "rum"
         ],
         "summary": "Rum Beacon Health",
-        "description": "Check if RUM beacons are arriving (validation endpoint for setup).",
+        "description": "Check if RUM beacons are arriving (validation endpoint for setup).\nQueries DuckDB views using execute_with_stale_view_retry.",
         "operationId": "rum_beacon_health_api_services__service_id__rum_beacon_health_get",
         "parameters": [
           {
-            "name": "service_id",
-            "in": "path",
-            "required": true,
+            "name": "service",
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
             }
           }
         ],
@@ -9159,18 +9214,9 @@
           "rum"
         ],
         "summary": "Rum Analytics",
-        "description": "Retrieve parsed RUM analytics from SQLite database with high-fidelity deterministic mock fallback.\n\nAnalyst invite-window clamp (matches the ``clamp_or_400`` idiom used by\n``session_scoring._scoring_time_window`` / ``dashboard._analyst_lookback_clamp``\n/ ``insights``): tenant scoping is already enforced by the RemoteAccess\nmiddleware path gate, but without this an analyst on e.g. a 1-hour invite\ncould pass an arbitrary ``start_time``/``end_time`` and read the full\nretained beacon history for their own service. Admin (no analyst_session)\nrequests pass straight through unclamped.",
+        "description": "Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.\nWraps execution with execute_with_stale_view_retry.",
         "operationId": "rum_analytics_api_services__service_id__rum_analytics_get",
         "parameters": [
-          {
-            "name": "service_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Id"
-            }
-          },
           {
             "name": "start_time",
             "in": "query",
@@ -9217,6 +9263,70 @@
                 }
               ],
               "title": "Filters"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
             }
           }
         ],
@@ -9332,16 +9442,71 @@
           "rum"
         ],
         "summary": "Rum Live Events",
-        "description": "Fetch recent live beacons stream to feed frontend ticker.",
+        "description": "Fetch recent live beacons stream to feed frontend ticker.\nQueries unified view records in DuckDB using execute_with_stale_view_retry.",
         "operationId": "rum_live_events_api_services__service_id__rum_live_events_get",
         "parameters": [
           {
-            "name": "service_id",
-            "in": "path",
-            "required": true,
+            "name": "service",
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": "string",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
             }
           }
         ],
@@ -18230,6 +18395,21 @@
         "operationId": "iceberg_info_endpoint_api_admin_iceberg_info_get",
         "parameters": [
           {
+            "name": "table_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "logs",
+                "client_vitals",
+                "client_errors"
+              ],
+              "type": "string",
+              "default": "logs",
+              "title": "Table Name"
+            }
+          },
+          {
             "name": "service",
             "in": "query",
             "required": false,
@@ -18407,6 +18587,21 @@
         "description": "Return per-date data file counts from Iceberg partition metadata.",
         "operationId": "iceberg_calendar_endpoint_api_admin_iceberg_calendar_get",
         "parameters": [
+          {
+            "name": "table_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "logs",
+                "client_vitals",
+                "client_errors"
+              ],
+              "type": "string",
+              "default": "logs",
+              "title": "Table Name"
+            }
+          },
           {
             "name": "service",
             "in": "query",
@@ -18934,6 +19129,192 @@
         "summary": "Reset Logs Endpoint",
         "description": "Permanently delete this service's log data (cloud + local) over SSE.\n\nWipes the cloud Iceberg log table, the local DuckDB file + cache, and\nthe SQLite ingestion ledgers, then re-initializes an empty, queryable\n0-state. Preserves the service's configuration: saved views, alerts,\nsource registration, audit history, and scoring labels/audit. See\n``backend.core.reset.reset_service_logs`` for the full sequence.\n\nFails closed before any work starts: 403 if this service isn't\nread_write (defense-in-depth \u2014 ``RemoteAccessMiddleware`` already blocks\n``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't\nmatch the resolved service id.",
         "operationId": "reset_logs_endpoint_api_admin_reset_logs_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetLogsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/reset-rum": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reset Rum Endpoint",
+        "description": "Permanently delete this service's RUM telemetry data (cloud + local) over SSE.\n\nWipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache\nwhile leaving logs data completely untouched.",
+        "operationId": "reset_rum_endpoint_api_admin_reset_rum_post",
         "parameters": [
           {
             "name": "service",
@@ -46735,6 +47116,16 @@
           "sql": {
             "type": "string",
             "title": "Sql"
+          },
+          "dataset": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "client_vitals",
+              "client_errors"
+            ],
+            "title": "Dataset",
+            "default": "logs"
           },
           "max_rows": {
             "type": "integer",

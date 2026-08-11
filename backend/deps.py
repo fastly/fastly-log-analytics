@@ -38,6 +38,7 @@ ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
 
 
 def get_service_id(
+    request: Request,
     service: str | None = Query(default=None),
     sid: str | None = Query(default=None, alias="service_id"),
     x_fastly_service_id: str | None = Header(default=None, alias="x-fastly-service-id"),
@@ -50,7 +51,7 @@ def get_service_id(
     ID matches a cdn_service_id in any config, it returns the corresponding
     logging service ID.
     """
-    res_sid = service or sid or x_fastly_service_id or x_service_id
+    res_sid = service or sid or x_fastly_service_id or x_service_id or request.path_params.get("service_id")
     if res_sid:
         if svcconfig.load_config(res_sid):
             return res_sid

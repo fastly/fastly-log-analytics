@@ -17,16 +17,6 @@ def mock_metadata_db(tmp_path):
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
 
-    # Initialize required tables matching actual schemas
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS rum_beacons (
-            id INTEGER PRIMARY KEY,
-            service_id TEXT NOT NULL,
-            received_at TEXT NOT NULL DEFAULT (datetime('now')),
-            beacon_data TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
     con.execute("""
         CREATE TABLE IF NOT EXISTS ingested_files (
             file_name TEXT,
@@ -36,7 +26,18 @@ def mock_metadata_db(tmp_path):
             file_size_bytes INTEGER,
             error_count INTEGER DEFAULT 0,
             file_date DATE,
-            PRIMARY KEY (file_name, source_name)
+            table_name TEXT NOT NULL DEFAULT 'logs',
+            PRIMARY KEY (file_name, source_name, table_name)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ingest_in_flight (
+            buffer_filename TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            files_json TEXT NOT NULL,
+            started_at TEXT DEFAULT (datetime('now')),
+            table_name TEXT NOT NULL DEFAULT 'logs',
+            PRIMARY KEY (buffer_filename, table_name)
         )
     """)
     con.execute("""
@@ -120,7 +121,9 @@ def test_ingest_rum_logs_empty_bucket(
 @patch("backend.core.rum_ingest.start_cron_run")
 @patch("backend.core.rum_ingest.log_cron_run")
 @patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+@patch("backend.core.iceberg.write_to_buffer")
 def test_ingest_rum_logs_success(
+    mock_write_buffer,
     mock_finalize,
     mock_log,
     mock_start,
@@ -141,7 +144,7 @@ def test_ingest_rum_logs_success(
         "bucket": "test-bucket",
     }
 
-    # Generate sample RUM log line matching standard Fastly fields
+    # Generate sample RUM log line matching standard Fastly fields (fallback query param format)
     raw_log = {
         "rum_cid": "sess_123",
         "fastly_req_id": "req_vital_0",
@@ -159,7 +162,7 @@ def test_ingest_rum_logs_success(
     mock_paginator.paginate.return_value = [
         {
             "Contents": [
-                {"Key": "raw/rum/rum_log_0.json.gz", "Size": len(gzipped_content)},
+                {"Key": "raw_rum/rum_log_0.json.gz", "Size": len(gzipped_content)},
             ]
         }
     ]
@@ -180,22 +183,113 @@ def test_ingest_rum_logs_success(
         ("done", 1),
     ]
 
-    # Verify rows in database
-    beacons = mock_metadata_db.execute("SELECT * FROM rum_beacons").fetchall()
-    assert len(beacons) == 1
-    assert beacons[0]["service_id"] == service_id
-    assert beacons[0]["received_at"] == "2026-08-07T03:07:47+00:00"
+    # Verify write_to_buffer was called with table_name="client_vitals"
+    mock_write_buffer.assert_called_once()
+    assert mock_write_buffer.call_args[1]["table_name"] == "client_vitals"
 
-    parsed_beacon = json.loads(beacons[0]["beacon_data"])
-    assert parsed_beacon["pathname"] == "/about"
-    assert parsed_beacon["path"] == "/about"
-    assert parsed_beacon["name"] == "LCP"
-    assert parsed_beacon["value"] == 1800.0
-    assert parsed_beacon["rating"] == "good"
-    assert parsed_beacon["cid"] == "sess_123"
-
-    # Verify that file key was successfully registered to ingested_files
+    # Verify that file key was successfully registered to ingested_files for both tables
     ingested = mock_metadata_db.execute("SELECT * FROM ingested_files").fetchall()
-    assert len(ingested) == 1
-    assert ingested[0]["file_name"] == "s3://test-bucket/raw/rum/rum_log_0.json.gz"
-    assert ingested[0]["row_count"] == 1
+    assert len(ingested) == 2
+    table_names = {row["table_name"] for row in ingested}
+    assert table_names == {"client_vitals", "client_errors"}
+
+    vitals_row = [r for r in ingested if r["table_name"] == "client_vitals"][0]
+    errors_row = [r for r in ingested if r["table_name"] == "client_errors"][0]
+    assert vitals_row["row_count"] == 1
+    assert errors_row["row_count"] == 0
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.core.rum_ingest._get_fos_client")
+@patch("backend.core.metadata.get_con")
+@patch("backend.core.metadata.ingest_log.get_con")
+@patch("backend.core.rum_ingest.start_cron_run")
+@patch("backend.core.rum_ingest.log_cron_run")
+@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+@patch("backend.core.iceberg.write_to_buffer")
+def test_ingest_rum_logs_faro_dual_fan_out(
+    mock_write_buffer,
+    mock_finalize,
+    mock_log,
+    mock_start,
+    mock_get_con_ingest,
+    mock_get_con_metadata,
+    mock_get_fos,
+    mock_get_source,
+    mock_metadata_db,
+):
+    """Test dual-event fan-out under Faro format (vitals & exception in the same beacon payload)."""
+    service_id = "test_service"
+    mock_get_con_ingest.return_value = mock_metadata_db
+    mock_get_con_metadata.return_value = mock_metadata_db
+    mock_start.return_value = 123
+    mock_get_source.return_value = {
+        "name": "test_service",
+        "service_id": service_id,
+        "bucket": "test-bucket",
+    }
+
+    # Generate Faro format log with both vitals and exceptions
+    faro_payload = {
+        "measurements": [
+            {
+                "type": "web-vitals",
+                "values": {"FID": 45.0},
+                "meta": {"rating": "good"},
+            }
+        ],
+        "exceptions": [
+            {
+                "value": "Uncaught ReferenceError: x is not defined",
+                "stacktrace": {"frames": [{"filename": "bundle.js", "lineno": 100, "colno": 2}]},
+            }
+        ],
+    }
+    raw_log = {
+        "rum_body": json.dumps(faro_payload),
+        "fastly_req_id": "req_faro_dual",
+        "rum_cid": "faro_sess",
+        "timestamp": "2026-08-07T03:07:47+00:00",
+    }
+    gzipped_content = gzip.compress(json.dumps(raw_log).encode("utf-8"))
+
+    mock_s3 = MagicMock()
+    mock_get_fos.return_value = mock_s3
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = [
+        {
+            "Contents": [
+                {"Key": "raw_rum/rum_log_1.json.gz", "Size": len(gzipped_content)},
+            ]
+        }
+    ]
+    mock_s3.get_paginator.return_value = mock_paginator
+
+    # Mock s3 get_object response
+    import io
+
+    mock_response = {"Body": io.BytesIO(gzipped_content)}
+    mock_s3.get_object.return_value = mock_response
+
+    # Execute ingest generator
+    events = list(ingest_rum_logs(service_id))
+
+    # Single beacon line contained both a vital and an error -> fanned out into 2 rows total
+    assert events == [
+        ("started", 123),
+        ("file_done", "rum_log_1.json.gz", 2),
+        ("done", 2),
+    ]
+
+    # Verify write_to_buffer was called twice (once for vitals, once for errors)
+    assert mock_write_buffer.call_count == 2
+    written_tables = {call.kwargs["table_name"] for call in mock_write_buffer.call_args_list}
+    assert written_tables == {"client_vitals", "client_errors"}
+
+    # Verify that file key was successfully registered to ingested_files for both tables
+    ingested = mock_metadata_db.execute("SELECT * FROM ingested_files").fetchall()
+    assert len(ingested) == 2
+    vitals_row = [r for r in ingested if r["table_name"] == "client_vitals"][0]
+    errors_row = [r for r in ingested if r["table_name"] == "client_errors"][0]
+    assert vitals_row["row_count"] == 1
+    assert errors_row["row_count"] == 1

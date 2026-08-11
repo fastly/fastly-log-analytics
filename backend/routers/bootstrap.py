@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 
 import duckdb
@@ -417,19 +418,37 @@ def _bootstrap_sync(
             # Get separate metrics from actual DuckDB and metadata
             meta_con = metadata_db.get_con(valid_active_id)
 
-            # RUM metrics from DuckDB (if rum_beacons table exists)
+            # RUM metrics from DuckDB RUM views
             try:
-                rum_count = meta_con.execute(
-                    "SELECT COUNT(*) FROM rum_beacons WHERE service_id = ?", (valid_active_id,)
-                ).fetchone()[0]
+                from backend.core.duckdb import rum_source_for
+                from backend.core.iceberg import execute_with_stale_view_retry
+                from backend.deps import _ConnectionHolder
+
+                rum_source = rum_source_for(active_src)
+                with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+
+                    def _query_rum_bootstrap(con):
+                        cnt = (
+                            con.execute(
+                                "SELECT COUNT(DISTINCT req_id) FROM (SELECT req_id FROM client_vitals UNION ALL SELECT req_id FROM client_errors)"
+                            ).fetchone()[0]
+                            or 0
+                        )
+                        l_row = con.execute(
+                            "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+                        ).fetchone()
+                        l_ts = l_row[0] if l_row else None
+                        return cnt, l_ts
+
+                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, _query_rum_bootstrap)
+
                 if rum_count > 0:
                     rum_total = rum_count
-                    rum_latest_row = meta_con.execute(
-                        "SELECT received_at FROM rum_beacons WHERE service_id = ? ORDER BY received_at DESC LIMIT 1",
-                        (valid_active_id,),
-                    ).fetchone()
-                    if rum_latest_row and rum_latest_row[0]:
-                        rum_latest = rum_latest_row[0]
+                    if rum_last_dt:
+                        if isinstance(rum_last_dt, datetime.datetime):
+                            rum_latest = rum_last_dt.isoformat()
+                        else:
+                            rum_latest = str(rum_last_dt)
             except Exception:
                 pass
 

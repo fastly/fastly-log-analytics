@@ -87,7 +87,7 @@ def test_deletes_only_objects_older_than_retention_window(mock_load_config, mock
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = source
 
-    _put(s3_mock, "test-prefix/raw/rum/old-file.log.gz", body=b"y" * 500)
+    _put(s3_mock, "test-prefix/raw_rum/old-file.log.gz", body=b"y" * 500)
     _put(s3_mock, "test-prefix/not-rum/other.log.gz", body=b"z" * 999)  # outside the rum/ prefix — must survive
 
     # Fast-forward "now" by 30 days so the (real-timestamped) object falls
@@ -100,7 +100,7 @@ def test_deletes_only_objects_older_than_retention_window(mock_load_config, mock
     remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="test-prefix/")
     remaining_keys = [o["Key"] for o in remaining.get("Contents", [])]
     assert "test-prefix/not-rum/other.log.gz" in remaining_keys
-    assert "test-prefix/raw/rum/old-file.log.gz" not in remaining_keys
+    assert "test-prefix/raw_rum/old-file.log.gz" not in remaining_keys
 
 
 @patch("backend.core.rum_ingest.get_source_for_service")
@@ -109,13 +109,13 @@ def test_objects_within_retention_window_are_kept(mock_load_config, mock_get_sou
     mock_load_config.return_value = {"rum": {"delete_after": 90}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "raw/rum/fresh-file.log.gz")
+    _put(s3_mock, "raw_rum/fresh-file.log.gz")
 
     with _patched_client(s3_mock):
         files, freed = cleanup_old_rum_logs("svc1")
 
     assert (files, freed) == (0, 0)
-    remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="raw/rum/")
+    remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="raw_rum/")
     assert len(remaining.get("Contents", [])) == 1
 
 
@@ -125,7 +125,7 @@ def test_directory_marker_keys_are_skipped(mock_load_config, mock_get_source, s3
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "raw/rum/")  # a directory-marker-style key (trailing slash)
+    _put(s3_mock, "raw_rum/")  # a directory-marker-style key (trailing slash)
 
     with _patched_client(s3_mock), patch("backend.core.rum_ingest.datetime", _fast_forwarded(30)):
         files, freed = cleanup_old_rum_logs("svc1")
@@ -154,8 +154,8 @@ def test_per_object_delete_failure_is_swallowed_and_others_still_deleted(
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "raw/rum/a.log.gz", body=b"a" * 100)
-    _put(s3_mock, "raw/rum/b.log.gz", body=b"b" * 200)
+    _put(s3_mock, "raw_rum/a.log.gz", body=b"a" * 100)
+    _put(s3_mock, "raw_rum/b.log.gz", body=b"b" * 200)
 
     real_delete = s3_mock.delete_object
 

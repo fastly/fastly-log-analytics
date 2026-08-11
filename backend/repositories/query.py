@@ -51,6 +51,7 @@ def execute_query(
     service_id: str | None = None,
     time_filter: tuple[str | None, str | None] | None = None,
     mask_ips: bool = False,
+    dataset: str = "logs",
 ) -> dict:
     """Execute a validated user SQL statement.
 
@@ -77,7 +78,11 @@ def execute_query(
 
     table_name: str | None = None
     if src:
-        table_name = _safe_table(src["name"])
+        if dataset != "logs":
+            table_name = dataset
+        else:
+            table_name = _safe_table(src["name"])
+
         if table_name != "logs":
             sql = re.sub(r"\blogs\b", table_name, sql, flags=re.IGNORECASE)
         # F-8/9/10: cross-tenant catalog leakage on /api/query. The
@@ -122,7 +127,7 @@ def execute_query(
     # column. (adversarial audit 2026-07-06: closed a raw-IP enumeration leak
     # via ``SELECT 'x'||ip, count(*) FROM logs GROUP BY ip``.)
     redact_cols = _pii_redact_cols(con, table_name) if mask_ips else frozenset()
-    window_view = _rebind_table_to_window_view(con, table_name, time_filter, redact_cols)
+    window_view = _rebind_table_to_window_view(con, table_name, time_filter, redact_cols, service_id=service_id)
     if window_view is not None and table_name is not None:
         sql = re.sub(rf"\b{re.escape(table_name)}\b", lambda _m: window_view, sql, flags=re.IGNORECASE)
 
@@ -182,6 +187,8 @@ def _rebind_table_to_window_view(
     table_name: str | None,
     time_filter: tuple[str | None, str | None] | None,
     redact_cols: frozenset[str] = frozenset(),
+    *,
+    service_id: str | None = None,
 ) -> str | None:
     """Create the per-request analyst source view, or None when nothing to bind.
 
@@ -221,12 +228,18 @@ def _rebind_table_to_window_view(
         # of the quoted identifier (SESSION_ID_KEYS are static literals today,
         # but keep the guard for any future addition — mirrors optional_col in
         # _base.py). Sorted for a deterministic, testable view definition.
-        replacements = ", ".join(
-            'CASE WHEN "{c}" IS NULL OR "{c}" = \'\' THEN "{c}" ELSE \'[redacted]\' END AS "{c}"'.format(
-                c=col.replace('"', '""')
-            )
-            for col in sorted(redact_cols)
-        )
+        repl_list = []
+        for col in sorted(redact_cols):
+            escaped_col = col.replace('"', '""')
+            if col == "cid" and service_id:
+                from backend.core.duckdb import get_or_generate_cid_salt
+
+                salt = get_or_generate_cid_salt(service_id)
+                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE sha256(CONCAT(\'{salt}\', "{escaped_col}")) END AS "{escaped_col}"'
+            else:
+                expr = f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" ELSE \'[redacted]\' END AS "{escaped_col}"'
+            repl_list.append(expr)
+        replacements = ", ".join(repl_list)
         select_list = f"* REPLACE ({replacements})"
 
     where_sql = ""

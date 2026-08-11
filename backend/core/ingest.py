@@ -352,7 +352,7 @@ def _deterministic_buffer_name(chunk: list[str]) -> str:
     return f"batch_{digest}.parquet"
 
 
-def _recover_in_flight(source: dict) -> dict:
+def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
     """Reconcile ``ingest_in_flight`` rows with on-disk buffer state.
 
     Called at the start of every ingest tick. For each in_flight row:
@@ -369,35 +369,37 @@ def _recover_in_flight(source: dict) -> dict:
     cron logger.
     """
     source_name = source["name"]
-    pending = metadata_db.list_in_flight(source_name)
+    pending = metadata_db.list_in_flight(source_name, table_name=table_name)
     if not pending:
         return {"promoted": 0, "dropped": 0, "rows_recovered": 0}
 
-    buf_dir = iceberg._buffer_dir(source)  # type: ignore[attr-defined]
+    buf_dir = iceberg._buffer_dir(source, table_name=table_name)  # type: ignore[attr-defined]
     promoted = 0
     dropped = 0
     rows_recovered = 0
     for buffer_filename, file_rows in pending:
         buf_path = os.path.join(buf_dir, buffer_filename)
         if os.path.isfile(buf_path) and file_rows:
-            metadata_db.insert_ingested_files(source_name, file_rows)
-            metadata_db.clear_in_flight(source_name, buffer_filename)
+            metadata_db.insert_ingested_files(source_name, file_rows, table_name=table_name)
+            metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
             promoted += 1
             rows_recovered += sum(rc for (_, rc, _) in file_rows if rc)
             logger.info(
-                "[ingest] %s: recovered in_flight buffer %s — promoted %d files (%d rows)",
+                "[ingest] %s: recovered in_flight buffer %s (%s) — promoted %d files (%d rows)",
                 source_name,
                 buffer_filename,
+                table_name,
                 len(file_rows),
                 sum(rc for (_, rc, _) in file_rows if rc),
             )
         else:
-            metadata_db.clear_in_flight(source_name, buffer_filename)
+            metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
             dropped += 1
             logger.info(
-                "[ingest] %s: dropped stale in_flight row for missing buffer %s (%d files will re-ingest)",
+                "[ingest] %s: dropped stale in_flight row for missing buffer %s (%s) (%d files will re-ingest)",
                 source_name,
                 buffer_filename,
+                table_name,
                 len(file_rows),
             )
     return {"promoted": promoted, "dropped": dropped, "rows_recovered": rows_recovered}
@@ -628,7 +630,6 @@ def ingest(
     list_gen = list_fos_files(
         src=src,
         prefix_subpath="raw/",
-        exclude_prefix_subpath="raw/rum/",
         already_ingested=already,
         start_time=start_time,
         end_time=end_time,

@@ -104,6 +104,7 @@ export function buildStructuredSql(
   sorting: SortingState,
   maxRows: number,
   fieldTypes?: Record<string, string>,
+  tableName: string = 'logs',
 ): string {
   const where = buildWhereClause(filters, startTime, endTime, fieldTypes)
   const sort = sorting[0]
@@ -112,7 +113,7 @@ export function buildStructuredSql(
     : 'ORDER BY timestamp DESC'
   return [
     'SELECT *',
-    'FROM logs',
+    `FROM ${tableName}`,
     where,
     orderBy,
     `LIMIT ${maxRows}`,

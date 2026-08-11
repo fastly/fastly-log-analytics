@@ -48,7 +48,7 @@ _initialized: set[str] = set()
 # it in sync. Unbounded reads (admin teardown / repair tools) bypass and
 # invalidate the cache. Eliminates the ~640 ms SQL fetchall on every ~5 s
 # sync tick for services with >1 M ingested_files.
-_ingested_filenames_cache: dict[str, set[str]] = {}
+_ingested_filenames_cache: dict[str | tuple[str, str], set[str]] = {}
 _ingested_filenames_cache_lock = threading.Lock()
 
 
@@ -84,6 +84,9 @@ def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
         if service_id is None:
             _ingested_filenames_cache.clear()
         else:
+            to_remove = [k for k in _ingested_filenames_cache if isinstance(k, tuple) and k[0] == service_id]
+            for k in to_remove:
+                _ingested_filenames_cache.pop(k, None)
             _ingested_filenames_cache.pop(service_id, None)
 
 
@@ -241,7 +244,8 @@ _SCHEMA = [
         file_size_bytes INTEGER,
         error_count INTEGER DEFAULT 0,
         file_date DATE,
-        PRIMARY KEY (file_name, source_name)
+        table_name TEXT NOT NULL DEFAULT 'logs',
+        PRIMARY KEY (file_name, source_name, table_name)
     )""",
     # Covers `/usage/prefill`'s source+range narrowing
     # (`WHERE source_name = ? AND ingested_at BETWEEN ? AND ?`) and the
@@ -292,10 +296,12 @@ _SCHEMA = [
     # this makes the ingest → buffer → metadata commit sequence crash-safe
     # without ever double-committing a row to Iceberg.
     """CREATE TABLE IF NOT EXISTS ingest_in_flight (
-        buffer_filename TEXT PRIMARY KEY,
+        buffer_filename TEXT NOT NULL,
         source_name TEXT NOT NULL,
         files_json TEXT NOT NULL,
-        started_at TEXT DEFAULT (datetime('now'))
+        started_at TEXT DEFAULT (datetime('now')),
+        table_name TEXT NOT NULL DEFAULT 'logs',
+        PRIMARY KEY (buffer_filename, table_name)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_in_flight_source ON ingest_in_flight(source_name)",
     """CREATE TABLE IF NOT EXISTS cron_runs (
@@ -436,17 +442,6 @@ _SCHEMA = [
         UNIQUE(file_name, source_name)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(source_name, quarantined_at)",
-    # RUM beacon receipt log for health validation. Tracks when beacons
-    # arrive to enable setup validation (confirming the script is firing).
-    # Queried by rum/beacon-health endpoint (last 1 hour for fire rate).
-    """CREATE TABLE IF NOT EXISTS rum_beacons (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        service_id TEXT NOT NULL,
-        received_at TEXT NOT NULL DEFAULT (datetime('now')),
-        beacon_data TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_rum_beacons_service_time ON rum_beacons(service_id, received_at DESC)",
 ]
 
 

@@ -277,13 +277,13 @@ def test_commit_buffer_loads_table_once_per_call(pipeline_env, monkeypatch):
     real_public = ice.init_iceberg_table
     real_locked = ice._init_iceberg_table_locked
 
-    def counting_public(source, create=True):
+    def counting_public(source, create=True, table_name="logs"):
         counts["public"] += 1
-        return real_public(source, create=create)
+        return real_public(source, create=create, table_name=table_name)
 
-    def counting_locked(source, create=True):
+    def counting_locked(source, create=True, table_name="logs"):
         counts["locked"] += 1
-        return real_locked(source, create=create)
+        return real_locked(source, create=create, table_name=table_name)
 
     monkeypatch.setattr(ice, "init_iceberg_table", counting_public)
     monkeypatch.setattr(ice, "_init_iceberg_table_locked", counting_locked)

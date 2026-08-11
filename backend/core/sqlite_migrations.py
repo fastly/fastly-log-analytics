@@ -281,6 +281,94 @@ def _migration_009_quarantined_error_size(con: sqlite3.Connection) -> None:
     con.execute("ALTER TABLE quarantined_files ADD COLUMN error_size_bytes INTEGER")
 
 
+def _migration_010_rum_duckdb_iceberg(con: sqlite3.Connection) -> None:
+    """Add table_name column to ingested_files and migrate ingest_in_flight to composite PK."""
+    schema_sql_ingested = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='ingested_files'"
+    ).fetchone()
+    if schema_sql_ingested and "PRIMARY KEY (file_name, source_name, table_name)" not in schema_sql_ingested[0]:
+        con.execute(
+            """
+            CREATE TABLE ingested_files_new (
+                file_name TEXT,
+                source_name TEXT,
+                ingested_at TEXT DEFAULT (datetime('now')),
+                row_count INTEGER,
+                file_size_bytes INTEGER,
+                error_count INTEGER DEFAULT 0,
+                file_date DATE,
+                table_name TEXT NOT NULL DEFAULT 'logs',
+                PRIMARY KEY (file_name, source_name, table_name)
+            )
+            """
+        )
+        # Check if table_name column exists in old table
+        has_table_name = "table_name" in schema_sql_ingested[0]
+        select_cols = "file_name, source_name, ingested_at, row_count, file_size_bytes, error_count, file_date, "
+        if has_table_name:
+            select_cols += "table_name"
+        else:
+            select_cols += "'logs'"
+
+        con.execute(
+            f"""
+            INSERT INTO ingested_files_new (file_name, source_name, ingested_at, row_count, file_size_bytes, error_count, file_date, table_name)
+            SELECT {select_cols} FROM ingested_files
+            """
+        )
+        con.execute("DROP TABLE ingested_files")
+        con.execute("ALTER TABLE ingested_files_new RENAME TO ingested_files")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingested_files_source_ingested_at ON ingested_files(source_name, ingested_at)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingested_files_table_source ON ingested_files(table_name, source_name)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingested_files_source_date ON ingested_files(source_name, file_date)"
+        )
+    elif not _has_column(con, "ingested_files", "table_name"):
+        con.execute("ALTER TABLE ingested_files ADD COLUMN table_name TEXT NOT NULL DEFAULT 'logs'")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingested_files_table_source ON ingested_files(table_name, source_name)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ingested_files_source_date ON ingested_files(source_name, file_date)"
+        )
+
+    schema_sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='ingest_in_flight'").fetchone()
+    if schema_sql and "PRIMARY KEY (buffer_filename, table_name)" not in schema_sql[0]:
+        con.execute(
+            """
+            CREATE TABLE ingest_in_flight_new (
+                buffer_filename TEXT NOT NULL,
+                source_name     TEXT NOT NULL,
+                files_json      TEXT,
+                started_at      TEXT,
+                table_name      TEXT NOT NULL DEFAULT 'logs',
+                PRIMARY KEY (buffer_filename, table_name)
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO ingest_in_flight_new (buffer_filename, source_name, files_json, started_at, table_name)
+            SELECT buffer_filename, source_name, files_json, started_at, 'logs' FROM ingest_in_flight
+            """
+        )
+        con.execute("DROP TABLE ingest_in_flight")
+        con.execute("ALTER TABLE ingest_in_flight_new RENAME TO ingest_in_flight")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_in_flight_source ON ingest_in_flight(source_name)")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_in_flight_table_source ON ingest_in_flight(table_name, source_name)"
+        )
+
+
+def _migration_011_drop_rum_beacons(con: sqlite3.Connection) -> None:
+    """Drop the deprecated SQLite-prototype rum_beacons table and its indices."""
+    con.execute("DROP TABLE IF EXISTS rum_beacons")
+
+
 # Insertion order = application order. Use integer keys. The key=3 slot
 # (a rebuild of usage_log_hourly_summary) was retired alongside the
 # legacy usage_log schema; the gap is intentional and apply_pending
@@ -294,6 +382,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migration_007_quarantined_files,
     8: _migration_008_quarantined_reason_counts,
     9: _migration_009_quarantined_error_size,
+    10: _migration_010_rum_duckdb_iceberg,
+    11: _migration_011_drop_rum_beacons,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

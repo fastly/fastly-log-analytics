@@ -518,7 +518,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
                 endpoint_type="s3",
-                path=f"{state.fos_prefix}/raw/rum/%Y/%m/%d/%H/rum_log_%M.json.gz",
+                path=f"{state.fos_prefix}/raw_rum/%Y/%m/%d/%H/rum_log_%M.json.gz",
                 period=state.log_period,
                 response_condition="rum_log_condition",
                 format_string=rum_format,

@@ -1,6 +1,7 @@
 """RUM beacon ingest pipeline.
 
-Parses raw/rum/ logs from FOS and streams them into the sqlite rum_beacons table.
+Parses raw_rum/ logs from FOS and streams them into local Parquet buffers
+which are then committed to Apache Iceberg tables.
 Uses the standard ingested_files table to ensure atomic, de-duplicated imports.
 """
 
@@ -13,6 +14,9 @@ import time
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
+import pyarrow as pa
+
+from backend.core import iceberg
 from backend.core import metadata as metadata_db
 from backend.core.duckdb import _get_fos_client, get_source_for_service
 from backend.core.metadata.cron_log import (
@@ -22,6 +26,24 @@ from backend.core.metadata.cron_log import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def safe_int(val, default: int = 0) -> int:
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+
+def safe_float(val, default: float | None = None) -> float | None:
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except Exception:
+        return default
 
 
 def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
@@ -51,7 +73,7 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
         prefix = src.get("prefix", "").strip("/")
-        rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+        rum_prefix = f"{prefix}/raw_rum/" if prefix else "raw_rum/"
 
         cutoff_time = datetime.now(UTC) - timedelta(days=delete_after_days)
         files_deleted = 0
@@ -209,10 +231,19 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
 def ingest_rum_logs(
     service_id: str,
 ) -> Generator[tuple]:
-    """Ingest RUM beacon logs from FOS raw/rum/ prefix into local SQLite."""
+    """Ingest RUM beacon logs from FOS raw_rum/ prefix into local Parquet buffers & DuckDB Iceberg views."""
     import tempfile
 
-    from backend.core.ingest import _download_chunk_to_local, list_fos_files
+    from backend.core.iceberg.rum_schema import (
+        CLIENT_ERRORS_ARROW_SCHEMA,
+        CLIENT_VITALS_ARROW_SCHEMA,
+    )
+    from backend.core.ingest import (
+        _deterministic_buffer_name,
+        _download_chunk_to_local,
+        _recover_in_flight,
+        list_fos_files,
+    )
 
     start_time = time.time()
     run_id = start_cron_run(service_id, "rum_sync")
@@ -237,8 +268,15 @@ def ingest_rum_logs(
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
 
+        # Run crash recovery for BOTH RUM tables
+        _recover_in_flight(src, table_name="client_vitals")
+        _recover_in_flight(src, table_name="client_errors")
+
         # Fetch already ingested files to avoid duplicate processing
-        already_ingested_raw = metadata_db.get_ingested_filenames(service_id) or set()
+        vitals_ingested = metadata_db.get_ingested_filenames(service_id, table_name="client_vitals") or set()
+        errors_ingested = metadata_db.get_ingested_filenames(service_id, table_name="client_errors") or set()
+        already_ingested_raw = vitals_ingested.union(errors_ingested)
+
         bucket_prefix = f"s3://{bucket}/"
         already_ingested = set()
         for p in already_ingested_raw:
@@ -247,10 +285,10 @@ def ingest_rum_logs(
             else:
                 already_ingested.add(f"{bucket_prefix}{p}")
 
-        # Use the shared list_fos_files helper to discover files in raw/rum/ prefix
+        # Use the shared list_fos_files helper to discover files in raw_rum/ prefix
         list_gen = list_fos_files(
             src=src,
-            prefix_subpath="raw/rum/",
+            prefix_subpath="raw_rum/",
             already_ingested=already_ingested,
             incremental_only=False,
             elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",
@@ -281,15 +319,20 @@ def ingest_rum_logs(
             )
             return
 
-        total_rows = 0
-        db = metadata_db.get_con(service_id)
-        ingested_batch_records = []
+        total_vitals_rows = 0
+        total_errors_rows = 0
 
         # Download and process in parallel chunks to unify request and RUM ingestion logic
         CHUNK_SIZE = 50
         chunks = [new_files_s3[i : i + CHUNK_SIZE] for i in range(0, len(new_files_s3), CHUNK_SIZE)]
 
         for chunk in chunks:
+            buf_filename = _deterministic_buffer_name(chunk)
+            vitals_rows = []
+            errors_rows = []
+            vitals_batch_records = []
+            errors_batch_records = []
+
             with tempfile.TemporaryDirectory() as tmpdir:
                 s3_to_local, _ = _download_chunk_to_local(s3, chunk, tmpdir)
 
@@ -300,7 +343,8 @@ def ingest_rum_logs(
                         continue
 
                     local_path = s3_to_local[s3_path]
-                    file_rows_count = 0
+                    vitals_count_for_file = 0
+                    errors_count_for_file = 0
                     size = file_sizes.get(s3_path, 0)
 
                     try:
@@ -318,6 +362,14 @@ def ingest_rum_logs(
                                         continue
 
                                     received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
+                                    try:
+                                        dt = datetime.fromisoformat(received_at)
+                                        if dt.tzinfo is None:
+                                            dt = dt.replace(tzinfo=UTC)
+                                        else:
+                                            dt = dt.astimezone(UTC)
+                                    except Exception:
+                                        dt = datetime.now(UTC)
 
                                     # Try to extract metrics/exceptions from raw JSON in rum_body first
                                     raw_body = log_data.get("rum_body")
@@ -336,51 +388,67 @@ def ingest_rum_logs(
                                     if extracted_metrics:
                                         # Ingest each extracted metric as a separate beacon row
                                         for metric in extracted_metrics:
-                                            beacon_data = {
-                                                "pathname": metric["pathname"],
-                                                "path": metric["pathname"],
-                                                "name": metric["metric_name"],
-                                                "value": metric["metric_value"],
-                                                "rating": metric["metric_rating"],
-                                                "cid": metric["cid"],
-                                                "req_id": log_data.get("fastly_req_id") or "",
-                                                "browser": metric["browser"],
-                                                "os": metric["os"],
-                                                "device": metric["device"],
-                                                "raw_log": log_data,
-                                                "faro_payload": payload,
-                                                "meta": {
-                                                    "browser": metric["browser"],
-                                                    "os": metric["os"],
-                                                    "device": metric["device"],
-                                                },
-                                            }
-                                            if metric.get("error_message"):
-                                                beacon_data["exceptions"] = [
-                                                    {
-                                                        "value": metric["error_message"],
-                                                        "message": metric["error_message"],
-                                                        "filename": metric.get("error_file") or "unknown.js",
-                                                        "file": metric.get("error_file") or "unknown.js",
-                                                        "lineno": metric.get("error_line") or 0,
-                                                        "line": metric.get("error_line") or 0,
-                                                        "colno": metric.get("error_col") or 0,
-                                                        "col": metric.get("error_col") or 0,
-                                                    }
-                                                ]
-                                            db.execute(
-                                                "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-                                                (service_id, received_at, json.dumps(beacon_data)),
+                                            # Common fields
+                                            browser_val = metric.get("browser") or log_data.get("browser") or "Chrome"
+                                            os_val = metric.get("os") or log_data.get("os") or "macOS"
+                                            device_val = metric.get("device") or log_data.get("device") or "Desktop"
+                                            cid_val = (
+                                                metric.get("cid")
+                                                or log_data.get("rum_cid")
+                                                or log_data.get("cid")
+                                                or ""
                                             )
-                                            file_rows_count += 1
-                                            total_rows += 1
+                                            req_id_val = log_data.get("fastly_req_id") or ""
+                                            pathname_val = metric.get("pathname") or "/"
+
+                                            is_exception = (metric.get("metric_name") == "exception") or metric.get(
+                                                "error_message"
+                                            )
+
+                                            if is_exception:
+                                                # client_errors row
+                                                errors_rows.append(
+                                                    {
+                                                        "timestamp": dt,
+                                                        "error_message": metric.get("error_message") or "Unknown error",
+                                                        "error_file": metric.get("error_file") or "unknown.js",
+                                                        "error_line": safe_int(metric.get("error_line")),
+                                                        "error_col": safe_int(metric.get("error_col")),
+                                                        "pathname": pathname_val,
+                                                        "browser": browser_val,
+                                                        "os": os_val,
+                                                        "device": device_val,
+                                                        "cid": cid_val,
+                                                        "req_id": req_id_val,
+                                                    }
+                                                )
+                                                errors_count_for_file += 1
+                                                total_errors_rows += 1
+                                            else:
+                                                # client_vitals row
+                                                vitals_rows.append(
+                                                    {
+                                                        "timestamp": dt,
+                                                        "metric_name": metric.get("metric_name") or "",
+                                                        "metric_value": safe_float(metric.get("metric_value")),
+                                                        "metric_rating": metric.get("metric_rating") or "",
+                                                        "pathname": pathname_val,
+                                                        "browser": browser_val,
+                                                        "os": os_val,
+                                                        "device": device_val,
+                                                        "cid": cid_val,
+                                                        "req_id": req_id_val,
+                                                    }
+                                                )
+                                                vitals_count_for_file += 1
+                                                total_vitals_rows += 1
                                     else:
                                         # Extract core RUM metric values with URL/query parameter fallbacks
                                         metric_name = log_data.get("rum_metric_name")
                                         metric_value = log_data.get("rum_metric_value")
                                         metric_rating = log_data.get("rum_metric_rating")
-                                        cid = log_data.get("rum_cid") or log_data.get("cid")
-                                        pathname = log_data.get("rum_pathname")
+                                        cid_val = log_data.get("rum_cid") or log_data.get("cid") or ""
+                                        pathname_val = log_data.get("rum_pathname")
 
                                         from urllib.parse import parse_qs, urlparse
 
@@ -397,10 +465,10 @@ def ingest_rum_logs(
                                                     metric_value = qparams["rum_metric_value"][0]
                                                 if not metric_rating and "rum_metric_rating" in qparams:
                                                     metric_rating = qparams["rum_metric_rating"][0]
-                                                if not cid and "cid" in qparams:
-                                                    cid = qparams["cid"][0]
-                                                if not pathname and "rum_pathname" in qparams:
-                                                    pathname = qparams["rum_pathname"][0]
+                                                if not cid_val and "cid" in qparams:
+                                                    cid_val = qparams["cid"][0]
+                                                if not pathname_val and "rum_pathname" in qparams:
+                                                    pathname_val = qparams["rum_pathname"][0]
                                             except Exception:
                                                 pass
 
@@ -415,78 +483,100 @@ def ingest_rum_logs(
                                                 pass
 
                                         # Robust path extraction fallback from referer if still missing
-                                        if not pathname and log_data.get("referer"):
+                                        if not pathname_val and log_data.get("referer"):
                                             try:
-                                                pathname = urlparse(log_data["referer"]).path
+                                                pathname_val = urlparse(log_data["referer"]).path
                                             except Exception:
                                                 pass
-                                        if not pathname:
-                                            pathname = "/"
-                                        pathname = pathname.replace("//", "/")
+                                        if not pathname_val:
+                                            pathname_val = "/"
+                                        pathname_val = pathname_val.replace("//", "/")
 
-                                        # Reconstruct the beacon_data format expected by RUM analytics dashboard
-                                        beacon_data = {
-                                            "pathname": pathname,
-                                            "path": pathname,
-                                            "name": metric_name or "",
-                                            "value": metric_value,
-                                            "rating": metric_rating or "",
-                                            "cid": cid or "",
-                                            "req_id": log_data.get("fastly_req_id") or "",
-                                            "browser": log_data.get("browser") or "Chrome",
-                                            "os": log_data.get("os") or "macOS",
-                                            "device": log_data.get("device") or "Desktop",
-                                            "raw_log": log_data,  # Store complete original raw log for debugging!
-                                            "meta": {
-                                                "browser": log_data.get("browser") or "Chrome",
-                                                "os": log_data.get("os") or "macOS",
-                                                "device": log_data.get("device") or "Desktop",
-                                            },
-                                        }
+                                        browser_val = log_data.get("browser") or "Chrome"
+                                        os_val = log_data.get("os") or "macOS"
+                                        device_val = log_data.get("device") or "Desktop"
+                                        req_id_val = log_data.get("fastly_req_id") or ""
 
                                         # Append client telemetry if available
-                                        if log_data.get("rum_error_message"):
-                                            beacon_data["exceptions"] = [
+                                        is_exception = log_data.get("rum_error_message") is not None
+                                        if is_exception:
+                                            errors_rows.append(
                                                 {
-                                                    "value": log_data["rum_error_message"],
-                                                    "message": log_data["rum_error_message"],
-                                                    "filename": log_data.get("rum_error_file") or "unknown.js",
-                                                    "file": log_data.get("rum_error_file") or "unknown.js",
-                                                    "lineno": log_data.get("rum_error_line") or 0,
-                                                    "line": log_data.get("rum_error_line") or 0,
-                                                    "colno": log_data.get("rum_error_col") or 0,
-                                                    "col": log_data.get("rum_error_col") or 0,
+                                                    "timestamp": dt,
+                                                    "error_message": log_data["rum_error_message"] or "Unknown error",
+                                                    "error_file": log_data.get("rum_error_file") or "unknown.js",
+                                                    "error_line": safe_int(log_data.get("rum_error_line")),
+                                                    "error_col": safe_int(log_data.get("rum_error_col")),
+                                                    "pathname": pathname_val,
+                                                    "browser": browser_val,
+                                                    "os": os_val,
+                                                    "device": device_val,
+                                                    "cid": cid_val,
+                                                    "req_id": req_id_val,
                                                 }
-                                            ]
-
-                                        db.execute(
-                                            "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-                                            (service_id, received_at, json.dumps(beacon_data)),
-                                        )
-                                        file_rows_count += 1
-                                        total_rows += 1
+                                            )
+                                            errors_count_for_file += 1
+                                            total_errors_rows += 1
+                                        else:
+                                            vitals_rows.append(
+                                                {
+                                                    "timestamp": dt,
+                                                    "metric_name": metric_name or "",
+                                                    "metric_value": safe_float(metric_value),
+                                                    "metric_rating": metric_rating or "",
+                                                    "pathname": pathname_val,
+                                                    "browser": browser_val,
+                                                    "os": os_val,
+                                                    "device": device_val,
+                                                    "cid": cid_val,
+                                                    "req_id": req_id_val,
+                                                }
+                                            )
+                                            vitals_count_for_file += 1
+                                            total_vitals_rows += 1
                                 except Exception as e:
                                     logger.warning(f"RUM sync: Failed to parse RUM log line: {e}")
                                     continue
 
-                        db.commit()
-                        ingested_batch_records.append((s3_path, file_rows_count, size))
-                        yield ("file_done", s3_path.split("/")[-1], file_rows_count)
+                        vitals_batch_records.append((s3_path, vitals_count_for_file, size))
+                        errors_batch_records.append((s3_path, errors_count_for_file, size))
+                        yield ("file_done", s3_path.split("/")[-1], vitals_count_for_file + errors_count_for_file)
                     except Exception as e:
                         logger.error(f"RUM sync: Failed to ingest RUM log file {s3_path}: {e}")
                         yield ("error", s3_path, str(e))
                         continue
 
-        # Persist completed files to ingested_files
-        if ingested_batch_records:
-            metadata_db.insert_ingested_files(service_id, ingested_batch_records)
+            # End of chunk: Write tables to buffers
+            if vitals_batch_records:
+                if vitals_rows:
+                    metadata_db.record_in_flight(
+                        service_id, buf_filename, vitals_batch_records, table_name="client_vitals"
+                    )
+                    vitals_table = pa.Table.from_pylist(vitals_rows, schema=CLIENT_VITALS_ARROW_SCHEMA)
+                    iceberg.write_to_buffer(src, vitals_table, buf_filename, table_name="client_vitals")
+                    metadata_db.insert_ingested_files(service_id, vitals_batch_records, table_name="client_vitals")
+                    metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_vitals")
+                else:
+                    metadata_db.insert_ingested_files(service_id, vitals_batch_records, table_name="client_vitals")
+
+            if errors_batch_records:
+                if errors_rows:
+                    metadata_db.record_in_flight(
+                        service_id, buf_filename, errors_batch_records, table_name="client_errors"
+                    )
+                    errors_table = pa.Table.from_pylist(errors_rows, schema=CLIENT_ERRORS_ARROW_SCHEMA)
+                    iceberg.write_to_buffer(src, errors_table, buf_filename, table_name="client_errors")
+                    metadata_db.insert_ingested_files(service_id, errors_batch_records, table_name="client_errors")
+                    metadata_db.clear_in_flight(service_id, buf_filename, table_name="client_errors")
+                else:
+                    metadata_db.insert_ingested_files(service_id, errors_batch_records, table_name="client_errors")
 
         # Clean up old RUM logs according to retention policy
         cleanup_files, cleanup_bytes = cleanup_old_rum_logs(service_id)
         if cleanup_files > 0:
             yield ("cleanup_done", cleanup_files, cleanup_bytes)
 
-        yield ("done", total_rows)
+        yield ("done", total_vitals_rows + total_errors_rows)
         duration_s = time.time() - start_time
         log_cron_run(
             service_id,
@@ -494,7 +584,7 @@ def ingest_rum_logs(
             duration_s,
             "success",
             files_downloaded=len(new_files_s3),
-            rows_ingested=total_rows,
+            rows_ingested=total_vitals_rows + total_errors_rows,
             run_id=run_id,
         )
     except Exception as e:
@@ -505,7 +595,7 @@ def ingest_rum_logs(
             "rum_sync",
             duration_s,
             "error",
-            files_downloaded=len(ingested_batch_records) if "ingested_batch_records" in locals() else 0,
+            files_downloaded=len(new_files_s3) if "new_files_s3" in locals() else 0,
             error_message=str(e),
             run_id=run_id,
         )

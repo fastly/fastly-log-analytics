@@ -1,12 +1,6 @@
 """Tests for backend.repositories.rum — client_vitals / client_errors query layer.
 
-This repository isn't wired into any router yet (the shipped RUM analytics
-endpoint reads the per-service SQLite ``rum_beacons`` table directly instead
-— see backend/routers/rum.py), so it had zero test coverage. The SQL is
-real and non-trivial (percentile aggregation, error-rate FILTER/NULLIF
-math, Top-N ordering), so these tests build the tables it queries in an
-in-memory DuckDB and assert on actual computed values — catching a broken
-percentile or rate calculation, not just "the function ran".
+This repository queries the modern RUM dataset stored in DuckDB/Iceberg.
 """
 
 from __future__ import annotations
@@ -23,12 +17,16 @@ def _runner(con, source) -> QueryRunner:
 
 def test_get_web_vitals_summary_computes_percentiles_per_metric(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
-    con.execute("CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE)")
+    con.execute(
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     # LCP values 1,2,3,4 in the same hour bucket -> p50 should land at 2.5 (linear interpolation).
     for v in (1.0, 2.0, 3.0, 4.0):
         con.execute(
-            "INSERT INTO client_vitals VALUES (?, 'LCP', ?)",
+            "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', ?)",
             [base, v],
         )
     runner = _runner(con, test_service_source)
@@ -44,10 +42,16 @@ def test_get_web_vitals_summary_computes_percentiles_per_metric(in_memory_duckdb
 
 def test_get_web_vitals_summary_excludes_metrics_outside_the_known_set(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
-    con.execute("CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE)")
+    con.execute(
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    con.execute("INSERT INTO client_vitals VALUES (?, 'LCP', 2.0)", [base])
-    con.execute("INSERT INTO client_vitals VALUES (?, 'NOT_A_REAL_METRIC', 99.0)", [base])
+    con.execute("INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 2.0)", [base])
+    con.execute(
+        "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'NOT_A_REAL_METRIC', 99.0)", [base]
+    )
     runner = _runner(con, test_service_source)
 
     rows = rum_repo.get_web_vitals_summary(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
@@ -58,10 +62,17 @@ def test_get_web_vitals_summary_excludes_metrics_outside_the_known_set(in_memory
 
 def test_get_web_vitals_summary_respects_time_window(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
-    con.execute("CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE)")
+    con.execute(
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    con.execute("INSERT INTO client_vitals VALUES (?, 'LCP', 2.0)", [base])
-    con.execute("INSERT INTO client_vitals VALUES (?, 'LCP', 9.0)", [base - timedelta(days=5)])
+    con.execute("INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 2.0)", [base])
+    con.execute(
+        "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 9.0)",
+        [base - timedelta(days=5)],
+    )
     runner = _runner(con, test_service_source)
 
     rows = rum_repo.get_web_vitals_summary(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
@@ -72,13 +83,26 @@ def test_get_web_vitals_summary_respects_time_window(in_memory_duckdb, test_serv
 
 def test_get_error_rate_trend_computes_percentage_across_vitals_and_errors(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
-    con.execute("CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE)")
-    con.execute("CREATE TABLE client_errors (timestamp TIMESTAMPTZ, error_message VARCHAR)")
+    con.execute(
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE client_errors ("
+        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     # 3 vitals beacons (no error) + 1 error beacon => 4 total, 1 error => 25%.
-    for _ in range(3):
-        con.execute("INSERT INTO client_vitals VALUES (?, 'LCP', 2.0)", [base])
-    con.execute("INSERT INTO client_errors VALUES (?, 'TypeError: boom')", [base])
+    for i in range(3):
+        con.execute(
+            "INSERT INTO client_vitals (timestamp, metric_name, metric_value, req_id) VALUES (?, 'LCP', 2.0, ?)",
+            [base, f"req_v_{i}"],
+        )
+    con.execute(
+        "INSERT INTO client_errors (timestamp, error_message, req_id) VALUES (?, 'TypeError: boom', 'req_err_1')",
+        [base],
+    )
     runner = _runner(con, test_service_source)
 
     rows = rum_repo.get_error_rate_trend(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
@@ -92,8 +116,15 @@ def test_get_error_rate_trend_computes_percentage_across_vitals_and_errors(in_me
 
 def test_get_error_rate_trend_zero_beacons_does_not_divide_by_zero(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
-    con.execute("CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE)")
-    con.execute("CREATE TABLE client_errors (timestamp TIMESTAMPTZ, error_message VARCHAR)")
+    con.execute(
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
+    con.execute(
+        "CREATE TABLE client_errors ("
+        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     runner = _runner(con, test_service_source)
 
@@ -106,8 +137,8 @@ def test_get_worst_pages_orders_by_combined_poor_percentage(in_memory_duckdb, te
     con = in_memory_duckdb
     con.execute(
         "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_rating VARCHAR, "
-        "pathname VARCHAR, rum_cid VARCHAR)"
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     # /bad: LCP+INP+CLS all poor for both sessions (100% poor on every metric).
@@ -118,11 +149,11 @@ def test_get_worst_pages_orders_by_combined_poor_percentage(in_memory_duckdb, te
     for cid in ("s1", "s2"):
         for metric in ("LCP", "INP", "CLS"):
             con.execute(
-                "INSERT INTO client_vitals VALUES (?, ?, 'poor', '/bad', ?)",
+                "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, ?, 'poor', '/bad', ?)",
                 [base, metric, cid],
             )
             con.execute(
-                "INSERT INTO client_vitals VALUES (?, ?, 'good', '/good', ?)",
+                "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, ?, 'good', '/good', ?)",
                 [base, metric, cid],
             )
     runner = _runner(con, test_service_source)
@@ -139,13 +170,13 @@ def test_get_worst_pages_respects_limit(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
     con.execute(
         "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_rating VARCHAR, "
-        "pathname VARCHAR, rum_cid VARCHAR)"
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     for i in range(5):
         con.execute(
-            "INSERT INTO client_vitals VALUES (?, 'LCP', 'poor', ?, 's1')",
+            "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, 'LCP', 'poor', ?, 's1')",
             [base, f"/page{i}"],
         )
     runner = _runner(con, test_service_source)
@@ -158,18 +189,32 @@ def test_get_worst_pages_respects_limit(in_memory_duckdb, test_service_source):
 def test_get_worst_sessions_requires_more_than_five_metrics(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
     con.execute(
-        "CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_rating VARCHAR, pathname VARCHAR, rum_cid VARCHAR)"
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
-    con.execute("CREATE TABLE client_errors (timestamp TIMESTAMPTZ, rum_cid VARCHAR)")
+    con.execute(
+        "CREATE TABLE client_errors ("
+        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     # session "small" has only 3 metrics -> excluded by HAVING COUNT(*) > 5.
     for i in range(3):
-        con.execute("INSERT INTO client_vitals VALUES (?, 'good', ?, 'small')", [base, f"/p{i}"])
+        con.execute(
+            "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, 'good', ?, 'small')",
+            [base, f"/p{i}"],
+        )
     # session "big" has 6 metrics, 2 poor -> included.
     for i in range(6):
         rating = "poor" if i < 2 else "good"
-        con.execute("INSERT INTO client_vitals VALUES (?, ?, ?, 'big')", [base, rating, f"/p{i}"])
-    con.execute("INSERT INTO client_errors VALUES (?, 'big')", [base])
+        con.execute(
+            "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, ?, ?, 'big')",
+            [base, rating, f"/p{i}"],
+        )
+    con.execute(
+        "INSERT INTO client_errors (timestamp, cid) VALUES (?, 'big')",
+        [base],
+    )
     runner = _runner(con, test_service_source)
 
     rows = rum_repo.get_worst_sessions(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
@@ -185,13 +230,21 @@ def test_get_worst_sessions_requires_more_than_five_metrics(in_memory_duckdb, te
 def test_get_worst_sessions_respects_limit(in_memory_duckdb, test_service_source):
     con = in_memory_duckdb
     con.execute(
-        "CREATE TABLE client_vitals (timestamp TIMESTAMPTZ, metric_rating VARCHAR, pathname VARCHAR, rum_cid VARCHAR)"
+        "CREATE TABLE client_vitals ("
+        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
+        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
     )
-    con.execute("CREATE TABLE client_errors (timestamp TIMESTAMPTZ, rum_cid VARCHAR)")
+    con.execute(
+        "CREATE TABLE client_errors ("
+        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+    )
     base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
     for sid in ("a", "b", "c"):
         for i in range(6):
-            con.execute("INSERT INTO client_vitals VALUES (?, 'good', ?, ?)", [base, f"/p{i}", sid])
+            con.execute(
+                "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, 'good', ?, ?)",
+                [base, f"/p{i}", sid],
+            )
     runner = _runner(con, test_service_source)
 
     rows = rum_repo.get_worst_sessions(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1), limit=1)

@@ -533,3 +533,124 @@ def test_user_version_ahead_of_latest_is_no_op_not_downgrade(tmp_path):
         assert sqlite_migrations.get_current_version(con) == future
     finally:
         con.close()
+
+
+def test_migration_010_adds_table_name_and_rebuilds_ingest_in_flight(tmp_path):
+    """Test that migration 010 successfully adds table_name to ingested_files
+    and rebuilds ingest_in_flight to have a composite PK including table_name,
+    while preserving pre-existing records."""
+    path = str(tmp_path / "svc.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        # Create pre-migration shape of ingest_in_flight
+        con.execute(
+            """CREATE TABLE ingest_in_flight (
+                buffer_filename TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL,
+                files_json TEXT NOT NULL,
+                started_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+        con.execute(
+            "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json) VALUES (?, ?, ?)",
+            ("batch_123.parquet", "svc", '["file1.gz"]'),
+        )
+        # Create pre-migration shape of ingested_files
+        con.execute(
+            """CREATE TABLE ingested_files (
+                file_name TEXT,
+                source_name TEXT,
+                ingested_at TEXT DEFAULT (datetime('now')),
+                row_count INTEGER,
+                file_size_bytes INTEGER,
+                error_count INTEGER DEFAULT 0,
+                file_date DATE,
+                PRIMARY KEY (file_name, source_name)
+            )"""
+        )
+        con.execute(
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, error_count, file_date) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s3://bucket/raw/file1.gz", "svc", 100, 1000, 0, "2026-05-01"),
+        )
+        # Explicitly set version to 9 so migration 10 is applied
+        con.execute("PRAGMA user_version = 9")
+        con.commit()
+    finally:
+        con.close()
+
+    con = sqlite3.connect(path)
+    try:
+        # Pre-condition
+        assert "table_name" not in _columns(con, "ingested_files")
+
+        # Run migration 10 & 11 (apply_pending will run both)
+        applied = sqlite_migrations.apply_pending(con)
+        assert applied == 2
+
+        # Post-condition
+        assert "table_name" in _columns(con, "ingested_files")
+        assert "table_name" in _columns(con, "ingest_in_flight")
+
+        # Verify default is applied
+        row_ingested = con.execute("SELECT table_name FROM ingested_files").fetchone()
+        assert row_ingested[0] == "logs"
+
+        row_in_flight = con.execute("SELECT table_name FROM ingest_in_flight").fetchone()
+        assert row_in_flight[0] == "logs"
+
+        # Verify composite primary key by trying to insert with same buffer_filename but different table_name
+        con.execute(
+            "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json, table_name) VALUES (?, ?, ?, ?)",
+            ("batch_123.parquet", "svc", '["file2.gz"]', "client_vitals"),
+        )
+        con.commit()
+
+        # Both should exist
+        rows = con.execute("SELECT buffer_filename, table_name FROM ingest_in_flight ORDER BY table_name").fetchall()
+        assert len(rows) == 2
+        assert rows[0] == ("batch_123.parquet", "client_vitals")
+        assert rows[1] == ("batch_123.parquet", "logs")
+    finally:
+        con.close()
+
+
+def test_migration_011_drops_rum_beacons(tmp_path):
+    """Test that migration 011 successfully drops the rum_beacons table."""
+    path = str(tmp_path / "svc.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        # Create a mock database at version 10 with rum_beacons table
+        con.execute(
+            """CREATE TABLE rum_beacons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_id TEXT NOT NULL,
+                received_at TEXT NOT NULL DEFAULT (datetime('now')),
+                beacon_data TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+        con.execute(
+            "INSERT INTO rum_beacons (service_id, beacon_data) VALUES (?, ?)",
+            ("svc", '{"test": true}'),
+        )
+        # Set user_version to 10
+        con.execute("PRAGMA user_version = 10")
+        con.commit()
+    finally:
+        con.close()
+
+    con = sqlite3.connect(path)
+    try:
+        # Pre-condition: table exists
+        tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        assert "rum_beacons" in tables
+
+        # Run migration 11 (apply_pending will run it)
+        applied = sqlite_migrations.apply_pending(con)
+        assert applied == 1
+
+        # Post-condition: table dropped
+        tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        assert "rum_beacons" not in tables
+    finally:
+        con.close()
