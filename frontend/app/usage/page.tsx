@@ -57,10 +57,6 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 
 export default function UsagePage() {
-  const { theme } = useTheme()
-  const isDark = theme === 'dark'
-  const router = useRouter()
-
   return (
     <ReportLayout
       title="System Usage"
@@ -68,15 +64,31 @@ export default function UsagePage() {
       icon={ActivityIcon}
       defaultInterval="1 hour"
     >
-      {({
-        startTime,
-        endTime,
-        activeServiceId,
-        config,
-        setChartInterval,
-        intervalButtons,
-      }) => {
-        const services = useServiceStore(s => s.services);
+      {(props) => <UsagePageContent {...props} />}
+    </ReportLayout>
+  )
+}
+
+function UsagePageContent({
+  startTime,
+  endTime,
+  activeServiceId,
+  config,
+  setChartInterval,
+  intervalButtons,
+}: {
+  startTime: string | null
+  endTime: string | null
+  activeServiceId: string | null
+  config: any
+  setChartInterval: (interval: any) => void
+  intervalButtons: React.ReactNode
+  [key: string]: any
+}) {
+  const { theme } = useTheme()
+  const isDark = theme === 'dark'
+  const router = useRouter()
+  const services = useServiceStore(s => s.services);
         const isAnalyst = services.find((s: any) => s.id === activeServiceId)?.accessLevel === 'read_only'
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
@@ -528,7 +540,4 @@ export default function UsagePage() {
       )}
       </>
     )
-  }}
-  </ReportLayout>
-)
 }
