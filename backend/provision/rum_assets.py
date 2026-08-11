@@ -496,39 +496,42 @@ def upload_rum_tracker_js(
     # security use of the hash, just matching S3's ETag semantics.
     local_md5 = hashlib.md5(js_bytes, usedforsecurity=False).hexdigest()
 
-    try:
-        # Check if file already exists and is up to date via HEAD request
-        with httpx.Client(verify=certifi.where()) as client:
-            head_headers = sign_fos_request(
-                method="HEAD",
-                url=fos_url,
-                headers={},
-                body=b"",
-                access_key_id=access_key,
-                secret_access_key=secret_key,
-                region=region,
-            )
-            head_response = client.head(fos_url, headers=head_headers, timeout=10.0)
-            if head_response.status_code == 200:
-                remote_etag = head_response.headers.get("ETag", "").strip('"')
-                if remote_etag == local_md5:
-                    ok(f"RUM tracker JS already present and up to date in {fos_key} (MD5 matches)")
-                    if status_cb:
-                        status_cb("✅ RUM tracker JS already present and up to date")
-                    return {
-                        "path": fos_key,
-                        "bytes_uploaded": 0,
-                        "fos_key": f"s3://{bucket}/{fos_key}",
-                    }
-                else:
-                    info(
-                        f"RUM tracker JS out of date in {fos_key} (local MD5 {local_md5} != remote ETag {remote_etag})"
-                    )
-                    if status_cb:
-                        status_cb("🔄 RUM tracker JS has changed, updating...")
-    except Exception:
-        # HEAD failed (file doesn't exist or network issue) — proceed to upload
-        pass
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if not is_mock_mode() and bucket != "mock_bucket":
+        try:
+            # Check if file already exists and is up to date via HEAD request
+            with httpx.Client(verify=certifi.where()) as client:
+                head_headers = sign_fos_request(
+                    method="HEAD",
+                    url=fos_url,
+                    headers={},
+                    body=b"",
+                    access_key_id=access_key,
+                    secret_access_key=secret_key,
+                    region=region,
+                )
+                head_response = client.head(fos_url, headers=head_headers, timeout=10.0)
+                if head_response.status_code == 200:
+                    remote_etag = head_response.headers.get("ETag", "").strip('"')
+                    if remote_etag == local_md5:
+                        ok(f"RUM tracker JS already present and up to date in {fos_key} (MD5 matches)")
+                        if status_cb:
+                            status_cb("✅ RUM tracker JS already present and up to date")
+                        return {
+                            "path": fos_key,
+                            "bytes_uploaded": 0,
+                            "fos_key": f"s3://{bucket}/{fos_key}",
+                        }
+                    else:
+                        info(
+                            f"RUM tracker JS out of date in {fos_key} (local MD5 {local_md5} != remote ETag {remote_etag})"
+                        )
+                        if status_cb:
+                            status_cb("🔄 RUM tracker JS has changed, updating...")
+        except Exception:
+            # HEAD failed (file doesn't exist or network issue) — proceed to upload
+            pass
 
     info(f"Uploading RUM tracker JS to FOS bucket {bucket}")
     if status_cb:
@@ -541,30 +544,35 @@ def upload_rum_tracker_js(
     }
 
     try:
-        # Sign the request
-        signed_headers = sign_fos_request(
-            method="PUT",
-            url=fos_url,
-            headers=headers,
-            body=js_bytes,
-            access_key_id=access_key,
-            secret_access_key=secret_key,
-            region=region,
-        )
-
-        # Upload to FOS
-        with httpx.Client(verify=certifi.where()) as client:
-            response = client.put(
-                fos_url,
-                content=js_bytes,
-                headers=signed_headers,
-                timeout=30.0,
+        if is_mock_mode() or bucket == "mock_bucket":
+            ok(f"[MOCK] Mock uploaded RUM tracker JS ({len(js_bytes)} bytes) to {fos_key}")
+            if status_cb:
+                status_cb(f"✅ RUM tracker JS uploaded ({len(js_bytes)} bytes)")
+        else:
+            # Sign the request
+            signed_headers = sign_fos_request(
+                method="PUT",
+                url=fos_url,
+                headers=headers,
+                body=js_bytes,
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+                region=region,
             )
-            response.raise_for_status()
 
-        ok(f"Uploaded {len(js_bytes)} bytes to {fos_key}")
-        if status_cb:
-            status_cb(f"✅ RUM tracker JS uploaded ({len(js_bytes)} bytes)")
+            # Upload to FOS
+            with httpx.Client(verify=certifi.where()) as client:
+                response = client.put(
+                    fos_url,
+                    content=js_bytes,
+                    headers=signed_headers,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+
+            ok(f"Uploaded {len(js_bytes)} bytes to {fos_key}")
+            if status_cb:
+                status_cb(f"✅ RUM tracker JS uploaded ({len(js_bytes)} bytes)")
 
         return {
             "path": fos_key,
@@ -742,28 +750,35 @@ async def download_and_upload_faro(
         status_cb(f"⏳ Uploading Faro Web SDK v{version}…")
 
     try:
-        signed_headers = sign_fos_request(
-            method="PUT",
-            url=fos_url,
-            headers=headers,
-            body=bundle,
-            access_key_id=access_key,
-            secret_access_key=secret_key,
-            region=region,
-        )
+        from backend.core.fastly.mock_fixtures import is_mock_mode
 
-        with httpx.Client(verify=certifi.where()) as client:
-            response = client.put(
-                fos_url,
-                content=bundle,
-                headers=signed_headers,
-                timeout=30.0,
+        if is_mock_mode() or bucket == "mock_bucket":
+            ok(f"[MOCK] Mock uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
+            if status_cb:
+                status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")
+        else:
+            signed_headers = sign_fos_request(
+                method="PUT",
+                url=fos_url,
+                headers=headers,
+                body=bundle,
+                access_key_id=access_key,
+                secret_access_key=secret_key,
+                region=region,
             )
-            response.raise_for_status()
 
-        ok(f"Uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
-        if status_cb:
-            status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")
+            with httpx.Client(verify=certifi.where()) as client:
+                response = client.put(
+                    fos_url,
+                    content=bundle,
+                    headers=signed_headers,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+
+            ok(f"Uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
+            if status_cb:
+                status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")
 
     except Exception as exc:
         fail_msg = f"Failed to upload Faro Web SDK v{version}: {exc}"
