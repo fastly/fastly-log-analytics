@@ -20,6 +20,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { DataTable } from '@/components/DataTable/DataTable';
+import { ColumnDef } from '@tanstack/react-table';
 
 interface RumClientProps {
   serviceId: string | null;
@@ -103,6 +105,154 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   const [isLiveMode, setIsLiveMode] = useState(true);
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null);
   const isAnalyst = useIsAnalyst();
+
+  const columns = React.useMemo<ColumnDef<RumLiveEvent>[]>(() => [
+    {
+      accessorKey: 'type',
+      id: 'type',
+      meta: { label: 'Status' },
+      header: 'Status',
+      cell: ({ row }) => {
+        const type = row.original.type;
+        return (
+          <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${
+            type === 'error'
+              ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20'
+              : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+          }`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+            {type === 'error' ? 'Error' : 'Success'}
+          </span>
+        );
+      }
+    },
+    {
+      accessorKey: 'time',
+      id: 'time',
+      meta: { label: 'Time' },
+      header: 'Time',
+      cell: ({ row }) => (
+        <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">
+          {new Date(row.original.time).toLocaleTimeString()}
+        </span>
+      )
+    },
+    {
+      accessorKey: 'path',
+      id: 'path',
+      meta: { label: 'Page Path' },
+      header: 'Page Path',
+      cell: ({ row }) => (
+        <span className="font-semibold font-mono text-xs text-zinc-300 block max-w-[200px] truncate" title={row.original.path}>
+          {row.original.path}
+        </span>
+      )
+    },
+    {
+      accessorKey: 'desc',
+      id: 'desc',
+      meta: { label: 'Description' },
+      header: 'Description',
+      cell: ({ row }) => (
+        <span className="text-muted-foreground text-xs block max-w-[250px] truncate" title={row.original.desc}>
+          {row.original.desc}
+        </span>
+      )
+    },
+    {
+      id: 'environment',
+      accessorFn: (row) => `${row.browser} on ${row.os}`,
+      meta: { label: 'Environment' },
+      header: 'Environment',
+      cell: ({ row }) => (
+        <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={`${row.original.browser} on ${row.original.os}`}>
+          {row.original.browser} on {row.original.os}
+        </span>
+      )
+    },
+    {
+      id: 'geo',
+      accessorFn: (row) => {
+        const raw = row.raw_log || {};
+        return `${raw.city || ''}, ${raw.country || ''}`;
+      },
+      meta: { label: 'Location' },
+      header: 'Location',
+      cell: ({ row }) => {
+        const raw = row.original.raw_log || {};
+        const location = [raw.city, raw.region, raw.country].filter(Boolean).join(', ');
+        return (
+          <span className="text-muted-foreground text-xs block max-w-[150px] truncate" title={location}>
+            {location || '—'}
+          </span>
+        );
+      }
+    },
+    {
+      id: 'pop',
+      accessorFn: (row) => (row.raw_log || {}).pop || '',
+      meta: { label: 'Edge POP' },
+      header: 'Edge POP',
+      cell: ({ row }) => {
+        const raw = row.original.raw_log || {};
+        return (
+          <span className="font-mono text-xs text-muted-foreground uppercase">
+            {raw.pop || '—'}
+          </span>
+        );
+      }
+    },
+    {
+      id: 'tls',
+      accessorFn: (row) => (row.raw_log || {}).tls || '',
+      meta: { label: 'TLS' },
+      header: 'TLS',
+      cell: ({ row }) => {
+        const raw = row.original.raw_log || {};
+        return (
+          <span className="font-mono text-xs text-muted-foreground">
+            {raw.tls ? `TLS ${raw.tls}` : '—'}
+          </span>
+        );
+      }
+    },
+    {
+      id: 'ttfb',
+      accessorFn: (row) => {
+        const raw = row.raw_log || {};
+        return raw.ttfb != null ? parseFloat(raw.ttfb) : null;
+      },
+      meta: { label: 'TTFB (Edge)' },
+      header: 'TTFB (Edge)',
+      cell: ({ row }) => {
+        const raw = row.original.raw_log || {};
+        return (
+          <span className="font-mono text-xs text-muted-foreground">
+            {raw.ttfb != null ? `${raw.ttfb}ms` : '—'}
+          </span>
+        );
+      }
+    },
+    {
+      id: 'actions',
+      header: () => <span className="sr-only">Actions</span>,
+      cell: ({ row }) => (
+        <div className="text-right">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSelectedEvent(row.original);
+            }}
+            className="h-8 text-xs font-medium"
+          >
+            Details
+          </Button>
+        </div>
+      )
+    }
+  ], []);
 
   // Fetch status
   const { data: status, isLoading: isStatusLoading } = useQuery({
@@ -467,64 +617,16 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
       {/* Live Monitor Feed Activity Ticker */}
       <AnalyticsCard title="Live Activity Monitor" icon={<Terminal className="h-4 w-4" />}>
-        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
-          <table className="w-full text-sm text-left border-collapse">
-            <thead>
-              <tr className="border-b border-zinc-800 text-muted-foreground text-xs uppercase tracking-wider font-semibold">
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4">Time</th>
-                <th className="py-3 px-4">Page Path</th>
-                <th className="py-3 px-4">Description</th>
-                <th className="py-3 px-4">Environment</th>
-                <th className="py-3 px-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {liveEvents?.map((e: RumLiveEvent, index: number) => (
-                <tr key={`${e.time}-${e.type}-${e.path}-${e.desc}-${index}`} className="border-b border-zinc-800/60 hover:bg-muted/5 transition-colors duration-150">
-                  <td className="py-3 px-4 font-semibold text-xs">
-                    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${
-                      e.type === 'error'
-                        ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20'
-                        : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
-                    }`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${e.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
-                      {e.type === 'error' ? 'Error' : 'Success'}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 font-mono text-xs text-muted-foreground">
-                    {new Date(e.time).toLocaleTimeString()}
-                  </td>
-                  <td className="py-3 px-4 font-semibold font-mono text-xs text-zinc-300 max-w-[200px] truncate" title={e.path}>
-                    {e.path}
-                  </td>
-                  <td className="py-3 px-4 text-muted-foreground text-xs max-w-[250px] truncate" title={e.desc}>
-                    {e.desc}
-                  </td>
-                  <td className="py-3 px-4 text-muted-foreground text-xs">
-                    {e.browser} on {e.os}
-                  </td>
-                  <td className="py-3 px-4 text-right">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setSelectedEvent(e)}
-                      className="h-8 text-xs font-medium"
-                    >
-                      Details
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-              {(!liveEvents || liveEvents.length === 0) && (
-                <tr>
-                  <td colSpan={6} className="text-muted-foreground text-center py-8 text-sm">
-                    Waiting for real-time RUM user events...
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="w-full">
+          <DataTable
+            columns={columns}
+            data={liveEvents || []}
+            searchKey="path"
+            isLoading={!liveEvents}
+            showPagination={false}
+            emptyMessage="Waiting for real-time RUM user events..."
+            onRowClick={(row) => setSelectedEvent(row)}
+          />
         </div>
       </AnalyticsCard>
 
