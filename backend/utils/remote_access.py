@@ -296,6 +296,7 @@ _ADMIN_TOKEN_EXEMPT_PATHS = {
     # second-factor gate on the admin loopback branch.
     "/api/web-vitals",
     "/api/ux-events",
+    "/api/services/rum-beacon",
 }
 
 
