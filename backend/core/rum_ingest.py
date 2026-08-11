@@ -93,6 +93,119 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         return 0, 0
 
 
+def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dict]:
+    """Extract all distinct metrics, timings, and exceptions from a raw Faro payload."""
+    extracted = []
+
+    # Extract common context
+    meta = payload.get("meta") or {}
+    browser_meta = meta.get("browser") or {}
+    os_meta = meta.get("os") or {}
+    page_meta = payload.get("page") or meta.get("page") or {}
+
+    browser_name = browser_meta.get("name") or log_data.get("browser") or "Chrome"
+    os_name = os_meta.get("name") or log_data.get("os") or "macOS"
+    device_type = "Desktop"
+    if browser_meta.get("mobile"):
+        device_type = "Mobile"
+
+    url_str = page_meta.get("url") or log_data.get("url") or ""
+    from urllib.parse import urlparse
+
+    pathname = "/"
+    if url_str:
+        try:
+            pathname = urlparse(url_str).path
+        except Exception:
+            pass
+
+    cid = log_data.get("rum_cid") or log_data.get("cid") or ""
+
+    # 1. Web Vitals
+    measurements = payload.get("measurements") or []
+    if isinstance(measurements, list):
+        for m in measurements:
+            if not isinstance(m, dict):
+                continue
+            if m.get("type") == "web-vitals":
+                values = m.get("values") or {}
+                rating = m.get("context", {}).get("rating") or (m.get("meta") or {}).get("rating") or ""
+                for k, v in values.items():
+                    if k == "delta":
+                        continue
+                    extracted.append(
+                        {
+                            "metric_name": k,
+                            "metric_value": v,
+                            "metric_rating": rating,
+                            "pathname": pathname,
+                            "cid": cid,
+                            "browser": browser_name,
+                            "os": os_name,
+                            "device": device_type,
+                        }
+                    )
+
+    # 2. Performance Navigation Timing events
+    events = payload.get("events") or []
+    if isinstance(events, list):
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            if e.get("name") == "faro.performance.navigation":
+                attrs = e.get("attributes") or e.get("values") or {}
+                for k, v in attrs.items():
+                    extracted.append(
+                        {
+                            "metric_name": k,
+                            "metric_value": v,
+                            "metric_rating": "",
+                            "pathname": pathname,
+                            "cid": cid,
+                            "browser": browser_name,
+                            "os": os_name,
+                            "device": device_type,
+                        }
+                    )
+
+    # 3. Exceptions
+    exceptions = payload.get("exceptions") or []
+    if isinstance(exceptions, list):
+        for exc in exceptions:
+            if not isinstance(exc, dict):
+                continue
+            err_msg = exc.get("value") or exc.get("message") or "Unknown error"
+            err_file = "unknown.js"
+            err_line = 0
+            err_col = 0
+            stack = exc.get("stacktrace") or {}
+            frames = stack.get("frames") or []
+            if isinstance(frames, list) and len(frames) > 0:
+                frame = frames[0]
+                err_file = frame.get("filename") or "unknown.js"
+                err_line = frame.get("lineno") or 0
+                err_col = frame.get("colno") or 0
+
+            extracted.append(
+                {
+                    "metric_name": "exception",
+                    "metric_value": None,
+                    "metric_rating": "",
+                    "pathname": pathname,
+                    "cid": cid,
+                    "browser": browser_name,
+                    "os": os_name,
+                    "device": device_type,
+                    "error_message": err_msg,
+                    "error_file": err_file,
+                    "error_line": err_line,
+                    "error_col": err_col,
+                }
+            )
+
+    return extracted
+
+
 def ingest_rum_logs(
     service_id: str,
 ) -> Generator[tuple]:
@@ -206,96 +319,151 @@ def ingest_rum_logs(
 
                                     received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
 
-                                    # Extract core RUM metric values with URL/query parameter fallbacks
-                                    metric_name = log_data.get("rum_metric_name")
-                                    metric_value = log_data.get("rum_metric_value")
-                                    metric_rating = log_data.get("rum_metric_rating")
-                                    cid = log_data.get("rum_cid") or log_data.get("cid")
-                                    pathname = log_data.get("rum_pathname")
-
-                                    from urllib.parse import parse_qs, urlparse
-
-                                    raw_url = log_data.get("url") or log_data.get("rum_raw_query") or ""
-                                    if raw_url:
+                                    # Try to extract metrics/exceptions from raw JSON in rum_body first
+                                    raw_body = log_data.get("rum_body")
+                                    extracted_metrics = []
+                                    if raw_body:
                                         try:
-                                            parsed = urlparse(raw_url)
-                                            qparams = parse_qs(parsed.query)
-                                            if not metric_name and "rum_metric_name" in qparams:
-                                                metric_name = qparams["rum_metric_name"][0]
-                                            if (
-                                                metric_value is None or metric_value == ""
-                                            ) and "rum_metric_value" in qparams:
-                                                metric_value = qparams["rum_metric_value"][0]
-                                            if not metric_rating and "rum_metric_rating" in qparams:
-                                                metric_rating = qparams["rum_metric_rating"][0]
-                                            if not cid and "cid" in qparams:
-                                                cid = qparams["cid"][0]
-                                            if not pathname and "rum_pathname" in qparams:
-                                                pathname = qparams["rum_pathname"][0]
-                                        except Exception:
-                                            pass
+                                            # It could be json-escaped or doubly-stringified
+                                            payload = json.loads(raw_body)
+                                            if isinstance(payload, str):
+                                                payload = json.loads(payload)
+                                            if isinstance(payload, dict):
+                                                extracted_metrics = extract_metrics_from_faro_payload(payload, log_data)
+                                        except Exception as e:
+                                            logger.warning(f"RUM sync: Failed to parse rum_body JSON: {e}")
 
-                                    if metric_value is not None:
-                                        try:
-                                            if isinstance(metric_value, str):
-                                                if "." in metric_value:
-                                                    metric_value = float(metric_value)
-                                                else:
-                                                    metric_value = int(metric_value)
-                                        except ValueError:
-                                            pass
+                                    if extracted_metrics:
+                                        # Ingest each extracted metric as a separate beacon row
+                                        for metric in extracted_metrics:
+                                            beacon_data = {
+                                                "pathname": metric["pathname"],
+                                                "path": metric["pathname"],
+                                                "name": metric["metric_name"],
+                                                "value": metric["metric_value"],
+                                                "rating": metric["metric_rating"],
+                                                "cid": metric["cid"],
+                                                "req_id": log_data.get("fastly_req_id") or "",
+                                                "browser": metric["browser"],
+                                                "os": metric["os"],
+                                                "device": metric["device"],
+                                                "raw_log": log_data,
+                                                "meta": {
+                                                    "browser": metric["browser"],
+                                                    "os": metric["os"],
+                                                    "device": metric["device"],
+                                                },
+                                            }
+                                            if metric.get("error_message"):
+                                                beacon_data["exceptions"] = [
+                                                    {
+                                                        "value": metric["error_message"],
+                                                        "message": metric["error_message"],
+                                                        "filename": metric.get("error_file") or "unknown.js",
+                                                        "file": metric.get("error_file") or "unknown.js",
+                                                        "lineno": metric.get("error_line") or 0,
+                                                        "line": metric.get("error_line") or 0,
+                                                        "colno": metric.get("error_col") or 0,
+                                                        "col": metric.get("error_col") or 0,
+                                                    }
+                                                ]
+                                            db.execute(
+                                                "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
+                                                (service_id, received_at, json.dumps(beacon_data)),
+                                            )
+                                            file_rows_count += 1
+                                            total_rows += 1
+                                    else:
+                                        # Extract core RUM metric values with URL/query parameter fallbacks
+                                        metric_name = log_data.get("rum_metric_name")
+                                        metric_value = log_data.get("rum_metric_value")
+                                        metric_rating = log_data.get("rum_metric_rating")
+                                        cid = log_data.get("rum_cid") or log_data.get("cid")
+                                        pathname = log_data.get("rum_pathname")
 
-                                    # Robust path extraction fallback from referer if still missing
-                                    if not pathname and log_data.get("referer"):
-                                        try:
-                                            pathname = urlparse(log_data["referer"]).path
-                                        except Exception:
-                                            pass
-                                    if not pathname:
-                                        pathname = "/"
-                                    pathname = pathname.replace("//", "/")
+                                        from urllib.parse import parse_qs, urlparse
 
-                                    # Reconstruct the beacon_data format expected by RUM analytics dashboard
-                                    beacon_data = {
-                                        "pathname": pathname,
-                                        "path": pathname,
-                                        "name": metric_name or "",
-                                        "value": metric_value,
-                                        "rating": metric_rating or "",
-                                        "cid": cid or "",
-                                        "req_id": log_data.get("fastly_req_id") or "",
-                                        "browser": log_data.get("browser") or "Chrome",
-                                        "os": log_data.get("os") or "macOS",
-                                        "device": log_data.get("device") or "Desktop",
-                                        "raw_log": log_data,  # Store complete original raw log for debugging!
-                                        "meta": {
+                                        raw_url = log_data.get("url") or log_data.get("rum_raw_query") or ""
+                                        if raw_url:
+                                            try:
+                                                parsed = urlparse(raw_url)
+                                                qparams = parse_qs(parsed.query)
+                                                if not metric_name and "rum_metric_name" in qparams:
+                                                    metric_name = qparams["rum_metric_name"][0]
+                                                if (
+                                                    metric_value is None or metric_value == ""
+                                                ) and "rum_metric_value" in qparams:
+                                                    metric_value = qparams["rum_metric_value"][0]
+                                                if not metric_rating and "rum_metric_rating" in qparams:
+                                                    metric_rating = qparams["rum_metric_rating"][0]
+                                                if not cid and "cid" in qparams:
+                                                    cid = qparams["cid"][0]
+                                                if not pathname and "rum_pathname" in qparams:
+                                                    pathname = qparams["rum_pathname"][0]
+                                            except Exception:
+                                                pass
+
+                                        if metric_value is not None:
+                                            try:
+                                                if isinstance(metric_value, str):
+                                                    if "." in metric_value:
+                                                        metric_value = float(metric_value)
+                                                    else:
+                                                        metric_value = int(metric_value)
+                                            except ValueError:
+                                                pass
+
+                                        # Robust path extraction fallback from referer if still missing
+                                        if not pathname and log_data.get("referer"):
+                                            try:
+                                                pathname = urlparse(log_data["referer"]).path
+                                            except Exception:
+                                                pass
+                                        if not pathname:
+                                            pathname = "/"
+                                        pathname = pathname.replace("//", "/")
+
+                                        # Reconstruct the beacon_data format expected by RUM analytics dashboard
+                                        beacon_data = {
+                                            "pathname": pathname,
+                                            "path": pathname,
+                                            "name": metric_name or "",
+                                            "value": metric_value,
+                                            "rating": metric_rating or "",
+                                            "cid": cid or "",
+                                            "req_id": log_data.get("fastly_req_id") or "",
                                             "browser": log_data.get("browser") or "Chrome",
                                             "os": log_data.get("os") or "macOS",
                                             "device": log_data.get("device") or "Desktop",
-                                        },
-                                    }
+                                            "raw_log": log_data,  # Store complete original raw log for debugging!
+                                            "meta": {
+                                                "browser": log_data.get("browser") or "Chrome",
+                                                "os": log_data.get("os") or "macOS",
+                                                "device": log_data.get("device") or "Desktop",
+                                            },
+                                        }
 
-                                    # Append client telemetry if available
-                                    if log_data.get("rum_error_message"):
-                                        beacon_data["exceptions"] = [
-                                            {
-                                                "value": log_data["rum_error_message"],
-                                                "message": log_data["rum_error_message"],
-                                                "filename": log_data.get("rum_error_file") or "unknown.js",
-                                                "file": log_data.get("rum_error_file") or "unknown.js",
-                                                "lineno": log_data.get("rum_error_line") or 0,
-                                                "line": log_data.get("rum_error_line") or 0,
-                                                "colno": log_data.get("rum_error_col") or 0,
-                                                "col": log_data.get("rum_error_col") or 0,
-                                            }
-                                        ]
+                                        # Append client telemetry if available
+                                        if log_data.get("rum_error_message"):
+                                            beacon_data["exceptions"] = [
+                                                {
+                                                    "value": log_data["rum_error_message"],
+                                                    "message": log_data["rum_error_message"],
+                                                    "filename": log_data.get("rum_error_file") or "unknown.js",
+                                                    "file": log_data.get("rum_error_file") or "unknown.js",
+                                                    "lineno": log_data.get("rum_error_line") or 0,
+                                                    "line": log_data.get("rum_error_line") or 0,
+                                                    "colno": log_data.get("rum_error_col") or 0,
+                                                    "col": log_data.get("rum_error_col") or 0,
+                                                }
+                                            ]
 
-                                    db.execute(
-                                        "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
-                                        (service_id, received_at, json.dumps(beacon_data)),
-                                    )
-                                    file_rows_count += 1
-                                    total_rows += 1
+                                        db.execute(
+                                            "INSERT INTO rum_beacons (service_id, received_at, beacon_data) VALUES (?, ?, ?)",
+                                            (service_id, received_at, json.dumps(beacon_data)),
+                                        )
+                                        file_rows_count += 1
+                                        total_rows += 1
                                 except Exception as e:
                                     logger.warning(f"RUM sync: Failed to parse RUM log line: {e}")
                                     continue

@@ -339,6 +339,7 @@ def generate_capture_vcl(
             '      set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");',
             '      set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");',
             "      set req.http.x-fos-edge-data:rum_raw_query = req.url;",
+            "      set req.http.x-fos-edge-data:rum_body = req.body;",
             "",
             "      # Mark beacon to skip S3 logging (already logged separately to metadata DB)",
             '      set req.http.x-skip-rum-logging = "1";',

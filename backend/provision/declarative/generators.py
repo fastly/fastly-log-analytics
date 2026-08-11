@@ -204,6 +204,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             '      set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");'
         )
         edge_first_hop_statements.append("      set req.http.x-fos-edge-data:rum_raw_query = req.url;")
+        edge_first_hop_statements.append("      set req.http.x-fos-edge-data:rum_body = req.body;")
         edge_first_hop_statements.append(
             "      # Mark beacon to skip S3 logging (already logged separately to metadata DB)"
         )

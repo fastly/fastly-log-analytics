@@ -210,6 +210,18 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "byte_limit": 8192,
         "enabled": True,
     },
+    {
+        "name": "rum_body",
+        "label": "RUM Request Body",
+        "description": "Raw JSON POST body from Faro Web SDK beacon (capped at 8KB).",
+        "vcl_log_expression": "req.http.x-fos-edge-data:rum_body",
+        "collection_stage": "beacon",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 1024,
+        "byte_limit": 8192,
+        "enabled": True,
+    },
 ]
 _RUM_FIELD_NAMES = {cf["name"] for cf in _RUM_CUSTOM_FIELDS}
 

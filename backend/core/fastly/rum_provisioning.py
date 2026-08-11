@@ -97,6 +97,7 @@ if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
         set req.http.x-fos-edge-data:rum_metric_rating = querystring.get(req.url, "rum_metric_rating");
         set req.http.x-fos-edge-data:rum_pathname = querystring.get(req.url, "rum_pathname");
         set req.http.x-fos-edge-data:rum_error_message = querystring.get(req.url, "rum_error_message");
+        set req.http.x-fos-edge-data:rum_body = req.body;
 
         # Mark beacon to skip S3 logging (already logged separately to metadata DB)
         set req.http.x-skip-rum-logging = "1";
