@@ -180,24 +180,16 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs
 
 
 def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -> None:
-    """Remove in-memory cache entries for a service.
+    """Remove in-memory cache entries for a service."""
+    # Pop the primary and any sub-table view cache keys (e.g. client_vitals, client_errors)
+    for k in list(_view_cache.keys()):
+        if k == source_key or k.startswith(f"{source_key}::"):
+            _view_cache.pop(k, None)
 
-    ``keep_snapshot_cache=True`` is used by the get_sync_status retry path
-    when the cached view SQL points at a since-deleted buffer parquet. We
-    want to force the view SQL to be regenerated, but we MUST NOT wipe
-    ``_snapshot_files_cache`` — that's the snapshot/path cache that lets
-    ``_update_iceberg_view_locked`` skip a catalog reload. Without it, a
-    transient catalog-load failure (FOS rate limit, network blip) causes
-    ``_update_iceberg_view_locked`` to fall into its empty-view branch and
-    downgrade the working view to "WHERE false", which then sticks until
-    a writer cron eventually re-fetches the catalog successfully.
-
-    Defaults match the original semantics (full wipe) so teardown still
-    clears everything.
-    """
-    _view_cache.pop(source_key, None)
     if not keep_snapshot_cache:
-        _snapshot_files_cache.pop(source_key, None)
+        for k in list(_snapshot_files_cache.keys()):
+            if k == source_key or k.startswith(f"{source_key}::"):
+                _snapshot_files_cache.pop(k, None)
 
 
 def _get_cache_file(source: dict, name: str) -> str:

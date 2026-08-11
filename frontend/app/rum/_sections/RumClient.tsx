@@ -376,11 +376,6 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="flex items-center gap-2">
           <span className={`h-2.5 w-2.5 rounded-full ${isLiveMode ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground'}`} />
           <span className="text-sm font-semibold">{isLiveMode ? 'Live Updates Active' : 'Live Paused'}</span>
-          {analytics.is_mock && (
-            <span className="ml-2 text-xs bg-indigo-500/10 text-indigo-500 px-2.5 py-0.5 rounded-full font-semibold">
-              Seeded Demonstration Mode
-            </span>
-          )}
           {analytics.beacon_count != null && (
             <span className="ml-2 text-xs bg-blue-500/10 text-blue-500 px-2.5 py-0.5 rounded-full font-semibold">
               {analytics.beacon_count} beacons

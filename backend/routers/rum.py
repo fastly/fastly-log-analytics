@@ -802,38 +802,9 @@ async def rum_analytics(
 
     except Exception as e:
         logger.error(f"[rum] Analytics query failed for {service_id}: {e}", exc_info=True)
-        # Fall back to high-fidelity mock data on failure
-        mock_timestamps = []
-        mock_lcps = []
-        mock_clss = []
-        mock_error_rates = []
+        from fastapi import HTTPException
 
-        for i in range(8):
-            dt_point = since + (until - since) * (i / 7.0)
-            mock_timestamps.append(dt_point.isoformat())
-            seed_val = i * 13 % 100
-            mock_lcps.append(round(1.5 + (seed_val % 15) / 10.0, 2))
-            mock_clss.append(round(0.02 + (seed_val % 8) / 100.0, 3))
-            mock_error_rates.append(round(1.2 + (seed_val % 5) / 2.0, 2))
-
-        return {
-            "is_mock": True,
-            "vitals": {
-                "lcp": {"p75": 2.0, "distribution": {"good": 70, "needs_improvement": 20, "poor": 10}},
-                "cls": {"p75": 0.05, "distribution": {"good": 80, "needs_improvement": 15, "poor": 5}},
-                "inp": {"p75": 140, "distribution": {"good": 75, "needs_improvement": 15, "poor": 10}},
-                "fid": {"p75": 22.0, "fcp": 1.4, "ttfb": 0.4},
-            },
-            "worst_pages": [],
-            "errors": [],
-            "trends": {
-                "timestamps": mock_timestamps,
-                "lcp": mock_lcps,
-                "cls": mock_clss,
-                "error_rate": mock_error_rates,
-            },
-            "environments": {"browsers": {"Chrome": 100}, "os": {"macOS": 100}, "devices": {"Desktop": 100}},
-        }
+        raise HTTPException(status_code=500, detail=f"RUM analytics query failed: {str(e)}")
 
 
 @router.get("/{service_id}/rum/live-events")
