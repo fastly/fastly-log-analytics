@@ -11,7 +11,7 @@ import { adminFetch } from '@/lib/api';
 import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
-import { RumFaroVersionCard } from './RumFaroVersionCard';
+
 
 interface RumStatus {
   enabled: boolean;
@@ -110,7 +110,7 @@ export function RumStatusPanel() {
         </div>
       </AnalyticsCard>
 
-      <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />
+
 
       <EnableRumDialog
         service={currentService}

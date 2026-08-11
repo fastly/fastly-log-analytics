@@ -152,7 +152,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
   // Monkeypatch fetch and XMLHttpRequest to unroll and enrich RUM beacons from JSON bodies.
   // This allows edge VCL (which cannot read request bodies) to capture and log ALL critical metrics.
-  function unrollAndSendBeacons(url, bodyStr) {{
+  function unrollAndSendBeacons(url, bodyStr, useBeacon) {{
     if (typeof url !== 'string' || url.indexOf('/rum-beacon') === -1 || !bodyStr) {{
       return;
     }}
@@ -251,7 +251,9 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
           extra += '&rum_pathname=' + encodeURIComponent(pathname);
 
           var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-          if (typeof originalFetch === 'function') {{
+          if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
+            navigator.sendBeacon(cleanBeaconUrl, '');
+          }} else if (typeof originalFetch === 'function') {{
             originalFetch.call(window, cleanBeaconUrl, {{
               method: 'POST',
               headers: {{ 'Content-Type': 'text/plain' }},
@@ -271,7 +273,9 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         extra += '&rum_pathname=' + encodeURIComponent(pathname);
 
         var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-        if (typeof originalFetch === 'function') {{
+        if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
+          navigator.sendBeacon(cleanBeaconUrl, '');
+        }} else if (typeof originalFetch === 'function') {{
           originalFetch.call(window, cleanBeaconUrl, {{
             method: 'POST',
             headers: {{ 'Content-Type': 'text/plain' }},
@@ -282,6 +286,25 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     }} catch (e) {{
       console.error('RUM: Unroll and send beacons failed:', e);
     }}
+  }}
+
+  // Intercept navigator.sendBeacon to unroll metrics on page unload/visibilitychange
+  if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
+    var originalSendBeacon = navigator.sendBeacon;
+    navigator.sendBeacon = function(url, data) {{
+      if (typeof url === 'string' && url.indexOf('/rum-beacon') !== -1) {{
+        if (typeof data === 'string') {{
+          unrollAndSendBeacons(url, data, true);
+          return true;
+        }} else if (data instanceof Blob) {{
+          data.text().then(function(text) {{
+            unrollAndSendBeacons(url, text, true);
+          }}).catch(function() {{}});
+          return true;
+        }}
+      }}
+      return originalSendBeacon.call(this, url, data);
+    }};
   }}
 
   // Intercept window.fetch

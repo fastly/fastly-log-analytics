@@ -5,7 +5,7 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
-import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
+
 import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton';
 import { PlotlyChart } from '@/components/PlotlyChart';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
@@ -325,7 +325,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
             <span className="text-sm font-semibold">Waiting for real-time data</span>
           </div>
         </div>
-        {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
+
         <AnalyticsCard title="Real User Monitoring Status">
           <div className="space-y-6 text-center py-12">
             <div>
@@ -370,7 +370,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   return (
     <div className="space-y-6">
-      {!isAnalyst && <RumFaroVersionCard serviceId={serviceId} rumEnabled={!!status?.enabled} />}
+
 
       {/* Summary KPI Cards Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

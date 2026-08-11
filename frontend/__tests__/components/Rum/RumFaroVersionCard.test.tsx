@@ -64,7 +64,12 @@ vi.mock('@/hooks/useSSE', () => ({
 
 function renderCard(rumEnabled = true) {
   const qc = createTestQueryClient()
-  return render(<RumFaroVersionCard serviceId={SVC} rumEnabled={rumEnabled} />, {
+  server.use(
+    http.get('/api/services/:service_id/rum/status', () =>
+      HttpResponse.json({ enabled: rumEnabled }),
+    ),
+  )
+  return render(<RumFaroVersionCard serviceId={SVC} />, {
     wrapper: makeQueryWrapper(qc),
   })
 }
@@ -97,7 +102,6 @@ describe('RumFaroVersionCard', () => {
     )
     renderCard()
     expect(await screen.findByText('1.8.0')).toBeInTheDocument()
-    expect(screen.getByText('1.9.0')).toBeInTheDocument()
   })
 
   it('surfaces the update-available affordance and enables Upgrade', async () => {
@@ -108,7 +112,6 @@ describe('RumFaroVersionCard', () => {
     )
     renderCard()
     expect(await screen.findByText(/update available/i)).toBeInTheDocument()
-    expect(screen.getByText(/new faro web sdk version available/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^upgrade$/i })).toBeEnabled()
   })
 
@@ -129,7 +132,7 @@ describe('RumFaroVersionCard', () => {
       ),
     )
     renderCard()
-    expect(await screen.findByText(/couldn.t reach the npm registry/i)).toBeInTheDocument()
+    expect(await screen.findByText(/versions offline/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeEnabled()
   })
 
@@ -140,8 +143,8 @@ describe('RumFaroVersionCard', () => {
       ),
     )
     renderCard()
-    expect(await screen.findByText(/no versions available/i)).toBeInTheDocument()
-    expect(screen.queryByText(/couldn.t reach the npm registry/i)).not.toBeInTheDocument()
+    expect(await screen.findByText(/not pinned/i)).toBeInTheDocument()
+    expect(screen.queryByText(/versions offline/i)).not.toBeInTheDocument()
   })
 
   it('skips the fetch entirely and does not invite an upgrade when RUM is not enabled', async () => {
@@ -153,7 +156,7 @@ describe('RumFaroVersionCard', () => {
       }),
     )
     renderCard(false)
-    expect(await screen.findByText(/enable rum above/i)).toBeInTheDocument()
+    expect(screen.queryByText(/faro sdk/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /upgrade/i })).not.toBeInTheDocument()
     expect(called).toBe(false)
   })
@@ -197,7 +200,7 @@ describe('RumFaroVersionCard', () => {
     // fresh render — completedRef/isExecuting are internal state set by the
     // click above).
     sseState.status = 'done'
-    rerender(<RumFaroVersionCard serviceId={SVC} rumEnabled={true} />)
+    rerender(<RumFaroVersionCard serviceId={SVC} />)
 
     await waitFor(() => expect(versionCalls).toBe(2))
   })

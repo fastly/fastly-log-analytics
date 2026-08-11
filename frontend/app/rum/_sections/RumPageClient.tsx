@@ -4,6 +4,7 @@ import { Radio, BookOpen, Copy, Check } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { ReportLayout } from '@/components/ReportLayout';
 import { RumClient } from './RumClient';
+import { RumFaroVersionCard } from '@/components/Rum/RumFaroVersionCard';
 import {
   Dialog,
   DialogContent,
@@ -60,15 +61,18 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
         icon={Radio}
         serviceId={initialServiceId}
         headerActions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowInstructions(true)}
-            className="flex items-center gap-2"
-          >
-            <BookOpen className="h-4 w-4" />
-            Installation Instructions
-          </Button>
+          <div className="flex items-center gap-3">
+            <RumFaroVersionCard serviceId={activeServiceId} />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowInstructions(true)}
+              className="flex items-center gap-2"
+            >
+              <BookOpen className="h-4 w-4" />
+              Installation Instructions
+            </Button>
+          </div>
         }
       >
         {({ startTime, endTime, activeServiceId: sid, filterPayload }) => {

@@ -2,14 +2,13 @@
 
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { RefreshCw, TriangleAlert, ArrowUpCircle } from 'lucide-react';
-import { AnalyticsCard } from '@/components/AnalyticsCard';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { RefreshCw, TriangleAlert } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
-import { client } from '@/lib/api';
+import { adminFetch, client } from '@/lib/api';
+import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
 import { UpgradeFaroDialog } from './UpgradeFaroDialog';
 
@@ -17,26 +16,28 @@ type RumVersionsResponse = components['schemas']['RumVersionsResponse'];
 
 interface RumFaroVersionCardProps {
   serviceId: string | null;
-  rumEnabled: boolean;
 }
 
-/**
- * Surfaces the pinned vs latest Grafana Faro Web SDK version and lets the
- * operator pick a target to upgrade to (Task 8 — the surface the user asked
- * for: "if there is a new version we should let the user know on the RUM
- * page and ask them if they want to upgrade").
- *
- * Deliberately a one-shot fetch, not polled: the npm-registry-backed
- * /rum/versions lookup is only interesting right after a page load or an
- * explicit refresh — see the precedent at SessionScoring/StatusPanel.tsx
- * (polling an admin status surface previously caused ~1.5 GB of
- * `.duckdb-wal` churn).
- */
-export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCardProps) {
+export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
   const queryClient = useQueryClient();
   const [isUpgradeOpen, setIsUpgradeOpen] = useState(false);
+  const isAnalyst = useIsAnalyst();
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
+  // Fetch status first
+  const { data: status, isLoading: isStatusLoading } = useQuery({
+    queryKey: ['rum-status', serviceId],
+    queryFn: async () => {
+      if (!serviceId) return null;
+      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
+      return res.ok ? res.json() : null;
+    },
+    enabled: !!serviceId,
+  });
+
+  const rumEnabled = !!status?.enabled;
+
+  // Fetch versions
+  const { data, isLoading: isVersionsLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
     queryKey: ['rum-versions', serviceId],
     queryFn: async ({ signal }) => {
       const { data, response } = await client.GET('/api/services/{service_id}/rum/versions', {
@@ -50,48 +51,41 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
     retry: false,
   });
 
-  // Not enabled: nothing to pin/upgrade, and the operator hasn't asked to
-  // provision RUM yet — don't invite an upgrade action for a feature that
-  // isn't on, and skip the registry fetch entirely.
-  if (!rumEnabled) {
-    return (
-      <AnalyticsCard title="Faro SDK Version">
-        <p className="text-sm text-muted-foreground">
-          Enable RUM above to pin and upgrade the self-hosted Faro Web SDK bundle.
-        </p>
-      </AnalyticsCard>
-    );
+  // Analysts do not see version management controls in the header
+  if (isAnalyst) {
+    return null;
   }
 
-  if (isLoading) {
+  // Not enabled: nothing to pin/upgrade
+  if (!rumEnabled) {
+    return null;
+  }
+
+  if (isStatusLoading || isVersionsLoading) {
     return (
-      <AnalyticsCard title="Faro SDK Version">
-        <Skeleton className="h-16 w-full" />
-      </AnalyticsCard>
+      <div className="flex items-center gap-2">
+        <Skeleton className="h-8 w-32" />
+        <Skeleton className="h-8 w-24" />
+      </div>
     );
   }
 
   if (isError) {
     return (
-      <AnalyticsCard title="Faro SDK Version">
-        <Alert variant="destructive">
-          <TriangleAlert className="h-4 w-4" />
-          <AlertTitle>Couldn&apos;t reach the npm registry</AlertTitle>
-          <AlertDescription className="flex items-center justify-between gap-2">
-            <span>Version info is temporarily unavailable. The rest of the RUM admin surface is unaffected.</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="h-7 text-xs shrink-0"
-            >
-              <RefreshCw className={cn('h-3 w-3 mr-1', isFetching && 'animate-spin')} />
-              {isFetching ? 'Retrying…' : 'Retry'}
-            </Button>
-          </AlertDescription>
-        </Alert>
-      </AnalyticsCard>
+      <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 px-2.5 py-1 rounded-md border border-destructive/20 shrink-0">
+        <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+        <span>Versions offline</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          aria-label="Retry"
+          className="h-5 w-5 hover:bg-destructive/20 hover:text-destructive shrink-0"
+        >
+          <RefreshCw className={cn('h-2.5 w-2.5', isFetching && 'animate-spin')} />
+        </Button>
+      </div>
     );
   }
 
@@ -99,7 +93,6 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
   const current = data?.current ?? null;
   const latest = data?.latest ?? null;
   const updateAvailable = data?.update_available ?? false;
-  const noVersions = available.length === 0;
 
   const handleComplete = () => {
     queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] });
@@ -108,56 +101,26 @@ export function RumFaroVersionCard({ serviceId, rumEnabled }: RumFaroVersionCard
 
   return (
     <>
-      <AnalyticsCard
-        title="Faro SDK Version"
-        headerAction={
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            aria-label="Refresh version info"
-            className="h-7 w-7"
-          >
-            <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} />
-          </Button>
-        }
-      >
-        {noVersions ? (
-          <p className="text-sm text-muted-foreground">No versions available from the registry right now.</p>
-        ) : (
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pinned:</span>
-                <span className="font-mono">{current ?? 'Not pinned'}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Latest:</span>
-                <span className="font-mono">{latest ?? '—'}</span>
-              </div>
-              {updateAvailable ? (
-                <div className="flex items-center gap-2">
-                  <Badge variant="warning" className="text-[10px] py-0 px-2 h-5">Update available</Badge>
-                  <span className="sr-only">New Faro Web SDK version available</span>
-                </div>
-              ) : current ? (
-                <Badge variant="success" className="text-[10px] py-0 px-2 h-5">Up to date</Badge>
-              ) : null}
-            </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mr-1">
+          <span className="font-semibold uppercase tracking-wider text-[10px]">Faro SDK:</span>
+          <span className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10">{current ?? 'Not pinned'}</span>
+          {updateAvailable && (
+            <Badge variant="warning" className="text-[9px] py-0 px-1.5 h-4.5 font-medium ml-1 shrink-0">
+              Update available
+            </Badge>
+          )}
+        </div>
 
-            <Button
-              onClick={() => setIsUpgradeOpen(true)}
-              disabled={false}
-              variant={updateAvailable ? 'default' : 'outline'}
-              size="sm"
-              className="h-8 text-xs font-semibold px-3"
-            >
-              {current ? (updateAvailable ? 'Upgrade' : 'Change version') : 'Choose version'}
-            </Button>
-          </div>
-        )}
-      </AnalyticsCard>
+        <Button
+          onClick={() => setIsUpgradeOpen(true)}
+          variant={updateAvailable ? 'default' : 'outline'}
+          size="sm"
+          className="h-8 text-xs font-semibold px-3"
+        >
+          {current ? (updateAvailable ? 'Upgrade' : 'Change Version') : 'Choose Version'}
+        </Button>
+      </div>
 
       <UpgradeFaroDialog
         serviceId={serviceId}
