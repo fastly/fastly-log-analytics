@@ -19,6 +19,7 @@ interface RumStatus {
   deployed_vcl_sha?: string | null;
   current_vcl_sha?: string;
   vcl_drift?: boolean;
+  unauthorized?: boolean;
 }
 
 export function RumStatusPanel() {
@@ -32,6 +33,9 @@ export function RumStatusPanel() {
     queryFn: async () => {
       if (!serviceId) return null;
       const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
+      if (res.status === 403) {
+        return { enabled: false, unauthorized: true };
+      }
       if (!res.ok) return null;
       return res.json() as Promise<RumStatus>;
     },
@@ -51,6 +55,22 @@ export function RumStatusPanel() {
   const currentService = services?.services?.find(
     (s: components['schemas']['ServiceConfig']) => s.service_id === serviceId
   ) || null;
+
+  if (isAnalyst && status?.unauthorized) {
+    return (
+      <AnalyticsCard title="RUM Status">
+        <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+          <AlertTriangle className="h-12 w-12 text-destructive" />
+          <div>
+            <h3 className="text-lg font-medium text-destructive">Access Denied</h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              You are not authorized to view RUM data for this service. Please contact your administrator to grant access.
+            </p>
+          </div>
+        </div>
+      </AnalyticsCard>
+    );
+  }
 
   // Analysts can't reach /rum/enable or /rum/disable — the middleware
   // blocks both (mutate deployed edge config) — so showing this panel's
