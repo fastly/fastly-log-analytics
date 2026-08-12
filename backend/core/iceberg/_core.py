@@ -828,6 +828,56 @@ def _metadata_search_prefixes(source: dict, namespace: str, table_name: str) -> 
     ]
 
 
+def metadata_version(key_or_location: str) -> int:
+    """Parse the numeric version prefix off an Iceberg ``metadata.json`` name.
+
+    PyIceberg writes ``<zero-padded-version>-<uuid>.metadata.json``. Returns
+    ``-1`` when the name doesn't carry a parseable version, which sorts such
+    entries below every real one.
+    """
+    base = (key_or_location or "").rsplit("/", 1)[-1]
+    digits = base.split("-", 1)[0]
+    if digits.isdigit():
+        return int(digits)
+    return -1
+
+
+def _list_metadata_json_keys(s3, bucket: str, prefix: str) -> list[str]:
+    """Return EVERY ``.metadata.json`` key under ``prefix``, paginated.
+
+    ``list_objects_v2`` caps a single response at 1000 keys. A mature table's
+    ``metadata/`` directory holds far more than that (the SE-demo service had
+    9,314 metadata.json objects plus manifests), so an unpaginated call sees
+    only the lexicographically-first page. Because pyiceberg zero-pads the
+    version prefix, that page holds the OLDEST versions — picking a "latest"
+    from it silently resolves the table to an ancient snapshot. See
+    :func:`_newest_metadata_key`.
+    """
+    keys: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []) or []:
+            key = obj.get("Key", "")
+            if key.endswith(".metadata.json"):
+                keys.append(key)
+    return keys
+
+
+def _newest_metadata_key(keys: list[str]) -> str | None:
+    """Pick the highest-version ``metadata.json`` key.
+
+    Ordered by parsed version, NOT by raw string sort: a lexicographic sort
+    is only accidentally correct while every version has the same digit
+    width, and breaks the moment the counter crosses a padding boundary
+    (``09999`` -> ``10000`` still sorts fine, but ``9999`` -> ``10000``
+    would not). The version is the authority; the full key breaks ties
+    deterministically.
+    """
+    if not keys:
+        return None
+    return max(keys, key=lambda k: (metadata_version(k), k))
+
+
 def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
     """Write a pointer to the latest metadata.json to FOS.
 
@@ -952,20 +1002,46 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
                 continue
 
         if resolved is None:
-            # Fallback: try listing the bucket
+            # The pointer object is the authority; reaching here means every
+            # candidate read failed (missing object, CDN 5xx, timeout). Log it
+            # — a silent slide into discovery is what let the 2026-08 rollback
+            # go unnoticed for weeks.
+            logger.warning(
+                "[iceberg] metadata pointer unreadable for %s — falling back to metadata/ discovery",
+                identifier,
+            )
             search_prefixes = _metadata_search_prefixes(source, namespace, table_name)
             for search_prefix in search_prefixes:
-                resp = s3.list_objects_v2(Bucket=bucket, Prefix=search_prefix)
-                metadata_files = [
-                    obj["Key"] for obj in resp.get("Contents", []) if obj["Key"].endswith(".metadata.json")
-                ]
-                if metadata_files:
-                    latest_key = sorted(metadata_files)[-1]
+                metadata_files = _list_metadata_json_keys(s3, bucket, search_prefix)
+                latest_key = _newest_metadata_key(metadata_files)
+                if latest_key:
                     resolved = f"s3://{bucket}/{latest_key}"
                     break
 
         if resolved is None:
             resolved = source.get("iceberg_metadata_location")
+
+        # MONOTONICITY GUARD. A resolution that moves the table BACKWARDS
+        # orphans every data file committed in between: the table keeps
+        # committing from the stale base, so the newer metadata (and the
+        # partitions it references) is never reachable again. That is exactly
+        # the 2026-08 incident — an unpaginated listing resolved version 952
+        # while 8999 was current, and 41 days of data went dark while ingest
+        # reported success. Refuse to regress and keep the known-good value.
+        known = source.get("iceberg_metadata_location")
+        if resolved and known and resolved != known:
+            resolved_v, known_v = metadata_version(resolved), metadata_version(known)
+            if resolved_v >= 0 and known_v > resolved_v:
+                logger.error(
+                    "[iceberg] REFUSING metadata rollback for %s: resolved v%d (%s) is older than "
+                    "known v%d (%s). Keeping the known-good pointer — investigate the pointer object.",
+                    identifier,
+                    resolved_v,
+                    resolved,
+                    known_v,
+                    known,
+                )
+                resolved = known
 
         with _pointer_cache_lock:
             _pointer_cache[cache_key] = (time.time(), resolved)
@@ -1010,6 +1086,23 @@ def _refresh_local_catalog_metadata(catalog, source: dict, identifier: tuple) ->
             if row:
                 current_loc = row[0]
                 if current_loc != latest_loc:
+                    # MONOTONICITY GUARD (sibling of the one in
+                    # _read_metadata_pointer). Writing an older location here
+                    # makes a rollback sticky in the local catalog: the table
+                    # then commits forward from the stale base and every data
+                    # file in between is orphaned. Refuse to regress.
+                    cur_v, new_v = metadata_version(current_loc), metadata_version(latest_loc)
+                    if new_v >= 0 and cur_v > new_v:
+                        logger.error(
+                            "[iceberg] REFUSING local catalog rollback for %s: resolved v%d (%s) is "
+                            "older than current v%d (%s).",
+                            identifier,
+                            new_v,
+                            latest_loc.split("/")[-1],
+                            cur_v,
+                            current_loc.split("/")[-1],
+                        )
+                        return False
                     logger.info(
                         "[iceberg] Updating local catalog metadata pointer from %s to %s",
                         current_loc.split("/")[-1],
@@ -1062,14 +1155,23 @@ def _try_register_from_fos(catalog, source: dict, identifier: tuple):
         search_prefixes = _metadata_search_prefixes(source, namespace, table_name)
 
         for search_prefix in search_prefixes:
-            resp = s3.list_objects_v2(Bucket=bucket, Prefix=search_prefix)
-            metadata_files = [obj["Key"] for obj in resp.get("Contents", []) if obj["Key"].endswith(".metadata.json")]
-            if not metadata_files:
+            # Paginated + version-ordered: an unpaginated list_objects_v2 caps
+            # at 1000 keys, and because the version prefix is zero-padded that
+            # first page is the OLDEST metadata. Registering the table from it
+            # pins it to an ancient snapshot and orphans everything newer.
+            metadata_files = _list_metadata_json_keys(s3, bucket, search_prefix)
+            latest_key = _newest_metadata_key(metadata_files)
+            if not latest_key:
                 continue
 
-            latest_key = sorted(metadata_files)[-1]
             loc = f"s3://{bucket}/{latest_key}"
-            logger.info("[iceberg] Registering table %s via discovery from %s", identifier, loc)
+            logger.info(
+                "[iceberg] Registering table %s via discovery from %s (v%d, %d metadata objects scanned)",
+                identifier,
+                loc,
+                metadata_version(latest_key),
+                len(metadata_files),
+            )
             return catalog.register_table(identifier, loc)
 
     except Exception as e:

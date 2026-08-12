@@ -685,6 +685,20 @@ Two incidents, same root cause:
 
 Route every such write through `reconcile_system_custom_fields` / `reconcile_cfg_system_custom_fields` in [backend/provision/system_fields.py](backend/provision/system_fields.py), and key it on the **current** feature state, never on a state transition — a reconcile that says nothing about the feature must still re-assert its fields, and a disable must strip them. The transition-only guard in `update_service_config` is exactly what let the SE-demo config stay broken across a month of reconciles. **If you add a third system-managed feature, add its flag to `system_feature_flags` — do not add a fourth re-injection block.**
 
+### 28. Never resolve the Iceberg metadata pointer from an unpaginated listing
+`list_objects_v2` caps a single response at **1000 keys**, and pyiceberg names metadata files `<zero-padded-version>-<uuid>.metadata.json`. So the lexicographically-first page holds the **oldest** versions — and `sorted(metadata_files)[-1]` over that page resolves an ancient snapshot while presenting as "latest".
+
+**2026-08 SE-demo incident.** The service's `metadata/` held 9,314 metadata.json objects. The truncated first page ended at `00952-…`; current was `08999-…`. `_read_metadata_pointer`'s discovery fallback resolved **v952**, the table committed forward from that stale base (reaching v1247), and every data file referenced only by v953…v8999 became unreachable — **41 days, 2026-07-01 → 2026-08-10, ~1.05 GB of July parquet alone**. Ingest kept reporting success the whole time because the buffer→commit path was healthy; only the *base* was wrong. The parquet was never deleted, just dereferenced, so it stayed fully recoverable.
+
+The trigger was cheap: both pointer-key candidates in `_read_metadata_pointer` are wrapped in `except Exception: continue`, so **one transient CDN 5xx or timeout** on `metadata_location.txt` is enough to drop into discovery. Note the pointer is CDN-fronted with a 10 s TTL + `stale_while_revalidate` (see the iceberg-metadata snippet), so transient misses are normal operation, not an exotic failure.
+
+Three independent defenses now exist in [backend/core/iceberg/_core.py](backend/core/iceberg/_core.py) — keep all three:
+1. **Paginate** — `_list_metadata_json_keys` uses a paginator. Never call `list_objects_v2` directly for metadata discovery.
+2. **Order by parsed version** — `_newest_metadata_key` / `metadata_version`, not a raw string sort (which is only accidentally correct while digit widths match).
+3. **Refuse to regress** — both `_read_metadata_pointer` and `_refresh_local_catalog_metadata` reject a resolution older than the known-good location and log at ERROR. This one alone would have prevented the incident; it is the backstop, not the fix.
+
+Recovery for an already-rolled-back table is [scripts/recover_orphaned_iceberg_metadata.py](scripts/recover_orphaned_iceberg_metadata.py) (dry-run by default). It reattaches the abandoned branch by moving the pointer to the newest version, and reports any data on the *current* branch that the recovered branch lacks — reattaching without handling that list trades one gap for another. **If you add another metadata-resolution path, paginate it and guard it, or this recurs silently.**
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
