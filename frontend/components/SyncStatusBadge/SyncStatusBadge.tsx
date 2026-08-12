@@ -315,14 +315,14 @@ function SyncStatusBadgeInner() {
 
         {/* Column 3: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
         {totalRows != null && totalRows > 0 ? (
-          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
         ) : (
-          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-right pr-2">—</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2">—</span>
         )}
 
         {/* Column 4: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
         {lastSyncTs ? (
-          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] inline-flex items-center justify-end gap-1 tabular-nums">
+          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] inline-flex items-center justify-start gap-1 tabular-nums">
             <span className="text-muted-foreground/80">sync:</span>
             {isRunning && startedAt ? (
               <span className="inline-flex items-center gap-1 font-semibold text-blue-500 animate-pulse" aria-label="Sync in progress">
@@ -334,7 +334,7 @@ function SyncStatusBadgeInner() {
             )}
           </span>
         ) : (
-          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] text-right">—</span>
+          <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] text-left">—</span>
         )}
       </div>
     )

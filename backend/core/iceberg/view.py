@@ -1040,6 +1040,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             if disk_parquets:
                 # Synthesize a sentinel so the local-read branch fires below
                 local_paths = disk_parquets[:1]
+                s3_paths = []  # Clear S3 paths so we don't fall through to iceberg_scan
                 logger.info(
                     "[iceberg] %s: plan_files returned 0 local paths but %s/ has %d parquets — "
                     "using local glob anyway to avoid cloud reads",
