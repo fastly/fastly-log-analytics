@@ -172,20 +172,25 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             "field_overrides": state.log_fields.field_overrides,
         }
         edge_first_hop_statements.append("")
-        edge_first_hop_statements.append("  # Capture edge data for logging before shielding or backend fetch")
-        for cap in get_capture_vcl_statements(log_fields_dict):
-            edge_first_hop_statements.append(f"  {cap}")
 
-        # CMCD is appended inside capture block if enabled
+        # CMCD extraction MUST precede the capture statements: capture promotes
+        # req.http.x-cmcd:<key> into req.http.x-fos-edge-data:cmcd_<key>, which
+        # is what the log format reads. Extracting after it copies empty
+        # strings — the 2026-08 CMCD outage, silent because the extraction still
+        # works (it strips ?CMCD= from the cache key) and the columns exist.
         if state.cmcd.enabled:
             from backend.provision.cmcd_vcl import generate_cmcd_vcl
 
             cmcd_vcl_dict = generate_cmcd_vcl(mode=state.cmcd.mode, version=state.cmcd.version)
             cmcd_body = next(iter(cmcd_vcl_dict.values()))
-            edge_first_hop_statements.append("  # Section 3: CMCD Extraction (vcl_recv)")
+            edge_first_hop_statements.append("  # Section 3: CMCD Extraction (vcl_recv) — before field capture")
             for line in cmcd_body.splitlines():
                 if line.strip():
                     edge_first_hop_statements.append(f"  {line}")
+
+        edge_first_hop_statements.append("  # Capture edge data for logging before shielding or backend fetch")
+        for cap in get_capture_vcl_statements(log_fields_dict):
+            edge_first_hop_statements.append(f"  {cap}")
 
     # D. Beacon interception POST to /rum-beacon (Section 5 RUM)
     # Placed AFTER the standard captures block!

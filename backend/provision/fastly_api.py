@@ -324,6 +324,33 @@ def generate_capture_vcl(
         scrub_lines.append("  # Mint a per-request ID for RUM beacons on fresh requests")
         scrub_lines.append("  set req.http.x-rum-req-id = randomstr(12);")
 
+    # CMCD extraction MUST be emitted BEFORE the capture statements below.
+    # Capture copies ``req.http.x-cmcd:<key>`` into
+    # ``req.http.x-fos-edge-data:cmcd_<key>`` (that promoted header is what the
+    # log format reads). Extracting afterwards copies EMPTY strings, so every
+    # cmcd_* column logs empty while the extraction itself works perfectly —
+    # provable at the edge, because it still strips ?CMCD= from the cache key.
+    # That silent ordering inversion is the 2026-08 CMCD-collection outage; it
+    # survived a month because nothing errors and the columns exist.
+    if cmcd_enabled:
+        from backend.provision.cmcd_vcl import generate_cmcd_vcl
+
+        cmcd_vcl_dict = generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version)
+        cmcd_body = next(iter(cmcd_vcl_dict.values()))
+        cmcd_lines = [
+            "  # Section 3: CMCD Extraction (vcl_recv) — must precede field capture",
+        ]
+        for line in cmcd_body.splitlines():
+            if line.strip():
+                cmcd_lines.append(f"  {line}")
+            else:
+                # Avoid consecutive empty lines to keep it clean, but keep a single empty line if there's code above
+                if cmcd_lines and cmcd_lines[-1] != "":
+                    cmcd_lines.append("")
+        if cmcd_lines and cmcd_lines[-1] == "":
+            cmcd_lines.pop()
+        scrub_lines.extend(cmcd_lines)
+
     for statement in get_capture_vcl_statements(log_fields_config):
         scrub_lines.append(f"  {statement}")
 
@@ -352,25 +379,6 @@ def generate_capture_vcl(
             "  }",
         ]
         scrub_lines.extend(rum_lines)
-
-    if cmcd_enabled:
-        from backend.provision.cmcd_vcl import generate_cmcd_vcl
-
-        cmcd_vcl_dict = generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version)
-        cmcd_body = next(iter(cmcd_vcl_dict.values()))
-        cmcd_lines = [
-            "  # Section 3: CMCD Extraction (vcl_recv)",
-        ]
-        for line in cmcd_body.splitlines():
-            if line.strip():
-                cmcd_lines.append(f"  {line}")
-            else:
-                # Avoid consecutive empty lines to keep it clean, but keep a single empty line if there's code above
-                if cmcd_lines and cmcd_lines[-1] != "":
-                    cmcd_lines.append("")
-        if cmcd_lines and cmcd_lines[-1] == "":
-            cmcd_lines.pop()
-        scrub_lines.extend(cmcd_lines)
 
     if scoring_enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
