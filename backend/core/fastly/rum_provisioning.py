@@ -43,6 +43,43 @@ RUM_FARO_FETCH_NAME = "RUM - Faro SDK fetch caching"
 _FARO_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
+_RUM_PATH_PREDICATE = re.compile(r"\breq\.url(\.path)?\b")
+
+
+def validate_rum_custom_condition(condition: str) -> str | None:
+    """Return an error message if ``condition`` can't work, else None.
+
+    ``rum_custom_condition`` is AND-ed onto ``req.url.path == "/rum-beacon"``
+    in the RUM response condition, so it is evaluated on the beacon request.
+    ``req.url.path`` is therefore pinned to ``/rum-beacon`` and any predicate on
+    it is either a tautology (a silent no-op) or a contradiction — and a
+    contradiction makes the whole condition identically false, which disables
+    ALL RUM logging with no error anywhere. Valid VCL, so Fastly's own
+    ``validate`` call passes it happily.
+
+    The SE-demo service ran with ``req.url.path !~ "^/api/"`` — the no-op form,
+    copied from what the settings dialog used to suggest as an example.
+
+    Operators reaching for this almost always want to exclude beacons by PAGE
+    url, which is impossible here: Faro batches events into the POST body, and
+    VCL cannot read a request body. That filtering belongs in the tracker.
+    """
+    cond = (condition or "").strip()
+    if not cond:
+        return None
+    if _RUM_PATH_PREDICATE.search(cond):
+        return (
+            "A condition on req.url / req.url.path cannot work here: it is AND-ed onto "
+            'req.url.path == "/rum-beacon", so the path is always "/rum-beacon". Such a '
+            "condition is either a no-op or silently disables all RUM logging. To exclude "
+            "beacons by page URL, filter in the tracker — the page URL is in the beacon's "
+            "POST body, which VCL cannot read."
+        )
+    if "'" in cond:
+        return "VCL string literals use double quotes, not single quotes."
+    return None
+
+
 def _assert_faro_version_safe(version: str) -> str:
     """Raise ``ValueError`` unless ``version`` is a plain ``X.Y.Z`` string.
 

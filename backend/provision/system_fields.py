@@ -54,6 +54,17 @@ def reconcile_system_custom_fields(
     partial, or different) and re-adds the canonical entries from code for
     each feature that is currently enabled. User-defined fields pass through
     untouched and keep their relative order.
+
+    System entries are appended in a DETERMINISTIC order (scoring, then CMCD,
+    each in its canonical declaration order). This matters beyond tidiness:
+    Iceberg assigns a field id when a column is first added, so the order the
+    fields appear here decides the ids on a freshly-built table. Two tables
+    built from the same config in different orders end up with the same columns
+    under different ids — and then ``add_files`` between them is impossible,
+    because Iceberg binds by id. That is exactly what blocked recovery of the
+    2026-08 SE-demo rollback: 27 columns, identical names and types, different
+    ids on each branch. Do not make this order depend on dict iteration,
+    feature-toggle timing, or the incoming list.
     """
     from backend.provision.cmcd_fields import reconcile_cmcd_custom_fields
     from backend.provision.session_scoring_orchestrator import (

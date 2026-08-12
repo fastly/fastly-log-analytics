@@ -186,13 +186,3 @@ def reconcile_cmcd_custom_fields(custom_fields: list[dict] | None, *, enabled: b
     """
     kept = [cf for cf in (custom_fields or []) if cf.get("name") not in _CMCD_FIELD_NAMES]
     return kept + get_cmcd_fields(enabled)
-
-
-def merge_cmcd_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
-    """Return ``custom_fields`` with the canonical CMCD fields re-applied.
-
-    Same pattern as ``merge_scoring_custom_fields``. Thin wrapper over
-    ``reconcile_cmcd_custom_fields(..., enabled=True)`` for the enable path,
-    which knows statically that CMCD is on.
-    """
-    return reconcile_cmcd_custom_fields(custom_fields, enabled=True)

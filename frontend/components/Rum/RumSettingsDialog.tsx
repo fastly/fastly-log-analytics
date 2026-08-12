@@ -383,12 +383,19 @@ export function RumSettingsDialog({
                       Optional Log Condition
                     </Label>
                     <p className="text-xs text-muted-foreground leading-normal">
-                      An additional VCL condition to filter RUM beacons (e.g. <code>req.url.path !~ "^/api/"</code>).
+                      An additional VCL condition, AND-ed onto{" "}
+                      <code>req.url.path == &quot;/rum-beacon&quot;</code>. It is evaluated on the beacon
+                      request itself, so <strong>a condition on <code>req.url.path</code> can never work</strong> —
+                      the path is always <code>/rum-beacon</code>, making it either always true (a no-op) or
+                      always false (which silently disables all RUM logging). The page URL lives in the beacon&apos;s
+                      POST body, which VCL cannot read; filter by page in the tracker instead. Useful here:
+                      client, geo, or header predicates, e.g.{" "}
+                      <code>client.geo.country_code != &quot;US&quot;</code>. Strings must use double quotes.
                     </p>
                   </div>
                   <Input
                     id="rum-custom-condition"
-                    placeholder="e.g. client.ip != '192.168.1.1' && req.url.path !~ '^/api/'"
+                    placeholder='e.g. req.http.User-Agent !~ "(bot|crawler)"'
                     value={customCondition}
                     onChange={(e) => setCustomCondition(e.target.value)}
                     className="h-9 font-mono text-xs mt-2"

@@ -1542,7 +1542,7 @@ def update_logging_endpoint(cfg: dict, token: str):
     if cmcd_enabled_req is not None:
         import datetime as _dt
 
-        from backend.provision.cmcd_fields import merge_cmcd_custom_fields
+        from backend.provision.cmcd_fields import reconcile_cmcd_custom_fields
         from backend.provision.cmcd_orchestrator import _remove_cmcd_custom_fields
 
         want_enabled = bool(cmcd_enabled_req)
@@ -1557,7 +1557,7 @@ def update_logging_endpoint(cfg: dict, token: str):
                 "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
             }
             lf_cfg = service_cfg.setdefault("log_fields", {})
-            lf_cfg["custom_fields"] = merge_cmcd_custom_fields(lf_cfg.get("custom_fields"))
+            lf_cfg["custom_fields"] = reconcile_cmcd_custom_fields(lf_cfg.get("custom_fields"), enabled=True)
             cmcd_changed = True
         elif not want_enabled and cmcd_was_enabled:
             service_cfg.pop("cmcd", None)

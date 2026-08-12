@@ -53,6 +53,107 @@ def _day_of(path: str) -> str:
     return "-".join(bits[:3]) if len(bits) >= 3 else part
 
 
+def _arrow_of(res):
+    """DuckDB result -> pyarrow.Table.
+
+    NOT ``.arrow()`` — that yields a RecordBatchReader (no ``num_rows``) on
+    current DuckDB. ``to_arrow_table`` is the modern name; ``fetch_arrow_table``
+    is its deprecated alias on older builds.
+    """
+    return res.to_arrow_table() if hasattr(res, "to_arrow_table") else res.fetch_arrow_table()
+
+
+def _dedup_day(args, source, live, cur_files, by_day) -> int:
+    """Recover a day present on BOTH branches without double-counting.
+
+    The rollback day is the one place the two branches overlap in time, so a
+    plain append could re-add rows the live branch already has. Anti-join on
+    ``rid`` (``req.http.x-req-id``) — the same per-request key
+    ``local_compaction`` already dedupes on.
+
+    Rows with a NULL ``rid`` can't be keyed, so they're reported separately and
+    left out; re-adding them blind is the one thing that could silently
+    duplicate.
+    """
+    import duckdb
+
+    from backend.core.duckdb import _configure_fos
+    from backend.core.iceberg import _core as _core_mod
+    from backend.core.iceberg._core import metadata_version
+
+    day = args.dedup_day
+    aband_paths = sorted(by_day.get(day, []))
+    live_paths = sorted(p for p in cur_files if _day_of(p) == day)
+    if not aband_paths:
+        print(f"\nnothing orphaned for {day}")
+        return 0
+
+    print(f"\n=== dedup recovery for {day} ===")
+    print(f"abandoned files: {len(aband_paths)}   live files: {len(live_paths)}")
+
+    con = duckdb.connect()
+    _configure_fos(con, source)
+    target = live.schema().as_arrow()
+    col_sql = ", ".join(f'"{f.name}"' for f in target)
+
+    stats = con.execute(
+        "SELECT count(*) AS n, count(rid) AS with_rid, count(DISTINCT rid) AS uniq_rid "
+        "FROM read_parquet($p, union_by_name=true)",
+        {"p": aband_paths},
+    ).fetchone()
+    print(f"abandoned rows: {stats[0]}  (rid set on {stats[1]}, {stats[2]} distinct)")
+
+    if live_paths:
+        overlap = con.execute(
+            "SELECT count(*) FROM ("
+            "  SELECT DISTINCT rid FROM read_parquet($a, union_by_name=true) WHERE rid IS NOT NULL"
+            ") a JOIN (SELECT DISTINCT rid FROM read_parquet($l, union_by_name=true) WHERE rid IS NOT NULL) l"
+            " USING (rid)",
+            {"a": aband_paths, "l": live_paths},
+        ).fetchone()[0]
+        print(f"OVERLAPPING rids between branches: {overlap}")
+    else:
+        overlap = 0
+        print("no live files for this day — no overlap possible")
+
+    null_rid = stats[0] - stats[1]
+    where = "rid IS NOT NULL"
+    if live_paths:
+        where += " AND rid NOT IN (SELECT rid FROM read_parquet($l, union_by_name=true) WHERE rid IS NOT NULL)"
+    params = {"p": aband_paths}
+    if live_paths:
+        params["l"] = live_paths
+
+    to_add = con.execute(f"SELECT count(*) FROM read_parquet($p, union_by_name=true) WHERE {where}", params).fetchone()[
+        0
+    ]
+    print(f"would append : {to_add} rows")
+    print(f"would EXCLUDE: {overlap} overlapping + {null_rid} NULL-rid rows")
+
+    if not args.apply:
+        print("\nDRY RUN — nothing written.")
+        return 0
+    if to_add == 0:
+        print("\nnothing to append.")
+        return 0
+
+    arrow = _arrow_of(
+        con.execute(f"SELECT {col_sql} FROM read_parquet($p, union_by_name=true) WHERE {where}", params)
+    ).cast(target)
+    live.append(arrow)
+    print(f"appended {arrow.num_rows} rows (v{metadata_version(live.metadata_location)})")
+
+    try:
+        _core_mod._set_cached_table(source, _core_mod._table_identifier(source, table_name=args.table), live)
+        _core_mod._write_metadata_pointer(source, live.metadata_location, table=live)
+        with _core_mod._pointer_cache_lock:
+            _core_mod._pointer_cache.clear()
+        print(f"pointer updated -> {live.metadata_location}")
+    except Exception as e:
+        print(f"WARNING: pointer/cache update failed: {e}", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--service", required=True)
@@ -61,6 +162,11 @@ def main() -> int:
     ap.add_argument("--only-day", default="", help="process just this YYYY-MM-DD")
     ap.add_argument("--max-days", type=int, default=0, help="stop after N days (0 = all)")
     ap.add_argument("--allow-overlap-day", action="store_true", help="also process days already present live")
+    ap.add_argument(
+        "--dedup-day",
+        default="",
+        help="process a day present on BOTH branches, anti-joining on rid so overlapping rows are not re-added",
+    )
     ap.add_argument("--apply", action="store_true")
     args = ap.parse_args()
 
@@ -111,6 +217,9 @@ def main() -> int:
     print(f"live    : {len(cur_files)} files, newest metadata v{metadata_version(newest_loc)}")
     print(f"orphaned: {len(orphan)} files across {len(by_day)} days")
 
+    if args.dedup_day:
+        return _dedup_day(args, source, live, cur_files, by_day)
+
     days = sorted(by_day)
     if args.only_day:
         days = [d for d in days if d == args.only_day]
@@ -155,14 +264,12 @@ def main() -> int:
             # fails with "schema mismatch in glob". Columns absent from a given
             # file come back NULL, which is the correct semantic for a column
             # added partway through the range.
-            res = con.execute(
-                f"SELECT {col_sql} FROM read_parquet($paths, union_by_name=true)",
-                {"paths": paths},
+            arrow = _arrow_of(
+                con.execute(
+                    f"SELECT {col_sql} FROM read_parquet($paths, union_by_name=true)",
+                    {"paths": paths},
+                )
             )
-            # NOT .arrow() — that yields a RecordBatchReader (no num_rows) on
-            # current DuckDB. to_arrow_table is the modern name;
-            # fetch_arrow_table is its deprecated alias on older builds.
-            arrow = res.to_arrow_table() if hasattr(res, "to_arrow_table") else res.fetch_arrow_table()
             arrow = arrow.cast(target)
             n = arrow.num_rows
             if n == 0:

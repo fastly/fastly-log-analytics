@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
+from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
@@ -651,7 +652,14 @@ def provision_execute(req: ProvisionExecuteRequest):
         # rum_orchestrator_v2.enable_rum, which applies the same fallback.
         cfg["rum"]["faro_version"] = req.faro_version or DEFAULT_FARO_VERSION
         rum_cond = getattr(req, "rum_custom_condition", None) or ""
-        cfg["rum"]["custom_condition"] = rum_cond.strip()
+        rum_cond = rum_cond.strip()
+        # Reject conditions that provably can't work rather than letting them
+        # reach the edge, where the no-op form is invisible and the inverse
+        # silently disables all RUM logging.
+        cond_err = validate_rum_custom_condition(rum_cond)
+        if cond_err:
+            raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_err))
+        cfg["rum"]["custom_condition"] = rum_cond
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
