@@ -1522,6 +1522,7 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 0, "total": total_steps}
 
     from backend import config as _svcconfig
+    from backend.provision.system_fields import reconcile_cfg_system_custom_fields
 
     try:
         service_cfg = _svcconfig.load_config(service_id)
@@ -1582,7 +1583,26 @@ def update_logging_endpoint(cfg: dict, token: str):
     if endpoint_name is not None:
         prov["endpoint_name"] = endpoint_name
     if cfg.get("log_fields") is not None:
-        service_cfg["log_fields"] = cfg["log_fields"]
+        # MERGE GUARD (sibling of the cli.py + api_service_log_fields_set
+        # guards): callers hand us a log_fields built from groups alone
+        # (_build_log_fields_config returns no custom_fields key), so a
+        # wholesale assign strips the user's custom_fields AND the
+        # system-managed scoring/CMCD entries. reconcile_vcl_state then
+        # regenerates the Fastly log format from this config, so the strip
+        # reaches the edge: the extraction VCL keeps running and nothing
+        # logs its output. Treat "absent OR empty" as "no change".
+        incoming_lf = dict(cfg["log_fields"])
+        if not incoming_lf.get("custom_fields"):
+            existing_custom = (service_cfg.get("log_fields") or {}).get("custom_fields")
+            if existing_custom:
+                incoming_lf["custom_fields"] = list(existing_custom)
+        service_cfg["log_fields"] = incoming_lf
+
+    # Re-assert the system-managed custom fields against the FINAL feature
+    # state (post-merge above, post-CMCD-request handling earlier). Keyed on
+    # state rather than on a transition so a reconcile that changes nothing
+    # about CMCD still converges, and a disable strips the fields.
+    reconcile_cfg_system_custom_fields(service_cfg)
     if path is not None:
         service_cfg["fos_path"] = path
 

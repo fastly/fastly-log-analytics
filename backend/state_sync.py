@@ -370,22 +370,25 @@ def import_admin_state(service_id: str):
             cfg = svcconfig.load_config(service_id)
             if cfg is not None:
                 from backend.core import field_registry as _lf
+                from backend.provision.system_fields import (
+                    reconcile_system_custom_fields,
+                    system_feature_flags,
+                )
 
                 lf = _lf.get_lf_config(cfg)
                 remote_fields = list(state["custom_fields"])
 
-                scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-                if scoring_enabled:
-                    from backend.provision.session_scoring_orchestrator import (
-                        _SCORING_CUSTOM_FIELDS,
-                        _SCORING_FIELD_NAMES,
-                    )
-
-                    # Strip any scoring-named entries the remote might carry
-                    # (stale, partial, or just plain different) and re-add
-                    # the canonical entries from code.
-                    remote_fields = [cf for cf in remote_fields if cf.get("name") not in _SCORING_FIELD_NAMES]
-                    remote_fields.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
+                # Strip any system-named entries the remote might carry
+                # (stale, partial, or just plain different) and re-add the
+                # canonical entries from code for whichever features are
+                # enabled locally. CMCD is included for the same reason
+                # scoring is — see backend/provision/system_fields.py.
+                scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+                remote_fields = reconcile_system_custom_fields(
+                    remote_fields,
+                    scoring_enabled=scoring_enabled,
+                    cmcd_enabled=cmcd_enabled,
+                )
 
                 lf["custom_fields"] = remote_fields
                 cfg["log_fields"] = lf

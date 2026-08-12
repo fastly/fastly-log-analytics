@@ -685,6 +685,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
 
     from backend import config as svcconfig
     from backend.core import field_registry as lf
+    from backend.provision.system_fields import reconcile_system_custom_fields
 
     _require_service_scope(request, service_id)
 
@@ -703,16 +704,16 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     incoming_custom = new_lf.get("custom_fields")
     if not incoming_custom and old_lf.get("custom_fields"):
         new_lf["custom_fields"] = old_lf["custom_fields"]
-    if cfg.get("scoring", {}).get("enabled"):
-        from backend.provision.session_scoring_orchestrator import (
-            _SCORING_CUSTOM_FIELDS,
-            _SCORING_FIELD_NAMES,
-        )
-
-        merged = list(new_lf.get("custom_fields") or [])
-        merged = [cf for cf in merged if cf.get("name") not in _SCORING_FIELD_NAMES]
-        merged.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
-        new_lf["custom_fields"] = merged
+    # Re-assert BOTH system features from code, keyed on current state. The
+    # scoring-only version of this let CMCD's 14 fields fall out whenever the
+    # incoming list was non-empty but omitted them (they're hidden from the
+    # user-editable list by _is_system_field, so a UI round-trip always omits
+    # them) — see backend/provision/system_fields.py.
+    new_lf["custom_fields"] = reconcile_system_custom_fields(
+        new_lf.get("custom_fields"),
+        scoring_enabled=bool(cfg.get("scoring", {}).get("enabled")),
+        cmcd_enabled=bool(cfg.get("cmcd", {}).get("enabled")),
+    )
     new_lf["schema_version"] = 2
     old_groups = set(old_lf.get("groups", []))
     new_groups = set(new_lf.get("groups", []))

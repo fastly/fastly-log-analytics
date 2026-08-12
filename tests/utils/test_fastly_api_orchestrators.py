@@ -516,6 +516,119 @@ def test_update_logging_endpoint_short_circuits_when_no_changes():
     assert done["version"] == 10
 
 
+def _run_update_logging_endpoint(cfg_in, stored_cfg):
+    """Drive update_logging_endpoint and return the config it persisted."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
+    saved = {}
+
+    with (
+        patch("backend.config.load_config", return_value=stored_cfg),
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
+        patch("backend.core.fastly.service.get_active_version", return_value=10),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id="svc-id", activated_version=11, changes_applied=["fmt"]),
+        ),
+    ):
+        events, exc = _drain(fastly_api.update_logging_endpoint(cfg_in, "tok"))
+
+    assert exc is None, f"generator raised: {exc}"
+    return saved["cfg"], events
+
+
+def test_update_logging_endpoint_preserves_custom_fields_when_incoming_omits_them():
+    """REGRESSION: 2026-08-12 SE-demo incident — the root cause. This
+    orchestrator assigned ``cfg["log_fields"]`` WHOLESALE over the stored
+    config with no merge guard (unlike its cli.py and log-fields-set
+    siblings). Callers build ``log_fields`` from groups alone, so the assign
+    dropped the user's custom_fields AND the system-managed scoring/CMCD
+    entries. ``reconcile_vcl_state`` then regenerated the Fastly log format
+    from the stripped config, so the CMCD extraction VCL kept running at the
+    edge and nothing logged its output — every ``cmcd_*`` column ingested
+    empty for a month while the UI still reported CMCD "enabled"."""
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+
+    stored = {
+        "logging_enabled": True,
+        "cmcd": {"enabled": True, "mode": "query_string", "version": 1},
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A", "B"],
+            "custom_fields": [
+                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        },
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {
+            "logging_service_id": "svc-id",
+            "endpoint_name": "MyEndpoint",
+            "log_period": 60,
+            # Built from groups alone — no custom_fields key at all.
+            "log_fields": {"schema_version": 2, "preset": "standard", "groups": ["A", "B", "C"]},
+        },
+        stored,
+    )
+
+    saved_names = {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert "my_custom" in saved_names, "user custom_field was stripped by the wholesale assign"
+    for name in _CMCD_FIELD_NAMES:
+        assert name in saved_names, f"CMCD field {name!r} was stripped by the wholesale assign"
+    # The incoming group change must still land.
+    assert saved_cfg["log_fields"]["groups"] == ["A", "B", "C"]
+
+
+def test_update_logging_endpoint_reasserts_cmcd_without_a_state_transition():
+    """The reconciler must be keyed on CMCD STATE, not on a transition. A
+    reconcile that says nothing about CMCD (no ``cmcd_enabled`` in the
+    request) previously left the fields however it found them; with CMCD
+    enabled it must re-assert the canonical 14 from code."""
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+
+    stored = {
+        "logging_enabled": True,
+        "cmcd": {"enabled": True, "mode": "query_string", "version": 1},
+        # Already-stripped config — the broken state the SE-demo service was in.
+        "log_fields": {"schema_version": 2, "groups": ["A", "B"], "field_overrides": {}},
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {"logging_service_id": "svc-id", "endpoint_name": "MyEndpoint", "log_period": 60},
+        stored,
+    )
+
+    saved_names = {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    for name in _CMCD_FIELD_NAMES:
+        assert name in saved_names, f"CMCD field {name!r} not re-asserted by a plain reconcile"
+
+
+def test_update_logging_endpoint_strips_cmcd_when_disabled():
+    """Disable converges too — a reconcile with CMCD off removes stale entries."""
+    stored = {
+        "logging_enabled": True,
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A", "B"],
+            "custom_fields": [
+                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        },
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {"logging_service_id": "svc-id", "endpoint_name": "MyEndpoint", "log_period": 60},
+        stored,
+    )
+
+    saved_names = {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert saved_names == {"my_custom"}
+
+
 def test_update_logging_endpoint_404_on_endpoint_lookup_raises_friendly_error():
     """If the endpoint name doesn't exist on the active version, raise
     a friendly error. Pinned because the FE renders error messages

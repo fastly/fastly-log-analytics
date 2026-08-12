@@ -674,6 +674,17 @@ if live_fields:
 ### 26. Tombstoned buffer parquets must be excluded from DIRECT buffer reads
 Post-commit, buffer parquets are not unlinked — `tombstone_buffer_files` ([backend/core/iceberg/buffer.py](backend/core/iceberg/buffer.py)) writes a `.parquet.consumed-<ts>` sidecar and the file lingers for a grace window so views bound BEFORE the commit stay readable. Its rows are ALREADY in the hourly partitions, so any code reading the buffer dir directly (not via `buffer_files()`, which filters) must skip `_tombstoned_parquet_paths(buffer_dir)` or it double-counts — the dashboard's direct active-hour read (`_create_active_hour_temp_direct` in [_base.py](backend/repositories/_base.py), the ~6 ms replacement for the ~700 ms view path on the live slice) double-counted up to ~10 min of the freshest rows before the fix (prod 2026-07-07: 40 of 55 buffer files were tombstoned). New consumers of the live slice should reuse the per-request shared temp via `begin_shared_active_hour_temps()` / `end_shared_active_hour_temps()` rather than rolling their own read.
 
+### 27. System-managed custom fields must be re-asserted on every `log_fields` write
+Session scoring and CMCD each inject a canonical set of `log_fields.custom_fields` generated from code. `_is_system_field` ([backend/core/field_registry.py](backend/core/field_registry.py)) hides them from the user-editable list, so **every writer that persists `log_fields` from a list it did not author omits them** — the log-fields UI round-trip, a `state_sync` pull of a remote `admin_state.json`, and a provisioning reconcile whose `log_fields` was built from groups alone.
+
+The omission is not cosmetic: `reconcile_vcl_state` regenerates the Fastly log format from the persisted config, so a dropped field leaves its extraction VCL installed and running while nothing writes its output to the log line. The column then ingests **empty string, not NULL** (the field is absent from the format, so ingest fills the schema default), the feature's `available` probe still passes because the DuckDB column exists, and the page renders all zeros with no error to explain why.
+
+Two incidents, same root cause:
+- **2026-06-02** — `state_sync` overwrote scoring's 8 fields on every ~30 s metadata_sync tick.
+- **2026-08-12** — the SE-demo service lost all 14 `cmcd_*` fields. CMCD had been enabled since 2026-07-13 and never collected a single value; the cache-key probe (`?CMCD=` vs a control param) proved the snippet was still stripping CMCD from `req.url` the whole time. The trigger was `update_logging_endpoint` assigning `cfg["log_fields"]` **wholesale** with no merge guard, unlike its `cli.py` / `api_service_log_fields_set` siblings.
+
+Route every such write through `reconcile_system_custom_fields` / `reconcile_cfg_system_custom_fields` in [backend/provision/system_fields.py](backend/provision/system_fields.py), and key it on the **current** feature state, never on a state transition — a reconcile that says nothing about the feature must still re-assert its fields, and a disable must strip them. The transition-only guard in `update_service_config` is exactly what let the SE-demo config stay broken across a month of reconciles. **If you add a third system-managed feature, add its flag to `system_feature_flags` — do not add a fourth re-injection block.**
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
