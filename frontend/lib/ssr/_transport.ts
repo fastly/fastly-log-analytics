@@ -176,6 +176,11 @@ export async function ssrUpstreamGet({
       Accept: 'application/json',
     }
     if (cookieHeader) upstreamHeaders.Cookie = cookieHeader
+    const ua = headerBag.get('user-agent')
+    if (ua) upstreamHeaders['user-agent'] = ua
+    const platform = headerBag.get('sec-ch-ua-platform')
+    if (platform) upstreamHeaders['sec-ch-ua-platform'] = platform
+
     // Caller-supplied non-trust headers first; the trust headers below win.
     if (extraHeaders) Object.assign(upstreamHeaders, extraHeaders)
     if (proxiedByCaddy) {

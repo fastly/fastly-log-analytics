@@ -215,7 +215,11 @@ export default async function RootLayout({
                 rest of the app so the existing fetch wrapper / origin
                 handling Just Works. */}
             <WebVitalsReporter />
-            <AppLayout initialCollapsed={initialSidebarCollapsed}>
+            <AppLayout
+              initialCollapsed={initialSidebarCollapsed}
+              ssrActiveServiceId={sid}
+              ssrIsRumEnabled={isRumEnabled}
+            >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>
           </QueryProvider>

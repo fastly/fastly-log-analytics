@@ -278,9 +278,13 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
 export function AppLayout({
   children,
   initialCollapsed = false,
+  ssrActiveServiceId,
+  ssrIsRumEnabled,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
+  ssrActiveServiceId?: string | null
+  ssrIsRumEnabled?: boolean
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -389,11 +393,13 @@ export function AppLayout({
   // expiry or be booted by an admin).
   const { logout, isLoggingOut } = useAnalystLogout()
 
-  const currentServiceId = activeServiceId || bootstrapData?.active_service_id
+  const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
   const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
   const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
   const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
-  const hasRum = activeSvc?.rum_enabled ?? false
+  const hasRum = activeServiceId ? (activeSvc?.rum_enabled ?? false) : (ssrIsRumEnabled ?? activeSvc?.rum_enabled ?? false)
+
+  const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
     if (item.requiresCmcd && !hasCmcd) return false
@@ -414,7 +420,7 @@ export function AppLayout({
   // from the wizard completion before bootstrap has had a chance to respond.
   const hasServices = isSuccess
     ? !!(bootstrapData?.services?.length)
-    : services.length > 0 || !!activeServiceId
+    : services.length > 0 || !!activeServiceId || !!ssrActiveServiceId
 
   const needsLogin = bootstrapSettings?.needs_login === true
 
@@ -688,7 +694,7 @@ export function AppLayout({
       >
         <div className="flex h-14 items-center justify-center border-b px-2 py-2 shrink-0">
           <Link
-            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
+            href={hasServices ? (navActiveServiceId ? `/dashboard?service=${navActiveServiceId}` : "/dashboard") : "/admin"}
             prefetch={false}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
             aria-label="Fastly Log Analytics — home"
@@ -714,7 +720,7 @@ export function AppLayout({
                 isActive={pathname === item.href}
                 disabled={!hasServices}
                 collapsed={sidebarCollapsed}
-                activeServiceId={activeServiceId}
+                activeServiceId={navActiveServiceId}
                 router={router}
               />
             ))}
@@ -932,8 +938,8 @@ export function AppLayout({
               <nav className="grid gap-1 p-2" aria-label="Primary">
                 {visibleNav.map((item) => {
                   const Icon = item.icon
-                  const finalHref = activeServiceId
-                    ? `${item.href}?service=${activeServiceId}`
+                  const finalHref = navActiveServiceId
+                    ? `${item.href}?service=${navActiveServiceId}`
                     : item.href
                   const isActive = pathname === item.href
                   const disabled = !hasServices
@@ -966,8 +972,8 @@ export function AppLayout({
                 <nav className="grid gap-1" aria-label="System">
                   {visibleSystemNav.map((item) => {
                     const Icon = item.icon
-                    const finalHref = activeServiceId
-                      ? `${item.href}?service=${activeServiceId}`
+                    const finalHref = navActiveServiceId
+                      ? `${item.href}?service=${navActiveServiceId}`
                       : item.href
                     const isActive = pathname === item.href
                     return (

@@ -328,11 +328,12 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   if (analytics.no_data) {
     return (
       <div className="space-y-6">
-        <div className="flex justify-between items-center bg-muted/30 p-3 rounded-lg border">
+        <div className="flex justify-between items-center bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20 text-emerald-900 dark:text-emerald-300 shadow-sm animate-in fade-in-50 duration-300">
           <div className="flex items-center gap-2">
-            <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground" />
-            <span className="text-sm font-semibold">Waiting for real-time data</span>
+            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" aria-hidden="true" />
+            <span className="text-xs font-bold uppercase tracking-wider">Live RUM Stream Active</span>
           </div>
+          <span className="text-xs opacity-85 font-medium">Waiting for real-time beacons…</span>
         </div>
 
         <AnalyticsCard title="Real User Monitoring Status">

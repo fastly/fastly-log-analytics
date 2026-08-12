@@ -113,7 +113,7 @@ export function proxy(request: NextRequest) {
   requestHeaders.set('x-nonce', nonce)
 
   const serviceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
-  const serviceCookie = request.cookies.get(ACTIVE_SERVICE_COOKIE)?.value || null
+  const serviceCookie = request.cookies?.get ? (request.cookies.get(ACTIVE_SERVICE_COOKIE)?.value || null) : null
   const serviceId = serviceParam || serviceCookie
 
   if (serviceId) {
@@ -122,7 +122,7 @@ export function proxy(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } })
 
-  if (serviceParam && serviceParam !== serviceCookie) {
+  if (serviceParam && serviceParam !== serviceCookie && response.cookies) {
     response.cookies.set(ACTIVE_SERVICE_COOKIE, serviceParam, {
       path: '/',
       maxAge: 31536000,
