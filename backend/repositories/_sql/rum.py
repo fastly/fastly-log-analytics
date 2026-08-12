@@ -5,15 +5,15 @@ from __future__ import annotations
 WEB_VITALS_SUMMARY = """
 SELECT
     DATE_TRUNC('hour', timestamp) AS hour,
-    metric_name,
+    UPPER(metric_name) AS metric_name,
     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY metric_value) AS p50,
     PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS p75,
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY metric_value) AS p95,
     COUNT(*) AS count
 FROM client_vitals
 WHERE timestamp >= ? AND timestamp < ?
-    AND metric_name IN ('LCP', 'INP', 'CLS', 'TTFB', 'FCP')
-GROUP BY hour, metric_name
+    AND UPPER(metric_name) IN ('LCP', 'INP', 'CLS', 'TTFB', 'FCP')
+GROUP BY hour, UPPER(metric_name)
 ORDER BY hour DESC, metric_name
 """
 
@@ -36,12 +36,12 @@ ORDER BY hour DESC
 WORST_PAGES = """
 SELECT
     pathname,
-    COUNT(*) FILTER (WHERE metric_name = 'LCP' AND metric_rating = 'poor') * 100.0
-        / NULLIF(COUNT(*) FILTER (WHERE metric_name = 'LCP'), 0) AS lcp_poor_pct,
-    COUNT(*) FILTER (WHERE metric_name = 'INP' AND metric_rating = 'poor') * 100.0
-        / NULLIF(COUNT(*) FILTER (WHERE metric_name = 'INP'), 0) AS inp_poor_pct,
-    COUNT(*) FILTER (WHERE metric_name = 'CLS' AND metric_rating = 'poor') * 100.0
-        / NULLIF(COUNT(*) FILTER (WHERE metric_name = 'CLS'), 0) AS cls_poor_pct,
+    COUNT(*) FILTER (WHERE UPPER(metric_name) = 'LCP' AND metric_rating = 'poor') * 100.0
+        / NULLIF(COUNT(*) FILTER (WHERE UPPER(metric_name) = 'LCP'), 0) AS lcp_poor_pct,
+    COUNT(*) FILTER (WHERE UPPER(metric_name) = 'INP' AND metric_rating = 'poor') * 100.0
+        / NULLIF(COUNT(*) FILTER (WHERE UPPER(metric_name) = 'INP'), 0) AS inp_poor_pct,
+    COUNT(*) FILTER (WHERE UPPER(metric_name) = 'CLS' AND metric_rating = 'poor') * 100.0
+        / NULLIF(COUNT(*) FILTER (WHERE UPPER(metric_name) = 'CLS'), 0) AS cls_poor_pct,
     COUNT(DISTINCT cid) AS session_count
 FROM client_vitals
 WHERE timestamp >= ? AND timestamp < ?
