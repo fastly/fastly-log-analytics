@@ -564,60 +564,33 @@ async def rum_analytics(
 
             distinct_id = "COALESCE(NULLIF(req_id, ''), concat(cid, '_', cast(timestamp as varchar)))"
 
-            # B. Total match count within bounds
+            # B. Total match counts within bounds (Consolidated)
             with track_query(
                 con,
                 f"""
-                SELECT COUNT(DISTINCT {distinct_id}) FROM (
-                    SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_vitals
+                SELECT
+                    COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name NOT LIKE 'event_%' THEN distinct_id END) AS pageviews,
+                    COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name LIKE 'event_%' THEN distinct_id END) AS interactions,
+                    COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count,
+                    COUNT(DISTINCT distinct_id) AS total_beacons
+                FROM (
+                    SELECT 'vitals' AS src, metric_name, {distinct_id} AS distinct_id
+                    FROM client_vitals
+                    WHERE {where_sql}
                     UNION ALL
-                    SELECT req_id, cid, timestamp, browser, os, device, pathname FROM client_errors
+                    SELECT 'errors' AS src, CAST(NULL AS VARCHAR) AS metric_name, {distinct_id} AS distinct_id
+                    FROM client_errors
+                    WHERE {where_sql}
                 )
-                WHERE {where_sql}
                 """,
-                params,
-                "rum_total_beacons",
-            ) as cur_total:
-                total_beacons = cur_total.fetchone()[0] or 0
-
-            # B2. Pageviews: beacons where there is at least one row in client_vitals that is not an event
-            with track_query(
-                con,
-                f"""
-                SELECT COUNT(DISTINCT {distinct_id})
-                FROM client_vitals
-                WHERE {where_sql} AND metric_name NOT LIKE 'event_%'
-                """,
-                params,
-                "rum_pageviews",
-            ) as cur_pvs:
-                pageviews = cur_pvs.fetchone()[0] or 0
-
-            # B3. Interactions: beacons where there is at least one custom event row
-            with track_query(
-                con,
-                f"""
-                SELECT COUNT(DISTINCT {distinct_id})
-                FROM client_vitals
-                WHERE {where_sql} AND metric_name LIKE 'event_%'
-                """,
-                params,
-                "rum_interactions",
-            ) as cur_ints:
-                interactions = cur_ints.fetchone()[0] or 0
-
-            # B4. Errors: beacons from client_errors
-            with track_query(
-                con,
-                f"""
-                SELECT COUNT(DISTINCT {distinct_id})
-                FROM client_errors
-                WHERE {where_sql}
-                """,
-                params,
-                "rum_errors_count",
-            ) as cur_errs:
-                errors_count = cur_errs.fetchone()[0] or 0
+                params + params,
+                "rum_consolidated_counts",
+            ) as cur_counts:
+                pageviews, interactions, errors_count, total_beacons = cur_counts.fetchone()
+                pageviews = pageviews or 0
+                interactions = interactions or 0
+                errors_count = errors_count or 0
+                total_beacons = total_beacons or 0
 
             # C. Vitals metrics, percentiles & distribution
             with track_query(
@@ -639,45 +612,40 @@ async def rum_analytics(
             ) as cur_vitals:
                 vitals_rows = cur_vitals.fetchall()
 
-            # D. Environments
-            with track_query(
-                con,
-                f"""
-                SELECT COALESCE(browser, 'Unknown'), COUNT(DISTINCT {distinct_id})
-                FROM client_vitals
-                WHERE {where_sql}
-                GROUP BY browser
-                """,
-                params,
-                "rum_browsers_distribution",
-            ) as cur_browsers:
-                browsers = {row[0]: row[1] for row in cur_browsers.fetchall() if row[0]}
+            # D. Environments (Consolidated using GROUPING SETS)
+            browsers = {}
+            os_dict = {}
+            devices = {}
 
             with track_query(
                 con,
                 f"""
-                SELECT COALESCE(os, 'Unknown'), COUNT(DISTINCT {distinct_id})
+                SELECT
+                    COALESCE(browser, 'Unknown') AS browser,
+                    COALESCE(os, 'Unknown') AS os,
+                    COALESCE(device, 'Unknown') AS device,
+                    COUNT(DISTINCT {distinct_id}) AS count,
+                    grouping(browser) AS g_browser,
+                    grouping(os) AS g_os,
+                    grouping(device) AS g_device
                 FROM client_vitals
                 WHERE {where_sql}
-                GROUP BY os
+                GROUP BY GROUPING SETS (
+                    (browser),
+                    (os),
+                    (device)
+                )
                 """,
                 params,
-                "rum_os_distribution",
-            ) as cur_os:
-                os_dict = {row[0]: row[1] for row in cur_os.fetchall() if row[0]}
-
-            with track_query(
-                con,
-                f"""
-                SELECT COALESCE(device, 'Unknown'), COUNT(DISTINCT {distinct_id})
-                FROM client_vitals
-                WHERE {where_sql}
-                GROUP BY device
-                """,
-                params,
-                "rum_devices_distribution",
-            ) as cur_devices:
-                devices = {row[0]: row[1] for row in cur_devices.fetchall() if row[0]}
+                "rum_environments_consolidated",
+            ) as cur_envs:
+                for r_browser, r_os, r_device, count, g_browser, g_os, g_device in cur_envs.fetchall():
+                    if g_browser == 0 and r_browser:
+                        browsers[r_browser] = count
+                    elif g_os == 0 and r_os:
+                        os_dict[r_os] = count
+                    elif g_device == 0 and r_device:
+                        devices[r_device] = count
 
             # E. Worst pages
             with track_query(
