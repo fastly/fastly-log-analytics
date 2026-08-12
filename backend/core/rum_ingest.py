@@ -73,45 +73,38 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
         prefix = src.get("prefix", "").strip("/")
-        rum_prefixes = []
-        if prefix:
-            rum_prefixes.append(f"{prefix}/rum/raw/")
-            rum_prefixes.append(f"{prefix}/raw_rum/")
-        else:
-            rum_prefixes.append("rum/raw/")
-            rum_prefixes.append("raw_rum/")
+        rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
 
         cutoff_time = datetime.now(UTC) - timedelta(days=delete_after_days)
         files_deleted = 0
         bytes_freed = 0
 
         paginator = s3.get_paginator("list_objects_v2")
-        for rum_prefix in rum_prefixes:
-            for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    # Skip directory markers
-                    if key.endswith("/"):
-                        continue
+        for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                # Skip directory markers
+                if key.endswith("/"):
+                    continue
 
-                    # Get file mtime from LastModified
-                    last_modified = obj.get("LastModified")
-                    if not last_modified:
-                        continue
+                # Get file mtime from LastModified
+                last_modified = obj.get("LastModified")
+                if not last_modified:
+                    continue
 
-                    # Convert to aware datetime for comparison
-                    if last_modified.tzinfo is None:
-                        last_modified = last_modified.replace(tzinfo=UTC)
+                # Convert to aware datetime for comparison
+                if last_modified.tzinfo is None:
+                    last_modified = last_modified.replace(tzinfo=UTC)
 
-                    # Only delete if older than retention period and not actively being written
-                    if last_modified < cutoff_time:
-                        try:
-                            s3.delete_object(Bucket=bucket, Key=key)
-                            files_deleted += 1
-                            bytes_freed += obj.get("Size", 0)
-                            logger.info(f"RUM cleanup: deleted {key} ({obj.get('Size', 0)} bytes)")
-                        except Exception as e:
-                            logger.warning(f"RUM cleanup: failed to delete {key}: {e}")
+                # Only delete if older than retention period and not actively being written
+                if last_modified < cutoff_time:
+                    try:
+                        s3.delete_object(Bucket=bucket, Key=key)
+                        files_deleted += 1
+                        bytes_freed += obj.get("Size", 0)
+                        logger.info(f"RUM cleanup: deleted {key} ({obj.get('Size', 0)} bytes)")
+                    except Exception as e:
+                        logger.warning(f"RUM cleanup: failed to delete {key}: {e}")
 
         logger.info(
             f"RUM cleanup for {service_id}: deleted {files_deleted} files, freed {bytes_freed / (1024 * 1024):.2f} MB"
@@ -343,29 +336,25 @@ def ingest_rum_logs(
             else:
                 already_ingested.add(f"{bucket_prefix}{p}")
 
-        # Use the shared list_fos_files helper to discover files in both prefixes
-        new_files_s3 = []
-        file_sizes = {}
-        for subpath in ["rum/raw/", "raw_rum/"]:
-            list_gen = list_fos_files(
-                src=src,
-                prefix_subpath=subpath,
-                already_ingested=already_ingested,
-                incremental_only=False,
-                elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",
-                fos_client=s3,
-            )
-            try:
-                while True:
-                    evt = next(list_gen)
-                    if evt.get("type") == "status":
-                        logger.debug(f"RUM sync ({subpath}): {evt['message']}")
-            except StopIteration as e:
-                list_res = e.value
-                for f in list_res["new_files"]:
-                    if f not in new_files_s3:
-                        new_files_s3.append(f)
-                file_sizes.update(list_res["file_sizes"])
+        # Use the shared list_fos_files helper to discover files in rum/raw/ prefix
+        list_gen = list_fos_files(
+            src=src,
+            prefix_subpath="rum/raw/",
+            already_ingested=already_ingested,
+            incremental_only=False,
+            elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",
+            fos_client=s3,
+        )
+        try:
+            while True:
+                evt = next(list_gen)
+                if evt.get("type") == "status":
+                    logger.debug(f"RUM sync: {evt['message']}")
+        except StopIteration as e:
+            list_res = e.value
+
+        new_files_s3 = list_res["new_files"]
+        file_sizes = list_res["file_sizes"]
 
         if not new_files_s3:
             logger.info(f"RUM sync: no new RUM logs found in bucket for {service_id}")
