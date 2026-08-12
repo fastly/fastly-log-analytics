@@ -93,28 +93,68 @@ docker compose up -d --build
 ```
 
 The repeat-deploy flow is the existing `~/restart.sh` pattern (canonicalized
-here so it works on every platform):
+here so it works on every platform).
+
+**Do not use a bare `docker compose up -d --build` for a redeploy.** It takes
+the whole stack down, including Caddy — and Caddy is both the sole ingress and
+the thing that serves the styled auto-refreshing "updating" page (see
+`handle_errors` in the `Caddyfile`). With Caddy down, visitors get the
+browser's connection-refused error for the length of the deploy instead of
+that page. Three specifics make the difference between ~45 s of downtime and
+~1 s:
+
+- **Build before stopping anything.** The build is the slow part; the old
+  containers serve throughout it.
+- **`--no-deps`, and never rebuild Caddy.** Caddy carries
+  `depends_on: frontend`, so a plain `up -d` recreates it every deploy even
+  though its image is unchanged. Worse, `compose build` with no service list
+  rebuilds it too, and `caddy/Dockerfile` runs `xcaddy build`, which
+  recompiles and yields a **new image id every time** — so compose then
+  recreates it on principle. Build only `backend frontend`. A `Caddyfile`
+  edit only needs `caddy reload` (zero downtime); a `caddy/` edit is the one
+  case that justifies a rebuild.
+- **Recreate backend and frontend as two separate commands.** The base
+  compose has `frontend depends_on backend: condition: service_healthy`, so
+  naming both in one `up` makes compose hold the frontend until the backend
+  healthcheck passes — roughly 40 s of extra downtime on its own.
 
 ```sh
 #!/usr/bin/env bash
 # ~/restart.sh on the VM
-set -euo pipefail
+set -uo pipefail
 cd /mnt/app-data/fastly-log-analytics
-git pull
-docker compose up -d --build
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 
-# Poll the SAME readiness signal as the Docker healthcheck in
-# docker-compose.prod.yml — NOT the old `sleep 10; curl .../api/health`,
-# which reported "ready" within seconds because plain /api/health (and even
-# ?deep=1) return HTTP 200 unconditionally while the backend is still
-# `initializing`. The per-service warm-up loop
-# (backend/main.py:_background_startup) can take 15-20 min on this VM, so
-# check the response BODY for the top-level "status":"ok", not just the
-# HTTP status code, and budget the wait accordingly.
-echo "waiting for backend to report real readiness (can take 15-20 min)..."
+BEFORE="$(git rev-parse HEAD)"
+git pull || exit 1
+CHANGED="$(git diff --name-only "$BEFORE" HEAD)"
+
+# 1. Build the app images while the current stack keeps serving.
+"${COMPOSE[@]}" build backend frontend || {
+  echo "build failed — nothing stopped, old stack still serving"; exit 1; }
+
+# 2. Swap the app containers. Separate commands so compose can't serialize
+#    the frontend behind the backend healthcheck.
+"${COMPOSE[@]}" up -d --no-deps backend
+"${COMPOSE[@]}" up -d --no-deps frontend
+
+# 3. Touch Caddy only if it actually changed.
+if echo "$CHANGED" | grep -q '^caddy/'; then
+  "${COMPOSE[@]}" build caddy && "${COMPOSE[@]}" up -d --no-deps caddy
+elif echo "$CHANGED" | grep -q '^Caddyfile$'; then
+  docker exec app-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || "${COMPOSE[@]}" up -d --no-deps caddy
+fi
+
+# 4. Poll the SAME readiness signal as the Docker healthcheck in
+# docker-compose.prod.yml — NOT `curl .../api/health`, which returns 200 the
+# moment the HTTP server binds and so reports "ready" within seconds while the
+# per-service warm-up loop (backend/main.py:_background_startup) still has
+# 15-20 min to run. Check the response BODY for the top-level "status":"ok".
+echo "site is serving; waiting for warm-up (can take 15-20 min, safe to Ctrl-C)..."
 for i in $(seq 1 100); do  # 100 * 15s = 25 min budget, matches compose start_period
   if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
-    echo "backend ready after $((i * 15))s"
+    echo "backend warm after $((i * 15))s"
     exit 0
   fi
   sleep 15
@@ -122,6 +162,11 @@ done
 echo "backend did not report ready within 25 min — check: curl -s 'http://localhost:8000/api/health?deep=1'" >&2
 exit 1
 ```
+
+An already-loaded browser tab doesn't do a full navigation, so it never sees
+Caddy's page — its in-flight XHR just fails. `useBootstrap` therefore polls
+while (and only while) the bootstrap query is errored, so an open tab
+reconnects on its own once the backend is back.
 
 **After a force-push** to the deploy branch:
 

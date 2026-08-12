@@ -596,13 +596,21 @@ export function AppLayout({
     return (
       <div className="flex h-screen items-center justify-center bg-background p-6">
         <div className="max-w-sm text-center space-y-4 p-6 rounded-lg border bg-card shadow-sm">
-          <h2 className="text-lg font-semibold">Can&apos;t reach the server</h2>
+          <h2 className="text-lg font-semibold">Reconnecting…</h2>
           <p className="text-sm text-muted-foreground">
-            We couldn&apos;t load the app shell. Check your connection and try
-            again.
+            We can&apos;t reach the server right now. This is normal during a
+            deploy — the page recovers on its own as soon as it&apos;s back.
           </p>
-          <Button onClick={() => { void refetchBootstrap() }} variant="default">
-            Retry
+          <div
+            className="flex items-center justify-center gap-2 text-xs text-muted-foreground"
+            role="status"
+            aria-live="polite"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            <span>Retrying automatically</span>
+          </div>
+          <Button onClick={() => { void refetchBootstrap() }} variant="outline" size="sm">
+            Retry now
           </Button>
         </div>
       </div>

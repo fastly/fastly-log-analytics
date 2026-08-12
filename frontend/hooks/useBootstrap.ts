@@ -133,6 +133,20 @@ export function useBootstrap() {
       if (status !== undefined && status >= 400 && status < 500) return false
       return failureCount < 1
     },
+    // Once that single retry is spent the query parks in `error` forever, and
+    // AppLayout renders a dead-end "Can't reach the server" card that only
+    // recovers if the user clicks Retry. A deploy takes the backend away for a
+    // few seconds, so an open tab burns its one retry and strands the user on
+    // that card long after the server is back.
+    //
+    // Poll — but ONLY while errored, which is what keeps the 2026-06-23
+    // bootstrap-storm guard intact. This is a flat one-request-per-interval
+    // per stranded client, not the exponential fan-out that caused the storm,
+    // and it stops the instant a fetch succeeds. Jittered so a fleet of tabs
+    // orphaned by the same restart doesn't rendezvous into a thundering herd.
+    // refetchIntervalInBackground stays default-false: hidden tabs don't poll.
+    refetchInterval: query =>
+      query.state.status === 'error' ? 5000 + Math.floor(Math.random() * 2000) : false,
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)

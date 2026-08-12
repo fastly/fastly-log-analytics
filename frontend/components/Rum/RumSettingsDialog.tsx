@@ -222,6 +222,7 @@ export function RumSettingsDialog({
         ...prev,
         '✅ RUM capture settings saved successfully!',
         '✅ Client-side rum-tracker.js wrapper compiled and deployed to FOS.',
+        '✅ Fastly Edge VCL reconciled and deployed successfully.',
       ])
 
       // 2. Check if version needs to be upgraded/changed too
