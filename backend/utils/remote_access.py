@@ -434,14 +434,14 @@ def _local_host_allowed(host_header: str) -> bool:
     base = host_header.split(":")[0].lower()
     if _is_private_or_loopback(base):
         return True
-    return base in _LOCAL_HOST_ALLOWLIST
+    return "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST
 
 
 def _remote_host_allowed(host_header: str) -> bool:
     if not host_header:
         return False
     base = host_header.split(":")[0].lower()
-    if base in _LOCAL_HOST_ALLOWLIST:
+    if "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST:
         return True
     mgr = get_tunnel_manager()
     state = mgr.state
