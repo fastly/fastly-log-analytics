@@ -110,6 +110,8 @@ describe('RumClient — Faro version card placement', () => {
     expect(await screen.findByText(/faro sdk:/i)).toBeInTheDocument()
     expect(await screen.findByText('1.8.0')).toBeInTheDocument()
     expect(screen.getByText('RUM Settings')).toBeInTheDocument()
+    // Installation instructions button is rendered for the admin.
+    expect(screen.getByText('Installation Instructions')).toBeInTheDocument()
   })
 
   it('analyst: does not render the version card, and never calls /rum/versions', async () => {
@@ -131,6 +133,8 @@ describe('RumClient — Faro version card placement', () => {
     // Dashboard still renders for the analyst.
     expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
     expect(screen.queryByText(/faro sdk:/i)).not.toBeInTheDocument()
+    // Installation instructions button is NOT rendered for the analyst.
+    expect(screen.queryByText('Installation Instructions')).not.toBeInTheDocument()
 
     // Give any stray query a moment to fire, then assert it never did.
     await new Promise((r) => setTimeout(r, 50))
