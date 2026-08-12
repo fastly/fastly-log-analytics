@@ -699,6 +699,28 @@ Three independent defenses now exist in [backend/core/iceberg/_core.py](backend/
 
 Recovery for an already-rolled-back table is [scripts/recover_orphaned_iceberg_metadata.py](scripts/recover_orphaned_iceberg_metadata.py) (dry-run by default). It reattaches the abandoned branch by moving the pointer to the newest version, and reports any data on the *current* branch that the recovered branch lacks — reattaching without handling that list trades one gap for another. **If you add another metadata-resolution path, paginate it and guard it, or this recurs silently.**
 
+### 29. Feature extraction VCL must be emitted BEFORE field capture
+Generated `vcl_recv` puts two related blocks in one snippet: **extraction** parses a source into `req.http.x-<feature>:*`, and **capture** promotes it into `req.http.x-fos-edge-data:<field>` — and only the promoted header is what the log format reads. Emit capture first and it copies empty strings; the extraction then runs too late to matter.
+
+**2026-08 CMCD outage.** `generate_capture_vcl` appended the `cmcd_enabled` block *after* the `get_capture_vcl_statements` loop (the deployed snippet had capture at lines 186-199 and extraction at 209-225). Every `cmcd_*` column logged empty. It hid for a month because the failure is completely silent in all three places you'd look:
+
+- Nothing errors — the VCL is valid and Fastly's `validate` passes.
+- The DuckDB columns exist, so the feature's `available` probe returns true and /streaming renders zeros rather than "not enabled".
+- **The extraction genuinely works.** It still runs `querystring.filter(req.url, "CMCD")`, so an edge-side cache-key probe (`?CMCD=A` vs `?CMCD=B` vs a control param) proves CMCD is being handled — and that proof is real but says nothing about whether the value reached the log line.
+
+The invariant is pinned by [tests/utils/test_cmcd_capture_ordering.py](tests/utils/test_cmcd_capture_ordering.py) for all 14 fields, in BOTH generators (`fastly_api.generate_capture_vcl` and `declarative/generators.generate_consolidated_snippet`). **When you add a feature that extracts into a `req.http.x-*` header for logging, order it before capture and add it to that test.** To verify a capture-stage field end-to-end, don't infer from edge behaviour — send a uniquely-tagged request and query for the tag.
+
+### 30. The log-line budget silently truncates late custom fields
+`generate_log_format` tracks an aggregate `budget` (`FASTLY_LOG_LINE_DELIVER_MAX`) and clamps each variable-length field to what's left: `cf_limit = max(0, min(cf_limit, budget))`, allocated greedily in `custom_fields` list order. Once the budget runs dry, later fields get `substr(x, 0, 0)` and **log null forever** with no warning.
+
+On the SE-demo service (groups A–M + 23 custom fields) this squeezed `cmcd_sid` to `substr(..., 0, 26)` — truncating 36-char UUID session ids to 26 chars and breaking session-level joins. Values logged before the squeeze are full length, so the same column holds both 26- and 40-char ids, which reads like a client quirk rather than a config effect.
+
+**Do not "fix" this by adding `byte_limit` to individual fields without measuring.** `byte_limit` only ever *lowers* a cap — it cannot create budget — and shifting the allocation moved other fields to zero when tried. Check the real generated format first:
+```python
+generate_log_format(cfg)  # then grep for substr(..., 0, 0) and per-field caps
+```
+The genuine levers are reducing enabled groups/custom fields or raising the line budget, both of which trade against Fastly silently dropping over-long log lines.
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
