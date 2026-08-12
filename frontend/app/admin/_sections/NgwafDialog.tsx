@@ -48,6 +48,7 @@ export function NgwafDialog({ service, onClose }: Props) {
   // Re-init whenever a new service is opened.
   useEffect(() => {
     if (!service) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setNgwafWorkspaceId(service.ngwaf_workspace_id || '')
     setNgwafWorkspaces([])
     setNgwafFetchError('')

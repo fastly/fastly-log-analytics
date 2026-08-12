@@ -24,7 +24,10 @@ import { BotSourcesPanel } from './BotSourcesPanel'
 
 function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: (days: number) => void }) {
   const [value, setValue] = useState(String(initial))
-  useEffect(() => { setValue(String(initial)) }, [initial])
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setValue(String(initial))
+  }, [initial])
   return (
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <span>Keep for</span>
@@ -85,6 +88,7 @@ export const PricingSettings = () => {
   useEffect(() => {
     if (!settings) return
     const d = settings as any
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRateA(String(d.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k))
     setRateB(String(d.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k))
     setRateCdn(String(d.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb))

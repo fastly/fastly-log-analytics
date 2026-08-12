@@ -145,7 +145,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription className="text-[13px] ml-1 font-medium">
-                  This will remove your local analyst connection to this service. It does not affect the shared cloud data or the admin's configuration.
+                  This will remove your local analyst connection to this service. It does not affect the shared cloud data or the admin&apos;s configuration.
                 </AlertDescription>
               </Alert>
 

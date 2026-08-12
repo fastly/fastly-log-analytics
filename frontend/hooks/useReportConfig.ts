@@ -85,6 +85,7 @@ export function useReportConfig(options: ReportConfigOptions = {}) {
   // Sync effective interval and validate trend
   useEffect(() => {
     if (config.effectiveInterval !== chartInterval) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setChartInterval(config.effectiveInterval)
     }
 
