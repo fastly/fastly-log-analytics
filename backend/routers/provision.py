@@ -332,7 +332,13 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
                 "endpoint_name": prov.get("endpoint_name", "Fastly Object Storage Logs"),
                 "cdn_service_id": prov.get("cdn_service_id", ""),
-                "cdn_service_name": svc_cfg.get("name", service_id),
+                # The analytics-owned CDN service's OWN name — never
+                # svc_cfg["name"], which is the customer's service display name
+                # ("www.drew-michael.com"). Passing that made teardown log
+                # "Deleting CDN service 'www.drew-michael.com'" and read as if
+                # the customer's site were being deleted (2026-08-13). Matches
+                # the creation convention used at provision time.
+                "cdn_service_name": prov.get("cdn_service_name") or f"Log Analysis CDN Service for {service_id}",
                 "cdn_url": prov.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
                 # Carry the scoring block so perform_teardown can tear down the

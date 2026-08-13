@@ -1147,9 +1147,18 @@ def teardown_scoring_resources(
         status_cb(f"⏳ Tearing down session scoring for {logging_service_id}...")
 
     # ── Stage 1: strip the scoring VCL from the still-live logging service. ──
-    # Best-effort: a VCL-strip failure must not block the resource deletion
-    # below (the operator cares most about not paying for an orphaned Compute
-    # service). get_active_version returns None if the service is already gone.
+    # MUST succeed before Stage 2 deletes the Compute service. A dangling
+    # ``session_scorer`` backend on an ACTIVE version points at a deleted host,
+    # so every request the customer's service pre-flights to the scorer fails —
+    # an outage. This used to be best-effort ("the operator cares most about not
+    # paying for an orphaned Compute service"), which has the trade backwards:
+    # an orphaned Compute service costs pennies and is trivially deleted later,
+    # a dangling backend on live traffic is an incident. Fastly 500s on these
+    # calls are real (observed 2026-08-12), so this path is reachable.
+    #
+    # get_active_version returns None if the service is already gone — that is
+    # NOT a failure, there is nothing left to dereference.
+    strip_ok = False
     try:
         active_ver = get_active_version(logging_service_id, token)
         if active_ver is None:
@@ -1184,10 +1193,24 @@ def teardown_scoring_resources(
                 token=token,
             )
             ok(f"Logging service version {new_ver} active (scoring VCL stripped)")
-    except Exception as exc:  # noqa: BLE001 — best-effort; resource delete still must run
-        warn(f"Could not strip scoring VCL during teardown (continuing to resource delete): {exc}")
+        strip_ok = True
+    except Exception as exc:
+        warn(f"Could not strip scoring VCL during teardown: {exc}")
         if status_cb:
-            status_cb(f"⚠️ Could not strip scoring VCL (continuing): {exc}")
+            status_cb(f"❌ Could not strip scoring VCL: {exc}")
+
+    if not strip_ok:
+        # ABORT before deleting the Compute service. Deleting it now would leave
+        # the customer's ACTIVE version pre-flighting to a backend whose host no
+        # longer exists. The Compute service is left in place deliberately: it
+        # is cheap, harmless and re-deletable, whereas a dangling backend on
+        # live traffic is an outage. Re-run teardown once the cause is cleared.
+        raise RuntimeError(
+            "Aborting scoring teardown: the scoring VCL could not be stripped from "
+            f"{logging_service_id}, so its active version may still route to the scorer. "
+            "The Compute service was NOT deleted (deleting it now would break live traffic). "
+            "Resolve the error above and re-run teardown."
+        )
 
     # ── Stage 2: delete the owned Compute service + stores. ─────────────────
     failed = delete_scoring_service(

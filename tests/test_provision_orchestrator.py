@@ -1328,9 +1328,14 @@ def test_perform_teardown_skips_scoring_when_remove_scoring_opt_false():
 
 
 def test_perform_teardown_swallows_scoring_exception_with_warning():
-    """If scoring teardown raises (Fastly 503), emit a warning and continue with
-    the rest of teardown — a scoring-cleanup failure must not orphan the
-    FOS/CDN cleanup. Mirrors the remove_logging swallow contract."""
+    """If scoring teardown raises, surface it loudly and continue with the rest
+    of teardown — a scoring-cleanup failure must not orphan the FOS/CDN cleanup.
+    Mirrors the remove_logging swallow contract.
+
+    The raise is now an intentional ABORT: teardown_scoring_resources refuses to
+    delete the Compute service when it couldn't strip the scoring VCL, because
+    that would leave the customer's active version routing to a deleted host.
+    The message must say so — an operator has to re-run teardown."""
     state = _teardown_state(scoring={"enabled": True, "scoring_service_id": "SCORESVC"})
     delete_cdn_called = []
 
@@ -1355,8 +1360,10 @@ def test_perform_teardown_swallows_scoring_exception_with_warning():
         events, exc = _consume(orchestrator.perform_teardown(state, "tok"))
 
     assert exc is None
-    # A warning was surfaced...
-    assert any(e["type"] == "status" and "scoring teardown failed" in e["message"].lower() for e in events)
+    # The abort was surfaced loudly, naming the deliberate non-deletion...
+    aborted = [e for e in events if e["type"] == "status" and "aborted" in e["message"].lower()]
+    assert aborted, f"no abort status surfaced; got {[e.get('message') for e in events]}"
+    assert "left in place" in aborted[0]["message"].lower()
     # ...and the rest of teardown still ran.
     assert delete_cdn_called == [True]
 

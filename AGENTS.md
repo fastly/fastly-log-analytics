@@ -721,6 +721,16 @@ generate_log_format(cfg)  # then grep for substr(..., 0, 0) and per-field caps
 ```
 The genuine levers are reducing enabled groups/custom fields or raising the line budget, both of which trade against Fastly silently dropping over-long log lines.
 
+### 31. Teardown: dereference before delete, and ENUMERATE what you remove
+Teardown touches a service the customer still serves traffic from, so ordering is a correctness property, not a preference. **Every step that strips VCL from the customer's service must complete before any step that deletes a service that VCL points at.** Otherwise their active version routes to a deleted host and their site breaks — caused by our teardown. Order in `perform_teardown`: scoring VCL strip + Compute delete → logging endpoint + all owned VCL off the customer service → FOS keys → FOS bucket → analytics-owned CDN service last (the logging endpoint is what referenced it).
+
+Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/test_teardown_dereference_order.py](tests/utils/test_teardown_dereference_order.py):
+
+- **Blind DELETE by hardcoded name = silent no-op.** `remove_logging_endpoint` DELETEd a hardcoded list of snippet names and swallowed every 404. The names on the service didn't match, so it logged *"removed 0 active snippets"* and reported success, leaving the entire capture VCL live on a "torn down" service. Endpoints, conditions and dictionaries were removed correctly because those three already enumerated-then-matched. The list was also missing `- vcl_pass`. **Always GET the list and delete what you can attribute; never guess names.** Attribution must be narrow: the `Fastly Log Analytics` prefix plus the canonical `scoring_snippet_names()` / `cmcd_snippet_names()` / RUM sets. Do NOT prefix-match `Session ` — a customer's own `Session Tracking - *` snippets sit beside our `Session Scoring - *` ones.
+- **Best-effort dereference + unconditional delete.** `teardown_scoring_resources` treated the VCL strip as best-effort ("the operator cares most about not paying for an orphaned Compute service") and deleted the Compute service anyway. That trade is backwards: an orphaned Compute service is pennies and re-deletable, a dangling backend on live traffic is an incident — and Fastly 500s on these calls are real. It now aborts and leaves the Compute service in place.
+
+Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read `Deleting CDN service 'www.drew-michael.com'` while actually deleting `fpRfyku4258qtifioTcgUo` — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.

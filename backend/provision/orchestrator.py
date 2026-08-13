@@ -757,12 +757,27 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         }
 
     total_steps = 5
-    # ── Step 1: session scoring (Compute service + stores + dangling VCL). ───
-    # Runs FIRST so the scoring VCL/backend are stripped before the logging
-    # endpoint removal does its own clone/activate. Gated on opts.get(..., True)
-    # so the internal provision()-failure rollback (no opts) still tears scoring
-    # down. The scoring ids ride in state['scoring'] (the cfg['scoring'] block);
-    # disable_scoring can't be used here because the config file is already gone.
+    # ── TEARDOWN ORDER: DEREFERENCE, THEN DELETE. ────────────────────────────
+    # Every step that removes VCL from the CUSTOMER's live service must complete
+    # before any step that deletes a service that VCL points at. Otherwise the
+    # customer's active version is left routing to a deleted host — its own
+    # traffic breaks, and the failure is ours, not theirs.
+    #
+    #   1. scoring VCL strip + Compute delete  (strip is fatal-on-failure, so
+    #      the Compute service is never deleted while still referenced)
+    #   2. logging endpoint + ALL analytics-owned snippets/conditions/
+    #      dictionaries/backends off the customer service
+    #   3. FOS access keys
+    #   4. FOS bucket
+    #   5. analytics-owned log-fronting CDN service (last: the logging endpoint
+    #      removed in step 2 is what referenced it)
+    #
+    # Step 1 stays ahead of step 2 because both clone+activate the customer
+    # service, and the scoring strip is the one with a live-traffic dependency.
+    # Gated on opts.get(..., True) so the internal provision()-failure rollback
+    # (no opts) still tears scoring down. The scoring ids ride in
+    # state['scoring'] (the cfg['scoring'] block); disable_scoring can't be used
+    # here because the config file is already gone.
     yield {"type": "progress", "current": 1, "total": total_steps}
     scoring_meta = state.get("scoring") or {}
     do_scoring = opts.get("remove_scoring", True) and (
@@ -782,7 +797,17 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                     "message": f"Warning: scoring {label} store {store_id} not deleted — remove it manually.",
                 }
         except Exception as exc:
-            yield {"type": "status", "message": f"Warning: scoring teardown failed: {exc}"}
+            # teardown_scoring_resources aborts (raises) rather than delete the
+            # Compute service while the customer's active version may still
+            # route to it. Surface that loudly — it is an action item, not a
+            # cosmetic warning, and the operator must re-run teardown.
+            yield {
+                "type": "status",
+                "message": (
+                    f"❌ Scoring teardown ABORTED (Compute service left in place on purpose): {exc} "
+                    "Re-run teardown after resolving; continuing with the remaining steps."
+                ),
+            }
 
     yield {"type": "progress", "current": 2, "total": total_steps}
     step(

@@ -173,10 +173,14 @@ def test_remove_logging_endpoint_no_op_when_endpoint_already_absent():
 
 
 def test_remove_logging_endpoint_clones_version_then_deletes_endpoint_and_snippets():
-    """Happy path: clone active → delete endpoint → delete 6 snippets
+    """Happy path: clone active → delete endpoint → delete snippets
     → validate → activate. Pinned because the clone-then-mutate flow
     is what preserves the audit trail (every change is its own
-    Fastly version)."""
+    Fastly version).
+
+    Snippet removal ENUMERATES the draft and deletes what it owns (it used to
+    blind-DELETE a hardcoded name list), so the fake must serve a snippet list.
+    """
     calls = []
 
     def fake_fastly(method, path, body=None, **kwargs):
@@ -185,6 +189,8 @@ def test_remove_logging_endpoint_clones_version_then_deletes_endpoint_and_snippe
             return {"number": 6}
         if "/validate" in path:
             return {"status": "ok"}
+        if method == "GET" and path.endswith("/snippet"):
+            return [{"name": "Fastly Log Analytics - vcl_recv"}, {"name": "Fastly Log Analytics - vcl_deliver"}]
         return {}
 
     with (

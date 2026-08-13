@@ -1156,16 +1156,26 @@ def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True
 
 
 def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
-    """Delete the CDN VCL service."""
-    info(f"Deleting CDN service {_c(BOLD, name)}  ({service_id})…")
+    """Delete the analytics-owned log-fronting CDN VCL service.
+
+    ``name`` is a caller-supplied label only — the deletion targets
+    ``service_id``. The teardown path used to pass the CUSTOMER's service
+    display name here, so the log read
+    ``Deleting CDN service 'www.drew-michael.com'`` and looked for all the world
+    like the customer's own site was being destroyed (2026-08-13). Callers now
+    pass the analytics naming convention (``Log Analysis CDN Service for <id>``)
+    and every message below carries the id it is actually acting on.
+    """
+    label = f"{name} ({service_id})"
+    info(f"Deleting analytics-owned log-fronting CDN service {_c(BOLD, label)}…")
     if status_cb:
-        status_cb(f"⏳ Deleting CDN service '{name}'...")
+        status_cb(f"⏳ Deleting analytics-owned CDN service {label} (not your origin service)...")
     try:
         versions = fastly("GET", f"/service/{service_id}/version", token=token)
         for v in versions:
             if v.get("active"):
                 if status_cb:
-                    status_cb(f"⏳ Deactivating version {v['number']}...")
+                    status_cb(f"⏳ Deactivating version {v['number']} of {service_id}...")
                 fastly("PUT", f"/service/{service_id}/version/{v['number']}/deactivate", token=token)
     except RuntimeError as exc:
         if "404" in str(exc):
@@ -1175,12 +1185,12 @@ def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
 
     try:
         fastly("DELETE", f"/service/{service_id}", token=token, expect_empty=True)
-        ok("CDN service deleted")
+        ok(f"Analytics-owned CDN service {label} deleted")
         if status_cb:
-            status_cb("✅ CDN service deleted.")
+            status_cb(f"✅ Analytics-owned CDN service {service_id} deleted.")
     except RuntimeError as exc:
         if "404" in str(exc):
-            ok("CDN service already deleted")
+            ok(f"Analytics-owned CDN service {service_id} already deleted")
         else:
             raise exc
 
@@ -1355,8 +1365,20 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         raise
 
 
+# Snippet-ownership attribution for teardown. Every name we install is either
+# in the capture family (this prefix, across all naming generations) or comes
+# from a canonical generator list, so teardown can't drift from provisioning.
+_CAPTURE_SNIPPET_PREFIX = "Fastly Log Analytics"
+_RUM_SNIPPET_NAMES = frozenset(
+    {"RUM - Recv", "RUM - Set cookies", "RUM - Asset fetch FOS", "RUM - Asset fetch SigV4 signing"}
+)
+
+
 def remove_logging_endpoint(service_id: str, endpoint_name: str, token: str, status_cb=None):
-    """Safely remove the logging endpoint from the active version."""
+    """Safely remove the logging endpoint + all analytics-owned VCL from the active version."""
+    from backend.provision.cmcd_vcl import cmcd_snippet_names
+    from backend.provision.session_scoring_vcl import scoring_snippet_names
+
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
     if status_cb:
         status_cb(f"🔍 Checking active version of service {service_id}...")
@@ -1367,15 +1389,20 @@ def remove_logging_endpoint(service_id: str, endpoint_name: str, token: str, sta
     ok(f"Active version: {active_ver}")
 
     existing = list_s3_endpoints(service_id, active_ver, token)
+    # dict.fromkeys de-dupes while preserving order: ``endpoint_name`` is
+    # usually one of the literals above, which previously produced a second,
+    # redundant DELETE (and a duplicate "Removing '…'" log line).
     endpoints_to_delete = [
         ep
-        for ep in [
-            "Fastly Log Analytics",
-            "Fastly Object Storage Logs",
-            "Fastly RUM Logs",
-            "Fastly RUM Object Storage Logs",
-            endpoint_name,
-        ]
+        for ep in dict.fromkeys(
+            [
+                "Fastly Log Analytics",
+                "Fastly Object Storage Logs",
+                "Fastly RUM Logs",
+                "Fastly RUM Object Storage Logs",
+                endpoint_name,
+            ]
+        )
         if ep in existing
     ]
 
@@ -1403,35 +1430,64 @@ def remove_logging_endpoint(service_id: str, endpoint_name: str, token: str, sta
                 if "404" not in str(exc):
                     raise exc
 
+        # ENUMERATE, don't guess. This used to blind-DELETE a hardcoded list of
+        # snippet names; every 404 was swallowed, so when the names on the
+        # service didn't match the list it reported success having removed
+        # NOTHING — leaving the full capture VCL live on a service the operator
+        # believed was torn down (observed 2026-08-13: "removed 0 active
+        # snippets" while endpoints/conditions/dictionaries were correctly
+        # removed, because those three already used the list-then-match pattern
+        # below). The list was also missing ``- vcl_pass``, so it stranded a
+        # snippet even on a service whose names DID match.
         info("Removing VCL snippets…")
-        target_snippets = [
-            "Fastly Log Analytics Capture",
-            "Fastly Log Analytics Miss",
-            "Fastly Log Analytics Pass",
-            "Fastly Log Analytics Origin Fetch",
-            "Fastly Log Analytics Origin Error",
-            "Fastly Log Analytics Origin Deliver",
-            "Fastly Log Analytics - vcl_recv",
-            "Fastly Log Analytics - vcl_miss",
-            "Fastly Log Analytics - vcl_fetch",
-            "Fastly Log Analytics - vcl_deliver",
-            "Fastly Log Analytics - vcl_error",
-        ]
-        removed_count = 0
-        for snippet_name in target_snippets:
+        owned_exact = {*scoring_snippet_names(), *cmcd_snippet_names(), *_RUM_SNIPPET_NAMES}
+        removed_names: list[str] = []
+        try:
+            present = fastly("GET", f"/service/{service_id}/version/{new_ver}/snippet", token=token)
+        except Exception as e:
+            warn(f"Could not list snippets on draft {new_ver}: {e}")
+            present = []
+
+        for snip in present:
+            s_name = snip.get("name") or ""
+            # Attribution, deliberately narrow. ``Fastly Log Analytics`` covers
+            # every generation of the capture snippets (legacy "… Capture" and
+            # current "… - vcl_recv"). The rest come from the canonical
+            # generators so this can't drift from what provisioning installs.
+            # NOTE: do NOT prefix-match "Session " — a customer's own
+            # "Session Tracking - *" snippets live alongside our
+            # "Session Scoring - *" ones and must never be touched.
+            if not (s_name.startswith(_CAPTURE_SNIPPET_PREFIX) or s_name in owned_exact):
+                continue
+            info(f"Removing snippet '{_c(BOLD, s_name)}' from draft…")
             try:
-                encoded_s = urllib.parse.quote(snippet_name, safe="")
+                encoded_s = urllib.parse.quote(s_name, safe="")
                 fastly(
                     "DELETE",
                     f"/service/{service_id}/version/{new_ver}/snippet/{encoded_s}",
                     token=token,
                     expect_empty=True,
                 )
-                removed_count += 1
+                removed_names.append(s_name)
             except RuntimeError as exc:
                 if "404" not in str(exc):
                     raise exc
-        ok(f"VCL snippets removed from draft (removed {removed_count} active snippets)")
+
+        ok(f"VCL snippets removed from draft ({len(removed_names)}): {', '.join(removed_names) or 'none matched'}")
+        # Never let "removed nothing" pass silently again.
+        leftovers = [
+            s.get("name")
+            for s in present
+            if (s.get("name") or "").startswith(_CAPTURE_SNIPPET_PREFIX) and s.get("name") not in removed_names
+        ]
+        if leftovers:
+            warn(f"Capture snippets still on draft {new_ver} after removal: {leftovers}")
+        elif not removed_names and present:
+            warn(
+                f"No analytics-owned snippets matched on draft {new_ver}. "
+                f"Snippets present: {[s.get('name') for s in present]} — "
+                "if any of those are ours, teardown left VCL behind."
+            )
 
         # Clean up any managed backends
         try:
