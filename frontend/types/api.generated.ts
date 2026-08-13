@@ -6061,6 +6061,8 @@ export interface components {
             enabled?: boolean | null;
             /** Interval Mins */
             interval_mins?: number | null;
+            /** Interval Seconds */
+            interval_seconds?: number | null;
             /** Commit Interval Mins */
             commit_interval_mins?: number | null;
             /** Log Enabled */
@@ -6073,6 +6075,10 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Keep Snapshot Days */
+            keep_snapshot_days?: number | null;
+            /** Expire Interval Mins */
+            expire_interval_mins?: number | null;
             /** Delete After */
             delete_after?: boolean | null;
         };
@@ -10845,6 +10851,8 @@ export interface components {
             enabled: boolean;
             /** Interval Mins */
             interval_mins?: number | null;
+            /** Interval Seconds */
+            interval_seconds?: number | null;
             /** Commit Interval Mins */
             commit_interval_mins?: number | null;
             /** Delete After */
@@ -10859,6 +10867,10 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Keep Snapshot Days */
+            keep_snapshot_days?: number | null;
+            /** Expire Interval Mins */
+            expire_interval_mins?: number | null;
         };
         /**
          * ServiceScopePayload

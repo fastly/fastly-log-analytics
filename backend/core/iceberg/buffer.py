@@ -1091,6 +1091,13 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         data_retention_days = int(cron_sync.get("data_retention_days", 30))
         rum_retention_days = int(cron_sync.get("rum_retention_days", data_retention_days))
         cache_retention_days = int(cron_sync.get("cache_retention_days", 90))
+        # Snapshot-history window. This — not the job's cadence — sets the
+        # steady-state snapshot count, and therefore metadata.json size and the
+        # per-commit read/parse/rewrite cost. Lowering it speeds up commits but
+        # trades away time-travel: the 2026-08 metadata rollback was only
+        # recoverable because old snapshots/metadata were still on FOS. Keep 7
+        # unless you have a specific reason.
+        keep_snapshot_days = max(1, int(cron_sync.get("keep_snapshot_days", 7)))
 
         catalog = _core_mod._get_catalog(source)
         table = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
@@ -1159,7 +1166,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
     #    here — expire drops only old snapshot metadata; the current snapshot's file
     #    membership is unchanged, so the snapshot fast-path stays valid. (Contrast
     #    with step 1's data-delete and the optimize-table path, which do invalidate.)
-    keep_snapshot_days = 7
+    # keep_snapshot_days resolved from cron_sync above (default 7).
     snapshot_cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
     try:
         # Load fresh from the catalog. Note: catalog is the FosSqlCatalog

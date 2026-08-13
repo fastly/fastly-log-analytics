@@ -157,7 +157,15 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
                 # keys, but Pydantic dumps each nested block as a full
                 # dict of its model fields — re-filter so we don't write
                 # a None where the operator simply omitted a sub-field.
-                existing.update({k: v for k, v in incoming.items() if v is not None})
+                sent = {k: v for k, v in incoming.items() if v is not None}
+                # The scheduler prefers interval_mins over interval_seconds, so
+                # setting seconds while a stale mins is persisted is a silent
+                # no-op — the caller's value lands in the config and is then
+                # ignored. Since this endpoint can only write keys (never remove
+                # them), honour the explicit intent by dropping the losing key.
+                if "interval_seconds" in sent and "interval_mins" not in sent:
+                    existing.pop("interval_mins", None)
+                existing.update(sent)
                 prov[cron_key] = existing
 
             # Handle RUM settings (top-level cfg, not provisioning)

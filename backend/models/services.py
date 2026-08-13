@@ -10,6 +10,10 @@ from backend.models.common import BaseResponse
 class ServiceCronSync(BaseModel):
     enabled: bool
     interval_mins: int | None = None
+    # Persisted sync configs use interval_seconds (the scheduler reads it, with
+    # interval_mins winning when both are present). Modelled here so this full
+    # view of the block can round-trip a real config without dropping it.
+    interval_seconds: int | None = None
     commit_interval_mins: int | None = None
     delete_after: bool | None = None
     log_enabled: bool | None = None
@@ -17,6 +21,8 @@ class ServiceCronSync(BaseModel):
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    keep_snapshot_days: int | None = None
+    expire_interval_mins: int | None = None
 
 
 class ServiceCronCompact(BaseModel):
@@ -125,12 +131,25 @@ class CronSettingsPartial(BaseModel):
 
     enabled: bool | None = None
     interval_mins: int | None = None
+    # The persisted sync config uses interval_seconds, and the scheduler reads
+    # it (interval_mins takes priority when both are set). Omitting it here made
+    # the settings endpoint silently DROP a caller-supplied interval_seconds and
+    # still answer "Successfully applied changes" — the value never reached the
+    # config (observed 2026-08-13). Pydantic ignores unknown fields, so an
+    # absent field on this partial is a silent no-op, not an error.
+    interval_seconds: int | None = None
     commit_interval_mins: int | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
+    # the scheduler's expire job). keep_snapshot_days drives metadata.json size
+    # and therefore per-commit cost; expire_interval_mins is how often it's
+    # enforced.
+    keep_snapshot_days: int | None = None
+    expire_interval_mins: int | None = None
     delete_after: bool | None = None
 
 

@@ -39287,6 +39287,17 @@
             ],
             "title": "Interval Mins"
           },
+          "interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Seconds"
+          },
           "commit_interval_mins": {
             "anyOf": [
               {
@@ -39352,6 +39363,28 @@
               }
             ],
             "title": "Cache Retention Days"
+          },
+          "keep_snapshot_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Snapshot Days"
+          },
+          "expire_interval_mins": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expire Interval Mins"
           },
           "delete_after": {
             "anyOf": [
@@ -51877,6 +51910,17 @@
             ],
             "title": "Interval Mins"
           },
+          "interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Seconds"
+          },
           "commit_interval_mins": {
             "anyOf": [
               {
@@ -51953,6 +51997,28 @@
               }
             ],
             "title": "Cache Retention Days"
+          },
+          "keep_snapshot_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Snapshot Days"
+          },
+          "expire_interval_mins": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expire Interval Mins"
           }
         },
         "type": "object",
