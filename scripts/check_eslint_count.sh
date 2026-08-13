@@ -53,9 +53,10 @@ cd "$REPO_ROOT/frontend"
 # useWizardState effects to render-time derived state, and unified a mismatched
 # optional-chain inside one _state.ts useMemo. 820 -> 819: resolved unescaped
 # single quotes in ServicesTable / TeardownDialog and suppressed state-in-effect / purity
-# warnings across multiple workspace files.
+# warnings across multiple workspace files. 819 -> 817: net drop from the RUM
+# branch's frontend work (measured on a clean worktree at the branch tip).
 # Drive toward zero.
-CEILING=819
+CEILING=817
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
