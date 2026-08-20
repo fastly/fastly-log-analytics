@@ -88,7 +88,7 @@ def test_commit_buffer_calls_impl_when_lock_free(monkeypatch, fos_source):
 
     result = buffer_mod.commit_buffer(fos_source)
 
-    impl.assert_called_once_with(fos_source, None)
+    impl.assert_called_once_with(fos_source, None, table_name="logs")
     assert result["files_committed"] == 3
 
     # Lock must be released afterward — a later contender shouldn't block.

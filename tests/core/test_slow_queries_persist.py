@@ -22,6 +22,9 @@ from backend.core import query_registry as qr_mod
 def svc_id(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.config.DATA_DIR", tmp_path)
     monkeypatch.setattr("backend.core.metadata.base.DATA_DIR", tmp_path, raising=False)
+    # Set the slow-query threshold to a massive value by default so real queries executed
+    # under test CPU starvation never get flagged as slow queries and pollute the database.
+    monkeypatch.setattr("backend.core.query_registry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
     svc = "test-slow-queries-svc"
     _meta.get_con(svc).execute("SELECT 1")  # trigger migrations
     return svc

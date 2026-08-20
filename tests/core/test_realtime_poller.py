@@ -177,10 +177,105 @@ class TestErrorTickPayload:
 # ── mock mode ───────────────────────────────────────────────────────────────
 
 
-def test_mock_rt_response_valid_shape():
-    from backend.core.realtime.poller import _mock_rt_response
+def _test_mock_rt_response() -> dict:
+    return {
+        "Data": [
+            {
+                "aggregated": {
+                    "requests": 150,
+                    "status_2xx": 140,
+                    "status_3xx": 5,
+                    "status_4xx": 3,
+                    "status_5xx": 2,
+                    "hits": 120,
+                    "miss": 30,
+                    "pass": 0,
+                    "synth": 0,
+                    "resp_body_bytes": 5_000_000,
+                    "resp_header_bytes": 50_000,
+                    "shield": 10,
+                    "shield_resp_body_bytes": 2_000_000,
+                    "shield_resp_header_bytes": 20_000,
+                    "bereq_header_bytes": 10_000,
+                    "bereq_body_bytes": 0,
+                    "waf_blocked": 1,
+                    "waf_logged": 2,
+                    "waf_passed": 147,
+                    "origin_offload": 0.78,
+                    "hit_time": 0.001,
+                    "miss_time": 0.045,
+                    "pass_time": 0.032,
+                    "http2": 95,
+                    "http3": 40,
+                    "ipv6": 20,
+                    "tls_v12": 15,
+                    "tls_v13": 120,
+                    "status_200": 130,
+                    "status_204": 5,
+                    "status_301": 3,
+                    "status_304": 2,
+                    "status_404": 2,
+                    "status_503": 1,
+                    "object_size_10k": 45,
+                    "object_size_100k": 50,
+                    "object_size_1m": 25,
+                    "origin_fetches": 15,
+                    "origin_revalidations": 8,
+                    "origin_cache_fetches": 5,
+                    "shield_hit_requests": 8,
+                    "shield_miss_requests": 2,
+                    "shield_revalidations": 3,
+                    "shield_fetch_body_bytes": 500_000,
+                    "request_collapse_usable_count": 12,
+                    "request_collapse_unusable_count": 3,
+                    "segblock_origin_fetches": 2,
+                    "segblock_shield_fetches": 1,
+                    "bot_challenge_starts": 5,
+                    "bot_challenges_issued": 4,
+                    "bot_challenges_succeeded": 3,
+                    "bot_challenges_failed": 1,
+                    "bot_edge_requests_detected_count": 8,
+                    "bot_edge_requests_verified_count": 2,
+                    "bot_edge_requests_ai_crawler_count": 1,
+                    "compute_execution_time_ms": 12.5,
+                    "compute_request_time_ms": 18.3,
+                    "compute_ram_used": 4_200_000,
+                    "compute_bereq_errors": 0,
+                    "compute_guest_errors": 0,
+                    "restarts": 0,
+                    "recv_sub_count": 150,
+                    "recv_sub_time": 0.002,
+                    "fetch_sub_count": 30,
+                    "fetch_sub_time": 0.045,
+                    "deliver_sub_count": 150,
+                    "deliver_sub_time": 0.001,
+                    "error_sub_count": 2,
+                    "error_sub_time": 0.001,
+                    "miss_histogram": {"10": 5, "20": 8, "30": 6, "60": 4, "120": 3, "250": 2},
+                },
+                "datacenter": {
+                    "SJC": {
+                        "requests": 80,
+                        "status_5xx": 1,
+                        "hits": 65,
+                        "miss": 15,
+                    },
+                    "DCA": {
+                        "requests": 70,
+                        "status_5xx": 1,
+                        "hits": 55,
+                        "miss": 15,
+                    },
+                },
+            }
+        ],
+        "Timestamp": 1720000000,
+        "AggregateDelay": 3,
+    }
 
-    rt = _mock_rt_response()
+
+def test_mock_rt_response_valid_shape():
+    rt = _test_mock_rt_response()
     assert "Data" in rt
     assert "Timestamp" in rt
     assert len(rt["Data"]) > 0
@@ -210,7 +305,7 @@ async def test_poller_starts_and_suspends(monkeypatch):
     def _fake_fetch(self, session, service_id, cursor):
         nonlocal fetch_count
         fetch_count += 1
-        return poller_mod._mock_rt_response()
+        return _test_mock_rt_response()
 
     monkeypatch.setattr(poller_mod.RealtimePoller, "_fetch_realtime", _fake_fetch)
 
@@ -252,7 +347,7 @@ async def test_cursor_advances(monkeypatch):
 
     def _fake_fetch(self, session, service_id, cursor):
         cursors_seen.append(cursor)
-        resp = poller_mod._mock_rt_response()
+        resp = _test_mock_rt_response()
         resp["Timestamp"] = 1720000000 + len(cursors_seen)
         if len(cursors_seen) >= 2:
             got_two.set()
@@ -288,18 +383,3 @@ async def test_cursor_advances(monkeypatch):
     assert len(cursors_seen) >= 2
     assert cursors_seen[0] == 0
     assert cursors_seen[1] > 0
-
-
-@pytest.mark.asyncio
-async def test_fetch_mock_mode(monkeypatch):
-    """FASTLY_MOCK_MODE returns valid shape from _fetch_realtime."""
-    monkeypatch.setenv("FASTLY_MOCK_MODE", "1")
-
-    import requests as req_lib
-
-    from backend.core.realtime.poller import RealtimePoller
-
-    p = RealtimePoller()
-    result = p._fetch_realtime(req_lib.Session(), "test-svc", 0)
-    assert result is not None
-    assert "Data" in result

@@ -296,3 +296,62 @@ describe('useBootstrap (MSW)', () => {
     })
   })
 })
+
+describe('useBootstrap — recovery after a deploy', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockServiceState.activeServiceId = null
+  })
+
+  // A deploy takes the backend away for a few seconds. The `retry` policy is
+  // deliberately capped at ONE attempt (the 2026-06-23 bootstrap-storm guard),
+  // so without a poll an open tab spends that single retry during the outage
+  // and parks on AppLayout's dead-end "Can't reach the server" card until the
+  // user clicks Retry. This asserts the tab heals itself.
+  it('recovers on its own once the server returns, with no manual retry', async () => {
+    let failing = true
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () => {
+        if (failing) return new HttpResponse(null, { status: 503 })
+        return HttpResponse.json({
+          services: [{ service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' }],
+          active_service_id: 'svc-1',
+        })
+      }),
+    )
+
+    const { useBootstrap } = await import('@/hooks/useBootstrap')
+    const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
+
+    await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 10000 })
+
+    // Server comes back. Nothing clicks anything.
+    failing = false
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true), { timeout: 15000 })
+    expect(mockSetServices).toHaveBeenCalled()
+  }, 30000)
+
+  // The poll must stop once healthy, or every client permanently hammers
+  // /api/bootstrap — which is the fan-out the storm guard exists to prevent.
+  it('does not keep polling once the request succeeds', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () => {
+        calls += 1
+        return HttpResponse.json({
+          services: [{ service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' }],
+          active_service_id: 'svc-1',
+        })
+      }),
+    )
+
+    const { useBootstrap } = await import('@/hooks/useBootstrap')
+    const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const afterFirstSuccess = calls
+    await new Promise(r => setTimeout(r, 8000))
+    expect(calls).toBe(afterFirstSuccess)
+  }, 30000)
+})

@@ -83,4 +83,4 @@ class VclLintResponse(BaseModel):
     errors: list[str]
     warnings: list[str]
     format_length: int | None = None
-    format_length_limit: int = 8000
+    format_length_limit: int = 12000

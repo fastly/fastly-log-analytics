@@ -296,3 +296,65 @@ def test_inject_view_debug_prepends_entry_when_stats_present():
     assert "DuckDB Iceberg View Resolution" in debug[0]["sql"]
     assert "SLOW PATH" in debug[0]["sql"]
     view_mod._view_cache.pop("svc-debug", None)
+
+
+def test_update_iceberg_view_skips_compacted_files():
+    """Verify that update_iceberg_view skips files that have been locally compacted,
+    preventing them from triggering an s3 fallback (iceberg_scan)."""
+    source = {
+        "service_id": "svc_compacted",
+        "name": "svc_compacted",
+        "access_level": "read_write",
+    }
+
+    # Mock scan.plan_files() to return a mock file
+    mock_file = MagicMock()
+    mock_file.file.file_path = "s3://bucket/data/file1.parquet"
+    mock_scan = MagicMock()
+    mock_scan.plan_files.return_value = [mock_file]
+
+    mock_table = MagicMock()
+    mock_table.scan.return_value = mock_scan
+    mock_table.metadata_location = "s3://bucket/metadata/v1.metadata.json"
+    mock_table.current_snapshot.return_value.snapshot_id = 123
+    mock_table.location.return_value = "s3://bucket"
+
+    # Mock get_locally_compacted_basenames to return "file1.parquet"
+    mock_get_compacted = MagicMock(return_value={"file1.parquet"})
+
+    def _exists_side_effect(path):
+        if "iceberg_catalog.db" in str(path):
+            return True
+        return False
+
+    # Mock sqlite3.connect
+    mock_sqlite_conn = MagicMock()
+    mock_sqlite_conn.__enter__.return_value = mock_sqlite_conn
+    mock_sqlite_conn.execute.return_value.fetchone.return_value = ("s3://bucket/metadata/v1.metadata.json",)
+
+    with (
+        patch("backend.core.iceberg.view._core_mod._get_catalog"),
+        patch("backend.core.iceberg.view._core_mod._load_table_cached", return_value=mock_table),
+        patch("backend.core.iceberg.view._core_mod._cloud_uri_to_local_path", return_value="/cache/data/file1.parquet"),
+        patch("backend.core.metadata.get_locally_compacted_basenames", mock_get_compacted),
+        patch("os.path.exists", side_effect=_exists_side_effect),
+        patch("sqlite3.connect", return_value=mock_sqlite_conn),
+        patch("backend.core.iceberg.view._save_persistent_cache"),
+        patch("backend.core.iceberg.view._core_mod._get_service_lock"),
+    ):
+        con = MagicMock()
+        con.execute.return_value.fetchone.return_value = None
+        view_mod.update_iceberg_view(con, source)
+
+        # Check snapshot cache
+        cache_key = "svc_compacted"
+        assert cache_key in view_mod._snapshot_files_cache
+        cached_info = view_mod._snapshot_files_cache[cache_key]
+        # cached_info[3] is the list of resolved files.
+        # Since file1.parquet was compacted, it should have been skipped entirely
+        # rather than being treated as missing and appended as an s3:// fallback path!
+        assert "s3://bucket/data/file1.parquet" not in cached_info[3]
+        assert "/cache/data/file1.parquet" not in cached_info[3]
+
+    # clean up cache
+    view_mod._snapshot_files_cache.pop(cache_key, None)

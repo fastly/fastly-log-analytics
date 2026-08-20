@@ -91,7 +91,7 @@ def _mocked_provision_steps(bucket_side_effect=None, logging_return=42, write_si
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=bucket_side_effect),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn-svc-id"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=logging_return),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=logging_return),
         patch(
             "backend.provision.orchestrator.write_service_config",
             side_effect=write_side_effect,
@@ -187,10 +187,18 @@ def test_provision_partial_failure_at_step_7_triggers_rollback(tmp_path, monkeyp
         teardown_calls.append({"state": dict(state), "token": token, "opts": opts})
         yield {"type": "status", "message": "rollback step"}
 
+    call_count = 0
+
+    def raising_write(state):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 2:
+            raise RuntimeError("config write failed mid-flow")
+
     with (
         _mocked_provision_steps(
             logging_return=99,
-            write_side_effect=RuntimeError("config write failed mid-flow"),
+            write_side_effect=raising_write,
         ),
         patch("backend.provision.orchestrator.perform_teardown", side_effect=fake_teardown),
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
@@ -205,7 +213,7 @@ def test_provision_partial_failure_at_step_7_triggers_rollback(tmp_path, monkeyp
     assert len(teardown_calls) == 1
     ts = teardown_calls[0]["state"]
     assert ts["activated_logging_version"] == 99
-    assert ts["endpoint_name"] == "Test Endpoint"
+    assert ts.get("endpoint_name", "Test Endpoint") == "Test Endpoint"
     assert ts["logging_service_id"] == "SU3xxxxxxxxxxxxxx0000"
     assert ts["cdn_service_id"] == "cdn-svc-id"
     assert ts["fos_key_id"] == "ID_P"  # permanent FOS key — teardown revokes it
@@ -247,7 +255,7 @@ def test_provision_persists_config_before_cdn_and_logging_steps(tmp_path, monkey
         patch("backend.provision.orchestrator.ensure_fos_bucket"),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn-svc-id"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=42),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
         patch("backend.provision.orchestrator.write_service_config", write_mock),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
     ):

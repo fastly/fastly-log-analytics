@@ -98,7 +98,6 @@ export default function LogsClient() {
         setSseDescription={s.setSseDescription}
         setIsSSEModalOpen={s.setIsSSEModalOpen}
         setIsSyncModalOpen={s.setIsSyncModalOpen}
-        setHasSyncedExtents={s.setHasSyncedExtents}
         reset={s.reset}
         start={s.start}
         setDisplayedJobs={s.setDisplayedJobs}
@@ -239,7 +238,6 @@ export default function LogsClient() {
             s.setSseTitle('Syncing from Cloud')
             s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
             s.setIsSSEModalOpen(true)
-            s.setHasSyncedExtents(false)
             s.reset()
             s.start(`/api/cron-runs/${(data as any)?.run_id}/stream`)
             cronCacheBust(queryClient, s.activeServiceId)

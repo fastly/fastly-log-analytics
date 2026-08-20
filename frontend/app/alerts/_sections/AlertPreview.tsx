@@ -108,6 +108,25 @@ export function AlertPreview({
                      line: { color: '#a1a1aa', width: 2, dash: 'dot' },
                      hovertemplate: getHoverTemplate(metric, 'Baseline')
                   }] : []),
+                  // If anomaly_zscore, overlay baseline mean and threshold envelope line
+                  ...(previewData.type === 'anomaly_zscore' && previewData.hist_values ? [{
+                     x: x,
+                     y: previewData.hist_values,
+                     type: 'scatter',
+                     mode: 'lines',
+                     name: 'Baseline Mean',
+                     line: { color: '#a1a1aa', width: 2, dash: 'dot' },
+                     hovertemplate: getHoverTemplate(metric, 'Baseline Mean')
+                  }] : []),
+                  ...(previewData.type === 'anomaly_zscore' && previewData.threshold_values ? [{
+                     x: x,
+                     y: previewData.threshold_values,
+                     type: 'scatter',
+                     mode: 'lines',
+                     name: `Threshold (${threshold}σ)`,
+                     line: { color: 'hsl(var(--destructive))', width: 2, dash: 'dash' },
+                     hovertemplate: getHoverTemplate(metric, 'Threshold')
+                  }] : []),
                   // If absolute, overlay the threshold as a horizontal line
                   ...(previewData.type === 'absolute' && parseFloat(threshold) ? [{
                      x: [x[0], x[x.length - 1]],

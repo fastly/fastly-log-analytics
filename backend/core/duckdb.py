@@ -229,7 +229,7 @@ def _proxy_target_for(source: dict) -> str:
     cdn_url = (source.get("cdn_url") or "").strip()
     if cdn_url:
         return cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
-    return source.get("fos_native_endpoint") or source["endpoint"]
+    return source.get("fos_native_endpoint") or source.get("endpoint") or ""
 
 
 def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
@@ -279,9 +279,9 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         )
     """
     secret_params = [
-        source["access_key_id"],
-        source["secret_access_key"],
-        source["region"],
+        source.get("access_key_id") or "",
+        source.get("secret_access_key") or "",
+        source.get("region") or "",
         proxy_ep,
         *headers.values(),
     ]
@@ -404,11 +404,11 @@ def _get_fos_client(source: dict):
             signature_version=UNSIGNED,
             s3={"addressing_style": "path"},
             # Match the per-tick burst from _download_chunk_to_local
-            # (max_workers=32) so threads don't queue on the default 10-slot
-            # urllib3 pool. Telemetry proxy supports up to 32 upstream
-            # connections per host (telemetry_proxy._POOL_PER_HOST), so this
-            # is the matched ceiling end-to-end.
-            max_pool_connections=32,
+            # (max_workers=32) with ample headroom for parallel API and cron
+            # requests so threads don't queue or trigger connection pool discard
+            # warnings. Telemetry proxy supports up to 128 upstream
+            # connections per host (telemetry_proxy._POOL_PER_HOST).
+            max_pool_connections=128,
         )
         raw_client = boto3.client(
             "s3",
@@ -1046,14 +1046,22 @@ def get_connection(
             _escaped_dir = _service_temp_dir.replace("'", "''")
             con.execute(f"SET temp_directory = '{_escaped_dir}';")
         except Exception as e:
-            logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+            err_msg = str(e)
+            if "cannot switch temporary directory" in err_msg.lower():
+                logger.warning(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
+            else:
+                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
 
     # Configure max temp directory size with environment override or default to 10GB
     try:
         _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
         con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
     except Exception as e:
-        logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+        err_msg = str(e)
+        if "cannot switch temporary directory" in err_msg.lower() or "cannot change" in err_msg.lower():
+            logger.warning(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
+        else:
+            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
 
     # ALWAYS update the view to ensure local buffer files
     # are included. DuckDB views are session-scoped when they reference temp tables
@@ -1373,3 +1381,48 @@ class _SchemaCacheAdapter:
 
 
 _CacheRegistry.register("duckdb._schema_cache", _SchemaCacheAdapter())
+
+
+def rum_source_for(source: dict) -> dict:
+    """Return a shallow-copied RUM source dict where name gets suffixed with
+    '::rum' and duckdb_path points to '.rum.duckdb'.
+    """
+    import copy
+
+    rum_source = copy.deepcopy(source)
+    # Isolate connection, view cache, and pool lock automatically
+    base_name = source.get("name") or source.get("service_id") or "default"
+    rum_source["name"] = f"{base_name}::rum"
+
+    # Update duckdb_path to .rum.duckdb
+    db_path = source.get("duckdb_path")
+    if db_path:
+        if db_path.endswith(".duckdb"):
+            rum_source["duckdb_path"] = db_path.replace(".duckdb", ".rum.duckdb")
+        else:
+            rum_source["duckdb_path"] = db_path + ".rum.duckdb"
+    return rum_source
+
+
+def get_or_generate_cid_salt(service_id: str) -> str:
+    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing."""
+    import secrets
+
+    from backend.config import load_config, save_config
+
+    cfg = load_config(service_id)
+    if not cfg:
+        # Fallback if no config exists (e.g. during test mode without a persistent config)
+        return "default_test_salt_static_fallback_value_12345678"
+
+    rum_cfg = cfg.get("rum") or {}
+    if not isinstance(rum_cfg, dict):
+        rum_cfg = {}
+
+    salt = rum_cfg.get("cid_salt")
+    if not salt:
+        salt = secrets.token_hex(32)
+        rum_cfg["cid_salt"] = salt
+        cfg["rum"] = rum_cfg
+        save_config(service_id, cfg)
+    return salt

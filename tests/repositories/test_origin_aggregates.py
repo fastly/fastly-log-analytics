@@ -513,43 +513,24 @@ async def test_get_aggregates_pop_ip_pair_runs_together(in_memory_duckdb, test_s
 
 
 def test_parallel_gather_uses_return_exceptions_true():
-    """Regression for the F015 use-after-return hazard (mirrors the
-    dashboard guard in tests/routers/test_dashboard_router.py).
+    """Since all branch queries in ``get_aggregates`` read from the temporary
+    table (which is connection-scoped in DuckDB and cannot be accessed across
+    different pooled connections), parallel execution is disabled and all
+    branches run sequentially on the primary connection's QueryRunner.
 
-    On the parallel path, ``get_aggregates`` checks out one extra DuckDB
-    connection per occupied non-primary branch and fans out via
-    ``asyncio.gather``. Without ``return_exceptions=True``, a branch that
-    raises (or a cancelled coroutine) propagates immediately; the
-    surrounding ``finally`` then returns the extra conns to the pool
-    (``errored=False``) while the sibling branches' ``asyncio.to_thread``
-    workers are still executing against them — and DuckDB connections are
-    not safe for concurrent use. A subsequent checkout of such a conn
-    deadlocks on the internal mutex (leaked-active conns exhaust the pool
-    → DoS) or corrupts in-process DuckDB state.
-
-    The runtime branch is inside ``if parallel:``, which the
-    single-connection test fixtures never exercise. Verify by reading the
-    function's source — a source-level check is the most reliable pin for
-    this structural invariant.
+    Verify this design invariant by confirming that ``get_aggregates``
+    source does not use ``checkout_connection`` or ``asyncio.gather`` for branch queries,
+    and runs them serially.
     """
     import inspect
 
     src = inspect.getsource(get_aggregates)
-    assert "asyncio.gather(*_tasks, return_exceptions=True)" in src, (
-        "asyncio.gather() inside get_aggregates must pass "
-        "return_exceptions=True so every worker thread finishes before "
-        "the extra pool connections are released (F015 regression)."
+    assert "checkout_connection" not in src, (
+        "get_aggregates should not attempt to checkout extra connections "
+        "because temporary tables are connection-scoped."
     )
-    # Confirm the manual re-raise is present so a real exception still
-    # surfaces to the caller rather than getting silently swallowed.
-    assert "isinstance(part, BaseException)" in src and "raise part" in src, (
-        "gather(return_exceptions=True) must be paired with an explicit "
-        "BaseException re-raise so failures still propagate to the caller."
-    )
-    # Confirm the CancelledError shield is present (finding 018)
-    assert "CancelledError" in src, (
-        "asyncio.gather in get_aggregates must shield against CancelledError "
-        "so background threads finish before connections are released."
+    assert "asyncio.gather(" not in src, (
+        "get_aggregates should execute branch queries sequentially on the primary connection's runner."
     )
 
 

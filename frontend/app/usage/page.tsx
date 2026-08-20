@@ -62,7 +62,7 @@ export default function UsagePage() {
       title="System Usage"
       description="Estimate Fastly Object Storage and CDN logging costs."
       icon={ActivityIcon}
-      defaultInterval="1 hour"
+      defaultInterval="1 day"
     >
       {(props) => <UsagePageContent {...props} />}
     </ReportLayout>
@@ -93,10 +93,10 @@ function UsagePageContent({
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
 
-        // FOS Operations uses Fastly's /stats/aggregate which only supports
-        // hour/day granularity. Render a custom button group with just those
-        // two so the user sees no misleading 1s/1m buttons on this chart.
-        const fosOpsIntervalButtons = (
+        // FOS Operations, Bandwidth, and Log Activity use Fastly's /stats/* APIs
+        // which only support hour/day granularity. Render a custom button group
+        // with just those two so the user sees no misleading 1s/1m buttons.
+        const restictedIntervalButtons = (
           <ButtonGroup>
             {[
               { label: '1h', value: '1 hour' as const },
@@ -122,6 +122,8 @@ function UsagePageContent({
             })}
           </ButtonGroup>
         )
+
+        const fosOpsIntervalButtons = restictedIntervalButtons
 
         const { data: storage, isLoading: loadingStorage, isFetching: fetchingStorage, error: errorStorage } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, startTime, endTime],
@@ -164,6 +166,18 @@ function UsagePageContent({
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/usage/log-activity", { signal,
         params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: activityBy } }
+      })
+      return data
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+
+  const { data: rumBreakdown, isLoading: loadingRumBreakdown, isFetching: fetchingRumBreakdown, error: errorRumBreakdown } = useQuery({
+    queryKey: ['usage', 'rum-breakdown', activeServiceId, startTime, endTime],
+    queryFn: async ({ signal }) => {
+      const { data } = await client.GET("/api/usage/rum-breakdown", { signal,
+        params: { query: { start: startTime ?? undefined, end: endTime ?? undefined, by: 'day' } }
       })
       return data
     },
@@ -227,7 +241,7 @@ function UsagePageContent({
   const prefill = prefillFull ?? prefillRates
   const loadingPrefill = !prefillRates && !prefillFull
 
-  const isFetchingAny = fetchingStorage || fetchingOps || fetchingBw || fetchingActivity
+  const isFetchingAny = fetchingStorage || fetchingOps || fetchingBw || fetchingActivity || fetchingRumBreakdown
   const isLoadingInitial = loadingStorage || loadingOps || loadingBw || loadingActivity
 
   // ── Chart colours ──────────────────────────────────────────────────────────
@@ -353,6 +367,18 @@ function UsagePageContent({
                   <span>Live Storage:</span>
                   <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>
                 </div>
+                {(storage?.rum_bytes ?? 0) > 0 && (
+                  <div className="flex justify-between text-blue-700 dark:text-blue-400">
+                    <span>RUM Logs:</span>
+                    <strong>{formatBytes(storage?.rum_bytes ?? 0)}</strong>
+                  </div>
+                )}
+                {(storage?.regular_log_bytes ?? 0) > 0 && (
+                  <div className="flex justify-between">
+                    <span>Request Logs:</span>
+                    <strong className="text-foreground">{formatBytes(storage?.regular_log_bytes ?? 0)}</strong>
+                  </div>
+                )}
                 {(storage?.quarantine_bytes ?? 0) > 0 && (
                   <div className="flex justify-between">
                     <span>Quarantine:</span>
@@ -478,7 +504,7 @@ function UsagePageContent({
         <AnalyticsCard
           title="CDN Bandwidth"
           description="Egress bandwidth delivered by the CDN service fronting FOS"
-          headerAction={intervalButtons}
+          headerAction={restictedIntervalButtons}
           isLoading={loadingBw}
           isFetching={fetchingBw}
           error={errorBw as AnalyticsCardError | null}
@@ -506,7 +532,7 @@ function UsagePageContent({
         <AnalyticsCard
           title="Log Activity (Processed)"
           description="Log rows ingested and processed (with Fastly emission overlay)"
-          headerAction={intervalButtons}
+          headerAction={restictedIntervalButtons}
           isLoading={loadingActivity}
           isFetching={fetchingActivity}
           error={errorActivity as AnalyticsCardError | null}
@@ -516,6 +542,56 @@ function UsagePageContent({
         >
           <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
         </AnalyticsCard>
+
+        {rumBreakdown && (
+          <AnalyticsCard
+            title="Real User Monitoring (RUM) Operations"
+            description="RUM beacon volume and estimated FOS Class A operation cost"
+            isLoading={loadingRumBreakdown}
+            isFetching={fetchingRumBreakdown}
+            error={errorRumBreakdown as AnalyticsCardError | null}
+            isEmpty={!rumBreakdown?.data || rumBreakdown.data.length === 0}
+          >
+            <div className="space-y-4 p-4">
+              {rumBreakdown.total_beacons === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <p className="text-sm mb-2">No RUM beacons collected yet</p>
+                  <p className="text-xs">Once users visit your site with the RUM script installed, beacons will appear here</p>
+                  <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-950 rounded text-xs text-blue-900 dark:text-blue-100">
+                    Cost: ${rumBreakdown.class_a_rate_per_1k?.toFixed(3)} per 1,000 beacons (Class A operations)
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total Beacons</p>
+                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_beacons)}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {rumBreakdown.average_beacons_per_day?.toLocaleString()} / day avg
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Class A Operations</p>
+                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_estimated_class_a)}</p>
+                    <p className="text-xs text-muted-foreground mt-1">@${rumBreakdown.class_a_rate_per_1k?.toFixed(3)}/1k</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Estimated Cost</p>
+                    <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                      ${rumBreakdown.total_estimated_cost_usd?.toFixed(4)}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">This period</p>
+                  </div>
+                </div>
+              )}
+              {rumBreakdown.note && (
+                <div className="p-3 bg-muted/50 border rounded text-xs text-muted-foreground">
+                  {rumBreakdown.note}
+                </div>
+              )}
+            </div>
+          </AnalyticsCard>
+        )}
         </div>
 
       {/* ── Cost Estimator ─────────────────────────────────────────────────── */}

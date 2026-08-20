@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-20
+
+### Added
+
+- **Real User Monitoring (RUM) & Grafana Faro SDK Integration**: Added comprehensive real-user core web vitals tracking (LCP, FID, CLS, TTFB) with dedicated JSON beacon ingestion endpoints, parallel unpackers, and a self-hosted Faro SDK caching layer.
+- **Assets Shielding**: Built-in VCL and edge routing headers for Fastly Shielding optimizations, utilizing cryptographic edge-hop limits to scrub forged client-side edge IP headers.
+- **Declarative IaC Orchestration Engine**: Transactions-based cross-service reconciliation across Fastly KV Stores, Compute Scorer, and VCL targets.
+- **Remote Sharing Security**: Secure origin routing and SSL mapping for analyst login.
+
+### Changed
+
+- **Dashboard Query Performance**: Numeric and quantitative non-top-N fields are pruned from dashboard aggregates, avoiding heavy grouping overhead.
+- **Total Rows Count Optimization**: Global count query removes redundant IP checks when no explicit IP filter is set, leveraging fast metadata/index lookups to bypass full table scans.
+
+
 ## [2.3.0] - 2026-08-04
 
 ### Added

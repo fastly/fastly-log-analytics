@@ -520,6 +520,60 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     assert captured.get("seconds") == 600
 
 
+def test_sync_jobs_registers_rum_jobs_when_rum_enabled_on_root():
+    """RUM sync and commit jobs are registered when `rum_enabled` is True at the root level."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-root",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum_enabled": True,
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-root")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+    ):
+        s._sync_jobs()
+
+    assert "rum_sync_svc-rum-root" in s._job_ids
+    assert "rum_commit_svc-rum-root" in s._job_ids
+
+
+def test_sync_jobs_registers_rum_jobs_when_rum_enabled_nested():
+    """RUM sync and commit jobs are registered when `rum.enabled` is True in nested configuration."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-nested",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum": {"enabled": True},
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-nested")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+    ):
+        s._sync_jobs()
+
+    assert "rum_sync_svc-rum-nested" in s._job_ids
+    assert "rum_commit_svc-rum-nested" in s._job_ids
+
+
 # ── _log_and_add_progress ─────────────────────────────────────────────────
 
 
@@ -2408,12 +2462,16 @@ def test_check_disk_space_aborts_when_below_pct_floor(tmp_path):
     only 2% of 50 GB total — pct floor (3%) should still trip."""
     from collections import namedtuple
 
+    import backend.cron.scheduler as scheduler
     from backend.cron.scheduler import _check_disk_space
 
     Usage = namedtuple("usage", "total used free")
-    with patch(
-        "shutil.disk_usage",
-        return_value=Usage(total=50 * 1024**3, used=49 * 1024**3, free=1 * 1024**3),
+    with (
+        patch(
+            "shutil.disk_usage",
+            return_value=Usage(total=50 * 1024**3, used=49 * 1024**3, free=1 * 1024**3),
+        ),
+        patch.object(scheduler, "_DISK_FREE_HARD_FLOOR_PCT", 0.03),
     ):
         ok, msg = _check_disk_space(str(tmp_path), "svc", "sync")
     assert ok is False

@@ -258,7 +258,7 @@ def _log_and_add_progress(
 _DISK_FREE_HARD_FLOOR_BYTES = 500 * 1024 * 1024
 # Same idea as a percentage, for the (rare) case of a very small disk
 # where 500 MB is most of free. Whichever check trips first wins.
-_DISK_FREE_HARD_FLOOR_PCT = 0.03  # 3 %
+_DISK_FREE_HARD_FLOOR_PCT = 0.005  # 0.5 %
 
 
 def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[bool, str]:
@@ -635,6 +635,8 @@ class Scheduler:
             _run_share_audit_purge,
         )
         from backend.cron.jobs.optimize import _run_optimize
+        from backend.cron.jobs.rum_commit import _run_rum_commit
+        from backend.cron.jobs.rum_sync import _run_rum_sync
         from backend.cron.jobs.sync import _run_full_sweep, _run_gap_heal, _run_service_cron
 
         configs = svcconfig.list_configs()
@@ -734,6 +736,7 @@ class Scheduler:
                     _run_service_cron,
                     "interval",
                     seconds=interval_seconds,
+                    jitter=2 if interval_seconds >= 5 else 1,
                     start_date=None,
                     args=[service_id],
                     id=job_id,
@@ -760,6 +763,7 @@ class Scheduler:
                     _run_commit,
                     "interval",
                     minutes=commit_interval_mins,
+                    jitter=30,
                     args=[service_id],
                     id=commit_job_id,
                     max_instances=1,
@@ -772,6 +776,68 @@ class Scheduler:
                     commit_job_id,
                     commit_interval_mins,
                 )
+
+            # ── RUM sync job (ingest RUM beacons from FOS) ─────────────────────
+            # Only register if RUM is enabled for this service
+            rum_cfg = cfg.get("rum", {})
+            rum_enabled = bool(cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False))
+            if rum_enabled:
+                rum_sync_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))
+                rum_sync_job_id = f"rum_sync_{service_id}"
+                seen_ids.add(rum_sync_job_id)
+
+                if rum_sync_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(rum_sync_job_id)
+                        if job:
+                            job.reschedule("interval", seconds=rum_sync_interval_secs)
+                    except Exception:
+                        pass
+                else:
+                    self._sched.add_job(
+                        _run_rum_sync,
+                        "interval",
+                        seconds=rum_sync_interval_secs,
+                        args=[service_id],
+                        id=rum_sync_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[rum_sync_job_id] = rum_sync_job_id
+                    logger.info(
+                        "[scheduler] Registered RUM sync job %s (every %ds).", rum_sync_job_id, rum_sync_interval_secs
+                    )
+
+                # ── RUM commit job (compact RUM tables) ──────────────────────
+                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", commit_interval_mins)))
+                rum_commit_job_id = f"rum_commit_{service_id}"
+                seen_ids.add(rum_commit_job_id)
+
+                if rum_commit_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(rum_commit_job_id)
+                        if job:
+                            job.reschedule("interval", minutes=rum_commit_interval_mins)
+                    except Exception:
+                        pass
+                else:
+                    self._sched.add_job(
+                        _run_rum_commit,
+                        "interval",
+                        minutes=rum_commit_interval_mins,
+                        args=[service_id],
+                        id=rum_commit_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[rum_commit_job_id] = rum_commit_job_id
+                    logger.info(
+                        "[scheduler] Registered RUM commit job %s (every %dm).",
+                        rum_commit_job_id,
+                        rum_commit_interval_mins,
+                    )
 
             # ── Alerts evaluation job (Per Service) ───────────────────────────
             # See note above (analyst branch) on the no-alerts gate.
@@ -869,6 +935,7 @@ class Scheduler:
                     _run_local_compact,
                     "interval",
                     minutes=2,
+                    jitter=15,
                     args=[service_id],
                     id=lc_job_id,
                     max_instances=1,
@@ -890,6 +957,7 @@ class Scheduler:
                     _run_insights_prewarmer,
                     "interval",
                     seconds=240,
+                    jitter=15,
                     args=[service_id],
                     id=ip_job_id,
                     max_instances=1,
@@ -955,17 +1023,33 @@ class Scheduler:
                         rh_job_id,
                     )
 
-            # ── Weekly expire-snapshots job ───────────────────────────────────
+            # ── expire-snapshots job (hourly by default) ───────────────────────
+            # Was weekly (Sun 04:00 UTC), which produced a week-long performance
+            # sawtooth. metadata.json is read, parsed AND rewritten on EVERY
+            # commit, and it grows with the snapshot count — so between runs the
+            # per-commit cost climbs continuously. Observed 2026-08-13 on a
+            # service committing every 5 min: 1,401 snapshots / 1,987 KB
+            # metadata.json, commits taking 50-145s each; expiring dropped it to
+            # 391 / 358 KB. It had reached 4,579 snapshots before the 08-09 run.
+            #
+            # Running hourly holds the table at the ``keep_snapshot_days``
+            # steady state instead of letting it drift far above it. NOTE the
+            # floor is set by that WINDOW, not by this cadence: at ~288
+            # commits/day a 7-day window retains ~2,000 snapshots no matter how
+            # often this runs. Shrinking the window trades away time-travel
+            # recoverability — the 2026-08 rollback was recovered precisely
+            # because old metadata still existed — so it is operator-tunable
+            # (``cron_sync.keep_snapshot_days``) and stays at 7 by default.
             if compact_cfg.get("enabled", True):
                 exp_job_id = f"expire_{service_id}"
                 seen_ids.add(exp_job_id)
+                expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))
                 if exp_job_id not in self._job_ids:
                     self._sched.add_job(
                         _run_expire_snapshots,
-                        "cron",
-                        day_of_week="sun",
-                        hour=4,
-                        minute=0,  # Sunday 04:00 UTC
+                        "interval",
+                        minutes=expire_interval_mins,
+                        jitter=60,
                         args=[service_id],
                         id=exp_job_id,
                         max_instances=1,
@@ -973,7 +1057,22 @@ class Scheduler:
                         misfire_grace_time=3600,
                     )
                     self._job_ids[exp_job_id] = exp_job_id
-                    logger.info("🗑️  [scheduler] Registered expire-snapshots job %s (weekly Sun 04:00 UTC).", exp_job_id)
+                    logger.info(
+                        "🗑️  [scheduler] Registered expire-snapshots job %s (every %dm).",
+                        exp_job_id,
+                        expire_interval_mins,
+                    )
+                else:
+                    job = self._sched.get_job(exp_job_id)
+                    if job is not None:
+                        existing = getattr(getattr(job, "trigger", None), "interval", None)
+                        if existing is None or int(existing.total_seconds()) != expire_interval_mins * 60:
+                            job.reschedule("interval", minutes=expire_interval_mins)
+                            logger.info(
+                                "🗑️  [scheduler] Rescheduled expire-snapshots job %s to every %dm.",
+                                exp_job_id,
+                                expire_interval_mins,
+                            )
 
             # ── NGWAF bot sync job (per-service) ─────────────────────────────
             if svcconfig.get_ngwaf_workspace_id(service_id):
@@ -992,6 +1091,7 @@ class Scheduler:
                         _run_ngwaf_bot_sync,
                         "interval",
                         minutes=ngwaf_interval_mins,
+                        jitter=15,
                         args=[service_id],
                         id=ngwaf_job_id,
                         max_instances=1,
@@ -1057,6 +1157,7 @@ class Scheduler:
                 _run_rdns_enrichment,
                 "interval",
                 minutes=5,
+                jitter=15,
                 id=rdns_job_id,
                 max_instances=1,
                 coalesce=True,
@@ -1096,6 +1197,7 @@ class Scheduler:
                 _run_metric_snapshot,
                 "interval",
                 seconds=60,
+                jitter=5,
                 id=snapshot_id,
                 max_instances=1,
                 coalesce=True,

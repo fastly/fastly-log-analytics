@@ -432,6 +432,39 @@ def test_check_domain_accepts_valid_prefix():
     assert resp.json()["available"] is True
 
 
+def test_check_domain_custom_domain_available():
+    """Verify check-domain with is_custom=true passes full domain to _check_domain_available."""
+    with (
+        TestClient(app) as c,
+        patch(
+            "backend.routers.provision._check_domain_available",
+            return_value=(True, None),
+        ) as mock_check,
+    ):
+        resp = c.get("/api/provision/check-domain?prefix=my.custom.domain.com&is_custom=true")
+
+    assert resp.status_code == 200
+    assert resp.json()["available"] is True
+    mock_check.assert_called_once_with("my.custom.domain.com")
+
+
+def test_check_domain_custom_domain_taken():
+    """Verify check-domain with is_custom=true handles taken domain successfully."""
+    with (
+        TestClient(app) as c,
+        patch(
+            "backend.routers.provision._check_domain_available",
+            return_value=(False, "Domain already registered or in use"),
+        ) as mock_check,
+    ):
+        resp = c.get("/api/provision/check-domain?prefix=my.custom.domain.com&is_custom=true")
+
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False
+    assert resp.json()["reason"] == "Domain already registered or in use"
+    mock_check.assert_called_once_with("my.custom.domain.com")
+
+
 # ── /api/provision/terraform/preview + /export ─────────────────────────────
 
 
@@ -851,6 +884,137 @@ def test_ingest_uses_provided_keys_without_calling_fastly_api(tmp_path, monkeypa
     mock_ensure.assert_not_called()
 
 
+def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, monkeypatch):
+    """#1 audit finding: a re-run of /api/provision/ingest (analyst-join,
+    wizard re-run, key rotation) rebuilt ``state["rum"]`` from the request
+    body alone as ``{enabled, enabled_at}``, with no awareness of a
+    ``faro_version`` already pinned on disk. ``write_service_config``'s
+    preserved-key merge treats "rum" as present-in-state (the handler
+    always sets it when ``rum_enabled`` is true) and does a full overwrite,
+    so a re-run silently unpinned an already-RUM-enabled service — handing
+    the sync cron an unrequested version change and, via its adopt-default
+    self-heal branch, an unrequested Fastly VCL activation.
+
+    Pins: an ingest re-run with ``rum_enabled=True`` and no
+    ``rum.faro_version`` in the body must carry the on-disk pin (and its
+    persisted upload hashes) forward into ``state["rum"]`` unchanged.
+    """
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "rum_enabled": True,
+            "rum": {
+                "enabled": True,
+                "enabled_at": "2026-01-01T00:00:00Z",
+                "faro_version": "9.9.9",
+                "faro_content_hash": "existing-hash",
+                "faro_fos_etag_md5": "existing-etag",
+            },
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+                "rum_enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["rum"]["faro_version"] == "9.9.9"
+    assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
+    assert captured["state"]["rum"]["faro_fos_etag_md5"] == "existing-etag"
+
+
+def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch):
+    """Negative control for the fix above: an explicit ``rum.faro_version``
+    in the request body (a deliberate operator re-pin) must still win over
+    whatever is stored on disk — the preservation fallback only applies
+    when the body carries no pin at all."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "rum_enabled": True,
+            "rum": {"enabled": True, "faro_version": "9.9.9"},
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+                "rum_enabled": True,
+                "rum": {"faro_version": "1.0.0"},
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["rum"]["faro_version"] == "1.0.0"
+
+
 # ── /api/provision/ngwaf-workspaces ────────────────────────────────────────
 
 
@@ -1179,6 +1343,86 @@ def test_provision_execute_allows_cdn_domain_with_dns_unavailable_reason():
 
     # 200 + SSE (DNS error doesn't block the proceed)
     assert r.status_code == 200
+
+
+def test_provision_execute_threads_faro_version_into_rum_config():
+    """The wizard's RUM version picker (Task 7) must reach
+    cfg["rum"]["faro_version"] so the declarative generator can pin the
+    Faro Web SDK bundle for a brand-new service. Pinned because this field
+    was silently dropped (Pydantic default extra=ignore) before the
+    ProvisionExecuteRequest field existed — an operator's picker choice
+    would have had zero effect on the deployed service."""
+    captured = {}
+
+    def fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="x"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision", side_effect=fake_provision),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
+        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        r = c.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc-1",
+                "fos_bucket_name": "valid-bucket",
+                "rum_enabled": True,
+                "faro_version": "1.2.3",
+            },
+        )
+
+    assert r.status_code == 200
+    assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
+
+
+def test_provision_execute_defaults_faro_version_when_operator_does_not_pin_one():
+    """No version chosen (registry outage, or operator skipped the picker)
+    must NOT leave cfg["rum"] unpinned (F-2 audit finding): the generated
+    tracker JS unconditionally requests /js/faro-sdk.js with no CDN
+    fallback, so an unpinned service's VCL would either omit that route
+    entirely or route it nowhere resolvable — a permanent 404 for every RUM
+    visitor. Provisioning must resolve DEFAULT_FARO_VERSION itself, exactly
+    like enable_rum() already does for the enable-after-the-fact path."""
+    from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
+    captured = {}
+
+    def fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="x"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision", side_effect=fake_provision),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.jobs.metadata._run_metadata_sync"),
+        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.metadata.record_audit"),
+    ):
+        r = c.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc-1",
+                "fos_bucket_name": "valid-bucket",
+                "rum_enabled": True,
+            },
+        )
+
+    assert r.status_code == 200
+    assert captured["cfg"]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
 
 def test_ngwaf_workspaces_empty_list_with_automation_token_returns_hint():
@@ -1794,3 +2038,21 @@ def test_object_storage_enabled_delegates_to_product_enabled():
     with patch("backend.provision.fos_setup.product_enabled", return_value=True) as m:
         assert fos_setup.object_storage_enabled("tok") is True
     assert m.call_args.args == ("tok", "object_storage")
+
+
+def test_reconcile_takes_credentials_in_body_not_query_string():
+    """A Fastly API token in a query string lands in every access log, proxy
+    log and Referer along the way. The endpoint must accept service_id/token
+    in the request body, and must NOT declare them as query parameters."""
+    params = app.openapi()["paths"]["/api/provision/reconcile"]["post"].get("parameters", [])
+    assert [p["name"] for p in params if p.get("in") == "query"] == []
+    assert "requestBody" in app.openapi()["paths"]["/api/provision/reconcile"]["post"]
+
+
+def test_reconcile_rejects_missing_credentials():
+    """Empty body must 400 rather than starting a reconcile thread with no token."""
+    client = TestClient(app)
+    with patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_reconcile:
+        response = client.post("/api/provision/reconcile", json={})
+    assert response.status_code == 400
+    mock_reconcile.assert_not_called()

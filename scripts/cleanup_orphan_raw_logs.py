@@ -3,6 +3,8 @@
 Cleanup orphaned raw log files in Fastly Object Storage (FOS).
 Deletes any .gz files in the FOS bucket that have already been recorded as
 ingested in the service's SQLite metadata database.
+
+Also includes a utility function to cleanup legacy logging endpoints from Fastly services.
 """
 
 import logging
@@ -95,8 +97,44 @@ def cleanup_orphans(service_id: str):
     logger.info(f"Successfully pruned {deleted_count} orphaned raw files from FOS.")
 
 
+def cleanup_legacy_logging_endpoints(service_id: str, fastly_token: str):
+    """Remove legacy logging endpoints from a Fastly service.
+
+    Searches for and removes endpoints matching these legacy naming patterns:
+    - "Fastly Object Storage Logs"
+    - "Fastly Log Analytics" (old name before RUM split)
+    - "Fastly RUM Logs" (old name)
+
+    These have been superseded by:
+    - "Fastly Log Analytics Request Logs"
+    - "Fastly Log Analytics RUM Logs"
+
+    NOTE: This function is now integrated into the automatic reconciliation
+    control loop via backend/provision/legacy_endpoint_cleanup.py. Manual
+    invocation via this script is only needed for cleanup outside of
+    reconciliation (e.g., legacy services that never went through the
+    new reconciler flow).
+    """
+    from backend.provision.legacy_endpoint_cleanup import (
+        cleanup_legacy_logging_endpoints as _cleanup_impl,
+    )
+
+    logger.info(f"Running legacy endpoint cleanup for service {service_id}...")
+    _cleanup_impl(service_id, fastly_token, status_cb=logger.info)
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        logger.error("Usage: python scripts/cleanup_orphan_raw_logs.py <service_id>")
+        logger.error("Usage:")
+        logger.error("  python scripts/cleanup_orphan_raw_logs.py <service_id>")
+        logger.error("  python scripts/cleanup_orphan_raw_logs.py <service_id> --cleanup-endpoints <fastly_token>")
         sys.exit(1)
-    cleanup_orphans(sys.argv[1])
+
+    service_id = sys.argv[1]
+
+    # Check if cleanup-endpoints flag is present
+    if len(sys.argv) >= 4 and sys.argv[2] == "--cleanup-endpoints":
+        fastly_token = sys.argv[3]
+        cleanup_legacy_logging_endpoints(service_id, fastly_token)
+    else:
+        cleanup_orphans(service_id)

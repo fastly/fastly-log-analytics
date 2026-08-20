@@ -28,6 +28,8 @@ import {
   Play,
   TrendingUp,
   X,
+  Eye,
+  Layers,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -54,14 +56,7 @@ const FilterBar = dynamic(
   () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
 )
 
-// DataWindowBanner surfaces when the selected range falls outside the
-// retained log extents — sibling of FilterBar, scoped to the same pages.
-// Reuses the `['log-extents', activeServiceId]` query that FilterBar
-// already populates, so mounting is free on the dashboard routes.
-const DataWindowBanner = dynamic(
-  () => import('@/components/DataWindowBanner').then(m => ({ default: m.DataWindowBanner })),
-  { ssr: false },
-)
+
 
 // ActiveFiltersBanner replaces the hidden FilterBar on pages that don't
 // apply filters (insights / alerts / admin / logs / share-login / raw-
@@ -109,10 +104,10 @@ const SERVICE_NAVIGATION = [
   { name: 'Performance', href: '/performance', icon: Timer, analystVisible: true },
   { name: 'Origin', href: '/origin', icon: Server, analystVisible: true },
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
-  { name: 'Charts', href: '/charts', icon: BarChart3, analystVisible: true },
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
   { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
+  { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
@@ -283,9 +278,13 @@ function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, active
 export function AppLayout({
   children,
   initialCollapsed = false,
+  ssrActiveServiceId,
+  ssrIsRumEnabled,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
+  ssrActiveServiceId?: string | null
+  ssrIsRumEnabled?: boolean
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -394,12 +393,17 @@ export function AppLayout({
   // expiry or be booted by an admin).
   const { logout, isLoggingOut } = useAnalystLogout()
 
-  const activeSvc = bootstrapData?.services?.find(s => s.service_id === activeServiceId)
+  const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
+  const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
   const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
   const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
+  const hasRum = activeServiceId ? (activeSvc?.rum_enabled ?? false) : (ssrIsRumEnabled ?? activeSvc?.rum_enabled ?? false)
+
+  const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
     if (item.requiresCmcd && !hasCmcd) return false
+    if (item.requiresRum && !hasRum) return false
     if (isShareAnalyst) {
       // share analysts see a tighter subset; default to analystVisible when
       // an item doesn't have a share-specific override.
@@ -416,7 +420,7 @@ export function AppLayout({
   // from the wizard completion before bootstrap has had a chance to respond.
   const hasServices = isSuccess
     ? !!(bootstrapData?.services?.length)
-    : services.length > 0 || !!activeServiceId
+    : services.length > 0 || !!activeServiceId || !!ssrActiveServiceId
 
   const needsLogin = bootstrapSettings?.needs_login === true
 
@@ -598,13 +602,21 @@ export function AppLayout({
     return (
       <div className="flex h-screen items-center justify-center bg-background p-6">
         <div className="max-w-sm text-center space-y-4 p-6 rounded-lg border bg-card shadow-sm">
-          <h2 className="text-lg font-semibold">Can&apos;t reach the server</h2>
+          <h2 className="text-lg font-semibold">Reconnecting…</h2>
           <p className="text-sm text-muted-foreground">
-            We couldn&apos;t load the app shell. Check your connection and try
-            again.
+            We can&apos;t reach the server right now. This is normal during a
+            deploy — the page recovers on its own as soon as it&apos;s back.
           </p>
-          <Button onClick={() => { void refetchBootstrap() }} variant="default">
-            Retry
+          <div
+            className="flex items-center justify-center gap-2 text-xs text-muted-foreground"
+            role="status"
+            aria-live="polite"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            <span>Retrying automatically</span>
+          </div>
+          <Button onClick={() => { void refetchBootstrap() }} variant="outline" size="sm">
+            Retry now
           </Button>
         </div>
       </div>
@@ -682,7 +694,7 @@ export function AppLayout({
       >
         <div className="flex h-14 items-center justify-center border-b px-2 py-2 shrink-0">
           <Link
-            href={hasServices ? (activeServiceId ? `/dashboard?service=${activeServiceId}` : "/dashboard") : "/admin"}
+            href={hasServices ? (navActiveServiceId ? `/dashboard?service=${navActiveServiceId}` : "/dashboard") : "/admin"}
             prefetch={false}
             className="flex flex-col items-center justify-center hover:opacity-80 transition-opacity mt-1"
             aria-label="Fastly Log Analytics — home"
@@ -708,7 +720,7 @@ export function AppLayout({
                 isActive={pathname === item.href}
                 disabled={!hasServices}
                 collapsed={sidebarCollapsed}
-                activeServiceId={activeServiceId}
+                activeServiceId={navActiveServiceId}
                 router={router}
               />
             ))}
@@ -846,7 +858,6 @@ export function AppLayout({
           </div>
         </header>
         {!hideFilterBar && <FilterBar />}
-        {!hideFilterBar && <DataWindowBanner />}
         {/* On pages where the FilterBar is hidden (insights / alerts /
             admin / logs / share-login / raw-query), surface any filters
             the user previously set on a dashboard / query page so they
@@ -877,7 +888,12 @@ export function AppLayout({
               !hasServices short-circuit stays so the onboarding
               redirect at lines 163-188 has time to fire without
               flashing a half-loaded page. */}
-          {!hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? (
+          {isLoading && !bootstrapData ? (
+            <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
+              <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
+              Loading app configuration…
+            </div>
+          ) : !hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login') ? (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground" role="status">
               <Loader2 className="animate-spin mr-2 h-4 w-4" aria-hidden="true" />
               Setting up your workspace…
@@ -922,8 +938,8 @@ export function AppLayout({
               <nav className="grid gap-1 p-2" aria-label="Primary">
                 {visibleNav.map((item) => {
                   const Icon = item.icon
-                  const finalHref = activeServiceId
-                    ? `${item.href}?service=${activeServiceId}`
+                  const finalHref = navActiveServiceId
+                    ? `${item.href}?service=${navActiveServiceId}`
                     : item.href
                   const isActive = pathname === item.href
                   const disabled = !hasServices
@@ -956,8 +972,8 @@ export function AppLayout({
                 <nav className="grid gap-1" aria-label="System">
                   {visibleSystemNav.map((item) => {
                     const Icon = item.icon
-                    const finalHref = activeServiceId
-                      ? `${item.href}?service=${activeServiceId}`
+                    const finalHref = navActiveServiceId
+                      ? `${item.href}?service=${navActiveServiceId}`
                       : item.href
                     const isActive = pathname === item.href
                     return (

@@ -11,30 +11,46 @@ export function extractApiError(error: unknown): string {
   if (!error) return 'Unknown error'
   if (typeof error === 'string') return error
   if (error instanceof Error && error.message) return error.message
-  const e = error as Record<string, any>
+  const e = error as {
+    detail?: unknown;
+    message?: unknown;
+    error?: unknown;
+    errors?: unknown;
+  }
   if (e.detail) {
     if (typeof e.detail === 'string') return e.detail
-    if (Array.isArray(e.detail))
-      return e.detail.map((err: any) => `${err.loc?.at(-1) ?? 'Field'}: ${err.msg}`).join(', ')
-    // Legacy multi-message validation: {errors: ["msg1", "msg2"]}
-    if (Array.isArray(e.detail.errors)) return e.detail.errors.join(', ')
-    // Canonical ``validation_failed`` helper output: {error: code, messages: [...]}
-    // Prefer the human-readable messages array over the machine code when
-    // both are present — the messages are what the operator can act on.
-    if (Array.isArray(e.detail.messages) && e.detail.messages.length > 0) {
-      return e.detail.messages.join(', ')
+    if (Array.isArray(e.detail)) {
+      return (e.detail as Array<{ loc?: unknown[]; msg?: unknown }>).map((err) => {
+        const field = Array.isArray(err.loc) && err.loc.length > 0 ? String(err.loc[err.loc.length - 1]) : 'Field'
+        const msg = typeof err.msg === 'string' ? err.msg : 'Invalid value'
+        return `${field}: ${msg}`
+      }).join(', ')
     }
-    // Unified envelope shape from backend.utils.router_utils.make_error:
-    // {error: code, message: human-readable, error_id?: ...}. Prefer the
-    // human-readable message; fall back to the machine code so callers
-    // without a message still surface something actionable.
-    if (typeof e.detail.message === 'string' && e.detail.message) return e.detail.message
-    if (e.detail.error) return String(e.detail.error)
+    if (typeof e.detail === 'object' && e.detail !== null) {
+      const detailObj = e.detail as {
+        errors?: unknown;
+        messages?: unknown;
+        message?: unknown;
+        error?: unknown;
+      }
+      if (Array.isArray(detailObj.errors)) {
+        return detailObj.errors.map(String).join(', ')
+      }
+      if (Array.isArray(detailObj.messages) && detailObj.messages.length > 0) {
+        return detailObj.messages.map(String).join(', ')
+      }
+      if (typeof detailObj.message === 'string' && detailObj.message) {
+        return detailObj.message
+      }
+      if (detailObj.error) {
+        return String(detailObj.error)
+      }
+    }
     return JSON.stringify(e.detail)
   }
   if (typeof e.message === 'string' && e.message) return e.message
   if (e.error) return String(e.error)
-  if (Array.isArray(e.errors)) return e.errors.join(', ')
+  if (Array.isArray(e.errors)) return e.errors.map(String).join(', ')
   try { return JSON.stringify(error) } catch { return 'Unknown error' }
 }
 
@@ -106,6 +122,12 @@ export function adminFetch(
       headers.set("x-service-id", sid)
     }
   } catch { /* SSR pre-hydration — fall through without the header */ }
+  try {
+    const debug = useDebugStore.getState()
+    if ((debug.enabled || debug.apiCallsEnabled) && !headers.has("x-debug-responses")) {
+      headers.set("x-debug-responses", "1")
+    }
+  } catch { /* SSR pre-hydration — fall through without the header */ }
   return fetch(input, { ...init, headers })
 }
 
@@ -147,6 +169,13 @@ const SERVICELESS_PATH_PREFIXES = [
   // forever (its query aborts with NO_SERVICE and the panel only checks
   // !data). The prefix also covers the /{source_id}/refresh subpath.
   "/api/admin/bot-sources",
+  // The provisioning wizard's Faro version picker (StorageStep) queries
+  // this for the Fastly service id chosen a few steps earlier — before
+  // /api/provision/execute has ever run, so there is no service config on
+  // disk yet and (on a fresh install with zero services) no active service
+  // at all. Match on the route suffix rather than a /api/services prefix so
+  // every OTHER service-scoped route still aborts without one.
+  "/rum/versions",
 ];
 
 // 403 error codes that indicate the session itself is dead (not just

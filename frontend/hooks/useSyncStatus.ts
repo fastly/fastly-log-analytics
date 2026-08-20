@@ -1,6 +1,7 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { client } from '@/lib/api'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
@@ -22,20 +23,9 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  * here prevents new callers from re-introducing those defaults.
  *
  * Contract:
- * - `skip_fos: true` because we never need the live FOS bucket scan
- *   on the page-shell path — the data we want (`latest_log_at`,
- *   `local_rows`) is in the local metadata.
- * - `staleTime: 60_000`: status changes every cron tick (~minute);
- *   60 s is fresh enough for a header badge.
- * - `refetchInterval: 5 * 60_000`: pure safety net. The primary
- *   update path is the `/api/sync-status/stream` SSE channel
- *   (wired via `useAdminEventStream` in SyncStatusBadge), which
- *   pushes a fresh snapshot within seconds of every cron tick. The
- *   5-minute poll only covers cases where the stream dropped
- *   silently (proxy timeout missed by keepalive, OS network blip)
- *   so the badge never goes more than 5 min stale even with no SSE.
- * - `refetchOnWindowFocus: false`: focus is not a signal that the
- *   sync state changed.
+ * - `staleTime`: 1 minute (allows the event stream in the layout to
+ *   push updates, falling back to pull if the WebSocket dies).
+ * - `refetchInterval`: 5 minutes (backup pull on a busy page).
  * - `retry: false`: the endpoint is admin-only; analyst sessions
  *   always 403. The badge degrades gracefully when status is null,
  *   so a one-shot failure (analyst permanent, admin transient) is
@@ -46,6 +36,7 @@ export type SyncStatus = components['schemas']['SyncStatusResponse']
  */
 export function useSyncStatus() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const queryClient = useQueryClient()
 
   // Perf audit Phase D-2: useBootstrap now seeds the
   // ['sync-status', service_id] cache from the bootstrap response on
@@ -58,6 +49,23 @@ export function useSyncStatus() {
   // any analyst fetch is a guaranteed 403 — skip it.
   const isAnalyst = useIsAnalyst()
 
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (activeServiceId) {
+      const existing = queryClient.getQueryData(['sync-status', activeServiceId])
+      if (existing === undefined) {
+        queryClient.setQueryData(['sync-status', activeServiceId], null)
+      }
+      queueMicrotask(() => {
+        setReady(true)
+      })
+    } else {
+      queueMicrotask(() => {
+        setReady(false)
+      })
+    }
+  }, [activeServiceId, queryClient])
+
   return useQuery({
     queryKey: ['sync-status', activeServiceId],
     queryFn: async ({ signal }) => {
@@ -68,7 +76,7 @@ export function useSyncStatus() {
       if (error) throw error
       return data as SyncStatus
     },
-    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst,
+    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,

@@ -68,7 +68,7 @@ export function RealtimeMetricCard({
       className={cn(
         'relative overflow-hidden transition-colors',
         levelClasses[level],
-        dimmed && 'opacity-50'
+        dimmed && 'border-dashed border-muted-foreground/40 bg-muted/5'
       )}
     >
       <CardHeader className="relative px-4 pt-4 pb-0">

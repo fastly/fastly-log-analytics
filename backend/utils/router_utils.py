@@ -64,7 +64,7 @@ def require_json_content_type(req: Request) -> None:
 #    SSE correctly via ``flush_interval -1`` in the Caddyfile, but we
 #    set the header anyway in case the deployment topology changes.
 #
-# Pass via ``EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)``.
+# Pass via ``EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)``.
 SSE_PASSTHROUGH_HEADERS: dict[str, str] = {
     "Surrogate-Control": "no-store",
     "Cache-Control": "private, no-store, no-transform",

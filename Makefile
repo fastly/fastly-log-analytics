@@ -54,6 +54,9 @@ test:
 test-v:
 	uv run pytest -v
 
+test-reconciler:
+	uv run pytest tests/backend/provision/declarative/ -v --cov=backend/provision/declarative --cov-fail-under=95
+
 lint:
 	uv run ruff check .
 

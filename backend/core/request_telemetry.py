@@ -33,8 +33,11 @@ module without paying for SDK setup.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
+
+logger = logging.getLogger(__name__)
 import time
 from contextlib import contextmanager
 from typing import Any
@@ -255,6 +258,31 @@ class RequestTelemetry:
                 elapsed_ms = round((time.monotonic() - t0) * 1000, 2)
                 span.set_attribute("app.section.elapsed_ms", elapsed_ms)
                 self._section_timings.append({"section": name, "elapsed_ms": elapsed_ms})
+
+                try:
+                    from backend.utils.telemetry import _RECORDING_TELEMETRY, get_page_load_id
+
+                    plid = get_page_load_id()
+                    if plid:
+                        token = _RECORDING_TELEMETRY.set(True)
+                        try:
+                            from backend import config as svcconfig
+
+                            sid = svcconfig.get_active_service_id()
+                            if sid:
+                                from backend.core.metadata import usage_log
+
+                                usage_log.log_telemetry_section(
+                                    service_id=sid,
+                                    page_load_id=plid,
+                                    request_id="unknown",
+                                    section_name=name,
+                                    duration_ms=elapsed_ms,
+                                )
+                        finally:
+                            _RECORDING_TELEMETRY.reset(token)
+                except Exception as e:
+                    logger.debug("Failed to record section to SQLite telemetry: %s", e)
 
     # ── Call / query attribution (mirrors backend.utils.telemetry API) ────
 

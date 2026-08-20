@@ -520,6 +520,94 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
     assert "my_custom" in saved_names, "non-scoring remote custom_field was wrongly stripped"
 
 
+def test_import_reinjects_cmcd_fields_when_cmcd_enabled():
+    """REGRESSION: 2026-08-12 SE-demo incident — the sibling of the scoring
+    case above, for CMCD's 14 ``cmcd_*`` fields. A remote admin_state.json
+    written before CMCD was enabled (or by a host without it) carries no
+    ``cmcd_*`` entries, and ``import_admin_state`` used to re-inject only the
+    scoring canon — so every metadata_sync tick stripped CMCD from the local
+    config. The generated log format then dropped the CMCD fields while the
+    extraction VCL stayed installed, and every ``cmcd_*`` column ingested
+    empty."""
+    src = _src(cdn_url="https://cdn-test.fastly.net")
+
+    remote_payload = json.dumps(
+        {
+            "_views": [],
+            "_audit_logs": [],
+            "custom_fields": [
+                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        }
+    ).encode("utf-8")
+
+    cfg_mock = {
+        "cmcd": {"enabled": True, "mode": "query_string", "version": 1},
+        "log_fields": {
+            "schema_version": 2,
+            "custom_fields": [
+                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        },
+    }
+
+    saved = {}
+
+    with (
+        patch("backend.state_sync.get_source_for_service", return_value=src),
+        patch("backend.state_sync._cdn_get", return_value=remote_payload),
+        patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
+        patch("backend.state_sync.svcconfig.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
+    ):
+        from backend.state_sync import import_admin_state
+
+        import_admin_state("svc1")
+
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+
+    saved_names = {cf["name"] for cf in saved["cfg"]["log_fields"]["custom_fields"]}
+    for name in _CMCD_FIELD_NAMES:
+        assert name in saved_names, f"CMCD field {name!r} missing after import_admin_state"
+    assert "my_custom" in saved_names, "non-CMCD remote custom_field was wrongly stripped"
+
+
+def test_import_strips_cmcd_fields_when_cmcd_disabled():
+    """With CMCD off locally, remote cmcd_* entries must not be adopted."""
+    src = _src(cdn_url="https://cdn-test.fastly.net")
+
+    remote_payload = json.dumps(
+        {
+            "_views": [],
+            "_audit_logs": [],
+            "custom_fields": [
+                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        }
+    ).encode("utf-8")
+
+    cfg_mock = {"log_fields": {"schema_version": 2, "custom_fields": []}}
+
+    saved = {}
+
+    with (
+        patch("backend.state_sync.get_source_for_service", return_value=src),
+        patch("backend.state_sync._cdn_get", return_value=remote_payload),
+        patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
+        patch("backend.state_sync.svcconfig.save_config", side_effect=lambda sid, cfg: saved.update({"cfg": cfg})),
+        patch("backend.core.metadata.replace_audit_for_service"),
+        patch("backend.core.metadata.replace_views_for_service"),
+    ):
+        from backend.state_sync import import_admin_state
+
+        import_admin_state("svc1")
+
+    saved_names = {cf["name"] for cf in saved["cfg"]["log_fields"]["custom_fields"]}
+    assert saved_names == {"my_custom"}
+
+
 def test_get_scoring_matrix_key_construction():
     """scoring_matrix.json lives next to admin_state.json under iceberg/meta/."""
     from backend.state_sync import get_scoring_matrix_key

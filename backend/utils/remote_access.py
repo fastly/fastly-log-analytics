@@ -91,6 +91,12 @@ _UNAUTH_ANALYST_PATHS = {
     # /share-login. The bootstrap endpoint itself manually validates the
     # session cookie and returns a stub response when absent.
     "/api/bootstrap",
+    # Public RUM assets and beacon endpoints
+    "/js/rum.js",
+    "/js/faro-sdk.js",
+    "/rum-beacon",
+    "/api/web-vitals",
+    "/api/ux-events",
 }
 
 # Path prefixes that are EXPLICITLY blocked for analysts even with a valid
@@ -170,6 +176,29 @@ _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
     "/evaluation/per-reason",  # N-5: per-reason evaluation breakdown (same reasoning as /dashboard)
 )
 
+# RUM sub-routes that mutate provisioning or disclose the operator's pinned
+# Faro Web SDK / enable-state configuration — same sensitivity class as the
+# scoring-suffix gate above. Mirrors that gate's shape: any path containing
+# "/rum/" AND ending with one of these suffixes is admin-only.
+# /rum/status is intentionally NOT listed: the RUM page is analystVisible
+# (frontend/components/AppLayout.tsx) and gates its entire body on this
+# endpoint, so blocking it wholesale made the analyst RUM page permanently
+# dead (F1 audit finding). The route itself (backend/routers/rum.py)
+# projects the response down to {enabled, enabled_at} for an analyst
+# caller — the analyst-safe sibling shape of /api/log-extents vs
+# /api/sync-status — and keeps deployed_vcl_sha / current_vcl_sha /
+# vcl_drift admin-only. /rum/beacon-health, /rum/analytics, and
+# /rum/live-events are also NOT listed — they're read-only beacon
+# telemetry with no operator-config disclosure, same sensitivity class as
+# the scoring analytics reads that stay open per the comment on
+# _ANALYST_BLOCKED_SCORING_SUFFIXES.
+_ANALYST_BLOCKED_RUM_SUFFIXES: tuple[str, ...] = (
+    "/enable",  # mutates deployed edge configuration
+    "/disable",  # mutates deployed edge configuration
+    "/versions",  # discloses the operator's pinned Faro Web SDK version
+    "/upgrade",  # mutates deployed edge configuration
+)
+
 # POST/PUT/PATCH/DELETE paths that analysts CAN reach despite the read-only
 # gate, because the verb-based check is a blunt instrument: most of this
 # app's read endpoints use POST so they can accept JSON filter bodies. List
@@ -196,6 +225,7 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/charts/",
     "/api/web-vitals",  # POST /api/web-vitals — client perf telemetry
     "/api/ux-events",  # POST /api/ux-events — DataTable column reorders + sibling UX signals
+    "/api/assets/",  # POST /api/assets/aggregates — assets/shield read-only query
 )
 
 # Pure fire-and-forget telemetry beacons. These can fire from a backgrounded
@@ -273,6 +303,11 @@ _ADMIN_TOKEN_EXEMPT_PATHS = {
     # second-factor gate on the admin loopback branch.
     "/api/web-vitals",
     "/api/ux-events",
+    "/api/services/rum-beacon",
+    # Public RUM assets and beacon endpoints
+    "/js/rum.js",
+    "/js/faro-sdk.js",
+    "/rum-beacon",
 }
 
 
@@ -410,15 +445,17 @@ def _local_host_allowed(host_header: str) -> bool:
     base = host_header.split(":")[0].lower()
     if _is_private_or_loopback(base):
         return True
-    return base in _LOCAL_HOST_ALLOWLIST
+    return "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST
 
 
 def _remote_host_allowed(host_header: str) -> bool:
-    mgr = get_tunnel_manager()
-    state = mgr.state
     if not host_header:
         return False
     base = host_header.split(":")[0].lower()
+    if "*" in _LOCAL_HOST_ALLOWLIST or base in _LOCAL_HOST_ALLOWLIST:
+        return True
+    mgr = get_tunnel_manager()
+    state = mgr.state
     candidates: list[str] = []
     if state.public_endpoint:
         from urllib.parse import urlparse
@@ -462,7 +499,12 @@ def _is_blocked_path(path: str) -> bool:
          ends with one of ``_ANALYST_BLOCKED_SCORING_SUFFIXES`` is admin-only.
          The "/scoring/" containment check keeps analyst-needed reads like
          /scoring/labels and /scoring/sessions/<sid>/events accessible.
-      4. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
+      4. RUM suffix gate: same shape as #3 — any path that contains "/rum/"
+         AND ends with one of ``_ANALYST_BLOCKED_RUM_SUFFIXES`` is
+         admin-only. Keeps /rum/status, /rum/beacon-health, /rum/analytics,
+         and /rum/live-events accessible (the route layer projects
+         /rum/status down to an analyst-safe body).
+      5. Regex match against ``_ANALYST_BLOCKED_SUBPATH_REGEX`` for routes
          that embed a path parameter (e.g. /api/services/{id}/lake-info).
 
     Trailing slashes are normalized before matching so an attacker cannot
@@ -483,6 +525,8 @@ def _is_blocked_path(path: str) -> bool:
         if normalized == sp or normalized.startswith(sp + "/") or normalized.startswith(sp + "?"):
             return True
     if "/scoring/" in normalized and normalized.endswith(_ANALYST_BLOCKED_SCORING_SUFFIXES):
+        return True
+    if "/rum/" in normalized and normalized.endswith(_ANALYST_BLOCKED_RUM_SUFFIXES):
         return True
     if any(pat.fullmatch(normalized) for pat in _ANALYST_BLOCKED_SUBPATH_REGEX):
         return True
@@ -658,7 +702,26 @@ async def _strip_analyst_envelope(response: Response, analyst_session: object | 
         )
     changed = False
     if isinstance(data, dict):
-        for k in _ANALYST_STRIPPED_ENVELOPE_KEYS:
+        try:
+            from backend.core.share_db.settings import get_setting
+
+            q_vis = get_setting("query_debug_visibility", "disabled")
+            a_vis = get_setting("api_call_debug_visibility", "disabled")
+            analyst_query_enabled = q_vis in ("analysts", "both")
+            analyst_api_enabled = a_vis in ("analysts", "both")
+        except Exception:
+            analyst_query_enabled = False
+            analyst_api_enabled = False
+
+        to_strip: list[str] = []
+        if not analyst_query_enabled:
+            to_strip.extend(("_debug_queries", "debug_queries", "_debug_sqlite", "debug_sqlite"))
+        if not analyst_api_enabled:
+            to_strip.extend(("_debug_calls", "debug_calls"))
+        if not (analyst_query_enabled or analyst_api_enabled):
+            to_strip.append("_is_cached")
+
+        for k in to_strip:
             if k in data:
                 data.pop(k)
                 changed = True

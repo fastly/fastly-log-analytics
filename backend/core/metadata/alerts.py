@@ -12,7 +12,7 @@ from backend.core.metadata.base import db_path, get_con
 _ALERT_COLUMNS = (
     "id, service_id, name, category, metric, evaluation_type, operator, threshold, "
     "window_min, comparison_period_min, status_codes, webhook_url, enabled, "
-    "last_triggered_at, created_at, evaluation_scope"
+    "last_triggered_at, created_at, evaluation_scope, channels_json, zscore_threshold, baseline_period_days"
 )
 
 # Strip every non-[A-Za-z0-9_] char from the service_id before splicing it
@@ -44,6 +44,9 @@ def _row_to_alert(r: sqlite3.Row) -> dict:
         "last_triggered_at": r["last_triggered_at"],
         "created_at": r["created_at"],
         "evaluation_scope": r["evaluation_scope"] or "all",
+        "channels": json.loads(r["channels_json"]) if r["channels_json"] else [],
+        "zscore_threshold": r["zscore_threshold"],
+        "baseline_period_days": r["baseline_period_days"],
     }
 
 
@@ -143,8 +146,8 @@ def save_alert(service_id: str, alert) -> dict:
         """
         INSERT INTO alerts (id, service_id, name, category, metric, evaluation_type,
             operator, threshold, window_min, comparison_period_min, status_codes,
-            webhook_url, enabled, evaluation_scope)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            webhook_url, enabled, evaluation_scope, channels_json, zscore_threshold, baseline_period_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             service_id = excluded.service_id,
             name = excluded.name,
@@ -158,7 +161,10 @@ def save_alert(service_id: str, alert) -> dict:
             status_codes = excluded.status_codes,
             webhook_url = excluded.webhook_url,
             enabled = excluded.enabled,
-            evaluation_scope = excluded.evaluation_scope
+            evaluation_scope = excluded.evaluation_scope,
+            channels_json = excluded.channels_json,
+            zscore_threshold = excluded.zscore_threshold,
+            baseline_period_days = excluded.baseline_period_days
         """,
         (
             alert_id,
@@ -175,6 +181,11 @@ def save_alert(service_id: str, alert) -> dict:
             alert.webhook_url,
             1 if alert.enabled else 0,
             alert.evaluation_scope,
+            json.dumps([c if isinstance(c, dict) else c.model_dump() for c in alert.channels])
+            if alert.channels
+            else "[]",
+            alert.zscore_threshold,
+            alert.baseline_period_days,
         ),
     )
     con.commit()

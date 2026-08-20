@@ -97,37 +97,85 @@ def query_endpoint(
     # tombstone-style swap (no cached SQL points at it).
     from backend.core.iceberg import execute_with_stale_view_retry
 
-    def _run(con):
-        return repo.execute_query(
-            con=con,
-            src=ctx.source,
-            sql=sql,
-            max_rows=req.max_rows,
-            want_explain=req.explain,
-            session_id=audit_session_id,
-            service_id=ctx.service_id,
-            time_filter=time_filter,
-            mask_ips=mask_ips,
-        )
+    # Resolve active source and connection based on dataset.
+    # For RUM datasets, checkout isolated RUM connection and source.
+    if req.dataset != "logs":
+        from backend.core.duckdb import rum_source_for
+        from backend.deps import _ConnectionHolder
 
-    for attempt in (1, 2):
+        rum_source = rum_source_for(ctx.source)
+        holder = _ConnectionHolder(rum_source, read_only=True)
         try:
-            return execute_with_stale_view_retry(ctx.con, ctx.source, _run)
-        except PermissionError as e:
-            # SQL validator gate — message is controlled ("operation X not
-            # permitted on table Y") so it's safe to echo for the admin.
-            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+            with holder as con:
+
+                def _run_rum(c):
+                    return repo.execute_query(
+                        con=c,
+                        src=rum_source,
+                        sql=sql,
+                        max_rows=req.max_rows,
+                        want_explain=req.explain,
+                        session_id=audit_session_id,
+                        service_id=ctx.service_id,
+                        time_filter=time_filter,
+                        mask_ips=mask_ips,
+                        dataset=req.dataset,
+                    )
+
+                for attempt in (1, 2):
+                    try:
+                        return execute_with_stale_view_retry(con, rum_source, _run_rum, table_name=req.dataset)
+                    except PermissionError as e:
+                        raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+                    except Exception as e:
+                        msg = str(e)
+                        if attempt == 1 and "Cannot open file" in msg:
+                            continue  # compaction race — retry once
+                        raise HTTPException(
+                            status_code=400,
+                            detail=make_error("query_failed", _redact_paths(msg)),
+                        )
+        except HTTPException:
+            raise
         except Exception as e:
-            msg = str(e)
-            if attempt == 1 and "Cannot open file" in msg:
-                continue  # compaction race — retry once
-            # _redact_paths keeps the SQL diagnostic text the admin needs
-            # while stripping the absolute file paths DuckDB interpolates
-            # into IO Error messages.
             raise HTTPException(
                 status_code=400,
-                detail=make_error("query_failed", _redact_paths(msg)),
+                detail=make_error("query_failed", _redact_paths(str(e))),
             )
+    else:
+
+        def _run(con):
+            return repo.execute_query(
+                con=con,
+                src=ctx.source,
+                sql=sql,
+                max_rows=req.max_rows,
+                want_explain=req.explain,
+                session_id=audit_session_id,
+                service_id=ctx.service_id,
+                time_filter=time_filter,
+                mask_ips=mask_ips,
+                dataset="logs",
+            )
+
+        for attempt in (1, 2):
+            try:
+                return execute_with_stale_view_retry(ctx.con, ctx.source, _run, table_name="logs")
+            except PermissionError as e:
+                # SQL validator gate — message is controlled ("operation X not
+                # permitted on table Y") so it's safe to echo for the admin.
+                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+            except Exception as e:
+                msg = str(e)
+                if attempt == 1 and "Cannot open file" in msg:
+                    continue  # compaction race — retry once
+                # _redact_paths keeps the SQL diagnostic text the admin needs
+                # while stripping the absolute file paths DuckDB interpolates
+                # into IO Error messages.
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("query_failed", _redact_paths(msg)),
+                )
 
 
 @router.get("/presets")

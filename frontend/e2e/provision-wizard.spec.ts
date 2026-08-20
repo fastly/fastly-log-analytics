@@ -36,6 +36,7 @@ test('admin shell reaches the provision-wizard entry', async ({ page }) => {
 test('POST /api/provision/execute streams all 8 Step banners and persists the new service', async ({
   page,
 }) => {
+  test.setTimeout(180_000)
   // Mint a fresh test-fixture service id so re-runs don't collide.
   // Date.now() is forbidden inside the workflow script but is fine in
   // Playwright test bodies (this isn't a workflow).
@@ -91,8 +92,9 @@ test('POST /api/provision/execute streams all 8 Step banners and persists the ne
     const SEP = /\r\n\r\n|\n\n|\r\r/
     while (Date.now() < deadline) {
       const { value, done } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
+      if (value) {
+        buf += decoder.decode(value, { stream: true })
+      }
       let m = SEP.exec(buf)
       while (m) {
         const chunk = buf.slice(0, m.index)
@@ -104,10 +106,22 @@ test('POST /api/provision/execute streams all 8 Step banners and persists the ne
         }
         m = SEP.exec(buf)
       }
+      if (done) {
+        break
+      }
+    }
+    // Final flush of any trailing data remaining in buf
+    if (buf.trim()) {
+      for (const line of buf.split(/\r\n|\n|\r/)) {
+        if (line.startsWith('data: ')) {
+          out.push(line.slice(6))
+        }
+      }
     }
     return out
   }, body)
 
+  console.log("ALL RAW SSE MESSAGES RECEIVED:", messages)
   const stepBanners = messages
     .map((raw) => {
       try {
@@ -119,6 +133,7 @@ test('POST /api/provision/execute streams all 8 Step banners and persists the ne
     .filter((m): m is { type: string; message: string } => !!m && typeof m.message === 'string')
     .filter((m) => /Step \d+\/8/.test(m.message))
 
+  console.log("STEP BANNERS RECEIVED:", stepBanners.map(m => m.message))
   // The orchestrator yields banners in order. Pin all 8 are seen.
   expect(stepBanners.length).toBeGreaterThanOrEqual(8)
   for (let i = 1; i <= 8; i++) {

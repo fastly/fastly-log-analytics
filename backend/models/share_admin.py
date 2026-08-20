@@ -163,6 +163,9 @@ class InviteRecord(_ShareAdminRead):
 class ShareServiceEntry(_ShareAdminRead):
     service_id: str | None = None
     name: str | None = None
+    remote_frontend_deployed: bool | None = None
+    sharing_domain: str | None = None
+    remote_service_id: str | None = None
 
 
 class ShareStatusResponse(_ShareAdminRead):

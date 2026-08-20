@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useMounted } from '@/hooks/useMounted'
 import { client, extractApiError } from '@/lib/api'
+import { useSearchParams } from 'next/navigation'
 
 import { useShareMutation } from './useShareMutation'
 import { formatUptime, type ShareStatus } from './utils'
@@ -41,6 +42,18 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   const [mode, setMode] = React.useState<SharingMode>('hostname')
   const [hostnameValue, setHostnameValue] = React.useState('')
   const [ipValue, setIpValue] = React.useState('')
+
+  const searchParams = useSearchParams()
+  const activeServiceId = searchParams?.get('service')
+  const activeService = React.useMemo(() => {
+    return status?.services?.find((s: any) => s.service_id === activeServiceId)
+  }, [status?.services, activeServiceId])
+
+  React.useEffect(() => {
+    if (activeService?.sharing_domain && !hostnameValue) {
+      setHostnameValue(activeService.sharing_domain)
+    }
+  }, [activeService, hostnameValue])
   // Editable copy of the global concurrent-analyst cap. `capDraft` is null
   // while the input mirrors the server value; once the admin types it holds
   // their edit. Deriving the displayed value during render (rather than syncing
@@ -168,6 +181,21 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             <ExternalLink className="h-3 w-3" />
             Preview
           </Button>
+        </div>
+      )}
+
+      {activeService?.remote_frontend_deployed && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>Remote Frontend Domain:</span>
+          <a
+            href={`https://${activeService.sharing_domain}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-mono font-semibold text-primary hover:underline flex items-center gap-1"
+          >
+            {activeService.sharing_domain}
+            <ExternalLink className="h-3 w-3" />
+          </a>
         </div>
       )}
 

@@ -364,6 +364,7 @@ class SessionDetailResponse(BaseResponse):
 
 class QueryRequest(BaseModel):
     sql: str
+    dataset: Literal["logs", "client_vitals", "client_errors"] = "logs"
     # M1: bound max_rows so an analyst can't request tens of millions of rows
     # and OOM the worker (it's interpolated into ``LIMIT max_rows+1`` and the
     # result is fully materialized via ``to_arrow_table().to_pylist()`` before

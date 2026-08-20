@@ -240,4 +240,23 @@ _SCHEMA = [
                       bytes = bytes + excluded.bytes,
                       last_updated = excluded.last_updated;
     END""",
+    """CREATE TABLE IF NOT EXISTS telemetry_queries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        page_load_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        sql_query TEXT NOT NULL,
+        duration_ms REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_queries_page ON telemetry_queries (page_load_id)",
+    """CREATE TABLE IF NOT EXISTS telemetry_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        page_load_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        section_name TEXT NOT NULL,
+        duration_ms REAL NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
 ]

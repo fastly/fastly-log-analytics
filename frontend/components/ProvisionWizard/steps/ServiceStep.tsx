@@ -39,7 +39,12 @@ export function ServiceStep({ s }: { s: WizardState }) {
       </div>
       <div className="flex-1 overflow-y-auto min-h-0 border rounded-lg shadow-sm">
         <div className="divide-y divide-muted/50 bg-background">
-          {s.filteredServices.length > 0 ? (
+          {s.isLoadingServices ? (
+            <div className="py-12 flex flex-col items-center justify-center gap-3 text-muted-foreground text-sm">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <span>Loading services...</span>
+            </div>
+          ) : s.filteredServices.length > 0 ? (
             s.filteredServices.map((svc: any) => (
               // a11y: was a <div onClick> — keyboard-invisible. Native
               // button with disabled state on provisioned services and a

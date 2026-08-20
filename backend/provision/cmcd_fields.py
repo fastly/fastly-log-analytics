@@ -20,6 +20,8 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "duckdb_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 40,
+        # CMCD v1 sid is a UUID (36 chars); 288//6 = 48 chars of headroom.
+        "byte_limit": 288,
         "enabled": True,
     },
     {
@@ -30,6 +32,8 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "duckdb_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 30,
+        # content id / hashUrl output; 288//6 = 48 chars.
+        "byte_limit": 288,
         "enabled": True,
     },
     {
@@ -157,10 +161,32 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _CMCD_FIELD_NAMES = {cf["name"] for cf in _CMCD_CUSTOM_FIELDS}
 
 
-def merge_cmcd_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
-    """Return ``custom_fields`` with the canonical CMCD fields re-applied.
+def get_cmcd_fields(enabled: bool) -> list[dict]:
+    """Return CMCD custom fields if enabled, else empty list.
 
-    Same pattern as ``merge_scoring_custom_fields``.
+    Used by field registry and reconcilers to generate system fields on-demand
+    based on feature toggles, without persisting them in the config file.
+    """
+    if enabled:
+        return [dict(cf) for cf in _CMCD_CUSTOM_FIELDS]
+    return []
+
+
+def reconcile_cmcd_custom_fields(custom_fields: list[dict] | None, *, enabled: bool) -> list[dict]:
+    """Return ``custom_fields`` with the canonical CMCD fields applied or stripped.
+
+    CMCD fields are system-managed — code is the source of truth, and
+    ``_is_system_field`` hides them from the user-editable custom-field list.
+    That means any writer that persists ``log_fields`` from a list it did not
+    author (a UI round-trip, a ``state_sync`` pull, a provisioning reconcile
+    built from groups alone) will omit them, silently stripping CMCD from the
+    generated log format while ``cmcd.enabled`` stays true. The edge keeps
+    extracting CMCD into ``req.http.x-cmcd:*`` and nothing logs it, so every
+    ``cmcd_*`` column ingests empty and /streaming renders all zeros with no
+    error — the 2026-08-12 SE-demo incident.
+
+    Every such writer must route its list through here, keyed on the CURRENT
+    ``cmcd.enabled`` state, so enabling and disabling both converge.
     """
     kept = [cf for cf in (custom_fields or []) if cf.get("name") not in _CMCD_FIELD_NAMES]
-    return kept + [dict(cf) for cf in _CMCD_CUSTOM_FIELDS]
+    return kept + get_cmcd_fields(enabled)

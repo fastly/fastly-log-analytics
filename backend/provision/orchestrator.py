@@ -9,15 +9,16 @@ import time
 logger = logging.getLogger(__name__)
 
 from backend.core import field_registry as lf
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import fastly
-from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import (
     region_endpoint,
 )
+from backend.provision.declarative.reconciler import reconcile_vcl_state
+from backend.provision.declarative.state import FeatureState
 from backend.provision.fastly_api import (
     delete_cdn_service,
     ensure_cdn_service,
-    ensure_logging_endpoint,
     remove_logging_endpoint,
     validate_log_format,
 )
@@ -38,6 +39,17 @@ def _sync_crontab():
         get_scheduler().reload()
     except Exception:
         pass
+
+
+def _upload_faro_bundle_sync(service_id: str, version: str, token: str, *, status_cb=None):
+    """Sync wrapper around the async ``download_and_upload_faro`` for use with
+    ``run_with_events`` (which calls its target as a plain sync callable with
+    a ``status_cb`` kwarg, same pattern as every other provisioning step)."""
+    import asyncio
+
+    from backend.provision.rum_assets import download_and_upload_faro
+
+    return asyncio.run(download_and_upload_faro(service_id, version, token, status_cb=status_cb))
 
 
 def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -> None:
@@ -97,30 +109,27 @@ def write_service_config(state: dict):
 
     # Build log_fields: prefer the request body, but if the request body
     # omits custom_fields (or sends an empty list) AND we have existing
-    # custom_fields on disk, preserve them. Then if scoring is enabled,
-    # re-inject the canonical _SCORING_CUSTOM_FIELDS from code.
+    # custom_fields on disk, preserve them. System fields (CMCD, Scoring)
+    # are generated on-demand by FeatureState.from_config() and are NOT
+    # persisted in the config file.
     incoming_lf = dict(state.get("log_fields") or {})
     incoming_custom = incoming_lf.get("custom_fields")
     existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
     if not incoming_custom and existing_custom:
-        incoming_lf["custom_fields"] = existing_custom
-    # Re-inject scoring fields from code when scoring is enabled in either
-    # the incoming state OR the existing cfg (the wizard re-run rarely
-    # carries scoring in the body).
-    scoring_block = state.get("scoring") or existing_cfg.get("scoring") or {}
-    if scoring_block.get("enabled"):
-        from backend.provision.session_scoring_orchestrator import merge_scoring_custom_fields
+        # Filter out system fields from existing custom_fields
+        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
+    else:
+        # Filter out system fields from incoming custom_fields
+        incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
 
-        incoming_lf["custom_fields"] = merge_scoring_custom_fields(incoming_lf.get("custom_fields"))
-    cmcd_block = state.get("cmcd") or existing_cfg.get("cmcd") or {}
-    if cmcd_block.get("enabled"):
-        from backend.provision.cmcd_fields import merge_cmcd_custom_fields
+    import datetime as _dt
 
-        incoming_lf["custom_fields"] = merge_cmcd_custom_fields(incoming_lf.get("custom_fields"))
+    created_at = existing_cfg.get("created_at") or _dt.datetime.now(_dt.UTC).isoformat()
 
     cfg = {
         "service_id": service_id,
         "name": state.get("name") or state.get("service_name") or service_id,
+        "created_at": created_at,
         "access_level": state.get("access_level", "read_write"),
         "storage_mode": state.get("storage_mode", "cloud"),
         "fos_endpoint": region_endpoint(region),
@@ -142,11 +151,31 @@ def write_service_config(state: dict):
     # carry — primarily ``scoring`` (set by enable_scoring) and
     # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
     # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id"):
+    for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
         if preserved_key not in state and preserved_key in existing_cfg:
             cfg[preserved_key] = existing_cfg[preserved_key]
         elif preserved_key in state:
             cfg[preserved_key] = state[preserved_key]
+
+    # Resolve features selection (logging_enabled, rum_enabled)
+    logging_enabled = state.get("logging_enabled")
+    if logging_enabled is None:
+        logging_enabled = existing_cfg.get("logging_enabled", True)
+
+    rum_enabled = state.get("rum_enabled")
+    if rum_enabled is None:
+        rum_enabled = existing_cfg.get("rum_enabled", False)
+
+    cfg["logging_enabled"] = bool(logging_enabled)
+    cfg["rum_enabled"] = bool(rum_enabled)
+
+    if cfg["rum_enabled"] and not cfg.get("rum"):
+        import datetime as _dt
+
+        cfg["rum"] = {
+            "enabled": True,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
 
     if "log_period" in state:
         cfg["log_period"] = state["log_period"]
@@ -175,7 +204,6 @@ def write_service_config(state: dict):
     rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
 
     cfg["provisioning"] = {
-        "fos_key_id": state.get("provisioning", {}).get("fos_key_id", ""),
         "endpoint_name": state.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs"),
         "cdn_service_id": state.get("cdn_service_id", state.get("provisioning", {}).get("cdn_service_id", "")),
         "cdn_url": cdn_url,
@@ -196,7 +224,16 @@ def write_service_config(state: dict):
             "log_enabled": True,
             "log_retention_days": int(state.get("log_retention_days", 30)),
             "data_retention_days": int(
-                state.get("provisioning", {}).get("cron_sync", {}).get("data_retention_days", 30)
+                state.get(
+                    "data_retention_days",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("data_retention_days", 30),
+                )
+            ),
+            "rum_retention_days": int(
+                state.get(
+                    "rum_retention_days",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("rum_retention_days", 30),
+                )
             ),
             "cache_retention_days": int(
                 state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90)
@@ -216,8 +253,8 @@ def write_service_config(state: dict):
     ok(f"Service config written → configs/{service_id}.json")
 
 
-def run_with_events(func, *args, **kwargs):
-    q = queue.Queue()
+def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
+    q: queue.Queue[str | None] = queue.Queue()
     kwargs["status_cb"] = q.put
     res = []
     err = []
@@ -241,7 +278,10 @@ def run_with_events(func, *args, **kwargs):
 
     t.join()
     if err:
-        raise err[0]
+        if raise_on_error:
+            raise err[0]
+        yield {"type": "error", "message": str(err[0])}
+        return None
     return res[0]
 
 
@@ -281,6 +321,68 @@ def load_state() -> dict:
     except Exception:
         pass
     return {}
+
+
+def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> int:
+    """Apply logging and VCL configuration via declarative reconciliation.
+
+    Replaces the imperative ensure_logging_endpoint by using reconcile_vcl_state
+    to handle all VCL snippets, logging endpoints, backends, and custom fields.
+
+    Args:
+        state: Provisioning state dict containing config and credentials.
+        token: Fastly API token.
+        status_cb: Optional callback for status updates.
+
+    Returns:
+        Activated version number.
+
+    Raises:
+        RuntimeError: if reconciliation fails.
+    """
+    from backend.core.fastly.service import get_active_version
+    from backend.provision.utils import info, ok
+
+    service_id = state.get("logging_service_id")
+    if not service_id:
+        raise ValueError("state missing logging_service_id")
+
+    info("Reconciling VCL state via declarative model…")
+    if status_cb:
+        status_cb(f"🔄 Reconciling VCL state for {service_id}...")
+
+    # Normalize state dict: FeatureState.from_config() expects 'service_id' key,
+    # but provisioning state uses 'logging_service_id'. Add both for compatibility.
+    state_for_feature = dict(state)
+    state_for_feature["service_id"] = service_id
+
+    # Verify FeatureState can be built from config (validates all required fields)
+    try:
+        feature_state = FeatureState.from_config(state_for_feature)
+    except (KeyError, ValueError) as e:
+        raise RuntimeError(f"Invalid feature state configuration: {e}") from e
+
+    # Call reconciler to apply desired state
+    # The reconciler reads from configs/{service_id}.json which was already written
+    try:
+        result = reconcile_vcl_state(service_id, token, dry_run=False, status_cb=status_cb)
+    except Exception as e:
+        raise RuntimeError(f"VCL reconciliation failed: {e}") from e
+
+    if result.activated_version is None:
+        # No changes were needed (already in desired state)
+        active_version = get_active_version(service_id, token)
+        if active_version is None:
+            raise RuntimeError(f"Service {service_id} has no active version")
+        ok(f"Logging configuration already in desired state (version {active_version})")
+        if status_cb:
+            status_cb("✅ Logging configuration already in desired state.")
+        return active_version
+    else:
+        ok(f"Logging and VCL configuration deployed (version {result.activated_version})")
+        if status_cb:
+            status_cb("✅ Logging and VCL configuration deployed.")
+        return result.activated_version
 
 
 def provision(cfg: dict, _resume_from_state: bool = False):
@@ -428,17 +530,95 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         save_state(state)
         yield {"type": "progress", "current": 6, "total": total}
 
-        yield {"type": "status", "message": "📡 Step 7/8: Adding logging endpoint to target service..."}
-        step(7, total, "Adding logging endpoint to target service")
-        new_ver = yield from run_with_events(
-            ensure_logging_endpoint, cfg, state["fos_access_key"], state["fos_secret_key"], token
-        )
+        yield {"type": "status", "message": "📡 Step 7/8: Reconciling logging configuration via declarative model..."}
+        step(7, total, "Reconciling logging configuration")
+
+        # Write config early so reconciler can read it from configs/{service_id}.json
+        write_service_config(state)
+        ok("Service config written (for reconciler)")
+
+        # RUM: upload the pinned Faro Web SDK bundle to FOS BEFORE the
+        # reconciler below activates VCL that routes /js/faro-sdk.js to it
+        # (F-2 audit finding). Without this, a fresh service provisioned
+        # with rum_enabled + a pinned faro_version (the wizard always pins
+        # one — see routers/provision.py) went live with VCL routing to an
+        # object that was never uploaded: the tracker requests
+        # /js/faro-sdk.js and gets a 404 forever, since there is no CDN
+        # fallback. Mirrors the upload-before-reconcile ordering in
+        # rum_orchestrator_v2.enable_rum. Resolves DEFAULT_FARO_VERSION here
+        # too, defensively, in case a caller invokes provision() directly
+        # with rum_enabled but no faro_version ever resolved upstream.
+        if state.get("rum_enabled"):
+            rum_state_raw = state.get("rum")
+            rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
+            resolved_faro_version = rum_state_cfg.get("faro_version") or DEFAULT_FARO_VERSION
+            yield {"type": "status", "message": f"⏳ Uploading Faro Web SDK v{resolved_faro_version}..."}
+            try:
+                yield from run_with_events(
+                    _upload_faro_bundle_sync, state["logging_service_id"], resolved_faro_version, token
+                )
+            except Exception as faro_exc:  # noqa: BLE001 — deliberately non-fatal, see below
+                # Non-fatal (#3 audit finding): this upload used to sit
+                # inside provision()'s try block, so an unpkg outage or a
+                # transient FOS error here fell into the except below and
+                # ran perform_teardown with remove_logging/remove_cdn/
+                # remove_bucket/remove_fos_tokens all True — a third-party
+                # CDN hiccup deleting the just-created CDN service, FOS
+                # bucket, and FOS access keys. faro_version is already
+                # pinned in config (write_service_config above, BEFORE this
+                # upload), which is exactly the "pinned, bundle missing"
+                # state the RUM sync cron's self-heal restore branch
+                # (backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle)
+                # already converges on its next tick — so warning and
+                # continuing is strictly safer than tearing down
+                # freshly-provisioned infrastructure over it.
+                logger.warning(
+                    "[provision] Faro bundle upload failed for %s (non-fatal — "
+                    "the RUM sync cron self-heals it on its next tick): %s",
+                    state.get("logging_service_id"),
+                    faro_exc,
+                    exc_info=True,
+                )
+                warn(f"Faro Web SDK upload failed (non-fatal, cron will restore it): {faro_exc}")
+                yield {
+                    "type": "status",
+                    "message": (
+                        f"⚠ Faro Web SDK upload failed (non-fatal): {faro_exc}. "
+                        "The RUM sync cron will restore the bundle automatically."
+                    ),
+                }
+            else:
+                # download_and_upload_faro already persisted faro_version +
+                # faro_content_hash + faro_fos_etag_md5 into
+                # configs/{service_id}.json itself (its own save_config
+                # call in rum_assets.py). Re-read that rather than writing
+                # back the pre-upload `rum_state_cfg` snapshot (#1 audit
+                # finding) — the snapshot predates the upload and would
+                # clobber the hashes it just wrote with a bare
+                # {"faro_version": ...}, leaving the cron's cheap FOS
+                # integrity check (_faro_bundle_intact) with no stored ETag
+                # to compare against, forcing a redundant unpkg
+                # download + FOS PUT + purge on the very next tick.
+                from backend import config as svcconfig
+
+                refreshed_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
+                refreshed_rum = refreshed_cfg.get("rum")
+                if isinstance(refreshed_rum, dict):
+                    state["rum"] = refreshed_rum
+                else:
+                    rum_state_cfg = dict(rum_state_cfg)
+                    rum_state_cfg["faro_version"] = resolved_faro_version
+                    state["rum"] = rum_state_cfg
+                write_service_config(state)
+                ok(f"Faro Web SDK v{resolved_faro_version} uploaded (for reconciler)")
+
+        new_ver = yield from run_with_events(ensure_logging_via_reconciler, state, token)
         state["activated_logging_version"] = new_ver
         save_state(state)
         yield {"type": "progress", "current": 7, "total": total}
 
         yield {"type": "status", "message": "⚙️ Step 8/8: Finalizing service configuration..."}
-        step(8, total, "Writing service config")
+        step(8, total, "Finalizing configuration")
         write_service_config(state)
 
         try:
@@ -463,17 +643,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     "message": "⚠ Iceberg table not initialized yet (no source resolved) — "
                     "it will be created on the first commit.",
                 }
-            elif is_mock_mode():
-                # Mock mode (e2e/contract backend): skip the FOS-backed table
-                # init. _get_catalog → catalog.load_table/create_table does a
-                # pyarrow HeadObject on metadata.json that, with no real FOS,
-                # is routed through the telemetry proxy to the unreachable
-                # endpoint and returns a synthetic 502 — slow + noisy + the
-                # source of the provision-teardown e2e's intermittent 502s.
-                # Real mode is unchanged (production never sets FASTLY_MOCK_MODE);
-                # the table is created lazily on first commit regardless.
-                ok("Iceberg table ready")
-                yield {"type": "status", "message": "✓ Iceberg table init skipped (mock mode)."}
             else:
                 yield {"type": "status", "message": "🧊 Initializing Iceberg table in Fastly Object Storage..."}
                 # FOS occasionally returns a transient 5xx (observed: HTTP 500 →
@@ -567,18 +736,42 @@ def provision(cfg: dict, _resume_from_state: bool = False):
 
 def perform_teardown(state: dict, token: str, opts: dict | None = None):
     if opts is None:
-        opts = {"remove_logging": True, "remove_cdn": True, "remove_bucket": True, "remove_scoring": True}
+        opts = {
+            "remove_logging": True,
+            "remove_rum": True,
+            "remove_cdn": True,
+            "remove_bucket": True,
+            "remove_scoring": True,
+            "remove_fos_tokens": True,
+        }
 
     total_steps = 5
-    # ── Step 1: session scoring (Compute service + stores + dangling VCL). ───
-    # Runs FIRST so the scoring VCL/backend are stripped before the logging
-    # endpoint removal does its own clone/activate. Gated on opts.get(..., True)
-    # so the internal provision()-failure rollback (no opts) still tears scoring
-    # down. The scoring ids ride in state['scoring'] (the cfg['scoring'] block);
-    # disable_scoring can't be used here because the config file is already gone.
+    # ── TEARDOWN ORDER: DEREFERENCE, THEN DELETE. ────────────────────────────
+    # Every step that removes VCL from the CUSTOMER's live service must complete
+    # before any step that deletes a service that VCL points at. Otherwise the
+    # customer's active version is left routing to a deleted host — its own
+    # traffic breaks, and the failure is ours, not theirs.
+    #
+    #   1. scoring VCL strip + Compute delete  (strip is fatal-on-failure, so
+    #      the Compute service is never deleted while still referenced)
+    #   2. logging endpoint + ALL analytics-owned snippets/conditions/
+    #      dictionaries/backends off the customer service
+    #   3. FOS access keys
+    #   4. FOS bucket
+    #   5. analytics-owned log-fronting CDN service (last: the logging endpoint
+    #      removed in step 2 is what referenced it)
+    #
+    # Step 1 stays ahead of step 2 because both clone+activate the customer
+    # service, and the scoring strip is the one with a live-traffic dependency.
+    # Gated on opts.get(..., True) so the internal provision()-failure rollback
+    # (no opts) still tears scoring down. The scoring ids ride in
+    # state['scoring'] (the cfg['scoring'] block); disable_scoring can't be used
+    # here because the config file is already gone.
     yield {"type": "progress", "current": 1, "total": total_steps}
     scoring_meta = state.get("scoring") or {}
-    do_scoring = opts.get("remove_scoring", True) and scoring_meta.get("enabled")
+    do_scoring = opts.get("remove_scoring", True) and (
+        scoring_meta.get("enabled") or state.get("scoring_enabled") or bool(scoring_meta.get("scoring_service_id"))
+    )
     step(1, total_steps, "Tearing down session scoring" if do_scoring else "Skipping session scoring teardown")
     if do_scoring:
         try:
@@ -593,7 +786,17 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                     "message": f"Warning: scoring {label} store {store_id} not deleted — remove it manually.",
                 }
         except Exception as exc:
-            yield {"type": "status", "message": f"Warning: scoring teardown failed: {exc}"}
+            # teardown_scoring_resources aborts (raises) rather than delete the
+            # Compute service while the customer's active version may still
+            # route to it. Surface that loudly — it is an action item, not a
+            # cosmetic warning, and the operator must re-run teardown.
+            yield {
+                "type": "status",
+                "message": (
+                    f"❌ Scoring teardown ABORTED (Compute service left in place on purpose): {exc} "
+                    "Re-run teardown after resolving; continuing with the remaining steps."
+                ),
+            }
 
     yield {"type": "progress", "current": 2, "total": total_steps}
     step(
@@ -601,39 +804,33 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         total_steps,
         "Removing logging endpoint" if opts.get("remove_logging") else "Skipping logging endpoint removal",
     )
-    if opts.get("remove_logging") and state.get("logging_service_id") and state.get("endpoint_name"):
+    endpoint_name = state.get("provisioning", {}).get("endpoint_name") or state.get("endpoint_name", "")
+    if (opts.get("remove_logging") or opts.get("remove_rum")) and state.get("logging_service_id") and endpoint_name:
         try:
             yield from run_with_events(
-                remove_logging_endpoint, state["logging_service_id"], state["endpoint_name"], token
+                remove_logging_endpoint,
+                state["logging_service_id"],
+                endpoint_name,
+                token,
+                remove_logging=opts.get("remove_logging", True),
+                remove_rum=opts.get("remove_rum", True),
             )
         except Exception as exc:
             yield {"type": "status", "message": f"Warning: {exc}"}
 
     yield {"type": "progress", "current": 3, "total": total_steps}
     step(
-        3, total_steps, "Deleting FOS access keys" if opts.get("remove_bucket") else "Skipping FOS access keys deletion"
+        3,
+        total_steps,
+        "Deleting FOS access keys" if opts.get("remove_fos_tokens") else "Skipping FOS access keys deletion",
     )
-    if opts.get("remove_bucket"):
+    if opts.get("remove_fos_tokens"):
         try:
-            target_desc = f"fos-log-analysis-{state['logging_service_id']}"
-            temp_admin_desc = f"fos-log-analysis-temp-admin-{state['logging_service_id']}"
-            resp = fastly("GET", "/resources/object-storage/access-keys", token=token)
-            for key in resp.get("data", []):
-                desc = key.get("description", "")
-                if desc == target_desc or desc == temp_admin_desc or desc.startswith("temp-teardown-"):
-                    fastly(
-                        "DELETE",
-                        f"/resources/object-storage/access-keys/{key['access_key']}",
-                        token=token,
-                        expect_empty=True,
-                    )
+            from backend.provision.fos_setup import delete_fos_tokens_for_service
+
+            yield from run_with_events(delete_fos_tokens_for_service, state["logging_service_id"], token)
         except Exception:
             pass
-        if state.get("fos_key_id"):
-            try:
-                yield from run_with_events(delete_fos_access_key, state["fos_key_id"], token)
-            except Exception:
-                pass
 
     yield {"type": "progress", "current": 4, "total": total_steps}
     step(4, total_steps, "Deleting FOS bucket" if opts.get("remove_bucket") else "Skipping FOS bucket deletion")
@@ -656,6 +853,29 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                 yield from run_with_events(delete_fos_access_key, temp_key["id"], token)
         except Exception:
             pass
+    elif opts.get("remove_cloud_files") and state.get("fos_bucket_name"):
+        try:
+            temp_desc = f"fos-log-analysis-temp-teardown-{state.get('logging_service_id', 'unknown')}"
+            temp_key = yield from run_with_events(
+                ensure_fos_access_key, temp_desc, {}, token, permission="read-write-admin"
+            )
+            try:
+                from backend.provision.fos_setup import delete_fos_prefix
+
+                prefix = state.get("fos_prefix", "")
+                yield from run_with_events(
+                    delete_fos_prefix,
+                    state["fos_bucket_name"],
+                    state["fos_region"],
+                    temp_key["access_key"],
+                    temp_key["secret_key"],
+                    prefix,
+                    service_id=state.get("logging_service_id"),
+                )
+            finally:
+                yield from run_with_events(delete_fos_access_key, temp_key["id"], token)
+        except Exception as exc:
+            yield {"type": "status", "message": f"Warning: failed to delete cloud files: {exc}"}
 
     yield {"type": "progress", "current": 5, "total": total_steps}
     step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
@@ -690,6 +910,17 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
             if os.path.exists(wal):
                 os.remove(wal)
             ok(f"Removed local database: {db_path}")
+
+        # Delete RUM DuckDB if it exists
+        rum_db_path = (
+            db_path.replace(".duckdb", ".rum.duckdb") if db_path.endswith(".duckdb") else db_path + ".rum.duckdb"
+        )
+        if os.path.exists(rum_db_path):
+            os.remove(rum_db_path)
+            rum_wal = rum_db_path + ".wal"
+            if os.path.exists(rum_wal):
+                os.remove(rum_wal)
+            ok(f"Removed local RUM database: {rum_db_path}")
 
         if service_id:
             try:

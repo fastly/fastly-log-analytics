@@ -97,6 +97,55 @@ from backend.core.field_registry import REGISTRY as _FIELD_REGISTRY
 _VIRTUAL_FIELDS = ("waf_sig_ind", "edge_score_reason_ind")
 FIELDS = [f.code for f in _FIELD_REGISTRY if f.code != "_source_file"] + list(_VIRTUAL_FIELDS)
 
+NON_TOP_N_FIELDS = frozenset(
+    {
+        "timestamp",
+        "elapsed",
+        "ttfb",
+        "req_bytes",
+        "req_header_bytes",
+        "resp_bytes",
+        "lat",
+        "lon",
+        "rid",
+        "prid",
+        "waf_req_id",
+        "waf_sig",
+        "_source_file",
+        # Network quality (Group F/G)
+        "tcp_rtt",
+        "ploss",
+        "rtt_min",
+        "rtt_var",
+        "retrans",
+        "bw",
+        "delivery_rate",
+        "data_segs_out",
+        # QUIC/HTTP3 (Group K)
+        "q_rtt",
+        "q_rtt_var",
+        "q_lost",
+        "q_cwnd",
+        # Origin metrics (Group L)
+        "ottfb",
+        "ottlb",
+        "oconnect_ms",
+        "ost",
+        "obytes",
+        "oip",
+        "oretries",
+        # IO / other stats
+        "io_input_bytes",
+        "io_output_bytes",
+        # Edge score / threat indicators
+        "edge_score",
+        "edge_score_l1",
+        "edge_score_l2",
+        "edge_score_rtt_us",
+        "edge_score_exec_us",
+    }
+)
+
 
 def _add_bot_columns(actual_cols: Collection[str], columns: list[str], select_cols: list[str]) -> tuple[bool, bool]:
     """Ensure UA + IP (Arcjet) or waf_req_id (NGWAF) columns are in select_cols
@@ -428,7 +477,23 @@ def get_aggregates(
                 return count_res[0]
             return 0
 
-        total_rows = _compute_count(table_name, where_clause, params)
+        # Optimize count query by excluding the redundant string IP check which forces string column decompression
+        count_params, count_where_clause = timer.call(
+            "build_where_clause",
+            lambda: build_where_clause(
+                start_time,
+                end_time,
+                filters,
+                actual_cols,
+                inline_params=True,
+                exclude_invalid_ips=False,
+            ),
+        )
+
+        if table_name == orig_table_name:
+            total_rows = _compute_count(table_name, count_where_clause, count_params)
+        else:
+            total_rows = _compute_count(table_name, where_clause, params)
 
         total_rows_total, earliest_log_at, latest_log_at = timer.call(
             "source_extent", lambda: get_source_extent(runner, src, orig_table_name)
@@ -473,7 +538,10 @@ def get_aggregates(
             rebuilt = _build_query_target()
             if rebuilt is not None:
                 table_name, where_clause, params, temp_table = rebuilt
-                total_rows = _compute_count(table_name, where_clause, params)
+                if table_name == orig_table_name:
+                    total_rows = _compute_count(table_name, count_where_clause, count_params)
+                else:
+                    total_rows = _compute_count(table_name, where_clause, params)
 
         schema_types = timer.call("schema_types", lambda: {col["name"]: col["type"] for col in _get_schema(con, src)})
 
@@ -495,7 +563,9 @@ def get_aggregates(
             return [v for v in _VIRTUAL_FIELDS if v in fields and _VFB.get(v) in in_set]
 
         if use_rollups:
-            batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in actual_cols]
+            batch_fields = [
+                f for f in fields if f not in _VIRTUAL_FIELDS and f in actual_cols and f not in NON_TOP_N_FIELDS
+            ]
             # Virtual fields go through the rollup reader too — they
             # have dedicated per-hour entries on disk and the reader
             # silently skips fields with no data, so a service that
@@ -508,7 +578,9 @@ def get_aggregates(
             # columns, so they'd raise a BinderException — keep them on
             # the existing runtime-explode path (_exploded_top_n
             # below).
-            batch_fields = [f for f in fields if f not in _VIRTUAL_FIELDS and f in field_totals]
+            batch_fields = [
+                f for f in fields if f not in _VIRTUAL_FIELDS and f in field_totals and f not in NON_TOP_N_FIELDS
+            ]
 
         # all_top_res is the merged (field, value, count) result of the
         # batch top-N scan; it also feeds the rollup-path map_data

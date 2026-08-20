@@ -1,97 +1,161 @@
 /**
- * Pins the SSR debug-query-visibility fix: toggling either switch must (1)
- * write the fla.debugResponses cookie as the OR of both toggles, so
- * lib/ssr/_transport.ts's SSR fetch can see it on the next navigation, and
- * (2) immediately invalidate the cache, so the CURRENT page's queries pick
- * up the header without needing a reload. No test existed for this
- * component before this fix.
+ * Tests for the DiagnosticsPanel component, verifying that it loads debug visibility
+ * settings from the backend and triggers appropriate PATCH mutations on change.
  */
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { describe, expect, test, vi, beforeEach } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import React from 'react'
 import { DiagnosticsPanel } from '@/app/admin/_sections/DiagnosticsPanel'
-import { useDebugStore } from '@/stores/debugStore'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { useServiceStore } from '@/stores/serviceStore'
 
 vi.mock('@/hooks/useBootstrap', () => ({
   useBootstrap: () => ({ data: { debug_state: { debug_responses_enabled: true } } }),
 }))
 
+// Mock @/components/ui/select. The real implementation uses base-ui which is
+// hard to drive from userEvent in jsdom (portals, native event sequencing).
+vi.mock('@/components/ui/select', () => {
+  const SelectCtx = React.createContext<((v: string) => void) | null>(null)
+
+  const Select = ({
+    value,
+    onValueChange,
+    children,
+  }: {
+    value?: string
+    onValueChange?: (v: string) => void
+    children?: React.ReactNode
+  }) => {
+    return (
+      <SelectCtx.Provider value={onValueChange ?? null}>
+        <div data-testid="mock-select" data-select-value={value ?? ''}>
+          {children}
+        </div>
+      </SelectCtx.Provider>
+    )
+  }
+
+  const SelectTrigger = ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="mock-select-trigger">{children}</div>
+  )
+
+  const SelectValue = ({ children }: { children?: React.ReactNode }) => (
+    <span data-testid="mock-select-value">{children}</span>
+  )
+
+  const SelectContent = ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="mock-select-content">{children}</div>
+  )
+
+  const SelectItem = ({
+    value,
+    children,
+  }: {
+    value: string
+    children?: React.ReactNode
+  }) => {
+    const onValueChange = React.useContext(SelectCtx)
+    return (
+      <button
+        type="button"
+        data-select-item-value={value}
+        onClick={() => onValueChange?.(value)}
+      >
+        {children}
+      </button>
+    )
+  }
+
+  return { Select, SelectTrigger, SelectValue, SelectContent, SelectItem }
+})
+
 function makeClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
 
-function clearDebugCookie() {
-  document.cookie = `${DEBUG_RESPONSES_COOKIE}=; path=/; max-age=0`
-}
-
-function readDebugCookie(): string | undefined {
-  return document.cookie
-    .split('; ')
-    .find((c) => c.startsWith(`${DEBUG_RESPONSES_COOKIE}=`))
-    ?.split('=')[1]
-}
-
-beforeEach(() => {
-  act(() => {
-    useDebugStore.setState({ enabled: false, apiCallsEnabled: false })
+describe('DiagnosticsPanel — debug settings API triggers', () => {
+  beforeEach(() => {
+    // Set an active service ID so the API onRequest middleware does not abort requests with NO_SERVICE
+    useServiceStore.setState({ activeServiceId: 'service-1' })
   })
-  clearDebugCookie()
-})
 
-describe('DiagnosticsPanel — debug cookie + refetch on toggle', () => {
-  test('turning the query-debug switch on writes cookie=1 and invalidates the query cache', async () => {
+  test('renders with initial settings from the backend', async () => {
+    const qc = makeClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <DiagnosticsPanel />
+      </QueryClientProvider>,
+    )
+
+    // Wait for settings to load
+    await screen.findByText('Query debugging panel')
+
+    // Check that we render the mock select elements with correct initial values
+    const selectContainers = screen.getAllByTestId('mock-select')
+    expect(selectContainers).toHaveLength(2)
+    expect(selectContainers[0].getAttribute('data-select-value')).toBe('disabled')
+    expect(selectContainers[1].getAttribute('data-select-value')).toBe('disabled')
+  })
+
+  test('changing query-debug visibility triggers mutation and invalidates queries', async () => {
+    const user = userEvent.setup()
     const qc = makeClient()
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+
     render(
       <QueryClientProvider client={qc}>
         <DiagnosticsPanel />
       </QueryClientProvider>,
     )
 
-    await userEvent.click(screen.getAllByRole('switch')[0])
+    // Wait for initial render
+    await screen.findByText('Query debugging panel')
 
-    expect(readDebugCookie()).toBe('1')
-    // Invalidation (not a point-in-time refetch) so enabled:false data
-    // queries are marked stale and refetch when they switch on.
-    expect(invalidateSpy).toHaveBeenCalled()
-    expect(useDebugStore.getState().enabled).toBe(true)
-  })
-
-  test('turning the api-calls switch on ALSO sets the cookie (OR semantics)', async () => {
-    const qc = makeClient()
-    render(
-      <QueryClientProvider client={qc}>
-        <DiagnosticsPanel />
-      </QueryClientProvider>,
+    // Find the first SelectItem with value "admins" (for query debugging)
+    const items = screen.getAllByRole('button')
+    const queryAdminsItem = items.find(
+      (b) => b.getAttribute('data-select-item-value') === 'admins',
     )
+    expect(queryAdminsItem).toBeInTheDocument()
 
-    const switches = screen.getAllByRole('switch')
-    await userEvent.click(switches[1])
+    // Click "Admins Only" button on the first Select
+    await user.click(queryAdminsItem!)
 
-    expect(readDebugCookie()).toBe('1')
-    expect(useDebugStore.getState().apiCallsEnabled).toBe(true)
-  })
-
-  test('turning both switches off clears the cookie back to 0', async () => {
-    act(() => {
-      useDebugStore.setState({ enabled: true, apiCallsEnabled: false })
+    // Verify invalidation was called
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled()
     })
-    document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/`
+  })
 
+  test('changing api-calls visibility triggers mutation and invalidates queries', async () => {
+    const user = userEvent.setup()
     const qc = makeClient()
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries')
+
     render(
       <QueryClientProvider client={qc}>
         <DiagnosticsPanel />
       </QueryClientProvider>,
     )
 
-    const switches = screen.getAllByRole('switch')
-    await userEvent.click(switches[0])
+    // Wait for initial render
+    await screen.findByText('Query debugging panel')
 
-    expect(readDebugCookie()).toBe('0')
-    expect(useDebugStore.getState().enabled).toBe(false)
+    // Find all buttons with value "both" and select the second one (for API call panel)
+    const items = screen.getAllByRole('button')
+    const apiBothItems = items.filter(
+      (b) => b.getAttribute('data-select-item-value') === 'both',
+    )
+    expect(apiBothItems).toHaveLength(2)
+
+    // Click "Both Admins & Analysts" button on the second Select (index 1)
+    await user.click(apiBothItems[1])
+
+    // Verify invalidation was called
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled()
+    })
   })
 })

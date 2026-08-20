@@ -812,5 +812,56 @@ def test_bootstrap_remote_unauth_stub_omits_section_timings():
     assert timings == [], f"unauth bootstrap stub leaked section_timings: {timings}"
 
 
+def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkeypatch):
+    """Verify that when DuckDB count is smaller or stale, REQUEST total_rows aligns with local_rows."""
+    from unittest.mock import MagicMock
+
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    # Mock cached_status to have 7.4M local_rows
+    monkeypatch.setattr(
+        config, "get_status", lambda sid: {"local_rows": 7400000, "latest_log_at": "2026-06-29T12:00:00Z"}
+    )
+
+    # Mock RUM count from DuckDB RUM views
+    class MockConnectionHolder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return MagicMock()
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("backend.deps._ConnectionHolder", MockConnectionHolder)
+    monkeypatch.setattr(
+        "backend.core.iceberg.execute_with_stale_view_retry",
+        lambda *args, **kwargs: (800, None),
+    )
+
+    # Mock REQUEST count in DuckDB to return 33000 (representing stale/empty view)
+    mock_duckdb_con = MagicMock()
+    # first fetchone for COUNT(*) returns 33000, second MAX(timestamp) returns None
+    mock_duckdb_con.execute.return_value.fetchone.side_effect = [(33000,), (None,)]
+    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda src: mock_duckdb_con)
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    data = response.json()
+
+    # The returned payload should be aligned:
+    # rum.total_rows should be 800 (from SQLite)
+    # request.total_rows should be aligned to local_rows - rum.total_rows = 7400000 - 800 = 7399200
+    # request.latest_log_at should fall back to cached_status.get("latest_log_at")
+    assert data["header_badge"]["rum"]["total_rows"] == 800
+    assert data["header_badge"]["request"]["total_rows"] == 7399200
+    assert data["header_badge"]["request"]["latest_log_at"] == "2026-06-29T12:00:00Z"
+    assert data["header_badge"]["local_rows"] == 7400000
+
+
 # Silence unused-import warnings
 _ = pytest

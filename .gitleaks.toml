@@ -45,6 +45,7 @@ paths = [
     '''^docs/''',
     '''^CHANGELOG\.md$''',
     '''^AGENTS\.md$''',
+    '''^vcl_reviews/.*\.txt$''',                              # VCL live review files (pulled compiled VCL log files)
 
     # Working-tree-only artifacts (all gitignored; matter only for
     # ad-hoc `--no-git` runs). We list the per-service config filename

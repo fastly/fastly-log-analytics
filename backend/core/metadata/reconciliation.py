@@ -136,7 +136,7 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                     out[out_key] = {"rows": 0, "bytes": 0}
                     continue
                 try:
-                    rows = usage_log_con.execute("SELECT count(*) FROM usage_log").fetchone()[0]
+                    rows = usage_log_con.execute("SELECT sum(count) FROM usage_log_hourly_summary").fetchone()[0] or 0
                     row = usage_log_con.execute(
                         "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
                     ).fetchone()

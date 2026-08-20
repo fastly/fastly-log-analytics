@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { useDebugStore } from '@/stores/debugStore'
+import { setActiveServiceCookie } from '@/lib/active-service-cookie'
 
 // Rehydrate the persisted Zustand stores AFTER mount.
 //
@@ -23,6 +24,12 @@ export function StoreHydrator() {
   useEffect(() => {
     useServiceStore.persist.rehydrate()
     useDebugStore.persist.rehydrate()
+
+    // Sync cookie with the rehydrated activeServiceId (Zustand persist bypasses setters)
+    const activeServiceId = useServiceStore.getState().activeServiceId
+    if (activeServiceId) {
+      setActiveServiceCookie(activeServiceId)
+    }
 
     // URL parameter overrides localStorage activeServiceId if present.
     // This fixes the bug where reloading or deep-linking to a page with

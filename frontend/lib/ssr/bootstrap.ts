@@ -35,14 +35,15 @@ type BootstrapResponse = components['schemas']['BootstrapResponse']
 // leak one analyst's scoped data to another. Admin is a single identity, so
 // sharing its bootstrap across concurrent admin renders is safe.
 const _ADMIN_SSR_TTL_MS = 2000
-let _adminInflight: Promise<BootstrapResponse | null> | null = null
-let _adminCached: { at: number; value: BootstrapResponse | null } | null = null
+const _adminInflightMap = new Map<string, Promise<BootstrapResponse | null>>()
+const _adminCachedMap = new Map<string, { at: number; value: BootstrapResponse | null }>()
 
-function _fetchBootstrapUpstream(): Promise<BootstrapResponse | null> {
+function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapResponse | null> {
   // Returns null on ANY failure (no resp / non-2xx / malformed 2xx body) so
   // the root layout never throws a SyntaxError out of this server-component
   // path; the shared parseSsrJson reproduces that guard + warn contract.
-  return ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ssr/bootstrap' }).then((resp) =>
+  const path = serviceId ? `/api/bootstrap?service_id=${serviceId}` : '/api/bootstrap'
+  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap', injectAdminToken: true }).then((resp) =>
     parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
   )
 }
@@ -54,26 +55,31 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
   const proxiedByCaddy = hdrs.get('x-proxied-by-caddy')
   const inboundHost = hdrs.get('host')
   const isAdmin = !proxiedByCaddy && !!inboundHost && isLoopbackHost(inboundHost)
+  const serviceId = hdrs.get('x-service-id')
 
   if (!isAdmin) {
     // Analyst / anonymous: per-session, never shared.
-    return _fetchBootstrapUpstream()
+    return _fetchBootstrapUpstream(serviceId)
   }
 
+  const cacheKey = serviceId || '__default__'
   const now = Date.now()
-  if (_adminCached && now - _adminCached.at < _ADMIN_SSR_TTL_MS) {
-    return _adminCached.value
+  const cached = _adminCachedMap.get(cacheKey)
+  if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {
+    return cached.value
   }
-  if (_adminInflight) return _adminInflight
+  const inflight = _adminInflightMap.get(cacheKey)
+  if (inflight) return inflight
 
-  _adminInflight = (async () => {
+  const promise = (async () => {
     try {
-      const value = await _fetchBootstrapUpstream()
-      _adminCached = { at: Date.now(), value }
+      const value = await _fetchBootstrapUpstream(serviceId)
+      _adminCachedMap.set(cacheKey, { at: Date.now(), value })
       return value
     } finally {
-      _adminInflight = null
+      _adminInflightMap.delete(cacheKey)
     }
   })()
-  return _adminInflight
+  _adminInflightMap.set(cacheKey, promise)
+  return promise
 }

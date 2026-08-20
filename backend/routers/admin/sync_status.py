@@ -91,7 +91,7 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
         logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
 
     cached_status["access_level"] = src.get("access_level", "read_write")
-    cached_status["storage_mode"] = _db.STORAGE_MODE
+    cached_status["storage_mode"] = src.get("storage_mode", "cloud")
     cached_status["configured"] = True
 
     db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
@@ -272,7 +272,7 @@ async def log_extents_stream(
             if projected is not None:
                 yield json.dumps(projected)
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 @router.get("/admin/ingested-files", response_model=IngestedFilesResponse)

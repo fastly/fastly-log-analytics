@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import { useShallow } from 'zustand/react/shallow'
 import { useFilterStore } from '@/stores/filterStore'
 import { useFilterPayload } from '@/hooks/useFilterPayload'
+import { hydrateFilterStoreFromUrl, _resetUrlHydrationFlag, rangeLabelToHours } from '@/lib/urlFilterHydration'
 
 /**
  * Bidirectional sync between the global filterStore and the page URL.
@@ -39,6 +40,45 @@ export function useFilterUrlWriteback(): void {
     })),
   )
   const filterPayload = useFilterPayload()
+
+  // Whenever the pathname changes, reset the URL hydration flag
+  // and hydrate the filterStore from the current URL search parameters.
+  // This ensures client-side navigations (e.g. from /assets-shield to
+  // /dashboard?filters=...) successfully apply the query parameters.
+  //
+  // If there are no absolute timestamps in the URL, and we have a rolling
+  // range, we re-anchor/advance that range to 'now' so navigating across
+  // views updates the temporal bounds to the latest rolling window.
+  useEffect(() => {
+    _resetUrlHydrationFlag()
+    hydrateFilterStoreFromUrl()
+
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search)
+      const qsStart = params.get('start_time')
+      const qsEnd = params.get('end_time')
+      const qsRange = params.get('range')
+
+      if (!qsStart && !qsEnd) {
+        const store = useFilterStore.getState()
+        const now = new Date()
+        const activeRange = qsRange || store.relativeRange
+
+        if (activeRange) {
+          const hours = rangeLabelToHours(activeRange)
+          if (hours !== null) {
+            const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
+            store.setRelativeRange(activeRange, start, now.toISOString())
+          }
+        } else if (store.isAutoRange) {
+          useFilterStore.setState({
+            startTime: new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
+            endTime: now.toISOString(),
+          })
+        }
+      }
+    }
+  }, [pathname])
 
   // Write store → URL on state changes or when path changes.
   useEffect(() => {

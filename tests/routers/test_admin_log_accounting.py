@@ -420,3 +420,153 @@ def test_log_accounting_handles_no_logging_service_id(in_memory_duckdb):
         app.dependency_overrides.clear()
     assert resp.status_code == 400
     assert "logging_service_id" in resp.json()["detail"]["error"]
+
+
+def test_log_accounting_clamps_to_created_at(log_accounting_client, log_accounting_source):
+    """If the service was created/provisioned less than 24h ago, the start
+    time of the log-accounting window is clamped to the service's created_at time
+    and we only compare from that hour forward."""
+    svc_id = log_accounting_source["name"]
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    created_at = now - timedelta(hours=2)
+    # Put created_at 5 minutes past the hour start
+    created_at_str = (created_at + timedelta(minutes=5)).isoformat()
+
+    b0 = now - timedelta(hours=2)
+    b1 = now - timedelta(hours=1)
+
+    _seed_ingested(
+        svc_id,
+        [
+            (b0.strftime("%Y-%m-%dT%H:%M:%S"), 100),
+            (b1.strftime("%Y-%m-%dT%H:%M:%S"), 200),
+        ],
+    )
+    fastly_payload = {
+        "data": [
+            {"start_time": int(b0.timestamp()), "requests": 100},
+            {"start_time": int(b1.timestamp()), "requests": 200},
+        ]
+    }
+
+    config_mock = {
+        "service_id": svc_id,
+        "name": svc_id,
+        "created_at": created_at_str,
+    }
+
+    with (
+        patch("backend.config.load_config", return_value=config_mock),
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
+    ):
+        resp = log_accounting_client.get("/api/admin/log-accounting?hours=24&by=hour")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # The query window must be clamped to the created_at hour start
+    assert body["from_ts"] == b0.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # We should have exactly 2 buckets representing b0 and b1
+    assert len(body["buckets"]) == 2
+
+
+def test_log_accounting_edge_only(log_accounting_client, log_accounting_source):
+    """If the service has edge-only logging enabled, log-accounting should use
+    'edge_requests' as the denominator instead of 'requests' from the Fastly stats response."""
+    svc_id = log_accounting_source["name"]
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    b0 = now - timedelta(hours=1)
+
+    # Ingested rows is 200
+    _seed_ingested(
+        svc_id,
+        [
+            (b0.strftime("%Y-%m-%dT%H:%M:%S"), 200),
+        ],
+    )
+
+    # Fastly payload contains requests=300 (which has shield hops) and edge_requests=200
+    fastly_payload = {
+        "data": [
+            {
+                "start_time": int(b0.timestamp()),
+                "requests": 300,
+                "edge_requests": 200,
+            },
+        ]
+    }
+
+    config_mock = {
+        "service_id": svc_id,
+        "name": svc_id,
+        "provisioning": {
+            "edge_only": True,
+        },
+    }
+
+    with (
+        patch("backend.config.load_config", return_value=config_mock),
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
+    ):
+        resp = log_accounting_client.get("/api/admin/log-accounting?hours=1&by=hour")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # The gap should be 0% because edge_requests (200) matches our_rows (200)
+    assert len(body["buckets"]) == 1
+    bucket = body["buckets"][0]
+    assert bucket["fastly_requests"] == 200
+    assert bucket["our_rows"] == 200
+    assert bucket["gap_pct"] == 0.0
+
+
+def test_log_accounting_not_edge_only(log_accounting_client, log_accounting_source):
+    """If edge-only logging is NOT enabled, log-accounting should use standard 'requests'."""
+    svc_id = log_accounting_source["name"]
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    b0 = now - timedelta(hours=1)
+
+    _seed_ingested(
+        svc_id,
+        [
+            (b0.strftime("%Y-%m-%dT%H:%M:%S"), 200),
+        ],
+    )
+
+    fastly_payload = {
+        "data": [
+            {
+                "start_time": int(b0.timestamp()),
+                "requests": 300,
+                "edge_requests": 200,
+            },
+        ]
+    }
+
+    config_mock = {
+        "service_id": svc_id,
+        "name": svc_id,
+        "provisioning": {
+            "edge_only": False,
+        },
+    }
+
+    with (
+        patch("backend.config.load_config", return_value=config_mock),
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("urllib.request.urlopen", side_effect=_fake_urlopen(fastly_payload)),
+    ):
+        resp = log_accounting_client.get("/api/admin/log-accounting?hours=1&by=hour")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # The gap should be non-zero because we used requests=300 as denominator vs our_rows=200
+    assert len(body["buckets"]) == 1
+    bucket = body["buckets"][0]
+    assert bucket["fastly_requests"] == 300
+    assert bucket["our_rows"] == 200
+    assert abs(bucket["gap_pct"] - 0.3333) < 0.01

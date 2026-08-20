@@ -1364,6 +1364,45 @@ def test_purge_usage_log_forwards_retention_to_metadata_db():
     assert captured == {"sid": "svc", "retention": 7}
 
 
+def test_get_sync_status_dynamic_storage_mode(in_memory_duckdb, fos_source):
+    """get_sync_status must dynamically resolve storage_mode from the source config."""
+    from backend.core._duckdb_status import get_sync_status
+
+    # Test with custom storage_mode "local"
+    local_source = {**fos_source, "storage_mode": "local"}
+    prior_status = {"local_rows": 0, "latest_log_at": None}
+    summary = {
+        "file_count": 0,
+        "total_rows": 0,
+        "total_bytes": 0,
+        "count_with_bytes": 0,
+        "last_ingested": None,
+        "latest_file_name": None,
+    }
+
+    with (
+        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.config.get_status", return_value=prior_status),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
+    ):
+        out = get_sync_status(in_memory_duckdb, local_source, force=True)
+
+    assert out["storage_mode"] == "local"
+
+
+def test_get_sync_status_cached_dynamic_storage_mode(in_memory_duckdb, fos_source):
+    """get_sync_status must dynamically resolve storage_mode from the source config even on skip_fos cache-hit path."""
+    from backend.core._duckdb_status import get_sync_status
+
+    local_source = {**fos_source, "storage_mode": "local"}
+    cached = {"local_rows": 12345, "ingested": 99, "latest_log_at": "2026-06-15T00:00:00Z"}
+
+    with patch("backend.config.get_status", return_value=cached):
+        out = get_sync_status(in_memory_duckdb, local_source, skip_fos=True, force=False)
+
+    assert out["storage_mode"] == "local"
+
+
 # Silence ruff unused-imports
 _ = MagicMock
 _ = pytest

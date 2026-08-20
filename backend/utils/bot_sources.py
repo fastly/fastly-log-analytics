@@ -22,7 +22,40 @@ BOT_SOURCES: list[dict] = [
         "name": "Well-Known Bots (arcjet)",
         "url": "https://raw.githubusercontent.com/arcjet/well-known-bots/main/well-known-bots.json",
         "enabled": True,
-    }
+        "type": "ua",
+    },
+    {
+        "id": "tor-exit-nodes",
+        "name": "Tor Exit Nodes (Official)",
+        "url": "https://check.torproject.org/torbulkexitlist",
+        "enabled": True,
+        "type": "ip",
+        "category": "anonymizer",
+    },
+    {
+        "id": "ipsum-blocklist",
+        "name": "IPsum Malicious IP List",
+        "url": "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt",
+        "enabled": True,
+        "type": "ip",
+        "category": "malicious_ip",
+    },
+    {
+        "id": "aws-ip-ranges",
+        "name": "AWS IP Ranges",
+        "url": "https://ip-ranges.amazonaws.com/ip-ranges.json",
+        "enabled": True,
+        "type": "ip",
+        "category": "cloud_infra",
+    },
+    {
+        "id": "gcp-ip-ranges",
+        "name": "GCP IP Ranges",
+        "url": "https://www.gstatic.com/ipranges/cloud.json",
+        "enabled": True,
+        "type": "ip",
+        "category": "cloud_infra",
+    },
 ]
 
 _CACHE_DIR = Path("data/cache/bot_sources")
@@ -165,41 +198,86 @@ def fetch_and_cache_source(source_id: str) -> dict:
 
     req = urllib.request.Request(src["url"], headers={"User-Agent": "fastly-log-analysis/1.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = json.loads(resp.read().decode())
+        raw_content = resp.read().decode()
 
-    # well-known-bots top-level is a list; other sources may differ
-    entries = raw if isinstance(raw, list) else raw.get("bots", raw.get("entries", []))
+    if source_id == "well-known-bots":
+        raw = json.loads(raw_content)
+        # well-known-bots top-level is a list; other sources may differ
+        entries = raw if isinstance(raw, list) else raw.get("bots", raw.get("entries", []))
 
-    # Normalize Arcjet format to expected {"domains": [], "cidrs": []} format
-    for entry in entries:
-        v_list = entry.get("verification")
-        if not isinstance(v_list, list):
-            continue
+        # Normalize Arcjet format to expected {"domains": [], "cidrs": []} format
+        for entry in entries:
+            v_list = entry.get("verification")
+            if not isinstance(v_list, list):
+                continue
 
-        domains = []
+            domains = []
+            cidrs = []
+
+            for v in v_list:
+                v_type = v.get("type")
+                if v_type == "dns":
+                    for mask in v.get("masks", []):
+                        domain = mask.split("*")[-1].lstrip(".").lstrip("@.")
+                        if domain:
+                            domains.append(domain)
+                elif v_type == "cidr":
+                    # Static prefixes
+                    for p in v.get("prefixes", []):
+                        cidrs.append(p)
+                    # Dynamic sources
+                    for s in v.get("sources", []):
+                        cidrs.extend(fetch_external_cidrs(s))
+
+            entry["verification"] = {"domains": list(set(domains)), "cidrs": list(set(cidrs))}
+    else:
+        # IP/threat feed: Tor, IPsum, Cloud range lists
         cidrs = []
+        try:
+            data = json.loads(raw_content)
+            # AWS / GCP format: check for lists under prefixes key
+            if isinstance(data, dict) and "prefixes" in data and isinstance(data["prefixes"], list):
+                for p in data["prefixes"]:
+                    if "ip_prefix" in p:
+                        cidrs.append(p["ip_prefix"])
+                    elif "ipv6_prefix" in p:
+                        cidrs.append(p["ipv6_prefix"])
+                    elif "ipv4Prefix" in p:
+                        cidrs.append(p["ipv4Prefix"])
+                    elif "ipv6Prefix" in p:
+                        cidrs.append(p["ipv6Prefix"])
+            elif isinstance(data, list):
+                cidrs = [str(x) for x in data if isinstance(x, str)]
+        except json.JSONDecodeError:
+            # Plain-text format (Tor bulk exit node list, IPsum list)
+            for line in raw_content.splitlines():
+                line = line.strip()
+                if not line or line.startswith(("#", "//")):
+                    continue
+                # For IPsum, format is "IP score" (e.g. "1.2.3.4 5"), take IP
+                parts = line.split()
+                if parts:
+                    ip = parts[0]
+                    if "/" in ip or "." in ip or ":" in ip:
+                        cidrs.append(ip)
 
-        for v in v_list:
-            v_type = v.get("type")
-            if v_type == "dns":
-                for mask in v.get("masks", []):
-                    domain = mask.split("*")[-1].lstrip(".").lstrip("@.")
-                    if domain:
-                        domains.append(domain)
-            elif v_type == "cidr":
-                # Static prefixes
-                for p in v.get("prefixes", []):
-                    cidrs.append(p)
-                # Dynamic sources
-                for s in v.get("sources", []):
-                    cidrs.extend(fetch_external_cidrs(s))
-
-        entry["verification"] = {"domains": list(set(domains)), "cidrs": list(set(cidrs))}
+        # Represent as a single standard entry for 100% backward compatibility
+        entries = [
+            {
+                "id": source_id,
+                "name": src["name"],
+                "pattern": {
+                    "accepted": []  # No UA patterns since matched by IP
+                },
+                "verification": {"domains": [], "cidrs": list(set(cidrs))},
+            }
+        ]
 
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    entry_count = len(cidrs) if src.get("type") == "ip" else len(entries)
     envelope = {
         "last_updated": iso_z_now(),
-        "entry_count": len(entries),
+        "entry_count": entry_count,
         "entries": entries,
     }
     _cache_path(source_id).write_text(json.dumps(envelope, separators=(",", ":")))
@@ -208,12 +286,12 @@ def fetch_and_cache_source(source_id: str) -> dict:
     with _matcher_lock:
         _matcher_cache.clear()
 
-    logger.info("👾 \x1b[36m[bots]\x1b[0m Cached %d entries for %s", len(entries), source_id)
+    logger.info("👾 \x1b[36m[bots]\x1b[0m Cached %d entries for %s", entry_count, source_id)
     return {
         "id": source_id,
         "name": src["name"],
         "last_updated": envelope["last_updated"],
-        "entry_count": len(entries),
+        "entry_count": entry_count,
     }
 
 
@@ -430,7 +508,39 @@ def get_bot_regex_pattern(limit: int = 500) -> str | None:
     return "(?i)" + "|".join(re.escape(lit) for lit in literals)
 
 
+import ipaddress
 from typing import Any
+
+_compiled_ip_feeds: dict = {}
+_compiled_ip_feeds_lock = threading.Lock()
+
+
+def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
+    """Compile enabled IP source CIDR ranges into Network objects once for high-performance match."""
+    current_mtime = _cache_mtime()
+    with _compiled_ip_feeds_lock:
+        if _compiled_ip_feeds.get("mtime") == current_mtime and "feeds" in _compiled_ip_feeds:
+            return _compiled_ip_feeds["feeds"]
+
+        feeds = {}
+        for src in BOT_SOURCES:
+            if src.get("type") != "ip" or not src["enabled"]:
+                continue
+            entries = load_source(src["id"])
+            if entries:
+                cidrs = entries[0].get("verification", {}).get("cidrs", [])
+                net_objs = []
+                for c in cidrs:
+                    try:
+                        net_objs.append(ipaddress.ip_network(c, strict=False))
+                    except ValueError:
+                        continue
+                if net_objs:
+                    feeds[src["id"]] = net_objs
+
+        _compiled_ip_feeds["feeds"] = feeds
+        _compiled_ip_feeds["mtime"] = current_mtime
+        return feeds
 
 
 def enrich_bot_metadata(df: Any) -> None:
@@ -441,7 +551,7 @@ def enrich_bot_metadata(df: Any) -> None:
     if df.empty:
         return
 
-    # 1. Arcjet/Well-Known Bot Matching
+    # 1. Arcjet/Well-Known Bot Matching & IP feed matching
     if "ua" in df.columns and "ip" in df.columns:
         from backend.utils.bot_sources import build_matcher
         from backend.utils.rdns_cache import classify, get_hostnames
@@ -460,10 +570,31 @@ def enrich_bot_metadata(df: Any) -> None:
                 candidate_ips.append(ip_str)
         hostnames = get_hostnames(candidate_ips)
 
+        # Get pre-compiled IP ranges
+        ip_feeds = _get_compiled_ip_feeds()
+
         bot_names = []
         for ip_str, matches in row_matches:
+            matched_feed = None
+            if ip_str:
+                try:
+                    ip_obj = ipaddress.ip_address(ip_str)
+                    for feed_id, net_objs in ip_feeds.items():
+                        for net in net_objs:
+                            if ip_obj in net:
+                                matched_feed = feed_id
+                                break
+                        if matched_feed:
+                            break
+                except Exception:
+                    pass
+
             if not matches:
-                bot_names.append("null")
+                if matched_feed:
+                    feed_name = next((s["name"] for s in BOT_SOURCES if s["id"] == matched_feed), matched_feed)
+                    bot_names.append(f"{feed_name} (IP-Match)")
+                else:
+                    bot_names.append("null")
                 continue
 
             entry = matches[0]
@@ -475,7 +606,11 @@ def enrich_bot_metadata(df: Any) -> None:
             verification_cidrs = verification.get("cidrs", [])
             state = classify(ip_str, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
 
-            bot_names.append(f"{bot_name} ({state})")
+            if matched_feed:
+                feed_name = next((s["name"] for s in BOT_SOURCES if s["id"] == matched_feed), matched_feed)
+                bot_names.append(f"{bot_name} ({state}, {feed_name})")
+            else:
+                bot_names.append(f"{bot_name} ({state})")
         df["_bot_name"] = bot_names
 
     # 2. NG-WAF Verified Bot Enrichment
@@ -522,3 +657,4 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 
 _CacheRegistry.register("utils.bot_sources._matcher_cache", _matcher_cache)
 _CacheRegistry.register("utils.bot_sources._source_cache", _source_cache)
+_CacheRegistry.register("utils.bot_sources._compiled_ip_feeds", _compiled_ip_feeds)

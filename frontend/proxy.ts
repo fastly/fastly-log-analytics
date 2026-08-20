@@ -1,4 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server'
+import { ACTIVE_SERVICE_COOKIE } from './lib/active-service-cookie'
 
 // Two responsibilities live here:
 //
@@ -111,7 +112,24 @@ export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
 
+  const serviceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
+  const serviceCookie = request.cookies?.get ? (request.cookies.get(ACTIVE_SERVICE_COOKIE)?.value || null) : null
+  const serviceId = serviceParam || serviceCookie
+
+  if (serviceId) {
+    requestHeaders.set('x-service-id', serviceId)
+  }
+
   const response = NextResponse.next({ request: { headers: requestHeaders } })
+
+  if (serviceParam && serviceParam !== serviceCookie && response.cookies) {
+    response.cookies.set(ACTIVE_SERVICE_COOKIE, serviceParam, {
+      path: '/',
+      maxAge: 31536000,
+      sameSite: 'lax',
+    })
+  }
+
   response.headers.set('Content-Security-Policy', buildCsp(nonce))
   response.headers.set('x-nonce', nonce)
   return response

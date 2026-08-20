@@ -31,7 +31,7 @@ test('TeardownDialog starts the SSE stream when the user enters a token and clic
 
   render(
     <TeardownDialog
-      service={{ service_id: "test-svc", name: "Test Service" } as any}
+      service={{ service_id: "test-svc", name: "Test Service", rum_enabled: true } as any}
       open={true}
       onOpenChange={onOpenChange}
       onComplete={onComplete}
@@ -60,8 +60,10 @@ test('TeardownDialog starts the SSE stream when the user enters a token and clic
       {
         service_id: 'test-svc',
         remove_logging: true,
+        remove_rum: true,
         remove_cdn: true,
         remove_bucket: true,
+        remove_cloud_files: true,
         remove_cache: true,
         token: 'test-admin-token-value',
       },
@@ -94,6 +96,7 @@ test('TeardownDialog allows analyst (cache-only) teardown without a token', asyn
       {
         service_id: 'test-svc',
         remove_logging: false,
+        remove_rum: false,
         remove_cdn: false,
         remove_bucket: false,
         remove_cache: true,

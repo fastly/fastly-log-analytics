@@ -517,6 +517,37 @@ _ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 
 
 # ---------------------------------------------------------------------------
+# System-managed field filtering (CMCD, Scoring)
+# ---------------------------------------------------------------------------
+#
+# CMCD and edge-scoring fields are generated on-demand from feature toggles
+# (backend/provision/orchestrator.py's FeatureState) and are never persisted
+# as user-authored custom_fields entries. Both provisioning (writing config)
+# and the custom-fields router (reading config) need to strip them from a
+# raw custom_fields list. The predicate lives here — a layer both callers
+# can import downward from — instead of in either caller's own package.
+# `backend.routers.services.core` re-exports both names for backward
+# compatibility (same-identity re-export; see AGENTS.md's shim convention).
+
+
+def _is_system_field(field_name: str) -> bool:
+    """Return True if field_name is a system-managed field (CMCD or Scoring).
+
+    System fields are generated on-demand from feature toggles and should
+    not be displayed as user-editable custom fields.
+    """
+    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+
+
+def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
+    """Filter out system-managed fields from custom_fields list.
+
+    Returns only user-defined custom fields, excluding CMCD and Scoring fields.
+    """
+    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
+
+
+# ---------------------------------------------------------------------------
 # Caller-facing API shape helpers + legacy re-exports
 # ---------------------------------------------------------------------------
 #

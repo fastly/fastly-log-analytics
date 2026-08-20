@@ -148,22 +148,17 @@ class RealtimePoller:
             session.close()
 
     def _fetch_realtime(self, session: req_lib.Session, service_id: str, cursor: int) -> dict | None:
-        from backend.core.fastly.mock_fixtures import is_mock_mode
-
-        if is_mock_mode():
-            return _mock_rt_response()
-
         from backend import config
 
         api_key = config.get_fastly_api_key(service_id)
-        cdn_service_id = config.get_fastly_service_id(service_id)
-        if not api_key or not cdn_service_id:
+        fastly_service_id = config.get_fastly_logging_service_id(service_id)
+        if not api_key or not fastly_service_id:
             return None
 
         if cursor == 0:
-            path = f"/v1/channel/{cdn_service_id}/ts/h?limit=120"
+            path = f"/v1/channel/{fastly_service_id}/ts/h?limit=120"
         else:
-            path = f"/v1/channel/{cdn_service_id}/ts/{cursor}"
+            path = f"/v1/channel/{fastly_service_id}/ts/{cursor}"
 
         session.headers["Fastly-Key"] = api_key
         url = RT_BASE + path
@@ -196,104 +191,6 @@ class RealtimePoller:
         if last_exc:
             raise last_exc
         return None
-
-
-def _mock_rt_response() -> dict:
-    """Canned rt.fastly.com response for FASTLY_MOCK_MODE."""
-    return {
-        "Data": [
-            {
-                "aggregated": {
-                    "requests": 150,
-                    "status_2xx": 140,
-                    "status_3xx": 5,
-                    "status_4xx": 3,
-                    "status_5xx": 2,
-                    "hits": 120,
-                    "miss": 30,
-                    "pass": 0,
-                    "synth": 0,
-                    "resp_body_bytes": 5_000_000,
-                    "resp_header_bytes": 50_000,
-                    "shield": 10,
-                    "shield_resp_body_bytes": 2_000_000,
-                    "shield_resp_header_bytes": 20_000,
-                    "bereq_header_bytes": 10_000,
-                    "bereq_body_bytes": 0,
-                    "waf_blocked": 1,
-                    "waf_logged": 2,
-                    "waf_passed": 147,
-                    "origin_offload": 0.78,
-                    "hit_time": 0.001,
-                    "miss_time": 0.045,
-                    "pass_time": 0.032,
-                    "http2": 95,
-                    "http3": 40,
-                    "ipv6": 20,
-                    "tls_v12": 15,
-                    "tls_v13": 120,
-                    "status_200": 130,
-                    "status_204": 5,
-                    "status_301": 3,
-                    "status_304": 2,
-                    "status_404": 2,
-                    "status_503": 1,
-                    "object_size_10k": 45,
-                    "object_size_100k": 50,
-                    "object_size_1m": 25,
-                    "origin_fetches": 15,
-                    "origin_revalidations": 8,
-                    "origin_cache_fetches": 5,
-                    "shield_hit_requests": 8,
-                    "shield_miss_requests": 2,
-                    "shield_revalidations": 3,
-                    "shield_fetch_body_bytes": 500_000,
-                    "request_collapse_usable_count": 12,
-                    "request_collapse_unusable_count": 3,
-                    "segblock_origin_fetches": 2,
-                    "segblock_shield_fetches": 1,
-                    "bot_challenge_starts": 5,
-                    "bot_challenges_issued": 4,
-                    "bot_challenges_succeeded": 3,
-                    "bot_challenges_failed": 1,
-                    "bot_edge_requests_detected_count": 8,
-                    "bot_edge_requests_verified_count": 2,
-                    "bot_edge_requests_ai_crawler_count": 1,
-                    "compute_execution_time_ms": 12.5,
-                    "compute_request_time_ms": 18.3,
-                    "compute_ram_used": 4_200_000,
-                    "compute_bereq_errors": 0,
-                    "compute_guest_errors": 0,
-                    "restarts": 0,
-                    "recv_sub_count": 150,
-                    "recv_sub_time": 0.002,
-                    "fetch_sub_count": 30,
-                    "fetch_sub_time": 0.045,
-                    "deliver_sub_count": 150,
-                    "deliver_sub_time": 0.001,
-                    "error_sub_count": 2,
-                    "error_sub_time": 0.001,
-                    "miss_histogram": {"10": 5, "20": 8, "30": 6, "60": 4, "120": 3, "250": 2},
-                },
-                "datacenter": {
-                    "SJC": {
-                        "requests": 80,
-                        "status_5xx": 1,
-                        "hits": 65,
-                        "miss": 15,
-                    },
-                    "DCA": {
-                        "requests": 70,
-                        "status_5xx": 1,
-                        "hits": 55,
-                        "miss": 15,
-                    },
-                },
-            }
-        ],
-        "Timestamp": 1720000000,
-        "AggregateDelay": 3,
-    }
 
 
 poller = RealtimePoller()

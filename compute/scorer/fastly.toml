@@ -4,7 +4,7 @@
 manifest_version = 3
 name = "session-scorer"
 description = "Edge session-anomaly scoring service. Decrypts an inbound X-Session-State cookie, scores the session via Layer 1 (universal behavioral) + Layer 2 (route transition), and returns X-Edge-* headers for VCL policy consumption."
-authors = ["drew.michael"]
+authors = ["Fastly Log Analytics Contributors"]
 language = "rust"
 
 # DO NOT set service_id here. The session-scorer Wasm is shared across all

@@ -42,9 +42,10 @@ function isAnalyst(service: ServiceConfig | null) {
 }
 
 export function TeardownDialog({ service, open, onOpenChange, onComplete }: TeardownDialogProps) {
-  const [removeLogging] = useState(true)
-  const [removeCdn] = useState(true)
+  const [removeLogging, setRemoveLogging] = useState(true)
+  const [removeRum, setRemoveRum] = useState(false)
   const [removeBucket, setRemoveBucket] = useState(true)
+  const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeCache, setRemoveCache] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
   // Security: backend now requires a caller-supplied Fastly token with the
@@ -55,6 +56,13 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   const [apiToken, setApiToken] = useState('')
 
   const { lines, status, error: sseError, start, stop, reset } = useSSE()
+
+  // Initialize and keep removeRum in sync when service loaded
+  useEffect(() => {
+    if (service) {
+      setRemoveRum(service.rum_enabled || false)
+    }
+  }, [service])
 
   // Reset state when dialog closes
   useEffect(() => {
@@ -71,6 +79,10 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
   if (!service) return null
 
   const analyst = isAnalyst(service)
+  const removeCdn = removeLogging
+  const bucketDisabled = !removeLogging || !removeRum
+  const effectiveRemoveBucket = bucketDisabled ? false : removeBucket
+
   // Security: teardown is now POST-only (CSRF defense). The token, service
   // id and removal flags travel in the request body, not the URL — keeps
   // the Fastly API token out of browser history, proxy access logs, and
@@ -80,6 +92,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
     ? {
         service_id: service.service_id,
         remove_logging: false,
+        remove_rum: false,
         remove_cdn: false,
         remove_bucket: false,
         remove_cache: removeCache,
@@ -87,14 +100,17 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
     : {
         service_id: service.service_id,
         remove_logging: removeLogging,
+        remove_rum: removeRum,
         remove_cdn: removeCdn,
-        remove_bucket: removeBucket,
+        remove_bucket: effectiveRemoveBucket,
+        remove_cloud_files: removeCloudFiles,
         remove_cache: removeCache,
         token: apiToken,
       }
 
-  const tokenRequired = !analyst && (removeLogging || removeCdn || removeBucket)
-  const canExecute = !tokenRequired || apiToken.trim().length > 0
+  const tokenRequired = !analyst && (removeLogging || removeRum || removeCdn || effectiveRemoveBucket)
+  const hasSelectedAnyAction = removeLogging || removeRum || removeCache
+  const canExecute = (!tokenRequired || apiToken.trim().length > 0) && hasSelectedAnyAction
 
   const handleExecute = () => {
     if (!canExecute) return
@@ -143,7 +159,7 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription className="text-[13px] ml-1 font-medium">
-                  This will remove your local analyst connection to this service. It does not affect the shared cloud data or the admin's configuration.
+                  This will remove your local analyst connection to this service. It does not affect the shared cloud data or the admin&apos;s configuration.
                 </AlertDescription>
               </Alert>
 
@@ -172,6 +188,51 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                 </AlertDescription>
               </Alert>
 
+              {/* What to Remove Questionnaire - Only shown if RUM is enabled */}
+              {service.rum_enabled && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Trash2 className="h-4 w-4 text-muted-foreground" />
+                    <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">What to remove from Fastly</h4>
+                  </div>
+                  <div className="space-y-4 bg-muted/40 border rounded-lg p-4">
+                    <div className="flex items-center justify-between group">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="toggle-remove-logging" className="text-sm font-semibold cursor-pointer">Remove Request Logging</Label>
+                        <p className="text-[11px] text-muted-foreground">Endpoints and VCL capture snippets for request logs.</p>
+                      </div>
+                      <Switch
+                        id="toggle-remove-logging"
+                        checked={removeLogging}
+                        onCheckedChange={(checked) => {
+                          setRemoveLogging(checked)
+                          if (!checked) {
+                            setRemoveBucket(false)
+                          }
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between group">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="toggle-remove-rum" className="text-sm font-semibold cursor-pointer">Remove Real User Monitoring (RUM)</Label>
+                        <p className="text-[11px] text-muted-foreground">Tracking snippets and collector endpoints for Faro RUM.</p>
+                      </div>
+                      <Switch
+                        id="toggle-remove-rum"
+                        checked={removeRum}
+                        onCheckedChange={(checked) => {
+                          setRemoveRum(checked)
+                          if (!checked) {
+                            setRemoveBucket(false)
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Resource Removal Options */}
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-1">
@@ -187,28 +248,49 @@ export function TeardownDialog({ service, open, onOpenChange, onComplete }: Tear
                     </div>
 
                     <div className="space-y-3">
-                      <div className="flex items-center justify-between group">
+                      <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
                         <div className="space-y-0.5">
                           <Label htmlFor="rem-logging" className="text-sm font-medium">Delete Fastly logging endpoint</Label>
                           <p className="text-[10px] text-muted-foreground">Removes the S3 logging configuration from the service.</p>
                         </div>
-                        <Switch id="rem-logging" checked={true} disabled={true} className="opacity-50" />
+                        <Switch id="rem-logging" checked={removeLogging} disabled={true} className="opacity-50" />
                       </div>
 
-                      <div className="flex items-center justify-between group">
+                      <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
                         <div className="space-y-0.5">
                           <Label htmlFor="rem-cdn" className="text-sm font-medium">Delete CDN VCL proxy service</Label>
                           <p className="text-[10px] text-muted-foreground">Permanently removes the secondary CDN service.</p>
                         </div>
-                        <Switch id="rem-cdn" checked={true} disabled={true} className="opacity-50" />
+                        <Switch id="rem-cdn" checked={removeLogging} disabled={true} className="opacity-50" />
                       </div>
 
-                      <div className="flex items-center justify-between group">
+                      <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
+                        <div className="space-y-0.5">
+                          <Label htmlFor="rem-cloud-files" className="text-sm font-medium cursor-pointer">Delete standard logs from cloud storage</Label>
+                          <p className="text-[10px] text-muted-foreground">Deletes raw logs under standard prefix, preserving RUM logs.</p>
+                        </div>
+                        <Switch id="rem-cloud-files" checked={removeLogging && removeCloudFiles} disabled={!removeLogging} onCheckedChange={setRemoveCloudFiles} />
+                      </div>
+
+                      <div className={cn("flex items-center justify-between group", bucketDisabled && "opacity-60")}>
                         <div className="space-y-0.5">
                           <Label htmlFor="rem-buck-new" className="text-sm font-medium cursor-pointer">Delete FOS bucket and all data</Label>
-                          <p className="text-[10px] text-muted-foreground text-destructive font-medium">Warning: This cannot be undone. All logs will be lost.</p>
+                          {bucketDisabled ? (
+                            <p className="text-[10px] text-amber-500 font-medium">
+                              {!removeLogging && !removeRum
+                                ? "FOS bucket cannot be deleted because both standard logging and RUM are being kept active."
+                                : !removeLogging
+                                ? "FOS bucket cannot be deleted because Request Logging is being kept active."
+                                : "FOS bucket cannot be deleted because Real User Monitoring (RUM) is being kept active."
+                              }
+                            </p>
+                          ) : service.rum_enabled ? (
+                            <p className="text-[10px] text-amber-500 font-medium">Warning: This bucket also contains Real User Monitoring (RUM) data. Deleting it will permanently lose all request AND RUM logs.</p>
+                          ) : (
+                            <p className="text-[10px] text-muted-foreground text-destructive font-medium">Warning: This cannot be undone. All logs will be lost.</p>
+                          )}
                         </div>
-                        <Switch id="rem-buck-new" checked={removeBucket} onCheckedChange={setRemoveBucket} />
+                        <Switch id="rem-buck-new" checked={effectiveRemoveBucket} disabled={bucketDisabled} onCheckedChange={setRemoveBucket} />
                       </div>
 
                       <div className="flex items-center justify-between group">

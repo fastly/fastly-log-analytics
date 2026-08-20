@@ -1,58 +1,62 @@
 'use client'
 import React from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import { useBootstrap } from '@/hooks/useBootstrap'
-import { useDebugStore } from '@/stores/debugStore'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { client, extractApiError } from '@/lib/api'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
 export function DiagnosticsPanel() {
-  const { enabled: debugEnabled, setEnabled: setDebugEnabled, apiCallsEnabled, setApiCallsEnabled } = useDebugStore()
   const queryClient = useQueryClient()
 
-  // Mirrors the OR the backend header itself represents (x-debug-responses
-  // doesn't distinguish which panel asked) — written so SSR's own fetch
-  // (lib/ssr/_transport.ts) can see the toggle on the NEXT navigation/reload,
-  // and immediately refetches active queries so the CURRENT page also picks
-  // it up without needing one.
-  function syncDebugCookie(nextEnabled: boolean, nextApiCallsEnabled: boolean) {
-    const shouldAttach = nextEnabled || nextApiCallsEnabled
-    document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
+  // 1. Fetch current debug visibility settings from the backend
+  const { data: settings, isLoading: isSettingsLoading } = useQuery({
+    queryKey: ['admin', 'debug-settings'],
+    queryFn: async () => {
+      const { data, error } = await client.GET('/api/admin/debug-settings')
+      if (error) throw new Error(extractApiError(error) || 'Failed to fetch debug settings')
+      return data
+    },
+  })
+
+  // 2. Mutation to update debug visibility settings on the backend
+  const updateSettingsMutation = useMutation({
+    mutationFn: async (body: { query_debug_visibility?: string; api_call_debug_visibility?: string }) => {
+      const { data, error } = await client.PATCH('/api/admin/debug-settings', {
+        body,
+      })
+      if (error) throw new Error(extractApiError(error) || 'Failed to update debug settings')
+      return data
+    },
+    onSuccess: () => {
+      // Invalidate both settings and bootstrap queries so the application re-syncs state
+      queryClient.invalidateQueries({ queryKey: ['admin', 'debug-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['bootstrap'] })
+      queryClient.invalidateQueries()
+    },
+  })
+
+  const queryVisibility = settings?.query_debug_visibility ?? 'disabled'
+  const apiCallVisibility = settings?.api_call_debug_visibility ?? 'disabled'
+  const isUpdating = updateSettingsMutation.isPending
+
+  const handleSetQueryVisibility = (val: string | null) => {
+    if (val) updateSettingsMutation.mutate({ query_debug_visibility: val })
   }
 
-  // Invalidate (not refetchQueries({type:'active'})): data queries that are
-  // momentarily enabled:false at flip time (service/filter hydration still
-  // resolving) would be missed by a point-in-time refetch and then serve
-  // their envelope-less cached data as fresh — same gap DebugPanel's
-  // cookie-heal shim hit. Invalidation refetches active queries now AND
-  // marks the rest stale so they refetch the moment they enable.
-  const handleSetDebugEnabled = (val: boolean) => {
-    setDebugEnabled(val)
-    syncDebugCookie(val, apiCallsEnabled)
-    queryClient.invalidateQueries()
-  }
-  const handleSetApiCallsEnabled = (val: boolean) => {
-    setApiCallsEnabled(val)
-    syncDebugCookie(debugEnabled, val)
-    queryClient.invalidateQueries()
+  const handleSetApiCallsVisibility = (val: string | null) => {
+    if (val) updateSettingsMutation.mutate({ api_call_debug_visibility: val })
   }
 
-  // Backend gate for the two "Show ... panel" toggles below. The frontend
-  // panels render data from response.`_debug_queries` / `_debug_calls` —
-  // when DEBUG_RESPONSES=false on the server (the prod default per the
-  // 2026 security hardening) those arrays are stripped and the panel
-  // shows nothing. Surface that so the toggle doesn't silently lie.
-  //
-  // Bootstrap folds the same flag in under ``debug_state`` so this
-  // skips a dedicated /api/debug/state round-trip on every admin page
-  // load. Env doesn't change without a restart, so the value is stable
-  // for the session.
+  // Backend gate check
   const { data: bootstrapData } = useBootstrap()
   const debugState = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state
-  // Default to "enabled" on first paint so the toggle isn't briefly dimmed
-  // before bootstrap resolves. Only mark disabled when we have a real
-  // false from the backend.
   const debugBackendOn = debugState?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn
     ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.'
@@ -73,12 +77,21 @@ export function DiagnosticsPanel() {
           )}
         </div>
         <div className="flex items-center justify-end mt-auto" title={debugDisabledTooltip}>
-          <Switch
-            aria-labelledby="diag-query-debug-label"
-            checked={debugEnabled}
-            onCheckedChange={handleSetDebugEnabled}
-            disabled={!debugBackendOn}
-          />
+          <Select
+            value={queryVisibility}
+            onValueChange={handleSetQueryVisibility}
+            disabled={!debugBackendOn || isSettingsLoading || isUpdating}
+          >
+            <SelectTrigger className="h-8 text-xs w-[180px]">
+              <SelectValue placeholder="Select visibility..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="disabled" className="text-xs">Off / Disabled</SelectItem>
+              <SelectItem value="admins" className="text-xs">Admins Only</SelectItem>
+              <SelectItem value="analysts" className="text-xs">Analysts Only</SelectItem>
+              <SelectItem value="both" className="text-xs">Both Admins & Analysts</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
@@ -95,12 +108,21 @@ export function DiagnosticsPanel() {
           )}
         </div>
         <div className="flex items-center justify-end mt-auto" title={debugDisabledTooltip}>
-          <Switch
-            aria-labelledby="diag-api-panel-label"
-            checked={apiCallsEnabled}
-            onCheckedChange={handleSetApiCallsEnabled}
-            disabled={!debugBackendOn}
-          />
+          <Select
+            value={apiCallVisibility}
+            onValueChange={handleSetApiCallsVisibility}
+            disabled={!debugBackendOn || isSettingsLoading || isUpdating}
+          >
+            <SelectTrigger className="h-8 text-xs w-[180px]">
+              <SelectValue placeholder="Select visibility..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="disabled" className="text-xs">Off / Disabled</SelectItem>
+              <SelectItem value="admins" className="text-xs">Admins Only</SelectItem>
+              <SelectItem value="analysts" className="text-xs">Analysts Only</SelectItem>
+              <SelectItem value="both" className="text-xs">Both Admins & Analysts</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </>

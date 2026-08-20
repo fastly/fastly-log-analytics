@@ -2,6 +2,7 @@
 
 import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, HealthBadge, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
 import React, { useState } from 'react'
+import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
@@ -464,6 +465,12 @@ export default function NetworkPage() {
           helpTitle="Worst-Performing Region"
           helpContent={<WorstRegionHelp />}
         />
+      </div>
+
+      <div className="my-6">
+        {activeServiceId && (
+          <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />
+        )}
       </div>
 
       {/* ── Heatmap ── */}

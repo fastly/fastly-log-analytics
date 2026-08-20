@@ -202,22 +202,17 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
 
     Bypasses the poller thread entirely — no threading coordination needed.
     """
-    from backend.core.fastly.mock_fixtures import is_mock_mode
-
-    if is_mock_mode():
-        return []
-
     from backend import config
     from backend.core.realtime.transform import transform_single_second
 
     api_key = config.get_fastly_api_key(service_id)
-    cdn_service_id = config.get_fastly_service_id(service_id)
-    if not api_key or not cdn_service_id:
+    fastly_service_id = config.get_fastly_logging_service_id(service_id)
+    if not api_key or not fastly_service_id:
         return []
 
     import requests as req_lib
 
-    url = f"https://rt.fastly.com/v1/channel/{cdn_service_id}/ts/h?limit=120"
+    url = f"https://rt.fastly.com/v1/channel/{fastly_service_id}/ts/h?limit=120"
     try:
         resp = req_lib.get(url, headers={"Fastly-Key": api_key}, timeout=10)
         resp.raise_for_status()
@@ -286,7 +281,7 @@ async def realtime_stream(
         async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
             yield json.dumps(payload)
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 # ── Log-field-audit endpoint ────────────────────────────────────────────────

@@ -44,7 +44,6 @@
 // window; start_time/end_time are omitted (the keyed path ignores them).
 
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -101,19 +100,16 @@ export interface OriginSsrSeed {
  */
 export function resolveOriginDefaultKey(
   now: Date = new Date(),
-  logExtents?: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
 } {
   // Cold load → no ?range= → client filterStore.relativeRange is null →
   // rangeToken defaults to "24h", matching the 24h store-default display window
-  // so the chart x-axis range and the scan window agree (the old "auto" resolved
-  // to 30d for mature services, squashing the bars under an off-screen-spike
-  // y-axis). The anchor floors to the 60s quantum, snapped to the service's real
-  // log extents when stale (see the module comment above).
-  const snapped = resolveSnappedWindow(narrowLogExtents(logExtents), now)
-  return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
+  // so the chart x-axis range and the scan window agree. The anchor floors to the 60s quantum.
+  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
 }
 
 /**

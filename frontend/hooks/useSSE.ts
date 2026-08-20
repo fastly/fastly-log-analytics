@@ -56,11 +56,16 @@ export function useSSE() {
     // Stop any existing stream before starting a new one
     stop();
 
-    // String concat (not `new URL(path, base)`): the public Fastly deploy's
-    // getApiBase() returns "" for relative proxying, and `new URL(p, "")`
-    // throws TypeError that the surrounding catch swallows into a silent
-    // retry loop. See [[sse-hook-url-pitfall]].
-    const url = `${getApiBase()}${urlPath}`
+    const serviceId = useServiceStore.getState().activeServiceId
+    let finalUrlPath = urlPath
+    if (serviceId) {
+      const separator = finalUrlPath.includes('?') ? '&' : '?'
+      const isPathParameterized = finalUrlPath.includes('/services/')
+      if (!finalUrlPath.includes('service=') && !isPathParameterized) {
+        finalUrlPath = `${finalUrlPath}${separator}service=${encodeURIComponent(serviceId)}`
+      }
+    }
+    const url = `${getApiBase()}${finalUrlPath}`
 
     if (mountedRef.current) {
       setLines([])
@@ -72,7 +77,6 @@ export function useSSE() {
     const currentReqId = requestIdRef.current
 
     try {
-      const serviceId = useServiceStore.getState().activeServiceId
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
@@ -180,9 +184,17 @@ export function useSSE() {
 
       if (currentReqId !== requestIdRef.current || !mountedRef.current) return
 
-      // Stream ended without a 'done' event — mark done if still streaming
-      setStatus((prev) => (prev === 'streaming' ? 'done' : prev))
-    } catch (err: any) {
+      // Stream ended without a 'done' event — if we are still 'streaming',
+      // that means the connection was closed unexpectedly before a terminal
+      // 'done' or 'error' event was sent. This is an error!
+      setStatus((prev) => {
+        if (prev === 'streaming') {
+          setError('Connection closed unexpectedly before completion.')
+          return 'error'
+        }
+        return prev
+      })
+    } catch (err) {
       // If we unmounted or the request was replaced, ignore all errors
       if (currentReqId !== requestIdRef.current || !mountedRef.current) return
 

@@ -30,6 +30,8 @@ _IOTHREAD_QUERIED: ContextVar[bool] = ContextVar("_IOTHREAD_QUERIED", default=Fa
 
 # Process context — identifies what triggered the current work (cron job name, API route, etc.)
 _PROCESS_CONTEXT: ContextVar[str | None] = ContextVar("_PROCESS_CONTEXT", default=None)
+_PAGE_LOAD_ID: ContextVar[str | None] = ContextVar("_PAGE_LOAD_ID", default=None)
+_RECORDING_TELEMETRY: ContextVar[bool] = ContextVar("_RECORDING_TELEMETRY", default=False)
 
 # Process-global stack of currently-active contexts. ContextVars don't
 # propagate into raw worker threads or asyncio loop threads (fsspec's
@@ -79,6 +81,14 @@ def _set_process_context_for_tests(ctx: str | None) -> None:
 
 def get_process_context() -> str | None:
     return _PROCESS_CONTEXT.get()
+
+
+def get_page_load_id() -> str | None:
+    return _PAGE_LOAD_ID.get()
+
+
+def set_page_load_id(page_load_id: str | None) -> None:
+    _PAGE_LOAD_ID.set(page_load_id)
 
 
 def get_process_context_with_fallback() -> str | None:
@@ -345,10 +355,36 @@ def record_sqlite_query(entry: dict) -> None:
     thread, fsspec iothread) don't inherit the context and are skipped —
     same documented gap as ``_CALLS``.
     """
-    entries = _SQLITE_QUERIES.get()
-    if entries is None:
+    if _RECORDING_TELEMETRY.get():
         return
-    entries.append(entry)
+
+    entries = _SQLITE_QUERIES.get()
+    if entries is not None:
+        entries.append(entry)
+
+    # Persistent SQLite recording
+    plid = get_page_load_id()
+    if plid:
+        token = _RECORDING_TELEMETRY.set(True)
+        try:
+            from backend import config as svcconfig
+
+            sid = svcconfig.get_active_service_id()
+            if sid:
+                from backend.core.metadata import usage_log
+
+                usage_log.log_telemetry_query(
+                    service_id=sid,
+                    page_load_id=plid,
+                    request_id="unknown",
+                    engine="sqlite",
+                    sql=entry.get("sql", ""),
+                    duration_ms=entry.get("time_ms", 0.0),
+                )
+        except Exception as e:
+            logger.debug("Failed to record sqlite query to SQLite telemetry: %s", e)
+        finally:
+            _RECORDING_TELEMETRY.reset(token)
 
 
 def get_sqlite_queries() -> list[dict]:
@@ -472,6 +508,31 @@ class track_query:
         queries = get_queries()
         queries.append({"sql": self.query.strip(), "time_ms": elapsed})
         _QUERIES.set(queries)
+
+        # New persistent SQLite recording
+        plid = get_page_load_id()
+        if plid:
+            token = _RECORDING_TELEMETRY.set(True)
+            try:
+                from backend import config as svcconfig
+
+                sid = svcconfig.get_active_service_id()
+                if sid:
+                    from backend.core.metadata import usage_log
+
+                    request_id = "unknown"
+                    usage_log.log_telemetry_query(
+                        service_id=sid,
+                        page_load_id=plid,
+                        request_id=request_id,
+                        engine="duckdb",
+                        sql=self.query.strip(),
+                        duration_ms=elapsed,
+                    )
+            except Exception as e:
+                logger.debug("Failed to record query to SQLite telemetry: %s", e)
+            finally:
+                _RECORDING_TELEMETRY.reset(token)
 
         # Phase 1 telemetry bridge — surface as a span event when inside
         # an active section span.

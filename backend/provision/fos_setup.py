@@ -155,19 +155,55 @@ class _ProvisioningPaginator:
             yield page
 
 
+class _MockS3ClientForProvisioning:
+    """Mock S3 client used during FASTLY_MOCK_MODE=1 to bypass real FOS network calls."""
+
+    def __init__(self):
+        # boto3 clients have a meta property that some listeners might access
+        self.meta = type("Meta", (), {"events": type("Events", (), {"register": lambda *a, **kw: None})()})()
+
+    def head_bucket(self, Bucket):
+        # Always raise 404 to indicate the bucket doesn't exist yet, forcing the create_bucket flow.
+        raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadBucket")
+
+    def create_bucket(self, Bucket, CreateBucketConfiguration=None):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    def delete_bucket(self, Bucket):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    def list_multipart_uploads(self, Bucket):
+        return {"Uploads": []}
+
+    def get_paginator(self, operation_name):
+        class _MockPaginator:
+            def paginate(self, **kwargs):
+                return []
+
+        return _MockPaginator()
+
+    def delete_objects(self, Bucket, Delete):
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+
 def _get_fos_s3_client(access_key, secret_key, region, *, service_id=None, bucket_name="", context=""):
-    endpoint = region_endpoint(region)
-    boto_config = Config(
-        signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 5, "mode": "standard"}
-    )
-    client = boto3.client(
-        "s3",
-        endpoint_url=f"https://{endpoint}",
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region,
-        config=boto_config,
-    )
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if is_mock_mode():
+        client = _MockS3ClientForProvisioning()
+    else:
+        endpoint = region_endpoint(region)
+        boto_config = Config(
+            signature_version="s3v4", s3={"addressing_style": "path"}, retries={"max_attempts": 5, "mode": "standard"}
+        )
+        client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{endpoint}",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+            config=boto_config,
+        )
     if service_id:
         return _ProvisioningTracker(client, service_id, bucket_name, context or f"provision:{bucket_name}")
     return client
@@ -183,20 +219,6 @@ def ensure_fos_bucket(
     service_id: str | None = None,
 ) -> bool:
     """Create the bucket via Boto3 (S3 API). Returns True on success."""
-    # R-3b mock branch: skip the real boto3 / FOS roundtrip during
-    # E2E so the orchestrator can stream all 8 banners without a
-    # ThreadedMotoServer attached. `FASTLY_MOCK_MODE` already neuters
-    # every Fastly/NGWAF API call upstream; the bucket call is the
-    # only S3 op left in the provisioning happy path that would
-    # otherwise need wiring through moto. Production never sets the
-    # env, so the real call path stays load-bearing.
-    from backend.core.fastly.mock_fixtures import is_mock_mode
-
-    if is_mock_mode():
-        if status_cb:
-            status_cb(f"✅ Bucket '{name}' (mocked).")
-        return True
-
     s3 = _get_fos_s3_client(
         access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"provision:{name}"
     )
@@ -208,14 +230,26 @@ def ensure_fos_bucket(
             if status_cb:
                 status_cb(f"✅ Bucket '{name}' already exists.")
             return True
-        except ClientError:
-            pass
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code == "404":
+                pass
+            elif error_code in ("403", "Forbidden", "AccessDenied"):
+                raise RuntimeError(
+                    f"Bucket {_c(BOLD, name)} exists but access denied. "
+                    f"Verify FOS credentials have permission to HeadBucket: {exc}"
+                )
+            else:
+                raise RuntimeError(f"Could not check FOS bucket status: {exc}")
 
         info(f"Creating FOS bucket {_c(BOLD, name)} in {_c(BOLD, region)}…")
         if status_cb:
             status_cb(f"⏳ Creating bucket '{name}' in {region}...")
         try:
-            s3.create_bucket(Bucket=name)
+            if region == "us-east-1":
+                s3.create_bucket(Bucket=name)
+            else:
+                s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": region})
             ok("FOS bucket created")
             if status_cb:
                 status_cb("✅ Bucket created.")
@@ -237,15 +271,6 @@ def delete_fos_bucket(
     service_id: str | None = None,
 ):
     """Delete the bucket via Boto3, emptying it first if necessary."""
-    # R-3b mock branch — mirrors ensure_fos_bucket so the Playwright
-    # teardown journey can stream its 8 banners without a moto stack.
-    from backend.core.fastly.mock_fixtures import is_mock_mode
-
-    if is_mock_mode():
-        if status_cb:
-            status_cb(f"✅ Bucket '{name}' deleted (mocked).")
-        return
-
     s3 = _get_fos_s3_client(
         access_key, secret_key, region, service_id=service_id, bucket_name=name, context=f"teardown:{name}"
     )
@@ -447,3 +472,104 @@ def delete_fos_access_key(key_id: str, token: str, status_cb=None):
             ok("FOS access key already deleted")
         else:
             raise exc
+
+
+def delete_fos_tokens_for_service(service_id: str, token: str, status_cb=None):
+    """List all FOS access keys and delete ones matching this service's patterns.
+
+    Searches for keys with descriptions matching:
+    - fos-log-analysis-{service_id}
+    - fos-log-analysis-temp-admin-{service_id}
+    - temp-teardown-{service_id}
+    """
+    try:
+        resp = fastly("GET", "/resources/object-storage/access-keys", token=token)
+        keys = resp.get("data", [])
+        patterns = [
+            f"fos-log-analysis-{service_id}",
+            f"fos-log-analysis-temp-admin-{service_id}",
+            f"temp-teardown-{service_id}",
+        ]
+
+        deleted_count = 0
+        for key in keys:
+            desc = key.get("description", "")
+            if any(desc.startswith(p) for p in patterns):
+                try:
+                    key_id = key.get("access_key")
+                    fastly("DELETE", f"/resources/object-storage/access-keys/{key_id}", token=token, expect_empty=True)
+                    info(f"Deleted FOS key: {desc}")
+                    deleted_count += 1
+                except RuntimeError as exc:
+                    if "404" not in str(exc):
+                        warn(f"Failed to delete FOS key {desc}: {exc}")
+
+        if deleted_count > 0:
+            ok(f"Deleted {deleted_count} FOS access key(s)")
+        if status_cb:
+            status_cb(f"✅ Deleted {deleted_count} FOS access key(s).")
+    except RuntimeError as exc:
+        warn(f"Failed to list FOS keys: {exc}")
+        if status_cb:
+            status_cb(f"⚠️ Could not clean up FOS keys: {exc}")
+
+
+def delete_fos_prefix(
+    bucket_name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    prefix: str,
+    exclude_prefix: str = None,
+    status_cb=None,
+    *,
+    service_id: str | None = None,
+):
+    """Delete all objects with prefix, optionally excluding those starting with exclude_prefix."""
+    from botocore.exceptions import ClientError
+
+    s3 = _get_fos_s3_client(
+        access_key,
+        secret_key,
+        region,
+        service_id=service_id,
+        bucket_name=bucket_name,
+        context=f"delete_prefix:{prefix}",
+    )
+
+    try:
+        try:
+            s3.head_bucket(Bucket=bucket_name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "404":
+                return
+            raise RuntimeError(f"Could not check FOS bucket status: {exc}")
+
+        deleted_count = 0
+        paginator = s3.get_paginator("list_objects_v2")
+
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            objects = page.get("Contents", [])
+            if objects:
+                delete_list = []
+                for obj in objects:
+                    key = obj["Key"]
+                    if exclude_prefix and key.startswith(exclude_prefix):
+                        continue
+                    delete_list.append({"Key": key})
+
+                if delete_list:
+                    for j in range(0, len(delete_list), 1000):
+                        batch = delete_list[j : j + 1000]
+                        s3.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
+                        deleted_count += len(batch)
+                        if status_cb:
+                            status_cb(
+                                f"🧹 Deleting cloud files under '{prefix}'... (deleted {deleted_count:,} objects so far)"
+                            )
+
+        if status_cb:
+            status_cb(f"✅ Deleted {deleted_count:,} cloud files.")
+    except Exception as e:
+        if status_cb:
+            status_cb(f"⚠️ Warning: Failed to delete cloud files under prefix '{prefix}': {e}")

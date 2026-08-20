@@ -207,7 +207,7 @@ def test_inlined_sql_executes(filters, start, end, schema_table):
 @given(actual_cols=st.one_of(st.none(), st.lists(st.sampled_from(_KNOWN_COLS), min_size=0, max_size=8)))
 def test_no_args_returns_passthrough(actual_cols):
     """No date range, no filters → ``1=1`` no matter what columns exist."""
-    params, sql = build_where_clause(None, None, {}, actual_cols=actual_cols)
+    params, sql = build_where_clause(None, None, {}, actual_cols=actual_cols, exclude_invalid_ips=False)
     assert sql == "1=1"
     assert params == []
 
@@ -219,7 +219,7 @@ def test_no_args_returns_passthrough(actual_cols):
 def test_empty_values_list_is_dropped(col, mode):
     """A FilterSpec with values=[] must contribute zero conditions."""
     filters = {col: FilterSpec(mode=mode, values=[])}
-    params, sql = build_where_clause(None, None, filters, actual_cols=list(_KNOWN_COLS))
+    params, sql = build_where_clause(None, None, filters, actual_cols=list(_KNOWN_COLS), exclude_invalid_ips=False)
     assert sql == "1=1"
     assert params == []
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 
 import duckdb
@@ -36,10 +37,17 @@ _BOOTSTRAP_CACHE_TTL_S = 3.0
 _bootstrap_cache: dict[str, tuple[float, BootstrapResponse]] = {}
 _bootstrap_inflight: dict[str, asyncio.Future] = {}
 
+# SRE-X: Service-level cache for the expensive real-time DuckDB/SQLite queries
+# inside header_badge_and_extents. Caps the query overhead on cold page loads
+# and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
+_HEADER_BADGE_CACHE_TTL_S = 30.0
+_header_badge_cache: dict[str, tuple[float, dict | None, dict | None]] = {}
+
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("routers.bootstrap._bootstrap_cache", _bootstrap_cache)
 _CacheRegistry.register("routers.bootstrap._bootstrap_inflight", _bootstrap_inflight)
+_CacheRegistry.register("routers.bootstrap._header_badge_cache", _header_badge_cache)
 # NB: the short-TTL admin bootstrap response is derived from the on-disk
 # config set, so ANY mutation of that set (provision writes / teardown removes
 # a config) must drop this cache or the change lingers for up to
@@ -149,7 +157,6 @@ def _bootstrap_sync(
     service_id: str | None,
 ) -> BootstrapResponse:
     from backend.core import duckdb as _db
-    from backend.core.duckdb import STORAGE_MODE
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map, get_pop_location_map
@@ -381,55 +388,172 @@ def _bootstrap_sync(
         nonlocal header_badge_payload, log_extents_payload
         if not valid_active_id:
             return
+
+        # Check service-level cache to bypass expensive DuckDB/SQLite scans
+        now_time = time.monotonic()
+        cached = _header_badge_cache.get(valid_active_id)
+        if cached is not None and now_time < cached[0]:
+            header_badge_payload, log_extents_payload = cached[1], cached[2]
+            return
+
         # svcconfig.get_status is keyed on the service NAME, not the
         # service_id. They're often identical, but resolving via the
         # source dict matches the dedicated /api/sync-status handler
         # exactly so analyst/admin both look in the same place.
         if not active_src:
             return
-        import re
 
         from backend import config as svcconfig
-        from backend.core import metadata as metadata_db
 
         cached_status = svcconfig.get_status(active_src["name"]) or {}
 
-        # Real-time SQLite metadata lookup overlay for bootstrap header/extents
-        latest_file_at = None
-        total_rows = 0
-        try:
-            summary = metadata_db.get_ingested_files_status_summary(active_src["name"])
-            latest_file_name = summary.get("latest_file_name")
-            total_rows = summary.get("total_rows") or 0
-            if latest_file_name:
-                fname = latest_file_name.split("/")[-1]
-                m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
-                if m:
-                    latest_file_at = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}Z"
-        except Exception:
-            pass
+        # Get RUM and REQUEST metrics directly from cached_status!
+        rum_payload = cached_status.get("rum")
+        request_payload = cached_status.get("request")
 
-        latest = (
-            latest_file_at
-            or cached_status.get("latest_log_at")
-            or cached_status.get("latest_available_file_at")
-            or cached_status.get("latest_ingested_file_at")
+        # Fall back to live query if RUM is enabled but cached as empty/Never to self-heal
+        is_rum_enabled = bool(
+            active_src.get("rum_enabled", False) or (active_src.get("rum") or {}).get("enabled", False)
         )
+        has_valid_rum_status = rum_payload and not (
+            is_rum_enabled and rum_payload.get("total_rows", 0) == 0 and rum_payload.get("latest_log_at") is None
+        )
+
+        if has_valid_rum_status and request_payload:
+            rum_latest = rum_payload.get("latest_log_at")
+            rum_total = rum_payload.get("total_rows", 0)
+            rum_last_sync = rum_payload.get("last_sync_at")
+
+            request_latest = request_payload.get("latest_log_at")
+            request_total = request_payload.get("total_rows", 0)
+            request_last_sync = request_payload.get("last_sync_at")
+        else:
+            # Fallback if the bg cron hasn't populated them yet
+            rum_latest = None
+            rum_total = 0
+            rum_last_sync = None
+            request_latest = None
+            request_total = 0
+            request_last_sync = None
+
+            try:
+                from backend.core.metadata.cron_log import latest_cron_per_task
+
+                # RUM metrics from DuckDB RUM views
+                try:
+                    from backend.core.duckdb import rum_source_for
+                    from backend.core.iceberg import execute_with_stale_view_retry
+                    from backend.deps import _ConnectionHolder
+
+                    rum_source = rum_source_for(active_src)
+                    with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+
+                        def _query_rum_bootstrap(con):
+                            distinct_id = (
+                                "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+                            )
+                            cnt = (
+                                con.execute(
+                                    f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
+                                ).fetchone()[0]
+                                or 0
+                            )
+                            l_row = con.execute(
+                                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+                            ).fetchone()
+                            l_ts = l_row[0] if l_row else None
+                            return cnt, l_ts
+
+                        rum_count, rum_last_dt = execute_with_stale_view_retry(
+                            rum_con, rum_source, _query_rum_bootstrap
+                        )
+
+                    if rum_count > 0:
+                        rum_total = rum_count
+                        if rum_last_dt:
+                            if isinstance(rum_last_dt, datetime.datetime):
+                                rum_latest = rum_last_dt.isoformat()
+                            else:
+                                rum_latest = str(rum_last_dt)
+                except Exception:
+                    pass
+
+                # REQUEST metrics from DuckDB main table
+                try:
+                    from backend.core.duckdb import _safe_table_name, get_connection
+
+                    duckdb_con = get_connection(active_src)
+                    req_count = duckdb_con.execute(
+                        f"SELECT COUNT(*) FROM {_safe_table_name(active_src['name'])}"
+                    ).fetchone()[0]
+                    if req_count > 0:
+                        request_total = req_count
+                        # RUM beacons are in metadata SQLite, so REQUEST is everything in DuckDB
+                        # Get latest log timestamp from DuckDB
+                        req_latest_row = duckdb_con.execute(
+                            f"SELECT MAX(timestamp) FROM {_safe_table_name(active_src['name'])}"
+                        ).fetchone()
+                        if req_latest_row and req_latest_row[0]:
+                            request_latest = (
+                                req_latest_row[0].isoformat()
+                                if hasattr(req_latest_row[0], "isoformat")
+                                else req_latest_row[0]
+                            )
+                except Exception:
+                    pass
+
+                # Get last sync times for each type
+                cron_data = latest_cron_per_task(valid_active_id)
+                rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
+                request_last_sync = cron_data.get("sync", {}).get("started_at")
+
+            except Exception:
+                pass
+
         earliest = cached_status.get("earliest_log_at")
-        local_rows = cached_status.get("local_rows") or total_rows
+        latest = rum_latest or request_latest or cached_status.get("latest_log_at")
+
+        # Align request_total with local_rows if DuckDB count is smaller or stale (e.g. on analyst instances or sync lag)
+        local_rows_total = cached_status.get("local_rows")
+        if local_rows_total is not None:
+            expected_request_total = max(0, local_rows_total - rum_total)
+            if request_total < expected_request_total:
+                request_total = expected_request_total
+                if not request_latest and cached_status.get("latest_log_at"):
+                    request_latest = cached_status.get("latest_log_at")
+
+        total_rows = rum_total + request_total
+        local_rows = local_rows_total or total_rows
+
         if latest is not None or local_rows is not None:
             header_badge_payload = {
-                "latest_log_at": latest,
+                "rum": {
+                    "latest_log_at": rum_latest,
+                    "total_rows": rum_total,
+                    "last_sync_at": rum_last_sync,
+                },
+                "request": {
+                    "latest_log_at": request_latest,
+                    "total_rows": request_total,
+                    "last_sync_at": request_last_sync,
+                },
+                "latest_log_at": latest,  # Combined for backward compat
                 "local_rows": local_rows,
             }
+
         # log_extents: emit even when both are None (with configured=True)
-        # so the frontend can distinguish "no extents yet, keep polling"
-        # from "service not configured" — matches the dedicated endpoint.
         log_extents_payload = {
             "configured": True,
             "earliest_log_at": earliest,
             "latest_log_at": latest,
         }
+
+        # Store in service-level cache
+        _header_badge_cache[valid_active_id] = (
+            time.monotonic() + _HEADER_BADGE_CACHE_TTL_S,
+            header_badge_payload,
+            log_extents_payload,
+        )
 
     timer.call("header_badge_and_extents", _resolve_header_badge_and_extents)
 
@@ -440,11 +564,17 @@ def _bootstrap_sync(
 
     def _resolve_debug_state():
         nonlocal debug_state_payload
-        if analyst_session is not None:
-            return
+        from backend.core.share_db.settings import get_setting
         from backend.models.common import _debug_responses_enabled
 
-        debug_state_payload = {"debug_responses_enabled": _debug_responses_enabled()}
+        query_vis = get_setting("query_debug_visibility", "disabled")
+        api_vis = get_setting("api_call_debug_visibility", "disabled")
+
+        debug_state_payload = {
+            "debug_responses_enabled": _debug_responses_enabled(),
+            "query_debug_visibility": query_vis,
+            "api_call_debug_visibility": api_vis,
+        }
 
     timer.call("debug_state", _resolve_debug_state)
 
@@ -615,6 +745,8 @@ def _bootstrap_sync(
 
     from backend.core.web_vitals_store import collection_enabled as _web_vitals_collection_enabled
 
+    storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
+
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
         services=services,
@@ -625,7 +757,7 @@ def _bootstrap_sync(
         pop_geo=pop_geo,
         settings={
             "access_level": access_level,
-            "storage_mode": STORAGE_MODE,
+            "storage_mode": storage_mode,
             "is_remote_analyst": analyst_session is not None,
             "analyst_email": analyst_session.email if analyst_session else None,
             "analyst_name": analyst_session.name if analyst_session else None,

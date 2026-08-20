@@ -100,6 +100,13 @@ def build_share_status() -> dict:
                 {
                     "service_id": cfg.get("service_id"),
                     "name": cfg.get("name") or cfg.get("service_id"),
+                    "remote_frontend_deployed": bool(cfg.get("remote_frontend")),
+                    "sharing_domain": cfg.get("remote_frontend", {}).get("domain_name")
+                    if cfg.get("remote_frontend")
+                    else None,
+                    "remote_service_id": cfg.get("remote_frontend", {}).get("service_id")
+                    if cfg.get("remote_frontend")
+                    else None,
                 }
             )
     except Exception:

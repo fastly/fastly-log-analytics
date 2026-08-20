@@ -8,6 +8,7 @@ import { quantizeAnchor } from '@/lib/time-window'
 import type { FiltersPayload } from '@/types/filters'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
+import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { parseFromInput } from '@/lib/date'
 import { Play, Users, Wifi, BarChart3, Gauge, Globe, Film, AlertTriangle, TrendingUp, Clock, UserPlus } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
@@ -407,7 +408,15 @@ function StreamingBody({
         helpTitle={STREAMING_INFO.active_viewers.title}
         helpContent={STREAMING_INFO.active_viewers.body}
       >
-        <PlotlyChart data={sessionsData} layout={SESSIONS_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+        <TimeSeriesChart
+          data={sessionsData}
+          layout={SESSIONS_LAYOUT}
+          startTime={startTime}
+          endTime={endTime}
+          timezone={timezone}
+          height="100%"
+          onRelayout={handleChartRelayout}
+        />
       </AnalyticsCard>
 
       {/* Session Starts */}
@@ -423,7 +432,15 @@ function StreamingBody({
         helpTitle={STREAMING_INFO.session_starts.title}
         helpContent={STREAMING_INFO.session_starts.body}
       >
-        <PlotlyChart data={sessionStartsData} layout={SESSION_STARTS_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+        <TimeSeriesChart
+          data={sessionStartsData}
+          layout={SESSION_STARTS_LAYOUT}
+          startTime={startTime}
+          endTime={endTime}
+          timezone={timezone}
+          height="100%"
+          onRelayout={handleChartRelayout}
+        />
       </AnalyticsCard>
 
       {/* Time Series Charts */}
@@ -440,7 +457,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.buffer_health.title}
           helpContent={STREAMING_INFO.buffer_health.body}
         >
-          <PlotlyChart data={bufferHealthData} layout={BUFFER_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={bufferHealthData}
+            layout={BUFFER_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -455,7 +480,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.bitrate_quality.title}
           helpContent={STREAMING_INFO.bitrate_quality.body}
         >
-          <PlotlyChart data={bitrateData} layout={BITRATE_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={bitrateData}
+            layout={BITRATE_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -470,7 +503,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.throughput.title}
           helpContent={STREAMING_INFO.throughput.body}
         >
-          <PlotlyChart data={throughputData} layout={THROUGHPUT_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={throughputData}
+            layout={THROUGHPUT_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -485,7 +526,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.startup.title}
           helpContent={STREAMING_INFO.startup.body}
         >
-          <PlotlyChart data={startupData} layout={STARTUP_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={startupData}
+            layout={STARTUP_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
       </div>
 

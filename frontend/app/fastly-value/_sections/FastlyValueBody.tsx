@@ -9,6 +9,7 @@ import {
   HardDrive,
   ImageIcon,
   BarChart3,
+  Layers,
 } from 'lucide-react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { resolveRangeWire } from '@/lib/range-wire'
@@ -16,6 +17,7 @@ import { client } from '@/lib/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
+import { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import SummaryValueTab from './tabs/SummaryValueTab'
 import CachingValueTab from './tabs/CachingValueTab'
 import SecurityValueTab from './tabs/SecurityValueTab'
@@ -29,6 +31,7 @@ type ValueData = components['schemas']['ValueSummaryResponse']
 const TABS = [
   { id: 'summary', label: 'Summary', icon: BarChart3 },
   { id: 'caching', label: 'CDN & Caching', icon: HardDrive },
+  { id: 'assets', label: 'Assets & Shield', icon: Layers },
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'bots', label: 'Bot Management', icon: Bot },
   { id: 'performance', label: 'Performance', icon: Gauge },
@@ -71,12 +74,11 @@ export default function FastlyValueBody({
     anchor,
   })
 
-  const sections = React.useMemo(
-    () => activeTab === 'summary'
-      ? [...SUMMARY_SECTIONS]
-      : [activeTab],
-    [activeTab],
-  )
+  const sections = React.useMemo(() => {
+    if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
+    if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
+    return [activeTab]
+  }, [activeTab]) as ("security" | "caching" | "bots" | "performance" | "network" | "io" | "overview")[]
 
   const valueQuery = useServiceQuery<ValueData | undefined>(
     ['value', 'summary', activeServiceId, rangeKey, anchor, filterPayload, '1 day', activeTab],
@@ -92,10 +94,13 @@ export default function FastlyValueBody({
       })
       return data
     },
+    {
+      enabled: activeTab !== 'assets',
+    }
   )
 
   const data = valueQuery.data
-  const loading = valueQuery.isLoading || (valueQuery.isFetching && valueQuery.isPlaceholderData)
+  const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && valueQuery.isPlaceholderData))
 
   return (
     <div className="space-y-6">
@@ -103,7 +108,7 @@ export default function FastlyValueBody({
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as TabId)}
       >
-        <TabsList>
+        <TabsList className="flex flex-wrap h-auto gap-1">
           {TABS.map((tab) => (
             <TabsTrigger key={tab.id} value={tab.id}>
               <tab.icon className="h-4 w-4" />
@@ -144,6 +149,17 @@ export default function FastlyValueBody({
             </TabsContent>
             <TabsContent value="network">
               <NetworkValueTab data={data?.network} />
+            </TabsContent>
+            <TabsContent value="assets">
+              <AssetsReportContent
+                startTime={startTime}
+                endTime={endTime}
+                activeServiceId={activeServiceId}
+                filterPayload={filterPayload}
+                relativeRange={relativeRange}
+                isAutoRange={isAutoRange}
+                anchor={anchor}
+              />
             </TabsContent>
             <TabsContent value="io">
               <IOValueTab data={data?.io} loading={loading} />

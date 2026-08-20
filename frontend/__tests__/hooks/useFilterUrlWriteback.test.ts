@@ -9,9 +9,15 @@
  * with values the user never picked.
  */
 import { renderHook, act } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useFilterUrlWriteback } from '@/hooks/useFilterUrlWriteback'
 import { useFilterStore } from '@/stores/filterStore'
+
+let currentPathname = '/dashboard'
+
+vi.mock('next/navigation', () => ({
+  usePathname: () => currentPathname,
+}))
 
 function resetStore() {
   act(() => {
@@ -21,7 +27,6 @@ function resetStore() {
       startTime: '2026-06-09T20:00:00.000Z',
       endTime: '2026-06-10T20:00:00.000Z',
       isAutoRange: true,
-      hasSyncedExtents: false,
       compareMode: false,
       compareStartTime: null,
       compareEndTime: null,
@@ -30,6 +35,7 @@ function resetStore() {
 }
 
 beforeEach(() => {
+  currentPathname = '/dashboard'
   // Start every test with a clean URL — no leftover query params from
   // a sibling test's window.history.replaceState writes.
   window.history.replaceState({}, '', '/dashboard')
@@ -37,6 +43,32 @@ beforeEach(() => {
 })
 
 describe('useFilterUrlWriteback', () => {
+  it('re-hydrates filterStore on client-side pathname change (ingress)', () => {
+    // 1. Initial page with no filters
+    const { rerender } = renderHook(() => useFilterUrlWriteback())
+
+    // 2. Set filters in URL manually (simulate client-side link navigation with query params)
+    const filters = {
+      country: { values: ['CA'], mode: 'include' },
+    }
+    window.history.replaceState({}, '', `/dashboard?filters=${encodeURIComponent(JSON.stringify(filters))}`)
+
+    // 3. Change pathname (trigger client-side transition)
+    currentPathname = '/security'
+    act(() => {
+      rerender()
+    })
+
+    // 4. Assert that filterStore has been hydrated with the new filters!
+    const store = useFilterStore.getState()
+    expect(store.filters).toHaveLength(1)
+    expect(store.filters[0]).toMatchObject({
+      column: 'country',
+      value: 'CA',
+      mode: 'include',
+    })
+  })
+
   it('does not write start_time/end_time on fresh load (isAutoRange=true)', () => {
     renderHook(() => useFilterUrlWriteback())
 

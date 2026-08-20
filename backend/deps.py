@@ -38,6 +38,7 @@ ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
 
 
 def get_service_id(
+    request: Request,
     service: str | None = Query(default=None),
     sid: str | None = Query(default=None, alias="service_id"),
     x_fastly_service_id: str | None = Header(default=None, alias="x-fastly-service-id"),
@@ -50,7 +51,7 @@ def get_service_id(
     ID matches a cdn_service_id in any config, it returns the corresponding
     logging service ID.
     """
-    res_sid = service or sid or x_fastly_service_id or x_service_id
+    res_sid = request.path_params.get("service_id") or service or sid or x_fastly_service_id or x_service_id
     if res_sid:
         if svcconfig.load_config(res_sid):
             return res_sid
@@ -123,14 +124,20 @@ class _ConnectionHolder:
         from backend.core import duckdb_pool
 
         use_pool = self._read_only and not self._skip_view_update and duckdb_pool._pool_enabled()
+        max_wait_env = os.getenv("DUCKDB_POOL_MAX_WAIT_S", "20.0")
+        try:
+            max_wait = max(1.0, float(max_wait_env))
+        except (TypeError, ValueError):
+            max_wait = 20.0
+
         try:
             if use_pool:
-                self._pool_cm = duckdb_pool.checkout_connection(self._source, max_wait=10.0)
+                self._pool_cm = duckdb_pool.checkout_connection(self._source, max_wait=max_wait)
                 self.con = self._pool_cm.__enter__()
             else:
                 self.con = get_connection(
                     source=self._source,
-                    max_wait=10,
+                    max_wait=max_wait,
                     skip_view_update=self._skip_view_update,
                     read_only=self._read_only,
                 )

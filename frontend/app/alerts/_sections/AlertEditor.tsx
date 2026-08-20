@@ -51,6 +51,11 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const [compPeriodMin, setCompPeriodMin] = React.useState(initialAlert?.comparison_period_min?.toString() || '60')
   const [statusCodesStr, setStatusCodesStr] = React.useState(initialAlert?.status_codes?.join(', ') || '')
   const [webhookUrl, setWebhookUrl] = React.useState(initialAlert?.webhook_url || '')
+  const [zscoreThreshold, setZscoreThreshold] = React.useState(initialAlert?.zscore_threshold?.toString() || '3.0')
+  const [baselinePeriodDays, setBaselinePeriodDays] = React.useState(initialAlert?.baseline_period_days?.toString() || '7')
+  const [channels, setChannels] = React.useState<any[]>(initialAlert?.channels || [])
+  const [newChannelType, setNewChannelType] = React.useState<'slack' | 'pagerduty' | 'webhook'>('slack')
+  const [newChannelUrl, setNewChannelUrl] = React.useState('')
   const [isSaving, setIsSaving] = React.useState(false)
   const [previewData, setPreviewData] = React.useState<any>(null)
   const [isPreviewLoading, setIsPreviewLoading] = React.useState(false)
@@ -64,10 +69,19 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const [touchedName, setTouchedName] = React.useState(false)
   const [touchedThreshold, setTouchedThreshold] = React.useState(false)
   const nameTrimmed = name.trim()
-  const thresholdTrimmed = threshold.trim()
+  const thresholdTrimmed = evalType === 'anomaly_zscore' ? zscoreThreshold.trim() : threshold.trim()
   const nameError = touchedName && nameTrimmed === '' ? 'Name is required.' : null
   const thresholdError = touchedThreshold && thresholdTrimmed === '' ? 'Threshold is required.' : null
   const formInvalid = nameTrimmed === '' || thresholdTrimmed === ''
+
+  const handleAddChannel = () => {
+    if (!newChannelUrl.trim()) return
+    setChannels([...channels, { type: newChannelType, url: newChannelUrl.trim() }])
+    setNewChannelUrl('')
+  }
+  const handleRemoveChannel = (index: number) => {
+    setChannels(channels.filter((_, i) => i !== index))
+  }
 
   // Fetch preview data on change
   React.useEffect(() => {
@@ -91,13 +105,15 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             metric,
             evaluation_type: evalType,
             evaluation_scope: evalScope,
-            operator,
-            threshold: parseFloat(threshold) || 0,
+            operator: evalType === 'anomaly_zscore' ? '>' : operator,
+            threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : (parseFloat(threshold) || 0),
             window_min: parseFloat(windowMin),
-            comparison_period_min: evalType !== 'absolute' ? parseFloat(compPeriodMin) : undefined,
+            comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
             status_codes: parsedCodes,
-            enabled: true
-          }
+            enabled: true,
+            zscore_threshold: evalType === 'anomaly_zscore' ? (parseFloat(zscoreThreshold) || 3.0) : undefined,
+            baseline_period_days: evalType === 'anomaly_zscore' ? (parseInt(baselinePeriodDays) || 7) : undefined,
+          } as any
         })
         if (data) {
           setPreviewData((data as any).data)
@@ -111,7 +127,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
     const timer = setTimeout(fetchPreview, 500)
     return () => clearTimeout(timer)
-  }, [activeServiceId, isAnalyst, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, lookbackHours])
+  }, [activeServiceId, isAnalyst, metric, category, evalType, evalScope, windowMin, compPeriodMin, statusCodesStr, threshold, zscoreThreshold, baselinePeriodDays, lookbackHours])
 
   // Dynamic metrics based on category
   const metricsByCategory: Record<string, {value: string, label: string}[]> = {
@@ -147,7 +163,9 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
   const handleEvalTypeChange = (val: string | null) => {
     if (!val) return
     setEvalType(val as any)
-    if (val !== 'absolute') {
+    if (val === 'anomaly_zscore') {
+      setOperator('>')
+    } else if (val !== 'absolute') {
       setOperator('>') // Relatives are usually increases
     }
   }
@@ -179,12 +197,15 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           metric,
           evaluation_type: evalType,
           evaluation_scope: evalScope,
-          operator,
-          threshold: parseFloat(threshold),
+          operator: evalType === 'anomaly_zscore' ? '>' : operator,
+          threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
           window_min: parseFloat(windowMin),
-          comparison_period_min: evalType !== 'absolute' ? parseFloat(compPeriodMin) : undefined,
+          comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
           status_codes: parsedCodes,
           webhook_url: webhookUrl || undefined,
+          channels: channels,
+          zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
+          baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
           enabled: initialAlert ? initialAlert.enabled : true
         } as any
       })
@@ -321,12 +342,13 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                   <SelectItem value="absolute">Absolute Threshold</SelectItem>
                   <SelectItem value="relative_increase">Relative Increase (%)</SelectItem>
                   <SelectItem value="relative_decrease">Relative Decrease (%)</SelectItem>
+                  <SelectItem value="anomaly_zscore">Anomaly Detection (Z-Score rolling baseline)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          {evalType !== 'absolute' && (
+          {(evalType !== 'absolute' && evalType !== 'anomaly_zscore') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">
               <LabelWithInfo tooltip="How far back to look for the baseline. If comparing the last 5m to 1 hour ago, it measures against the 5-minute window that ended 60 minutes ago.">
                 Baseline Comparison Period
@@ -346,46 +368,82 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4 border-t pt-4">
-            <div className="grid gap-2">
-              <LabelWithInfo tooltip="The mathematical condition to trigger the alert.">
-                Operator
-              </LabelWithInfo>
-              <Select value={operator} onValueChange={(v) => v && setOperator(v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value=">">{'>'}</SelectItem>
-                  <SelectItem value="<">{'<'}</SelectItem>
-                  <SelectItem value=">=">{'>='}</SelectItem>
-                  <SelectItem value="<=">{'<='}</SelectItem>
-                </SelectContent>
-              </Select>
+          {evalType === 'anomaly_zscore' ? (
+            <div className="grid grid-cols-2 gap-4 border-t pt-4">
+              <div className="grid gap-2">
+                <LabelWithInfo htmlFor="zscore-threshold" tooltip="How many standard deviations above the rolling hourly baseline the current window must be to trigger. Standard value is 3.0.">
+                  Z-Score Threshold
+                </LabelWithInfo>
+                <Input
+                  id="zscore-threshold"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  placeholder="e.g. 3.0"
+                  value={zscoreThreshold}
+                  onChange={e => setZscoreThreshold(e.target.value)}
+                  onBlur={() => setTouchedThreshold(true)}
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <LabelWithInfo tooltip="The length of the rolling historical baseline period to compute standard deviation and mean over.">
+                  Baseline Period (Days)
+                </LabelWithInfo>
+                <Select value={baselinePeriodDays} onValueChange={v => v && setBaselinePeriodDays(v)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="7">7 Days</SelectItem>
+                    <SelectItem value="14">14 Days</SelectItem>
+                    <SelectItem value="30">30 Days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div className="grid gap-2">
-              <LabelWithInfo htmlFor="threshold" tooltip="The numeric value to breach. For rate/relative metrics, this is a percentage.">
-                Threshold {evalType !== 'absolute' || metric.endsWith('_rate') ? '(%)' : ''}
-              </LabelWithInfo>
-              <Input
-                id="threshold"
-                type="number"
-                step="any"
-                placeholder={evalType !== 'absolute' ? "e.g. 50 (for 50% increase)" : "e.g. 100"}
-                value={threshold}
-                onChange={e => setThreshold(e.target.value)}
-                onBlur={() => setTouchedThreshold(true)}
-                aria-invalid={thresholdError !== null}
-                aria-describedby={thresholdError ? 'threshold-error' : undefined}
-                required
-              />
-              {thresholdError && (
-                <p id="threshold-error" role="alert" className="text-[11px] text-destructive">
-                  {thresholdError}
-                </p>
-              )}
+          ) : (
+            <div className="grid grid-cols-2 gap-4 border-t pt-4">
+              <div className="grid gap-2">
+                <LabelWithInfo tooltip="The mathematical condition to trigger the alert.">
+                  Operator
+                </LabelWithInfo>
+                <Select value={operator} onValueChange={(v) => v && setOperator(v)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value=">">{'>'}</SelectItem>
+                    <SelectItem value="<">{'<'}</SelectItem>
+                    <SelectItem value=">=">{'>='}</SelectItem>
+                    <SelectItem value="<=">{'<='}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <LabelWithInfo htmlFor="threshold" tooltip="The numeric value to breach. For rate/relative metrics, this is a percentage.">
+                  Threshold {evalType !== 'absolute' || metric.endsWith('_rate') ? '(%)' : ''}
+                </LabelWithInfo>
+                <Input
+                  id="threshold"
+                  type="number"
+                  step="any"
+                  placeholder={evalType !== 'absolute' ? "e.g. 50 (for 50% increase)" : "e.g. 100"}
+                  value={threshold}
+                  onChange={e => setThreshold(e.target.value)}
+                  onBlur={() => setTouchedThreshold(true)}
+                  aria-invalid={thresholdError !== null}
+                  aria-describedby={thresholdError ? 'threshold-error' : undefined}
+                  required
+                />
+                {thresholdError && (
+                  <p id="threshold-error" role="alert" className="text-[11px] text-destructive">
+                    {thresholdError}
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="grid gap-2">
             <LabelWithInfo htmlFor="window" tooltip="The length of time to aggregate data over before evaluating the threshold. A longer window prevents flapping on brief spikes.">
@@ -405,9 +463,76 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             </Select>
           </div>
 
+          <div className="grid gap-4 border-t pt-4">
+            <LabelWithInfo tooltip="Configure one or more alert delivery channels (e.g. Slack, PagerDuty, generic Webhooks) for this alert.">
+              Alert Notification Channels
+            </LabelWithInfo>
+
+            {channels.length > 0 ? (
+              <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
+                {channels.map((chan, idx) => (
+                  <div key={idx} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <span className="font-semibold capitalize px-1.5 py-0.5 rounded bg-accent/60 text-[10px]">
+                        {chan.type}
+                      </span>
+                      <span className="truncate text-muted-foreground max-w-[200px]" title={chan.url}>
+                        {chan.url}
+                      </span>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
+                      onClick={() => handleRemoveChannel(idx)}
+                    >
+                      ×
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[10px] text-muted-foreground italic">No channels configured. Legacy Webhook URL (if defined below) will be used.</p>
+            )}
+
+            <div className="flex gap-2">
+              <Select value={newChannelType} onValueChange={(v: any) => setNewChannelType(v)}>
+                <SelectTrigger className="w-[110px] text-xs h-8">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="slack">Slack</SelectItem>
+                  <SelectItem value="pagerduty">PagerDuty</SelectItem>
+                  <SelectItem value="webhook">Webhook</SelectItem>
+                </SelectContent>
+              </Select>
+              <Input
+                placeholder={
+                  newChannelType === 'slack' ? 'Slack webhook URL...' :
+                  newChannelType === 'pagerduty' ? 'PagerDuty Integration URL...' :
+                  'Generic webhook URL...'
+                }
+                value={newChannelUrl}
+                onChange={e => setNewChannelUrl(e.target.value)}
+                className="h-8 text-xs flex-1"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={handleAddChannel}
+                disabled={!newChannelUrl.trim()}
+              >
+                Add
+              </Button>
+            </div>
+          </div>
+
           <div className="grid gap-2 border-t pt-4">
-            <LabelWithInfo htmlFor="webhook" tooltip="An endpoint to receive an HTTP POST when the alert triggers. Supported natively by Slack, Teams, and Discord.">
-              Webhook URL (Optional)
+            <LabelWithInfo htmlFor="webhook" tooltip="Legacy single-destination webhook URL. Use Alert Notification Channels above instead for flexible multi-destination routing.">
+              Legacy Webhook URL (Optional / Prefer Channels)
             </LabelWithInfo>
             <Input
               id="webhook"
@@ -416,7 +541,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               onChange={e => setWebhookUrl(e.target.value)}
             />
             <p className="text-[10px] text-muted-foreground italic">
-              A JSON POST with a 'text' field will be sent to this URL when triggered.
+              Legacy fallback endpoint. We recommend using the dedicated notification channels configured above.
             </p>
           </div>
         </div>
@@ -429,7 +554,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           setLookbackHours={setLookbackHours}
           metric={metric}
           evalType={evalType}
-          threshold={threshold}
+          threshold={evalType === 'anomaly_zscore' ? zscoreThreshold : threshold}
         />
       </div>
 

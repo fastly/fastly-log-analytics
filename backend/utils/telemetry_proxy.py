@@ -67,9 +67,9 @@ _UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(
 )
 
 # Connection-pool cap per upstream host. Boto3 sticks to ~10; DuckDB does
-# many parallel Range GETs against the same parquet host so 32 gives some
+# many parallel Range GETs against the same parquet host so 128 gives some
 # headroom without exhausting ephemeral ports.
-_POOL_PER_HOST = 32
+_POOL_PER_HOST = 128
 
 # Idle keep-alive cap on pooled upstream connections. aiohttp's default is
 # 15s; Fastly's edge keep-alive is typically 5-10s. The mismatch caused the

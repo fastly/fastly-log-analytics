@@ -45,19 +45,18 @@ export function WizardFooter({ s }: { s: WizardState }) {
           className="mr-auto h-9 text-xs"
           disabled={isAnalyzing}
           onClick={() => {
-            const order: Step[] =
-              mode === "join"
-                ? ["mode", "join", "analyze", "settings", "confirm"]
-                : [
-                    "mode",
-                    "token",
-                    "service",
-                    "storage",
-                    "ngwaf",
-                    "fields",
-                    "execute",
-                    "terraform",
-                  ];
+            const getStepsOrder = (): Step[] => {
+              if (mode === "join") {
+                return ["mode", "join", "analyze", "settings", "confirm"];
+              }
+              const steps: Step[] = ["mode", "token", "service", "features", "storage"];
+              if (config.logging_enabled) {
+                steps.push("ngwaf", "fields");
+              }
+              steps.push("execute", "terraform");
+              return steps;
+            };
+            const order = getStepsOrder();
             const idx = order.indexOf(step);
             if (idx > 0) setStep(order[idx - 1] as Step);
           }}
@@ -107,9 +106,18 @@ export function WizardFooter({ s }: { s: WizardState }) {
               Continue
             </Button>
           )}
+          {step === "features" && (
+            <Button
+              onClick={() => setStep("storage")}
+              disabled={!config.logging_enabled && !config.rum_enabled}
+              className="h-9 text-xs"
+            >
+              Continue
+            </Button>
+          )}
           {step === "storage" && (
             <Button
-              onClick={() => setStep("ngwaf")}
+              onClick={() => setStep(config.logging_enabled ? "ngwaf" : "execute")}
               disabled={domainStatus === "taken" || domainStatus === "checking"}
               className="h-9 text-xs"
             >

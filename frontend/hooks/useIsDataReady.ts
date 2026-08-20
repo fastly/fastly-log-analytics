@@ -30,7 +30,9 @@ import { useServiceStore } from '@/stores/serviceStore'
  */
 export function useEffectiveServiceId(): string | null | undefined {
   const stored = useServiceStore(s => s.activeServiceId)
+  const isInitialized = useServiceStore(s => s.isInitialized)
   const queryClient = useQueryClient()
+  if (isInitialized) return stored
   if (stored) return stored
   const bootstrap = queryClient.getQueryData(queryKeys.bootstrap()) as
     | { active_service_id?: string | null }

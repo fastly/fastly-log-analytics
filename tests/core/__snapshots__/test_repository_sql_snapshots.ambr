@@ -726,8 +726,10 @@
   '''
   
       
-      SELECT *, (req_count >= 1000) AS flagged
-      FROM sessions_agg
+      SELECT * FROM (
+          SELECT *, (req_count >= 1000) AS flagged
+          FROM sessions_agg
+      ) sub
       
       ORDER BY req_count DESC
       LIMIT 100 OFFSET 0

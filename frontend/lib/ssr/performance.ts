@@ -5,7 +5,6 @@
 // shared transport, inheriting its Caddy-marker trust gate + analyst clamp.
 
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveSnappedWindow, narrowLogExtents } from '@/lib/log-extents-snap'
 
 import { parseSsrJson, ssrUpstreamGet } from './_transport'
 
@@ -26,13 +25,13 @@ export interface PerformanceSsrSeed {
 
 export function resolvePerformanceDefaultKey(
   now: Date = new Date(),
-  logExtents?: unknown,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _logExtents?: unknown,
 ): {
   rangeToken: string
   anchor: string
 } {
-  const snapped = resolveSnappedWindow(narrowLogExtents(logExtents), now)
-  return { rangeToken: '24h', anchor: quantizeAnchor(snapped?.end ?? now.toISOString(), now) }
+  return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
 }
 
 async function fetchPerformanceData(

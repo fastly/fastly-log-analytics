@@ -1,6 +1,6 @@
 'use client'
 
-import { useQuery, keepPreviousData, type UseQueryOptions, type QueryFunctionContext } from '@tanstack/react-query'
+import { useQuery, type UseQueryOptions, type QueryFunctionContext } from '@tanstack/react-query'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 
 /**
@@ -18,7 +18,19 @@ export function useServiceQuery<T>(
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
-    placeholderData: keepPreviousData,
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery) return undefined
+      if (
+        Array.isArray(queryKey) &&
+        Array.isArray(previousQuery.queryKey) &&
+        queryKey.length > 2 &&
+        previousQuery.queryKey.length > 2 &&
+        queryKey[2] !== previousQuery.queryKey[2]
+      ) {
+        return undefined
+      }
+      return previousData
+    },
     ...options,
   })
 }

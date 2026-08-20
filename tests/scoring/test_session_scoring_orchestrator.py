@@ -13,12 +13,8 @@ import pytest
 
 from backend.provision import session_scoring_orchestrator as sso
 from backend.provision.session_scoring_vcl import (
-    SCORING_BACKEND_API_NAME,
     SCORING_DELIVER_NAME,
-    SCORING_ENFORCE_NAME,
     SCORING_FETCH_NAME,
-    SCORING_MISS_NAME,
-    SCORING_PASS_NAME,
     SCORING_RECV_NAME,
     scoring_snippet_names,
 )
@@ -151,9 +147,28 @@ def _happy_path_fastly_mock():
     return MagicMock(side_effect=side_effect)
 
 
+def _happy_path_fastly_mock_with_post_secret(*, post_secret_409: bool = False):
+    """Variant that also handles the request_secret heal POST/PATCH on
+    the keys ConfigStore."""
+    base_mock = _happy_path_fastly_mock()
+    base_side_effect = base_mock.side_effect
+
+    def side_effect(method, path, body=None, token=None, **kwargs):
+        # Secret heal endpoints.
+        if (method, path) == ("POST", "/resources/stores/config/KEYS_STORE/item"):
+            if post_secret_409:
+                raise RuntimeError("409 Conflict — item already exists")
+            return {"item_key": body["item_key"]}
+        if method == "PATCH" and path == "/resources/stores/config/KEYS_STORE/item/request_secret":
+            return {"ok": True}
+        return base_side_effect(method, path, body, token=token, **kwargs)
+
+    return MagicMock(side_effect=side_effect)
+
+
 def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
     """End-to-end enable on a clean service: ensure_scoring → wasm deploy
-    → clone → backend → snippets → format update → validate → activate."""
+    → declarative reconciler."""
     # Pre-existing config — no scoring block yet.
     cfg = {
         "service_id": LOG_SVC,
@@ -163,6 +178,8 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
 
     fastly_mock = _happy_path_fastly_mock()
 
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "save_config") as save_mock,
@@ -171,7 +188,9 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
         patch.object(sso, "_write_matrix_to_kv") as kv_mock,
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         result = sso.enable_scoring(LOG_SVC, TOKEN)
 
     # Returned dict carries the scoring metadata + new active version.
@@ -196,13 +215,8 @@ def test_enable_scoring_happy_path_runs_all_stages(monkeypatch, tmp_path):
     field_names = [cf["name"] for cf in final_cfg["log_fields"]["custom_fields"]]
     assert "edge_score" in field_names
 
-    # The right Fastly mutations happened.
-    calls = [(c.args[0], c.args[1]) for c in fastly_mock.call_args_list]
-    assert ("PUT", f"/service/{LOG_SVC}/version/100/clone") in calls
-    assert ("POST", f"/service/{LOG_SVC}/version/101/backend") in calls
-    assert ("POST", f"/service/{LOG_SVC}/version/101/snippet") in calls
-    assert ("GET", f"/service/{LOG_SVC}/version/101/validate") in calls
-    assert ("PUT", f"/service/{LOG_SVC}/version/101/activate") in calls
+    # The right reconciler call happened.
+    reconcile_mock.assert_called_once_with(LOG_SVC, TOKEN, status_cb=None)
 
 
 def test_enable_scoring_stamps_deploy_identity_for_drift_detection(monkeypatch):
@@ -216,6 +230,8 @@ def test_enable_scoring_stamps_deploy_identity_for_drift_detection(monkeypatch):
         "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
     }
     fastly_mock = _happy_path_fastly_mock()
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "save_config") as save_mock,
@@ -224,7 +240,9 @@ def test_enable_scoring_stamps_deploy_identity_for_drift_detection(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         sso.enable_scoring(LOG_SVC, TOKEN)
 
     saved_cfg = save_mock.call_args_list[-1].args[1]
@@ -287,6 +305,7 @@ def test_enable_scoring_populates_default_exclude_url_regex_on_first_enable(monk
     DEFAULT_ASSET_EXT_REGEX literal into cfg.scoring.exclude_url_regex
     so the admin UI's textarea is pre-populated with a real editable
     value instead of an empty box hiding behind a "show default" toggle."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
     from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX
 
     cfg = {
@@ -303,7 +322,9 @@ def test_enable_scoring_populates_default_exclude_url_regex_on_first_enable(monk
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         sso.enable_scoring(LOG_SVC, TOKEN)
 
     saved_cfg = save_mock.call_args_list[-1].args[1]
@@ -318,6 +339,8 @@ def test_enable_scoring_preserves_operator_overrides_on_reenable(monkeypatch):
     must NOT wipe operator-tunable overrides. The previous implementation
     replaced the entire ``scoring`` block, silently dropping any
     exclude_url_regex or enforce_status_code the operator had set."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     cfg = {
         "service_id": LOG_SVC,
         "log_fields": {"custom_fields": []},
@@ -338,7 +361,9 @@ def test_enable_scoring_preserves_operator_overrides_on_reenable(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         sso.enable_scoring(LOG_SVC, TOKEN)
 
     saved_cfg = save_mock.call_args_list[-1].args[1]
@@ -351,9 +376,9 @@ def test_enable_scoring_preserves_operator_overrides_on_reenable(monkeypatch):
 
 
 def test_enable_scoring_adds_backend_with_correct_shape(monkeypatch):
-    """The scoring backend payload must use the SNI + cert hostnames that
-    match the Compute service domain — required for TLS to terminate
-    correctly at edgecompute.app."""
+    """The scoring backend is managed and deployed via the Declarative Reconciler."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     cfg = {
         "service_id": LOG_SVC,
         "log_fields": {"custom_fields": []},
@@ -368,30 +393,18 @@ def test_enable_scoring_adds_backend_with_correct_shape(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         sso.enable_scoring(LOG_SVC, TOKEN)
 
-    backend_post = next(
-        c for c in fastly_mock.call_args_list if c.args[:2] == ("POST", f"/service/{LOG_SVC}/version/101/backend")
-    )
-    body = backend_post.args[2]
-    # Fastly auto-prefixes backend names with F_, so we POST the raw name
-    # and the VCL ends up referencing the F_-prefixed form.
-    assert body["name"] == SCORING_BACKEND_API_NAME
-    assert body["address"].endswith("session-scorer.edgecompute.app")
-    assert body["use_ssl"] is True
-    assert body["ssl_cert_hostname"] == body["address"]
-    assert body["ssl_sni_hostname"] == body["address"]
-    # Timeout ceiling — Wasm runs in ~600µs, intra-Fastly network adds
-    # ~5-20ms. first_byte_timeout lowered 200→100ms (2026-06-22): successful
-    # scoring RTT p99 ~18ms leaves wide headroom under 100ms, and the residual
-    # fail-opens are scanner-driven sandbox contention the ceiling didn't gate.
-    # connect_timeout stays 100ms (the fast rejects are connection-level).
-    assert body["connect_timeout"] == 100
-    assert body["first_byte_timeout"] == 100
+    reconcile_mock.assert_called_once_with(LOG_SVC, TOKEN, status_cb=None)
 
 
 def test_enable_scoring_installs_all_six_named_snippets(monkeypatch):
+    """The scoring VCL is managed and deployed via the Declarative Reconciler."""
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     cfg = {
         "service_id": LOG_SVC,
         "log_fields": {"custom_fields": []},
@@ -406,55 +419,26 @@ def test_enable_scoring_installs_all_six_named_snippets(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
         sso.enable_scoring(LOG_SVC, TOKEN)
 
-    snippet_posts = [
-        c for c in fastly_mock.call_args_list if c.args[:2] == ("POST", f"/service/{LOG_SVC}/version/101/snippet")
-    ]
-    posted_names = [c.args[2]["name"] for c in snippet_posts]
-    for name in (
-        SCORING_RECV_NAME,
-        SCORING_PASS_NAME,
-        SCORING_FETCH_NAME,
-        SCORING_DELIVER_NAME,
-        SCORING_MISS_NAME,
-        SCORING_ENFORCE_NAME,
-    ):
-        assert name in posted_names
+    reconcile_mock.assert_called_once_with(LOG_SVC, TOKEN, status_cb=None)
 
 
 # ── enable_scoring: rollback path ─────────────────────────────────────────────
 
 
 def test_enable_scoring_rolls_back_on_validation_failure(monkeypatch):
-    """When validate returns non-ok, we MUST re-activate the prior version
-    and revert the config changes."""
+    """When reconcile_vcl_state raises an exception, we MUST revert the on-disk config changes."""
     cfg = {
         "service_id": LOG_SVC,
         "log_fields": {"custom_fields": []},
         "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
     }
 
-    def side_effect(method, path, body=None, token=None, **kwargs):
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version"):
-            return [{"number": 100, "active": True}]
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/100/clone"):
-            return {"number": 101}
-        if (method, path) == ("PUT", f"/service/{LOG_SVC}/version/101"):
-            return {}
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/backend"):
-            return []
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/snippet"):
-            return []
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/logging/s3"):
-            return [{"name": "Fastly Object Storage Logs"}]
-        # Validate FAILS
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/101/validate"):
-            return {"status": "error", "errors": ["something is broken"]}
-        return {}
-
-    fastly_mock = MagicMock(side_effect=side_effect)
+    fastly_mock = _happy_path_fastly_mock_with_post_secret()
     save_calls = []
 
     def fake_save(svc_id, c):
@@ -468,14 +452,11 @@ def test_enable_scoring_rolls_back_on_validation_failure(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.side_effect = RuntimeError("Validation failed")
         with pytest.raises(RuntimeError, match="Validation failed"):
             sso.enable_scoring(LOG_SVC, TOKEN)
-
-    # Rollback must re-activate the OLD version (100), not the failing one (101).
-    calls = [(c.args[0], c.args[1]) for c in fastly_mock.call_args_list]
-    assert ("PUT", f"/service/{LOG_SVC}/version/100/activate") in calls
-    assert ("PUT", f"/service/{LOG_SVC}/version/101/activate") not in calls
 
     # Config was reverted (no "scoring" key in the final saved state).
     assert save_calls, "expected at least one save"
@@ -880,9 +861,11 @@ def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
 
     shared = MagicMock(side_effect=side_effect)
     meta = _ensure_scoring_meta()
+    from backend.provision.declarative.reconciler import ReconciliationResult
+
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
-        patch.object(sso.svcconfig, "save_config"),
+        patch.object(sso.svcconfig, "save_config") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=meta),
         patch.object(
             sso, "_deploy_wasm_package", return_value={"version": 2, "sha": "PKG", "files_hash": "F", "skipped": True}
@@ -892,16 +875,14 @@ def test_enable_skips_logging_redeploy_when_vcl_matches_edge():
         patch.object(sso, "_publish_scoring_fos_side_effects"),
         patch.object(sso, "fastly", shared),
         patch("backend.core.fastly.service.fastly", shared),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
+        reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=None)
         result = sso.enable_scoring(LOG_SVC, TOKEN)
 
     # No new logging version — we reused the active one.
     assert result["logging_service_active_version"] == 8
-    methods_paths = [(c.args[0], c.args[1]) for c in shared.call_args_list]
-    assert not any(m == "PUT" and "/clone" in p for m, p in methods_paths), "should not clone on a no-op redeploy"
-    assert not any(m == "PUT" and p.endswith("/activate") for m, p in methods_paths), (
-        "should not activate on a no-op redeploy"
-    )
+    reconcile_mock.assert_called_once_with(LOG_SVC, TOKEN, status_cb=None)
 
 
 # ── teardown_scoring_resources (full-teardown scoring step, Part A) ───────────

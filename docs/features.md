@@ -168,3 +168,32 @@ The Compute scorer is bypassed when `fastly.ddos_detected` fires. Volumetric def
 
 ### Operations
 See [session_scoring_runbook.md](session_scoring_runbook.md) for enable/disable procedures, threshold tuning, key rotation, matrix restore, and incident response.
+
+## Real User Monitoring (RUM)
+
+### Architecture & Self-Hosting
+Real User Monitoring (RUM) captures fine-grained, client-side metrics and Core Web Vitals. To satisfy strict data privacy constraints and eliminate third-party CDN script dependencies, the system self-hosts the **Grafana Faro Web SDK** script.
+* **Asset Manager (`rum_assets.py`):** Downloads specified Faro versions from npm/unpkg registries, computes cryptographic SHA-256 content hashes, and stores the script directly inside the Fastly Object Storage (FOS) bucket.
+* **Dynamic Tracker Router (`/js/rum.js`):** Resolves the request context (headers, cookies, active service settings) and generates a customized tracker script on-the-fly, pre-populated with client telemetry configurations.
+* **SDK Asset Router (`/js/faro-sdk.js`):** Proxies and caches the corresponding versioned SDK package (`rum/faro-web-sdk-v{version}.iife.js`) from FOS with public caching headers (`stale-while-revalidate`).
+
+### Beacon Ingestion & Processing
+* **Server-Side Receiver (`/rum-beacon`):** A high-performance, secure backend receiver. It parses client-side JSON beacons (navigation timings, web vitals, errors, browser/device info) and maps them to PyArrow tables.
+* **Crash-Safe Buffer Ingest:** Faro event data is buffered to local Parquet files. Dedicated `rum_sync` and `rum_commit` cron jobs run on the APScheduler to commit RUM data atomically into the hour-partitioned Iceberg schema.
+* **Analytics & Real-time Live Feed:** The RUM dashboard visualizes core performance metrics (LCP, FID, CLS, TTFB), error rates, device/OS distributions, and features an active, streaming SSE ticker feed (`/api/services/{id}/rum/live-events`) displaying navigation ticks as they occur.
+
+## Assets Shield (Static Asset Delivery Analytics)
+
+### Integrated Caching Dashboards
+Assets Shield aggregates and visualizes CDN performance, cache efficiency, and payload delivery statistics across all static files (images, scripts, stylesheets, fonts, documents, etc.) — **delivered as a built-in tab within the Service Summary executive view**.
+* **Granular Cache Status Mapping:** Plots hit/miss/revalidation/bypass ratios across all custom Fastly cache statuses (HIT, MISS, HIT-STALE, REVALIDATED, PASS, BYPASS), color-coded to provide a fast breakdown of edge routing.
+* **Distinct Documents Category:** Categorizes and filters PDFs, office file formats, and compressed zip/tar archives separately from traditional media to track corporate asset usage.
+* **Preserving Context Links:** Every table row (e.g. specific asset URLs, file types, user-agents) is equipped with interactive filter links. Clicking a link opens a pre-filtered dashboard or query editor in a new window, preserving the operator's active analytics session.
+
+## Remote Frontend Deployment (Sharing Domain)
+
+### Enterprise-Grade Edge Proxy
+Live Shared Instance (Path B) utilizes a highly secure, high-performance edge-proxy architecture to connect analysts with the local running server, completely replacing the obsolete SSH-reverse-tunnel relays.
+* **One-Click Wizard:** Nested in the `/admin/share` control panel, an interactive `DeployRemoteFrontendDialog` allows operators to register and configure a dedicated Fastly service acting as a secure HTTPS reverse proxy.
+* **Auto-Provisioning Origin Mapping:** Provisions custom or Fastly SSL hostnames, auto-configuring backend server records to map the local GCE VM public IP (`34.123.30.195`), port 80, and TLS configurations.
+* **Interactive Selective Teardown:** A dedicated teardown wizard form guides the operator through teardown options. It permits selective teardown of request logging snippet components, RUM snippet components, or complete service teardown with safe, dependency-ordered resource dereferencing.

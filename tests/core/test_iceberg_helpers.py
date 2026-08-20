@@ -888,18 +888,16 @@ def test_buffer_files_returns_sorted_parquet_files(tmp_path):
 
 
 def test_buffer_files_walks_subdirs_recursively(tmp_path):
-    """Files in nested subdirs (e.g. partitioned writes) are included.
-    Pinned because PyIceberg's write layout uses date-partitioned
-    subdirs; flat-only walk would miss them."""
+    """Files in nested subdirs (e.g. partitioned writes) are included."""
     from backend.core.iceberg import buffer_files
 
-    buf = tmp_path / "buffer" / "2026" / "05" / "18"
+    buf = tmp_path / "buffer" / "rum_perf" / "2026" / "05" / "18"
     buf.mkdir(parents=True)
     (buf / "deep.parquet").write_bytes(b"")
-    (tmp_path / "buffer" / "shallow.parquet").write_bytes(b"")
+    (tmp_path / "buffer" / "rum_perf" / "shallow.parquet").write_bytes(b"")
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        files = buffer_files({"name": "svc"})
+        files = buffer_files({"name": "svc"}, table_name="rum_perf")
 
     names = [os.path.basename(f) for f in files]
     assert "deep.parquet" in names

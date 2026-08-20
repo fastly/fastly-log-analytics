@@ -1,6 +1,6 @@
 'use client'
 
-import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { throwIfStaleAggregates, STALE_VIEW_RETRY_OPTIONS } from '@/lib/staleViewRetry'
@@ -126,7 +126,19 @@ export function useDashboardBundle({
       return body
     },
     enabled,
-    placeholderData: keepPreviousData,
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery) return undefined
+      if (
+        Array.isArray(bundleKey) &&
+        Array.isArray(previousQuery.queryKey) &&
+        bundleKey.length > 2 &&
+        previousQuery.queryKey.length > 2 &&
+        bundleKey[2] !== previousQuery.queryKey[2]
+      ) {
+        return undefined
+      }
+      return previousData
+    },
     ...STALE_VIEW_RETRY_OPTIONS,
   })
 }

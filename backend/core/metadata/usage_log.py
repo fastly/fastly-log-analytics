@@ -267,12 +267,12 @@ def reconcile_fastly_stats(
     local_sums: dict[tuple[str, str], int] = {}
     for r in con.execute(
         """
-        SELECT operation_class, substr(timestamp, 1, 13), coalesce(sum(count), 0)
-        FROM usage_log
+        SELECT operation_class, hour, sum(count)
+        FROM usage_log_hourly_summary
         WHERE service_id = ? AND operation_class IN ('A', 'B')
-          AND timestamp >= ? AND timestamp < ?
-          AND function_name != 'fastly.reconciliation'
-        GROUP BY operation_class, 2
+          AND hour >= substr(?, 1, 13) AND hour < substr(?, 1, 13)
+          AND operation_type NOT LIKE 'RECONCILE_%'
+        GROUP BY operation_class, hour
         """,
         (service_id, window_start, window_end),
     ):
@@ -335,6 +335,8 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
     con = _ul(service_id)
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con.execute("DELETE FROM usage_log WHERE timestamp < ?", (cutoff,))
+    con.execute("DELETE FROM telemetry_queries WHERE timestamp < ?", (cutoff,))
+    con.execute("DELETE FROM telemetry_sections WHERE timestamp < ?", (cutoff,))
     con.commit()
 
 
@@ -706,3 +708,95 @@ DEFAULT_METADATA_RETENTION = {
     # QUERY_REGISTRY_PERSIST_THRESHOLD_MS).
     "slow_queries_days": 7,
 }
+
+
+def log_telemetry_query(
+    service_id: str,
+    page_load_id: str,
+    request_id: str,
+    engine: str,
+    sql: str,
+    duration_ms: float,
+) -> None:
+    con = _ul(service_id)
+    now = iso_z_now()
+    con.execute(
+        "INSERT INTO telemetry_queries (timestamp, page_load_id, request_id, engine, sql_query, duration_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (now, page_load_id, request_id, engine, sql, duration_ms),
+    )
+    con.commit()
+
+
+def log_telemetry_section(
+    service_id: str,
+    page_load_id: str,
+    request_id: str,
+    section_name: str,
+    duration_ms: float,
+) -> None:
+    con = _ul(service_id)
+    now = iso_z_now()
+    con.execute(
+        "INSERT INTO telemetry_sections (timestamp, page_load_id, request_id, section_name, duration_ms) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now, page_load_id, request_id, section_name, duration_ms),
+    )
+    con.commit()
+
+
+def get_page_telemetry(service_id: str, page_load_id: str) -> dict:
+    con = _ul(service_id)
+
+    # 1. Fetch queries
+    cur = con.execute(
+        "SELECT engine, sql_query, duration_ms FROM telemetry_queries WHERE page_load_id = ? ORDER BY timestamp ASC",
+        (page_load_id,),
+    )
+    queries = [
+        {
+            "engine": r["engine"],
+            "sql_query": r["sql_query"],
+            "duration_ms": r["duration_ms"],
+        }
+        for r in cur.fetchall()
+    ]
+
+    # 2. Fetch sections
+    cur = con.execute(
+        "SELECT section_name, duration_ms FROM telemetry_sections WHERE page_load_id = ? ORDER BY timestamp ASC",
+        (page_load_id,),
+    )
+    sections = [
+        {
+            "section_name": r["section_name"],
+            "duration_ms": r["duration_ms"],
+        }
+        for r in cur.fetchall()
+    ]
+
+    # 3. Fetch proxy FOS/CDN network calls (mapped from usage_log process_context containing '#page_load_id')
+    cur = con.execute(
+        "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
+        "FROM usage_log "
+        "WHERE process_context LIKE ? ORDER BY timestamp ASC",
+        (f"%#{page_load_id}",),
+    )
+    calls = [
+        {
+            "service": "CDN" if r["operation_class"] == "CDN" else "FOS",
+            "method": r["operation_type"],
+            "path": r["url"],
+            "status": r["status"],
+            "time_ms": r["duration_ms"],
+            "caller": r["function_name"],
+            "bytes": r["bytes"],
+        }
+        for r in cur.fetchall()
+    ]
+
+    return {
+        "queries": queries,
+        "sections": sections,
+        "calls": calls,
+    }
