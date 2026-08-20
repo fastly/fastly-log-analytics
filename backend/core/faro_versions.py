@@ -53,7 +53,7 @@ _BUNDLE_MEMBER_NAME = "package/dist/bundle/faro-web-sdk.iife.js"
 # enabled before this default existed and never got a version pinned.
 # Chosen by the operator to match npm's dist-tags.latest as of this task;
 # bump deliberately when a new version is vetted, not automatically.
-DEFAULT_FARO_VERSION = "2.9.0"
+DEFAULT_FARO_VERSION = "2.10.0"
 
 _TIMEOUT = 10.0
 # The tarball (~180 KB for 2.9.0, includes source maps, README, etc.) is

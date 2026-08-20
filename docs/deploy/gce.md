@@ -270,7 +270,7 @@ is no CDN fallback and no code path that can produce one.
 Because of that, RUM can no longer be enabled without a self-hosted bundle
 behind `/js/faro-sdk.js`. `enable_rum()` pins an explicit version
 (`cfg["rum"]["faro_version"]`) when given one, and otherwise defaults to
-`backend.core.faro_versions.DEFAULT_FARO_VERSION` (currently `2.9.0`,
+`backend.core.faro_versions.DEFAULT_FARO_VERSION` (currently `2.10.0`,
 npm's `dist-tags.latest` as of this task) — enabling RUM always downloads,
 integrity-verifies, and uploads a bundle to the service's FOS bucket.
 A service that was enabled *before* this default existed and still has no
@@ -291,11 +291,11 @@ just to "turn on" self-hosting — enabling RUM already does that
 automatically.
 
 ```sh
-# Pins to 2.9.0 (current npm dist-tags.latest) by default:
+# Pins to 2.10.0 (current npm dist-tags.latest) by default:
 scripts/pin-rum-faro-version.sh <service_id>
 
 # Pin to an explicit version instead:
-scripts/pin-rum-faro-version.sh <service_id> 2.9.0
+scripts/pin-rum-faro-version.sh <service_id> 2.10.0
 scripts/pin-rum-faro-version.sh <service_id> 1.19.0
 ```
 

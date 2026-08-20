@@ -18,7 +18,7 @@
 # an older one. It replaces the operator-known-good choice with an explicit,
 # reviewable version string.
 #
-# Defaults to 2.9.0 (npm dist-tags.latest as of this task) — an operator
+# Defaults to 2.10.0 (npm dist-tags.latest as of this task) — an operator
 # decision made deliberately, not a "safe" fallback to 1.19.0. Pass an
 # explicit version as the second argument to pin to something else.
 #
@@ -32,8 +32,8 @@
 # -----
 #   scripts/pin-rum-faro-version.sh <service_id> [version]
 #
-#   scripts/pin-rum-faro-version.sh svc_abc123           # pins to 2.9.0
-#   scripts/pin-rum-faro-version.sh svc_abc123 2.9.0     # same, explicit
+#   scripts/pin-rum-faro-version.sh svc_abc123           # pins to 2.10.0
+#   scripts/pin-rum-faro-version.sh svc_abc123 2.10.0     # same, explicit
 #   scripts/pin-rum-faro-version.sh svc_abc123 1.19.0    # pin to a different version
 #
 # Idempotent: re-running with the same (or no) version argument against an
@@ -44,10 +44,25 @@
 # same directory) so a failure never leaves a truncated config.
 #
 # Requires: jq
+#
+# Env:
+#   CONFIGS_DIR   - override directory holding {service_id}.json configs
+#                   (defaults to <repo_root>/configs)
+#
+# Examples:
+#   scripts/pin-rum-faro-version.sh MviCL9Pd5vxBKYSxXEhQR1
+#   scripts/pin-rum-faro-version.sh MviCL9Pd5vxBKYSxXEhQR1 1.19.0
+#
+# Notes:
+#   This only pins the configuration. To trigger the download and upload
+#   manually, wait for the RUM sync cron to run, or execute:
+#     curl -X POST http://localhost:8000/api/services/{id}/faro-upgrade
+#
+# -----------------------------------------------------------------------------
 
 set -euo pipefail
 
-DEFAULT_VERSION="2.9.0"
+DEFAULT_VERSION="2.10.0"
 # Same shape the backend enforces (_assert_faro_version_safe in
 # backend/core/fastly/rum_provisioning.py) — a plain X.Y.Z version string,
 # nothing else, since this interpolates into an FOS object path and VCL.
