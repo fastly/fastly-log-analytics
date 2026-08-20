@@ -46,7 +46,7 @@ dependencies = [
     # (med), max_line_size fragment bypass (med), DigestAuth cross-
     # origin credential leak (med), TLS hostname override on conn-reuse
     # (low), host-only cookie persistence drift (low).
-    "aiohttp>=3.14.1,<4",
+    "aiohttp>=3.14.3,<4",
     # Floor raised 2026-06-17 to clear Dependabot #18 (high): cryptography
     # wheels bundled vulnerable OpenSSL across all platforms. 48.0.1
     # ships patched OpenSSL.
