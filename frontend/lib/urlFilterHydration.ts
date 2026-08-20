@@ -7,7 +7,7 @@ import type { FiltersPayload } from '@/types/filters'
 
 let hydrated = false
 
-function rangeLabelToHours(label: string): number | null {
+export function rangeLabelToHours(label: string): number | null {
   const m = /^(\d+)([hd])$/.exec(label)
   if (!m) return null
   const n = parseInt(m[1], 10)

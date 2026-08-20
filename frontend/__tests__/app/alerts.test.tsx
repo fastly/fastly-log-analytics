@@ -50,7 +50,6 @@ beforeEach(() => {
     startTime: '2026-01-01T00:00:00Z',
     endTime: '2026-01-01T01:00:00Z',
     isAutoRange: false,
-    hasSyncedExtents: true,
   } as never)
   queryClient.clear()
 })

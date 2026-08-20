@@ -86,7 +86,13 @@ def _cdn_open(opener, req, timeout: float):
     return opener.open(req, timeout=timeout)
 
 
-def sync_data(source: dict, progress_callback=None, start_time: str | None = None, end_time: str | None = None) -> dict:
+def sync_data(
+    source: dict,
+    progress_callback=None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    table_name: str = "logs",
+) -> dict:
     """Download data files from FOS that are present in the Iceberg table but missing locally.
 
     If start_time and end_time (ISO strings) are provided, only files matching that range
@@ -94,13 +100,14 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
     are NOT deleted if a range is specified (to allow incremental multi-range imports).
     """
     source_key = source.get("name", "default")
+    cache_key = f"{source_key}::{table_name}" if table_name != "logs" else source_key
 
     # Phase 1: Brief lock just for catalog init — table object is captured, then lock released.
     # The manifest scan (plan_files) runs outside the lock so dashboard queries are not blocked.
     try:
         with _core_mod._get_service_lock(source_key):
             catalog = _core_mod._get_catalog(source)
-            identifier = _core_mod._table_identifier(source)
+            identifier = _core_mod._table_identifier(source, table_name=table_name)
             _core_mod._refresh_local_catalog_metadata(catalog, source, identifier)
             try:
                 table = _core_mod._load_table_cached(source, identifier, catalog)
@@ -117,7 +124,8 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
     # Phase 2: Manifest scan — runs without the service lock so the dashboard is never blocked.
     from backend.core.duckdb import _cache_dir
 
-    cache_dir = os.path.join(_cache_dir(source), "data")
+    sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
+    cache_dir = os.path.join(_cache_dir(source), sub_dir)
     os.makedirs(cache_dir, exist_ok=True)
 
     # 1. Map cloud paths to local paths
@@ -130,7 +138,7 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
     # manifest just to discover that nothing has changed. record_count
     # is not stored in the cache; downloaded-rows reporting falls back to 0
     # for delta-tracked files, which is fine for steady-state cron runs.
-    cached_snapshot = _core_mod._snapshot_files_cache.get(source_key)
+    cached_snapshot = _core_mod._snapshot_files_cache.get(cache_key)
     fast_path_used = False
     # Pre-fetch the set of basenames that local_compaction has intentionally
     # removed (merged into a bigger local file). Without this exclusion, the
@@ -498,21 +506,24 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                 # Phase 1, we can skip the catalog reload + full plan_files()
                 # scan entirely. Just flip any s3:// entries to local paths
                 # for files we just downloaded.
-                cached = _core_mod._snapshot_files_cache.get(source_key)
+                cached = _core_mod._snapshot_files_cache.get(cache_key)
                 if cached and cached[0] == table.metadata_location:
-                    _core_mod._reconcile_snapshot_cache_after_sync(source)
-                    _core_mod._view_cache.pop(source_key, None)
+                    _core_mod._reconcile_snapshot_cache_after_sync(source, table_name=table_name)
+                    _core_mod._view_cache.pop(cache_key, None)
                     break
 
                 # Slow path: cache miss/stale — re-resolve via catalog scan.
                 catalog = _core_mod._get_catalog(source)
-                table = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
+                table = _core_mod._load_table_cached(
+                    source, _core_mod._table_identifier(source, table_name=table_name), catalog
+                )
                 snap = table.current_snapshot()
                 snapshot_id = snap.snapshot_id if snap else None
 
                 from backend.core.duckdb import _cache_dir
 
-                data_dir = os.path.join(_cache_dir(source), "data")
+                sub_dir = f"data_{table_name}" if table_name != "logs" else "data"
+                data_dir = os.path.join(_cache_dir(source), sub_dir)
 
                 resolved_files = []
                 for f in table.scan().plan_files():
@@ -526,7 +537,7 @@ def sync_data(source: dict, progress_callback=None, start_time: str | None = Non
                     else:
                         resolved_files.append(uri)
 
-                _core_mod._snapshot_files_cache[source_key] = (
+                _core_mod._snapshot_files_cache[cache_key] = (
                     table.metadata_location,
                     snapshot_id,
                     table.location(),

@@ -20,7 +20,7 @@ function relativeTime(iso: string): string {
 }
 
 function stepLabelFor(draft: WizardDraft): string {
-  const steps = getStepsForMode(draft.mode);
+  const steps = getStepsForMode(draft.mode, draft.config);
   const found = steps.find((s) => s.id === draft.currentStep);
   return found?.label ?? draft.currentStep;
 }

@@ -58,7 +58,13 @@ export type ShareStatus = {
   started_at: string | null
   max_concurrent_sessions: number
   active_session_count: number
-  services: { service_id: string; name: string }[]
+  services: {
+    service_id: string
+    name: string
+    remote_frontend_deployed?: boolean
+    sharing_domain?: string | null
+    remote_service_id?: string | null
+  }[]
   invites: Invite[]
   sessions: ShareSession[]
   audit_logs: AuditLog[]

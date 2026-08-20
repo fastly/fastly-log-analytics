@@ -22,11 +22,13 @@ interface ReportLayoutProps<TData = unknown> {
   apiCall?: (params: {
     startTime: string | null
     endTime: string | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     filters: any
     bucketSeconds: number
   }) => Promise<TData | undefined>
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
+  serviceId?: string | null
   children: (props: {
     data: TData | undefined
     isLoading: boolean
@@ -47,6 +49,7 @@ interface ReportLayoutProps<TData = unknown> {
     endTime: string | null
     timezone: string
     activeServiceId: string | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     filterPayload: any
   }) => React.ReactNode
 }
@@ -59,10 +62,12 @@ export function ReportLayout<TData = unknown>({
   apiCall,
   defaultInterval = '1 hour',
   headerActions,
+  serviceId,
   children
 }: ReportLayoutProps<TData>) {
   const { startTime, endTime } = useTimeRange()
-  const { activeServiceId } = useActiveService()
+  const { activeServiceId: storeActiveServiceId } = useActiveService()
+  const activeServiceId = serviceId !== undefined ? serviceId : storeActiveServiceId
   const timezone = useTimezone()
   const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
   // Pass `true` so the FilterBar's "Edge only" toggle injects

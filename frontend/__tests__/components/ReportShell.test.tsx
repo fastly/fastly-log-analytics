@@ -14,8 +14,6 @@ import { ReportShell } from '@/components/ReportShell'
 
 let mockActiveServiceId: string | null = 'svc-1'
 let mockIsDataReady = true
-let mockIsAutoRange = false
-let mockHasSyncedExtents = true
 // Default to "bootstrap has returned" so existing tests keep their
 // pre-change behavior. The new flash-defense case sets this to false
 // explicitly to verify ReportShell shows the skeleton instead of the
@@ -26,13 +24,6 @@ vi.mock('@/hooks/useIsDataReady', () => ({
   useEffectiveServiceId: () => mockActiveServiceId,
   useIsDataReady: () => mockIsDataReady,
   useBootstrapResolved: () => mockBootstrapResolved,
-}))
-
-vi.mock('@/stores/filterStore', () => ({
-  useFilterStore: vi.fn((selector?: (s: any) => any) => {
-    const state = { isAutoRange: mockIsAutoRange, hasSyncedExtents: mockHasSyncedExtents }
-    return selector ? selector(state) : state
-  }),
 }))
 
 vi.mock('@/components/NoServiceSelected', () => ({
@@ -49,8 +40,6 @@ describe('ReportShell', () => {
   beforeEach(() => {
     mockActiveServiceId = 'svc-1'
     mockIsDataReady = true
-    mockIsAutoRange = false
-    mockHasSyncedExtents = true
     mockBootstrapResolved = true
   })
 
@@ -118,17 +107,14 @@ describe('ReportShell', () => {
     expect(screen.getByTestId('skeleton')).toBeInTheDocument()
   })
 
-  it('requireService=false bypasses the NoServiceSelected gate AND uses range-ready as the loading signal', () => {
+  it('requireService=false bypasses the NoServiceSelected gate', () => {
     mockActiveServiceId = null
-    mockIsAutoRange = true
-    mockHasSyncedExtents = false
     render(
       <ReportShell title="Insights" icon={Server} requireService={false}>
         <div data-testid="content">body</div>
       </ReportShell>,
     )
-    // No service gate passes, but range isn't synced → skeleton
     expect(screen.queryByTestId('no-service')).not.toBeInTheDocument()
-    expect(screen.getByTestId('skeleton')).toBeInTheDocument()
+    expect(screen.getByTestId('content')).toBeInTheDocument()
   })
 })

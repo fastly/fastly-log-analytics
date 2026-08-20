@@ -341,6 +341,132 @@ Inputs (trusted-identifier / trusted-fragment substitutions only):
 Output rows: ``(ua: str, ip: str, cnt: int)``.
 """
 
+# ── VPN & Proxy Watchdog Templates ───────────────────────────────────────────
+
+GET_PROXY_STATS = """
+    WITH metrics AS (
+        SELECT
+            ip,
+            pop,
+            rtt_min / 1000.0 AS rtt_min_ms,
+            lat AS client_lat,
+            lon AS client_lon,
+            -- Haversine formula distance calculation using a default coordinate for POP
+            -- If pop is SJC, use SJC coords, else a reasonable US default or central pop fallback
+            CASE
+                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
+                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
+                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
+                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
+            END AS distance_km,
+            tcp_rtt
+        FROM {temp_table}
+    )
+    SELECT
+        COUNT(DISTINCT CASE
+            WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip
+            WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN ip
+            ELSE NULL
+        END) AS active_proxies_count,
+        COUNT(CASE
+            WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 1
+            WHEN tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1 THEN 1
+            ELSE NULL
+        END) AS total_requests_count,
+        COUNT(DISTINCT CASE WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN ip ELSE NULL END) AS distance_mismatches_count
+    FROM metrics
+"""
+
+GET_TRAFFIC_QUALITY = """
+    SELECT
+        CASE
+            WHEN rtt_min IS NULL OR tcp_rtt IS NULL THEN 'Direct Connection'
+            -- relativity violation or aroma score < 0.1
+            WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 THEN 'Active Tunnel / Proxy'
+            WHEN tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.7 THEN 'WiFi / Mobile'
+            ELSE 'Direct Connection'
+        END AS type,
+        COUNT(*) AS count
+    FROM {temp_table}
+    GROUP BY 1
+    ORDER BY count DESC
+"""
+
+GET_SUSPICIOUS_ISPS = """
+    SELECT
+        asn,
+        COUNT(*) AS count
+    FROM {temp_table}
+    WHERE
+        tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1
+    GROUP BY 1
+    ORDER BY count DESC
+    LIMIT 10
+"""
+
+GET_ACTIVE_PROXY_CLIENTS = """
+    WITH metrics AS (
+        SELECT
+            ip,
+            pop,
+            rtt_min / 1000.0 AS rtt_min_ms,
+            tcp_rtt / 1000.0 AS tcp_rtt_ms,
+            lat AS client_lat,
+            lon AS client_lon,
+            asn,
+            CASE
+                WHEN pop = 'SJC' THEN 37.3382
+                WHEN pop = 'IAD' THEN 38.9531
+                WHEN pop = 'NRT' THEN 35.7720
+                ELSE 38.0
+            END AS pop_lat,
+            CASE
+                WHEN pop = 'SJC' THEN -121.8863
+                WHEN pop = 'IAD' THEN -77.4565
+                WHEN pop = 'NRT' THEN 140.3929
+                ELSE -97.0
+            END AS pop_lon,
+            -- Haversine distance formula matching GET_PROXY_STATS
+            CASE
+                WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
+                WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
+                WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
+                ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
+            END AS distance_km
+            {select_country_city_inner}
+        FROM {temp_table}
+        WHERE rtt_min IS NOT NULL
+    )
+    SELECT
+        ip,
+        asn,
+        ROUND(rtt_min_ms, 2) AS rtt_min_ms,
+        ROUND(tcp_rtt_ms, 2) AS tcp_rtt_ms,
+        ROUND(distance_km, 1) AS distance_km,
+        pop,
+        ROUND(client_lat, 4) AS client_lat,
+        ROUND(client_lon, 4) AS client_lon,
+        pop_lat,
+        pop_lon,
+        CASE
+            WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN true
+            ELSE false
+        END AS impossible_distance,
+        CASE
+            WHEN distance_km > (rtt_min_ms * 100.0 + 150.0) THEN 'High'
+            WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High'
+            WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium'
+            ELSE 'Low'
+        END AS risk_level
+        {select_country_city_outer}
+    FROM metrics
+    WHERE
+        (distance_km > (rtt_min_ms * 100.0 + 150.0)) OR
+        (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)
+    ORDER BY risk_level DESC, distance_km DESC
+    LIMIT 100
+"""
+
 __all__ = [
     "TOP_UAS_BY_COUNT",
     "NGWAF_TOP_BOTS_JOIN",
@@ -356,4 +482,8 @@ __all__ = [
     "PROXY_TYPE_DIST",
     "CONN_REUSE_DIST",
     "WELLKNOWN_BOTS_UA_IP",
+    "GET_PROXY_STATS",
+    "GET_TRAFFIC_QUALITY",
+    "GET_SUSPICIOUS_ISPS",
+    "GET_ACTIVE_PROXY_CLIENTS",
 ]

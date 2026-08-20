@@ -66,17 +66,34 @@ export default async function DashboardPage({
   searchParams: Promise<{ service?: string | string[] }>
 }) {
   const params = await searchParams
-  const bootstrap = await fetchBootstrapServerSide()
+  const urlServiceId = firstParam(params.service) ?? undefined
+
+  let bootstrap: any = null
+  let seed: any = null
+  const now = new Date()
+
+  if (urlServiceId) {
+    // Parallel optimization: run both server-side fetches concurrently
+    const [bootstrapRes, seedRes] = await Promise.all([
+      fetchBootstrapServerSide(),
+      fetchDashboardServerSide(urlServiceId, now),
+    ])
+    bootstrap = bootstrapRes
+    seed = seedRes
+  } else {
+    // Sequential fallback: fetch bootstrap first to resolve default service id
+    bootstrap = await fetchBootstrapServerSide()
+    const resolvedServiceId =
+      (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+      undefined
+    const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
+    seed = await fetchDashboardServerSide(resolvedServiceId, now, logExtents)
+  }
+
   const serviceId =
-    firstParam(params.service) ??
+    urlServiceId ??
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
-
-  // Pin a single render instant so the seed body anchor and the seed KEY anchor
-  // agree (resolveDashboardDefaultKey + fetchDashboardServerSide both floor it).
-  const now = new Date()
-  const seed = await fetchDashboardServerSide(serviceId, now, logExtents)
 
   const dehydratedState = seed
     ? seedDehydratedState(

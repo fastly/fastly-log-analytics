@@ -102,9 +102,7 @@ export function filterStoreModuleMock() {
         endTime: '2026-01-01T01:00:00Z',
         filters: [],
         isAutoRange: false,
-        hasSyncedExtents: true,
         compareMode: false,
-        autoSetRange: vi.fn(),
         setRange: vi.fn(),
         clearFilters: vi.fn(),
       }

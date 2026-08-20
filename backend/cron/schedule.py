@@ -40,9 +40,11 @@ def build_cron_schedule_payload(source: dict) -> dict:
     _TASK_MAP = {
         "sync_metadata": "metadata_sync",
         "sync": "sync",
+        "rum_sync": "rum_sync",
         "full_sync": "full_sync",
         "gap_heal": "gap_heal",
         "commit": "commit",
+        "rum_commit": "rum_commit",
         "optimize": "optimize",
         "local_compact": "local_compact",
         "expire": "expire",

@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { NextResponse } from 'next/server'
 import { proxy as middleware } from '../proxy'
 
 function makeReq(url: string, headers: Record<string, string> = {}): any {
@@ -164,6 +165,30 @@ describe('middleware /admin gate (security)', () => {
       const req = makeReq(`http://localhost/_next/data/build-id${prefix}.json`, { 'x-proxied-by-caddy': 'true' })
       const res: any = middleware(req)
       expect(res.status).toBe(403)
+    })
+  })
+
+  describe('service ID propagation', () => {
+    it('sets x-service-id header when service query parameter is present', () => {
+      const nextSpy = vi.spyOn(NextResponse, 'next')
+      const req = makeReq('http://localhost/dashboard?service=my-service-id')
+      const res = middleware(req)
+      expect(res.status).toBe(200)
+      expect(nextSpy).toHaveBeenCalled()
+      const callArgs = nextSpy.mock.calls[0][0]
+      expect(callArgs?.request?.headers?.get('x-service-id')).toBe('my-service-id')
+      nextSpy.mockRestore()
+    })
+
+    it('does not set x-service-id header when service query parameter is absent', () => {
+      const nextSpy = vi.spyOn(NextResponse, 'next')
+      const req = makeReq('http://localhost/dashboard')
+      const res = middleware(req)
+      expect(res.status).toBe(200)
+      expect(nextSpy).toHaveBeenCalled()
+      const callArgs = nextSpy.mock.calls[0][0]
+      expect(callArgs?.request?.headers?.get('x-service-id')).toBeNull()
+      nextSpy.mockRestore()
     })
   })
 })

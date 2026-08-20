@@ -60,10 +60,15 @@ class ProvisionExecuteRequest(BaseModel):
     commit_interval_mins: int = 5
     enable_cron_compact: bool = True
     log_retention_days: int = 30
+    rum_retention_days: int = 30
     log_fields: str | None = None
     cmcd_enabled: bool = False
     cmcd_mode: str | None = None
     cmcd_version: int | None = None
+    logging_enabled: bool = True
+    rum_enabled: bool = False
+    faro_version: str | None = None
+    rum_custom_condition: str | None = None
 
 
 class ProvisionValidateRequest(BaseModel):
@@ -75,6 +80,19 @@ class ProvisionValidateRequest(BaseModel):
     service_id: str = ""
 
 
+class ProvisionReconcileRequest(BaseModel):
+    """Body for ``POST /api/provision/reconcile`` — the service to reconcile
+    and the Fastly token to do it with.
+
+    Both were query parameters until 2026-08-11. A Fastly API token in a
+    query string lands in every access log, proxy log and ``Referer`` along
+    the way; moving it into the body keeps it out of the URL. ``service_id``
+    came along so the two stay in one place."""
+
+    service_id: str = ""
+    token: str = ""
+
+
 class ProvisionTeardownRequest(BaseModel):
     """Body for ``POST /api/provision/teardown`` — destructive removal of a
     provisioned service. ``remove_*`` flags toggle each component.
@@ -84,11 +102,52 @@ class ProvisionTeardownRequest(BaseModel):
     token: str = ""
     service_id: str | None = None
     remove_logging: bool = True
+    remove_rum: bool = True
     remove_cdn: bool = True
     remove_bucket: bool = True
+    remove_cloud_files: bool = True
     remove_scoring: bool = True
     remove_cache: bool = True
     remove_cron: bool = False
+    remove_fos_tokens: bool = True
+
+
+class RumDisableRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/disable`` — selective
+    destructive removal of Real User Monitoring (RUM)."""
+
+    token: str = ""
+    remove_cloud_files: bool = True
+    remove_bucket: bool = False
+    activate: bool = True
+
+
+class RumEnableRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/enable`` — selective
+    onboarding/enabling of Real User Monitoring (RUM)."""
+
+    token: str = ""
+    activate: bool = True
+
+
+class RumUpgradeRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
+    Faro Web SDK version and reconcile the deployed bundle to match."""
+
+    version: str
+    token: str = ""
+    activate: bool = True
+
+
+class RumSettingsUpdateRequest(BaseModel):
+    """Body for ``POST /api/services/{service_id}/rum/settings`` — update RUM capture toggles."""
+
+    capture_vitals: bool = True
+    capture_performance: bool = True
+    capture_errors: bool = True
+    capture_events: bool = True
+    custom_condition: str = ""
+    token: str = ""
 
 
 class ProvisionConfigRequest(BaseModel):
@@ -132,6 +191,8 @@ class ProvisionConfigRequest(BaseModel):
     enable_cron_compact: bool | None = None
     log_retention_days: int | None = None
     log_fields: str | dict[str, Any] | None = None
+    logging_enabled: bool | None = None
+    rum_enabled: bool | None = None
 
 
 class CustomFieldsImportBody(BaseModel):
@@ -240,3 +301,15 @@ class NgwafWorkspacesResponse(_ProvisionRead):
 class NgwafWorkspaceSetResponse(_ProvisionRead):
     ok: bool | None = None
     ngwaf_workspace_id: str | None = None
+
+
+class RumVersionsResponse(_ProvisionRead):
+    """Response for ``GET /api/services/{service_id}/rum/versions`` —
+    available Faro Web SDK releases plus the operator's pinned/latest
+    state. Only returned on a successful registry lookup; a registry
+    failure surfaces as 503 instead of a degraded body (see the handler)."""
+
+    available: list[str] = []
+    current: str | None = None
+    latest: str | None = None
+    update_available: bool = False

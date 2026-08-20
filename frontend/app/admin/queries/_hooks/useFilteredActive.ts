@@ -72,6 +72,7 @@ export function useFilteredActive({
 } {
   const justFinished = React.useMemo(() => {
     const all = snapshot?.completed ?? []
+    // eslint-disable-next-line react-hooks/purity
     const cutoff = Date.now() / 1000 - JUST_FINISHED_WINDOW_S
     return all.filter((c) => c.ended_at_utc >= cutoff)
   }, [snapshot])

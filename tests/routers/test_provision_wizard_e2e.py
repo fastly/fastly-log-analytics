@@ -92,7 +92,7 @@ def _fake_ensure_cdn_service(cfg, fos_access_key, fos_secret_key, token, status_
     }
 
 
-def _fake_ensure_logging_endpoint(cfg, fos_access_key, fos_secret_key, token, status_cb=None):
+def _fake_ensure_logging_via_reconciler(state, token, status_cb=None):
     if status_cb:
         status_cb("📡 Logging endpoint (mock)…")
     return 42  # activated version number
@@ -119,7 +119,10 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", side_effect=_fake_ensure_logging_endpoint),
+        patch(
+            "backend.provision.orchestrator.ensure_logging_via_reconciler",
+            side_effect=_fake_ensure_logging_via_reconciler,
+        ),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
         # Skip Fastly preflight + scheduler reload; we don't have a real cron.
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
@@ -230,7 +233,10 @@ def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path,
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", side_effect=_fake_ensure_logging_endpoint),
+        patch(
+            "backend.provision.orchestrator.ensure_logging_via_reconciler",
+            side_effect=_fake_ensure_logging_via_reconciler,
+        ),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.config.fetch_service_name", return_value="Wizard Iceberg Success"),
@@ -302,7 +308,10 @@ def test_wizard_execute_rolls_back_on_helper_failure(isolated_configs_dir, tmp_p
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_boom_cdn),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", side_effect=_fake_ensure_logging_endpoint),
+        patch(
+            "backend.provision.orchestrator.ensure_logging_via_reconciler",
+            side_effect=_fake_ensure_logging_via_reconciler,
+        ),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
         # Swallow side effects from the rollback path.
         patch("backend.provision.orchestrator.remove_logging_endpoint"),
@@ -374,7 +383,7 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
 
         return _capture
 
-    def _boom_logging_endpoint(cfg, fos_access_key, fos_secret_key, token, status_cb=None):
+    def _boom_logging_endpoint(state, token, status_cb=None):
         raise RuntimeError("Fastly API: 502 Bad Gateway on logging endpoint (mock)")
 
     # The teardown's mid-step "create a temp admin key to delete the
@@ -384,7 +393,7 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", side_effect=_boom_logging_endpoint),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", side_effect=_boom_logging_endpoint),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_track("delete_fos_access_key")),
         patch("backend.provision.orchestrator.delete_fos_bucket", side_effect=_track("delete_fos_bucket")),
         patch("backend.provision.orchestrator.delete_cdn_service", side_effect=_track("delete_cdn_service")),

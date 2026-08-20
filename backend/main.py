@@ -49,6 +49,7 @@ from backend.utils.structlog_config import bridge_uvicorn_loggers, configure_str
 configure_structlog()
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # Install s3fs/botocore monkeypatches before anything else can touch s3fs.
 # Importing the fs submodule has the side-effect of patching S3FileSystem;
@@ -62,7 +63,7 @@ logger = logging.getLogger("backend.main")
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from starlette_compress import CompressMiddleware
+from starlette_compress import CompressMiddleware, remove_compress_type
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 # Ensure the project root is on sys.path so the backend package is importable.
@@ -303,8 +304,16 @@ def _background_startup():
                 configs = svcconfig.list_configs()
                 logging.info("[fastapi] Initialising %d services...", len(configs))
 
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    executor.map(_initialize_service, configs)
+                executor = ThreadPoolExecutor(max_workers=4)
+                futures = [executor.submit(_initialize_service, cfg) for cfg in configs]
+                from concurrent.futures import wait as _futures_wait
+
+                done, not_done = _futures_wait(futures, timeout=1.0)
+                if not_done:
+                    logging.info(
+                        "[fastapi] Some services are taking longer to initialize; continuing startup in background."
+                    )
+                executor.shutdown(wait=False)
 
             except Exception as e:
                 logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
@@ -335,6 +344,38 @@ def _enforce_data_dir_mounted() -> None:
         )
         logging.critical(msg)
         raise RuntimeError(msg)
+
+
+def _migrate_config_on_startup() -> None:
+    """Auto-migrate legacy flat configs to nested structure on service startup.
+
+    This runs BEFORE any code reads config files, ensuring all configs in memory
+    are in the new nested format. Migration is idempotent: calling on already-nested
+    configs returns them unchanged.
+    """
+    import json
+    from pathlib import Path
+
+    from backend.provision.declarative.config_migration import config_changed, migrate_config
+
+    config_dir = Path.home() / ".fastly-log-analytics" / "configs"
+    if not config_dir.exists():
+        return
+
+    for config_file in config_dir.glob("*.json"):
+        try:
+            with open(config_file) as f:
+                original_cfg = json.load(f)
+
+            migrated_cfg = migrate_config(original_cfg)
+
+            if config_changed(original_cfg, migrated_cfg):
+                with open(config_file, "w") as f:
+                    json.dump(migrated_cfg, f, indent=2)
+                logging.info("[fastapi] Migrated config file to v2.3.0 nested format: %s", config_file.name)
+        except Exception as e:
+            # Log but don't fail startup
+            logging.warning("[fastapi] Failed to migrate config file %s: %s", config_file.name, e)
 
 
 def _enforce_proxy_headers_configured() -> None:
@@ -414,6 +455,11 @@ async def lifespan(app: FastAPI):
     # Data-volume sanity check FIRST — before any dependency / scheduler /
     # ingestion logic that would otherwise blindly write to the wrong path.
     _enforce_data_dir_mounted()
+
+    # Migrate legacy flat configs to nested structure BEFORE any code reads configs.
+    # This is the critical enforcement point: all configs must be in nested format
+    # from this point onward.
+    _migrate_config_on_startup()
 
     # Proxy-headers regression guard (security). Production
     # must have TRUSTED_PROXY_IPS set in env (mirrors the uvicorn
@@ -543,7 +589,7 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.3.0",
+    version="2.4.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -655,7 +701,17 @@ async def telemetry_middleware(request: Request, call_next):
     # same SELECT. Cleared in the finally below so cron / test paths fall
     # through to the live DB read.
     _scoring_labels.init_request_cache()
-    ctx_name = f"api:{request.method} {request.url.path}"
+    page_load_id = request.headers.get("X-Page-Load-ID") or request.headers.get("x-page-load-id")
+    from backend.utils.telemetry import get_page_load_id, set_page_load_id
+
+    _prev_plid = get_page_load_id()
+    set_page_load_id(page_load_id)
+
+    # Modify process context to include the page_load_id suffix so proxy reads match
+    if page_load_id:
+        ctx_name = f"api:{request.method} {request.url.path}#{page_load_id}"
+    else:
+        ctx_name = f"api:{request.method} {request.url.path}"
 
     # Best-effort attribution: analyst_session is set by RemoteAccessMiddleware
     # (which now sits OUTSIDE this middleware). Falls back to admin when
@@ -753,6 +809,10 @@ async def telemetry_middleware(request: Request, call_next):
         _scoring_labels.clear_request_cache()
     except Exception:
         pass
+    try:
+        set_page_load_id(_prev_plid)
+    except Exception:
+        pass
     return response
 
 
@@ -810,6 +870,9 @@ async def _invalid_service_id_handler(request: Request, exc: InvalidServiceIdErr
 # client; an inner placement gets stripped by BaseHTTPMiddleware's
 # buffer-and-reemit (audited 2026-06-09: 11490 B raw uncompressed when
 # Compress sat inside the telemetry decorator).
+# Disable compression for Server-Sent Events (SSE) to prevent response buffering
+# and chunk boundaries corruption (which cause ERR_INVALID_CHUNKED_ENCODING on public endpoints).
+remove_compress_type("text/event-stream")
 app.add_middleware(CompressMiddleware, minimum_size=1024)
 
 # Boot-time middleware-order assertion. Crashes on violation rather than
@@ -822,6 +885,7 @@ assert_middleware_order(app)
 from backend.models.errors import DEFAULT_ERROR_RESPONSES  # noqa: E402
 from backend.routers import (
     alerts,
+    assets,
     cmcd,
     control_room,
     dashboard,
@@ -830,6 +894,7 @@ from backend.routers import (
     origin,
     performance,
     query,
+    rum,
     security,
     sessions,
     value,
@@ -849,6 +914,9 @@ app.include_router(origin.router)
 app.include_router(control_room.router)
 app.include_router(value.router)
 app.include_router(cmcd.router)
+app.include_router(rum.router)
+app.include_router(rum.asset_router)
+app.include_router(assets.router)
 
 from backend.routers import (
     admin,
@@ -862,6 +930,7 @@ from backend.routers import (
     share_admin,
     share_auth,
     share_oauth,
+    sharing_domain,
     usage,
     ux_events,
     web_vitals,
@@ -876,6 +945,7 @@ app.include_router(admin.router)
 app.include_router(admin.sync_status.meta_router)
 app.include_router(admin_queries.router)
 app.include_router(provision.router)
+app.include_router(sharing_domain.router)
 app.include_router(session_scoring.router)
 app.include_router(cmcd_admin.router)
 app.include_router(debug.router)
@@ -905,7 +975,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.3.0"
+    _APP_VERSION = "2.4.0"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -1091,13 +1161,13 @@ def health_check(
                         svc_state["stale_minutes_used"] = effective_minutes
                     norm_effective_cutoff = str(effective_cutoff).replace(" ", "T").rstrip("Z")
                     if norm_last < norm_effective_cutoff:
-                        svc_state["status"] = "degraded"
+                        svc_state["status"] = "stale"
                         svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {effective_cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
             svc_state["reason"] = f"metadata_db query failed: {e}"
 
-        if svc_state["status"] != "ok":
+        if svc_state["status"] not in ("ok", "stale"):
             overall_ok = False
         services_report.append(svc_state)
 

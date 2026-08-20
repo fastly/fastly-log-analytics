@@ -40,6 +40,57 @@ def test_get_sessions_returns_expected_keys(in_memory_duckdb, test_service_sourc
     assert result["limit"] == 20
 
 
+def test_get_sessions_flagged_only(in_memory_duckdb, test_service_source):
+    """Result correctly applies flagging rules and filters to flagged_only=True."""
+    logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
+    # Force 6 requests to have one IP (flagged) and 4 requests to have another IP (not flagged)
+    for i, log in enumerate(logs):
+        if i < 6:
+            log["ip"] = "1.1.1.1"
+        else:
+            log["ip"] = "2.2.2.2"
+            log["status"] = 200  # Prevent status-based flagging
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
+
+    # First, run with flagged_only=False
+    result_all = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        page=1,
+        limit=50,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=False,
+        min_reqs_flag=5,
+        min_4xx_pct_flag=None,
+    )
+    ips_all = [s["ip"] for s in result_all["sessions"]]
+    assert "1.1.1.1" in ips_all
+    assert "2.2.2.2" in ips_all
+
+    # Next, run with flagged_only=True
+    result_flagged = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        page=1,
+        limit=50,
+        sort_by="session_start",
+        sort_dir="desc",
+        flagged_only=True,
+        min_reqs_flag=5,
+        min_4xx_pct_flag=None,
+    )
+    ips_flagged = [s["ip"] for s in result_flagged["sessions"]]
+    assert "1.1.1.1" in ips_flagged
+    assert "2.2.2.2" not in ips_flagged
+
+
 def test_get_sessions_groups_requests_by_ip(in_memory_duckdb, test_service_source):
     """Multiple requests from the same IP within 30 minutes form a single session."""
     logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)

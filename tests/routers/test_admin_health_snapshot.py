@@ -247,3 +247,113 @@ def test_health_snapshot_vcpus_failure_renders_none(client):
     with patch("multiprocessing.cpu_count", side_effect=NotImplementedError):
         body = _get_health(client)
     assert body["vcpus"] is None
+
+
+def test_health_snapshot_with_probe_fos(client):
+    """Verify that probe_fos=1 triggers FOS reachability probe across all configs."""
+    fake_configs = [{"service_id": "svc-a", "name": "svc-a"}]
+    fake_reachable = {"reachable": True, "latency_ms": 45}
+
+    with (
+        patch("backend.config.list_configs", return_value=fake_configs),
+        patch("backend.config.config_to_source", side_effect=lambda c: c),
+        patch("backend.core.duckdb.fos_reachable", return_value=fake_reachable) as mock_reachable,
+    ):
+        resp = client.get("/api/admin/health-snapshot?probe_fos=True")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fos"]["svc-a"]["reachable"] is True
+        mock_reachable.assert_called_once()
+
+
+def test_health_snapshot_with_probe_fos_failure(client):
+    """Verify that probe_fos=1 handles FOS reachability probe failures gracefully per service."""
+    fake_configs = [{"service_id": "svc-a", "name": "svc-a"}]
+
+    with (
+        patch("backend.config.list_configs", return_value=fake_configs),
+        patch("backend.config.config_to_source", side_effect=lambda c: c),
+        patch("backend.core.duckdb.fos_reachable", side_effect=RuntimeError("S3 connection timed out")),
+    ):
+        resp = client.get("/api/admin/health-snapshot?probe_fos=True")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fos"]["svc-a"]["reachable"] is False
+        assert "timed out" in body["fos"]["svc-a"]["error"]
+
+
+def test_vcl_health_not_configured(client):
+    """Verify /api/admin/vcl-health returns an error when service is not configured."""
+    with patch("backend.config.load_config", return_value=None):
+        resp = client.get("/api/admin/vcl-health?service_id=nonexistent")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is False
+        assert "not configured" in body["error"]
+
+
+def test_vcl_health_no_token(client):
+    """Verify /api/admin/vcl-health returns an error when no API token is in config."""
+    with patch("backend.config.load_config", return_value={"service_id": "svc-a"}):
+        resp = client.get("/api/admin/vcl-health?service_id=svc-a")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is False
+        assert "No Fastly API token" in body["error"]
+
+
+def test_vcl_health_no_active_version(client):
+    """Verify /api/admin/vcl-health returns an error when no active version is fetched."""
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc-a", "admin_token": "token"}),
+        patch("backend.provision.declarative.fastly_integration.fetch_active_version", return_value=None),
+    ):
+        resp = client.get("/api/admin/vcl-health?service_id=svc-a")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is False
+        assert "No active version found" in body["error"]
+
+
+def test_vcl_health_migration_complete(client):
+    """Verify /api/admin/vcl-health reports a clean state when only consolidated snippets are present."""
+    from collections import namedtuple
+
+    Snippet = namedtuple("Snippet", ["name"])
+    snippets = [Snippet(name="Fastly Log Analytics - Recv")]
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc-a", "admin_token": "token"}),
+        patch("backend.provision.declarative.fastly_integration.fetch_active_version", return_value=5),
+        patch("backend.provision.declarative.fastly_integration.fetch_snippets", return_value=snippets),
+    ):
+        resp = client.get("/api/admin/vcl-health?service_id=svc-a")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is True
+        assert body["legacy_snippets_found"] == 0
+        assert body["consolidated_snippets_found"] == 1
+
+
+def test_vcl_health_unexpected_state(client):
+    """Verify /api/admin/vcl-health handles unexpected states (no snippets found)."""
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc-a", "admin_token": "token"}),
+        patch("backend.provision.declarative.fastly_integration.fetch_active_version", return_value=5),
+        patch("backend.provision.declarative.fastly_integration.fetch_snippets", return_value=[]),
+    ):
+        resp = client.get("/api/admin/vcl-health?service_id=svc-a")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is False
+        assert "no snippets found" in body["recommendation"]
+
+
+def test_vcl_health_exception_handled(client):
+    """Verify /api/admin/vcl-health handles general exceptions gracefully."""
+    with patch("backend.config.load_config", side_effect=RuntimeError("disk crash")):
+        resp = client.get("/api/admin/vcl-health?service_id=svc-a")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["is_clean"] is False
+        assert "disk crash" in body["error"]

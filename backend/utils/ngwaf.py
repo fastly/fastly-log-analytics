@@ -36,6 +36,12 @@ def fetch_verified_bots_paged(
 
     Pagination stops when meta.next_cursor is "" (empty string, not null).
     """
+    from backend.core.fastly.mock_fixtures import is_mock_mode
+
+    if is_mock_mode():
+        yield [], None, 0
+        return
+
     # Round up the 'from' range to a larger interval (e.g. -5d, -15min) as requested
     # to ensure we don't miss records near the edge due to clock drift or pipeline lag.
     relative_from = _get_relative_time_range(from_ts)
@@ -51,16 +57,6 @@ def fetch_verified_bots_paged(
     }
 
     cursor: str = "initial"  # Non-empty sentinel to enter the loop
-
-    # R-3b: short-circuit on FASTLY_MOCK_MODE so the Playwright E2E + the
-    # contract suite don't need a real NGWAF workspace. Production never
-    # sets the env var; the gate is a no-op outside the test harness.
-    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_ngwaf_verified_bots_page
-
-    if is_mock_mode():
-        payload = mock_ngwaf_verified_bots_page()
-        yield ([], None, len(payload.get("data", [])))
-        return
 
     while cursor:
         query_string = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items())

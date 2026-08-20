@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import duckdb
 
@@ -1232,3 +1233,154 @@ def _build_security_response(
 
     results["section_timings"] = section_timings
     return results
+
+
+def get_security_proxies(
+    con: duckdb.DuckDBPyConnection,
+    src: dict[str, Any],
+    start_time: Any,
+    end_time: Any,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from backend.repositories._base import QueryRunner, _safe_table
+    from backend.repositories._sql import security as SQL
+    from backend.repositories.utils.filters import build_where_clause
+
+    source_name = src["name"]
+    table_name = _safe_table(source_name)
+    runner = QueryRunner(con, src)
+
+    actual_cols = runner.get_schema_cols()
+    required = ["ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn"]
+    if not actual_cols or not all(col in actual_cols for col in required):
+        return {
+            "active_proxies_count": 0,
+            "tunnel_requests_count": 0,
+            "distance_mismatches_count": 0,
+            "traffic_quality": [],
+            "suspicious_isps": [],
+            "active_clients": [],
+        }
+
+    params, where_clause = build_where_clause(start_time, end_time, filters or {}, actual_cols, inline_params=True)
+
+    optional = ["country", "city"]
+    cols_needed = [c for c in required + optional if c in actual_cols]
+
+    with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+        if temp_table is None:
+            return {
+                "active_proxies_count": 0,
+                "tunnel_requests_count": 0,
+                "distance_mismatches_count": 0,
+                "traffic_quality": [],
+                "suspicious_isps": [],
+                "active_clients": [],
+            }
+
+        # Fetch stats
+        stats_df = runner.execute(SQL.GET_PROXY_STATS.format(temp_table=temp_table)).fetchdf()
+        stats = stats_df.to_dict(orient="records")[0] if not stats_df.empty else {}
+
+        # Fetch traffic quality segments
+        quality_df = runner.execute(SQL.GET_TRAFFIC_QUALITY.format(temp_table=temp_table)).fetchdf()
+        traffic_quality = []
+        if not quality_df.empty:
+            total_count = int(quality_df["count"].sum())
+            if total_count > 0:
+                for row in quality_df.to_dict(orient="records"):
+                    label = str(row.get("type", "Unknown"))
+                    item_count = float(row.get("count", 0))
+                    value = round((item_count / total_count) * 100, 1)
+                    traffic_quality.append({"label": label, "value": value})
+
+        # Fetch top suspicious networks
+        isps_df = runner.execute(SQL.GET_SUSPICIOUS_ISPS.format(temp_table=temp_table)).fetchdf()
+        raw_isps = isps_df.to_dict(orient="records") if not isps_df.empty else []
+
+        # Fetch active clients
+        select_country_city_inner = ""
+        if "country" in cols_needed:
+            select_country_city_inner += ",\n            country"
+        else:
+            select_country_city_inner += ",\n            CAST(NULL AS VARCHAR) AS country"
+        if "city" in cols_needed:
+            select_country_city_inner += ",\n            city"
+        else:
+            select_country_city_inner += ",\n            CAST(NULL AS VARCHAR) AS city"
+
+        select_country_city_outer = ""
+        select_country_city_outer += ",\n        country"
+        select_country_city_outer += ",\n        city"
+
+        clients_df = runner.execute(
+            SQL.GET_ACTIVE_PROXY_CLIENTS.format(
+                temp_table=temp_table,
+                select_country_city_inner=select_country_city_inner,
+                select_country_city_outer=select_country_city_outer,
+            )
+        ).fetchdf()
+        raw_clients = clients_df.to_dict(orient="records") if not clients_df.empty else []
+
+        # Gather all distinct ASNs to resolve
+        asns_to_resolve = set()
+        for row in raw_isps:
+            asn_val = row.get("asn")
+            if asn_val is not None:
+                try:
+                    asns_to_resolve.add(int(asn_val))
+                except (ValueError, TypeError):
+                    pass
+        for row in raw_clients:
+            asn_val = row.get("asn")
+            if asn_val is not None:
+                try:
+                    asns_to_resolve.add(int(asn_val))
+                except (ValueError, TypeError):
+                    pass
+
+        # Resolve ASN names in batch
+        from backend.core.duckdb import get_asn_names
+
+        asn_names = get_asn_names(source_name, list(asns_to_resolve))
+
+        # Format suspicious ISPs
+        suspicious_isps = []
+        for row in raw_isps:
+            asn_val = row.get("asn")
+            try:
+                asn_int = int(asn_val) if asn_val is not None else None
+            except (ValueError, TypeError):
+                asn_int = None
+            name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
+            suspicious_isps.append(
+                {
+                    "isp": name,
+                    "asn": asn_int,
+                    "count": int(row.get("count", 0)),
+                }
+            )
+
+        # Format active clients
+        active_clients = []
+        for row in raw_clients:
+            asn_val = row.get("asn")
+            try:
+                asn_int = int(asn_val) if asn_val is not None else None
+            except (ValueError, TypeError):
+                asn_int = None
+            name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
+            client_item = {**row}
+            client_item["asn_name"] = name
+            if "asn" in client_item:
+                del client_item["asn"]
+            active_clients.append(client_item)
+
+    return {
+        "active_proxies_count": int(stats.get("active_proxies_count", 0)),
+        "tunnel_requests_count": int(stats.get("total_requests_count", 0)),
+        "distance_mismatches_count": int(stats.get("distance_mismatches_count", 0)),
+        "traffic_quality": traffic_quality,
+        "suspicious_isps": suspicious_isps,
+        "active_clients": active_clients,
+    }

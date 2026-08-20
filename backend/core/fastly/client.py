@@ -71,9 +71,6 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout)
 
 def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3, timeout=30):
     """Make a Fastly API request and return parsed JSON."""
-    # R-3b: in mock mode (Playwright + contract suites), short-circuit
-    # the wire call and return a canned response. Production never sets
-    # ``FASTLY_MOCK_MODE``, so the real urlopen() path stays load-bearing.
     from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
 
     if is_mock_mode():
@@ -117,14 +114,14 @@ def fastly_raw(
     typically 200 with an empty body). ``timeout`` defaults higher than
     ``fastly()`` because a multi-MB upload can outlast the 30s default.
     """
-    from backend.core.fastly.mock_fixtures import is_mock_mode
+    from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
 
-    # Raw writes (KV value, package upload) have no meaningful canned
-    # response; mocked suites that exercise enable/retrain patch fastly_raw
-    # directly, so a bare {} here keeps contract runs from needing fixtures
-    # for every binary path.
     if is_mock_mode():
-        return {}
+        try:
+            body = json.loads(data.decode()) if data else None
+        except Exception:
+            body = None
+        return mock_response(method, path, body)
 
     hdrs = {"Fastly-Key": token, "Accept": "application/json", "Content-Type": content_type}
 

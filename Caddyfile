@@ -72,7 +72,21 @@
 }
 
 :80 {
-	encode zstd gzip
+	# Compress responses, but NOT Server-Sent Events (SSE) or other streaming/POST progress streams.
+	# Compressing SSE/streaming responses corrupts chunk boundaries and causes ERR_INVALID_CHUNKED_ENCODING.
+	@compressible {
+		not header Accept *text/event-stream*
+		not path_regexp sse_stream /stream$
+		not path_regexp metadata_cleanup /metadata-cleanup$
+		not path_regexp reset_logs /reset-logs$
+		not path_regexp reset_rum /reset-rum$
+		not path_regexp teardown /teardown$
+		not path_regexp execute /execute$
+		not path_regexp reconcile /reconcile$
+		not path_regexp cmcd_enable /cmcd/enable$
+		not path_regexp cmcd_disable /cmcd/disable$
+	}
+	encode @compressible zstd gzip
 	request_body {
 		max_size 25MB
 	}

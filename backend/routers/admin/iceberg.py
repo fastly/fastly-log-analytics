@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 
 from fastapi import Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -25,22 +26,28 @@ logger = logging.getLogger(__name__)
 
 @router.get("/admin/iceberg-info", response_model=IcebergTableInfoResponse)
 @query_errors(status_code=500)
-def iceberg_info_endpoint(source: dict = Depends(get_source)):
+def iceberg_info_endpoint(
+    table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
+    source: dict = Depends(get_source),
+):
     """Return Iceberg table metadata: snapshots, data files, size, buffer status."""
     from backend.core import iceberg as db_iceberg
 
-    result = db_iceberg.get_table_info(source)
+    result = db_iceberg.get_table_info(source, table_name=table_name)
     return IcebergTableInfoResponse.with_telemetry(**result)
 
 
 @router.get("/admin/iceberg-calendar")
 @query_errors(status_code=500)
-def iceberg_calendar_endpoint(source: dict = Depends(get_source)):
+def iceberg_calendar_endpoint(
+    table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
+    source: dict = Depends(get_source),
+):
     """Return per-date data file counts from Iceberg partition metadata."""
     from backend.core import iceberg as db_iceberg
     from backend.utils.telemetry import get_tracked_calls
 
-    result = db_iceberg.get_snapshot_calendar(source)
+    result = db_iceberg.get_snapshot_calendar(source, table_name=table_name)
     return {**result, "_debug_calls": get_tracked_calls()}
 
 
@@ -185,4 +192,62 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
             except _queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+
+
+@router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
+def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
+    """Permanently delete this service's RUM telemetry data (cloud + local) over SSE.
+
+    Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
+    while leaving logs data completely untouched.
+    """
+    import json as _json
+    import queue as _queue
+    import threading
+
+    from backend.core.reset import reset_service_rum
+
+    service_id = source["name"]
+
+    if source.get("access_level") != "read_write":
+        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
+    if body.confirm != service_id:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("confirm_mismatch", "`confirm` must equal the service id being deleted."),
+        )
+
+    events: _queue.Queue = _queue.Queue()
+
+    def worker():
+        from backend.cron.scheduler import get_scheduler
+
+        try:
+            for event in reset_service_rum(
+                service_id,
+                delete_raw_logs=body.delete_raw_logs,
+                reload_scheduler=lambda: get_scheduler().reload(),
+            ):
+                events.put(event)
+        except Exception as e:
+            logger.exception("reset_rum_endpoint(%s) failed", service_id)
+            events.put({"type": "error", "message": f"RUM deletion failed: {e}"})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name=f"reset-rum-{service_id}").start()
+
+    async def stream():
+        import asyncio
+
+        while True:
+            try:
+                event = await asyncio.to_thread(events.get, timeout=1)
+                if event is None:
+                    break
+                yield _json.dumps(event)
+            except _queue.Empty:
+                pass
+
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)

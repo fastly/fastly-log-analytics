@@ -21,7 +21,7 @@ from backend.core.fastly.service import (
 )
 from backend.provision.cmcd_fields import (
     _CMCD_FIELD_NAMES,
-    merge_cmcd_custom_fields,
+    reconcile_cmcd_custom_fields,
 )
 from backend.provision.cmcd_vcl import (
     CMCD_SNIPPET_NAME,
@@ -42,7 +42,7 @@ def _remove_cmcd_custom_fields(cfg: dict) -> None:
 
 def _add_cmcd_custom_fields(cfg: dict) -> None:
     lf = cfg.setdefault("log_fields", {})
-    lf["custom_fields"] = merge_cmcd_custom_fields(lf.get("custom_fields"))
+    lf["custom_fields"] = reconcile_cmcd_custom_fields(lf.get("custom_fields"), enabled=True)
 
 
 def enable_cmcd(

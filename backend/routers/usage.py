@@ -20,9 +20,11 @@ from backend.models.usage import (
     CurrentStorageResponse,
     PrefillRatesResponse,
     PrefillResponse,
+    RumBreakdownPoint,
     UsageBandwidthResponse,
     UsageLogActivityResponse,
     UsageOperationsResponse,
+    UsageRumBreakdownResponse,
 )
 from backend.repositories import usage as repo
 from backend.repositories._base import SectionTimer
@@ -111,6 +113,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
+        "rum_beacons_per_day": 0,
     }
 
     prov: dict = {}
@@ -196,6 +199,28 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         avg = metadata_db.get_node_count_avg(source["name"])
         if avg:
             result["avg_nodes_per_flush"] = round(float(avg))
+    except Exception:
+        pass
+
+    # Extract historical RUM beacons per day for prefill.
+    try:
+        from backend.core.metadata import get_con
+
+        db = get_con(source["name"])
+        cur = db.execute(
+            """
+            SELECT AVG(daily_beacons) FROM (
+                SELECT SUM(row_count) as daily_beacons
+                FROM ingested_files
+                WHERE source_name = ?
+                  AND table_name IN ('client_vitals', 'client_errors')
+                GROUP BY file_date
+            )
+            """,
+            (source["name"],),
+        )
+        val = cur.fetchone()[0]
+        result["rum_beacons_per_day"] = round(float(val)) if val is not None else 0
     except Exception:
         pass
 
@@ -485,6 +510,22 @@ def usage_current_storage(
         except Exception:
             pass
 
+        # Calculate RUM storage separately from regular logs
+        rum_bytes = 0
+        try:
+            s3 = _get_fos_client(src)
+            bucket = src["bucket"]
+            prefix = src.get("prefix", "").strip("/")
+            rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
+                for obj in page.get("Contents", []):
+                    rum_bytes += obj.get("Size", 0)
+        except Exception:
+            pass
+
+        regular_log_bytes = total_bytes - rum_bytes
+
         if delete_after:
             live_bytes = iceberg_bytes + quarantine_bytes
             live_files = iceberg_files
@@ -513,6 +554,8 @@ def usage_current_storage(
             total_billed_gb_hours=gb_hours,
             total_files=total_files,
             total_bytes=total_bytes,
+            rum_bytes=rum_bytes,
+            regular_log_bytes=regular_log_bytes,
             start=start_str,
             end=end_str,
         )
@@ -749,3 +792,117 @@ def usage_log_activity(
             pass
 
     return UsageLogActivityResponse.with_telemetry(**res)
+
+
+@router.get("/rum-breakdown", response_model=UsageRumBreakdownResponse)
+@query_errors()
+def usage_rum_breakdown(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    by: str = Query(default="day"),
+    source: dict = Depends(get_source),
+):
+    """Calculate RUM beacon volume and estimated FOS Class A operations cost."""
+    from backend.core.metadata import get_con
+
+    requested_by = by
+    if by not in ("hour", "day"):
+        by = "day"
+    clamped_from_sub_hour = requested_by != by
+
+    src = source
+    service_id = src.get("name") or src.get("service_id")
+    if not service_id or not isinstance(service_id, str):
+        return UsageRumBreakdownResponse.with_telemetry(
+            data=[],
+            total_beacons=0,
+            total_estimated_class_a=0,
+            total_estimated_cost_usd=0.0,
+            class_a_rate_per_1k=0.0,
+            average_beacons_per_day=0.0,
+            note="Service not found.",
+        )
+
+    start_str, end_str, from_ts, to_ts = window_to_epoch(start, end)
+
+    # Get class A rate from config
+    from backend import config as svcconfig
+
+    global_rates = svcconfig.load_usage_logging_config()
+    class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.005))
+
+    # Query RUM beacon count by date from metadata DB using the new DuckDB/Iceberg ingestion tracking
+    try:
+        db = get_con(service_id)
+        start_date = start_str.split("T")[0]
+        end_date = end_str.split("T")[0]
+        cur = db.execute(
+            """
+            SELECT
+                file_date as date,
+                SUM(row_count) as beacon_count
+            FROM ingested_files
+            WHERE source_name = ?
+              AND table_name IN ('client_vitals', 'client_errors')
+              AND file_date >= ? AND file_date < ?
+            GROUP BY file_date
+            ORDER BY date
+            """,
+            (service_id, start_date, end_date),
+        )
+        rows = cur.fetchall()
+        beacons_by_date: dict[str, int] = {}
+        for row in rows:
+            if row["date"]:
+                beacons_by_date[str(row["date"])] = row["beacon_count"]
+    except Exception:
+        beacons_by_date = {}
+
+    # Build response with cost estimates (each beacon = 1 Class A operation)
+    data: list[RumBreakdownPoint] = []
+    total_beacons = 0
+    total_class_a = 0
+    total_cost = 0.0
+
+    for date_str in sorted(beacons_by_date.keys()):
+        beacon_count = beacons_by_date[date_str]
+        class_a_ops = beacon_count  # Each beacon = 1 PUT to FOS = 1 Class A op
+        cost = (class_a_ops / 1000.0) * class_a_rate  # class_a_rate is per 1000 ops
+
+        data.append(
+            RumBreakdownPoint(
+                date=date_str,
+                beacon_count=beacon_count,
+                estimated_class_a_ops=class_a_ops,
+                estimated_cost_usd=round(cost, 6),
+            )
+        )
+
+        total_beacons += beacon_count
+        total_class_a += class_a_ops
+        total_cost += cost
+
+    # Calculate average beacons per day
+    days = (to_ts - from_ts) / 86400.0
+    avg_beacons_per_day = total_beacons / days if days > 0 else 0
+
+    note = (
+        "RUM beacon volume is tracked separately. Each beacon is one FOS Class A operation. "
+        "This estimate assumes current beacon volume; actual costs depend on user traffic. "
+        "These operations are also included in the total FOS Class A operations shown elsewhere."
+    )
+    if clamped_from_sub_hour:
+        note += (
+            f" The chart interval you selected ({requested_by}) was adjusted to daily granularity "
+            "for RUM data (FOS doesn't provide sub-daily beacon breakdown)."
+        )
+
+    return UsageRumBreakdownResponse.with_telemetry(
+        data=data,
+        total_beacons=total_beacons,
+        total_estimated_class_a=total_class_a,
+        total_estimated_cost_usd=round(total_cost, 6),
+        class_a_rate_per_1k=class_a_rate,
+        average_beacons_per_day=round(avg_beacons_per_day, 2),
+        note=note,
+    )

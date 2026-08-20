@@ -2,7 +2,7 @@
 name = "session-scorer"
 version = "0.1.0"
 edition = "2021"
-authors = ["drew.michael"]
+authors = ["Fastly Log Analytics Contributors"]
 description = "Edge session-anomaly scoring service for Fastly Compute"
 license = "Apache-2.0"
 publish = false

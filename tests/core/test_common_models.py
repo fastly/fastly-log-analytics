@@ -38,8 +38,8 @@ def test_build_where_clause_filters():
     assert "200" in params
     assert "404" in params
 
-    # Check exclude parameter (also CAST for consistency)
-    assert "(CAST(country AS VARCHAR) NOT IN (?))" in sql
+    # Check exclude parameter (country is already VARCHAR in the registry, so CAST is bypassed for performance)
+    assert "(country NOT IN (?))" in sql
     assert "US" in params
 
 
@@ -56,7 +56,7 @@ def test_build_where_clause_inline():
     # CAST AS VARCHAR + stringified literals matches the behaviour of
     # the wildcard branch and makes mixed-type filter values safe.
     assert "(CAST(status AS VARCHAR) IN ('200', '404'))" in sql
-    assert "(CAST(country AS VARCHAR) NOT IN ('US'))" in sql
+    assert "(country NOT IN ('US'))" in sql
 
 
 # ── build_where_clause extended cases ─────────────────────────────────────────
@@ -78,8 +78,8 @@ class TestBuildWhereClauseExtended:
     def test_xfilter_prefix_stripped(self):
         filters = {"xfilter_country": FilterSpec(mode="exclude", values=["US"])}
         _, sql = build_where_clause(None, None, filters)
-        # IN-clause is wrapped in CAST(... AS VARCHAR) defensively
-        assert "country AS VARCHAR) NOT IN" in sql
+        # Since country is VARCHAR in the registry, it is NOT wrapped in CAST defensively
+        assert "country NOT IN" in sql
 
     def test_numeric_suffix_stripped(self):
         # Frontend appends _2, _3 for duplicate filter keys
@@ -91,18 +91,18 @@ class TestBuildWhereClauseExtended:
     def test_wildcard_include(self):
         filters = {"url": FilterSpec(mode="include", values=["/api/*"])}
         _, sql = build_where_clause(None, None, filters, inline_params=True)
-        assert "LIKE '/api/%'" in sql
+        assert "ILIKE '/api/%'" in sql
 
     def test_wildcard_exclude(self):
         filters = {"url": FilterSpec(mode="exclude", values=["/health*"])}
         _, sql = build_where_clause(None, None, filters, inline_params=True)
-        assert "NOT LIKE '/health%'" in sql
+        assert "NOT ILIKE '/health%'" in sql
 
     def test_mixed_exact_and_wildcard(self):
         filters = {"url": FilterSpec(mode="include", values=["/api", "/static/*"])}
         _, sql = build_where_clause(None, None, filters, inline_params=True)
         assert "IN ('/api')" in sql
-        assert "LIKE '/static/%'" in sql
+        assert "ILIKE '/static/%'" in sql
 
     def test_null_value_in_include(self):
         filters = {"country": FilterSpec(mode="include", values=[None])}

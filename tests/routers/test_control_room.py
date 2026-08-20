@@ -351,3 +351,121 @@ def test_openapi_has_control_room_endpoints():
     assert "/api/services/{service_id}/log-field-audit" in paths
     assert "/api/services/{service_id}/control-room/correlate" in paths
     assert "/api/services/{service_id}/control-room/mitigations" in paths
+
+
+# ── Seed, Correlate, & Wizard endpoints ──────────────────────────────────
+
+
+def test_realtime_seed_with_cached_ticks(admin_client, monkeypatch):
+    """If the publisher has enough ticks cached, return them directly."""
+    from backend.core.realtime.publisher import publisher as rt_publisher
+
+    dummy_ticks = [{"timestamp": "2026-07-07T00:00:00Z"}] * 60
+    monkeypatch.setattr(rt_publisher, "get_recent_ticks", lambda sid, count: dummy_ticks)
+
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/realtime-seed",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["ticks"]) == 60
+
+
+def test_realtime_seed_with_fetch_fallback(admin_client, monkeypatch):
+    """If the publisher cache is empty, fall back to fetching from RT API."""
+    import backend.routers.control_room as cr_mod
+    from backend.core.realtime.publisher import publisher as rt_publisher
+
+    monkeypatch.setattr(rt_publisher, "get_recent_ticks", lambda sid, count: [])
+
+    dummy_ticks = [{"timestamp": "2026-07-07T00:01:00Z"}]
+    monkeypatch.setattr(cr_mod, "_fetch_seed_ticks", lambda sid: dummy_ticks)
+    monkeypatch.setattr("backend.core.realtime.poller.poller.ensure_polling", lambda sid: None)
+
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/realtime-seed",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["ticks"]) == 1
+    assert data["ticks"][0]["timestamp"] == "2026-07-07T00:01:00Z"
+
+
+def test_correlate_success(admin_client, monkeypatch):
+    """Verify correlate returns correct dimension stats with mocked DuckDB connection."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    mock_source = {"name": "svc"}
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: mock_source)
+
+    mock_con = MagicMock()
+    mock_con.execute().fetchall.return_value = [("200", 100)]
+    mock_con.execute().fetchone.return_value = (datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC),)
+    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda source, read_only: mock_con)
+
+    resp = admin_client.post(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"dimension": "status", "window_minutes": 10, "limit": 5},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dimension"] == "status"
+    assert data["top"] == [{"value": "200", "count": 100}]
+    assert "freshness" in data
+
+
+def test_correlate_unknown_service_source_404(admin_client, monkeypatch):
+    """If service source doesn't exist, return 404."""
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+
+    resp = admin_client.post(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"dimension": "status"},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["error"] == "no_data_source"
+
+
+def test_wizard_state_and_step_flow(admin_client):
+    """Verify completion of wizard steps and state query from audit logs."""
+    # 1. Check initial empty state
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/wizard/state",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["completed_steps"] == []
+    assert resp.json()["is_complete"] is False
+
+    # 2. Complete a step
+    resp = admin_client.post(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/wizard/step",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"step": "domain", "details": {"custom": True}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["recorded"] is True
+    assert resp.json()["step"] == "domain"
+
+    # 3. Complete wizard
+    resp = admin_client.post(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/wizard/step",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"step": "complete", "details": {}},
+    )
+    assert resp.status_code == 200
+
+    # 4. Check updated state
+    resp = admin_client.get(
+        f"/api/services/{MOCK_SERVICE_ID}/control-room/wizard/state",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert resp.status_code == 200
+    completed = resp.json()["completed_steps"]
+    assert "domain" in completed
+    assert "complete" in completed

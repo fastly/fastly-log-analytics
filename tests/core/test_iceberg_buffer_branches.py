@@ -339,3 +339,85 @@ def test_quarantine_buffer_file_returns_none_on_failure(tmp_path, caplog):
 
     assert out is None
     assert any("Failed to quarantine" in r.message for r in caplog.records)
+
+
+# ── Recursive / Non-recursive Globbing Scopes ───────────────────────────
+
+
+def test_buffer_files_respects_table_name_for_recursive_glob(tmp_path):
+    """If table_name == 'logs', globbing should be non-recursive (single level).
+    If table_name != 'logs' (e.g., 'client_errors'), globbing should be recursive."""
+    src = {"_cache_dir_override": str(tmp_path), "name": "svc"}
+    buf = tmp_path / "buffer"
+    buf.mkdir()
+
+    # Files directly in buffer/ (level 1)
+    p_lvl1 = buf / "batch_1.parquet"
+    p_lvl1.write_bytes(b"x")
+
+    # Files in subdirectories (level 2)
+    subdir = buf / "client_errors"
+    subdir.mkdir()
+    p_lvl2 = subdir / "batch_2.parquet"
+    p_lvl2.write_bytes(b"y")
+
+    # 1. table_name == 'logs' (non-recursive)
+    with patch("backend.core.iceberg._core._buffer_dir", return_value=str(buf)):
+        out_logs = buffer_files(src, table_name="logs")
+    assert str(p_lvl1) in out_logs
+    assert str(p_lvl2) not in out_logs
+
+    # 2. table_name == 'client_errors' (recursive)
+    with patch("backend.core.iceberg._core._buffer_dir", return_value=str(buf)):
+        out_rum = buffer_files(src, table_name="client_errors")
+    assert str(p_lvl1) in out_rum
+    assert str(p_lvl2) in out_rum
+
+
+def test_sweep_respects_table_name_for_recursive_glob(tmp_path):
+    """If table_name == 'logs', tombstone sweeping is non-recursive.
+    If table_name != 'logs', tombstone sweeping is recursive."""
+    src = {"_cache_dir_override": str(tmp_path), "name": "svc"}
+    buf = tmp_path / "buffer"
+    buf.mkdir()
+
+    # Level 1 tombstone
+    p1 = buf / "batch_1.parquet"
+    p1.write_bytes(b"x")
+    old_ts = 1700000000
+    m1 = buf / f"batch_1.parquet.consumed-{old_ts}"
+    m1.write_bytes(b"")
+
+    # Level 2 tombstone
+    subdir = buf / "client_errors"
+    subdir.mkdir()
+    p2 = subdir / "batch_2.parquet"
+    p2.write_bytes(b"y")
+    m2 = subdir / f"batch_2.parquet.consumed-{old_ts}"
+    m2.write_bytes(b"")
+
+    now = old_ts + 9999
+
+    # Sweep with table_name="logs" (non-recursive) -> should only delete level 1
+    with (
+        patch("backend.core.iceberg._core._buffer_dir", return_value=str(buf)),
+        patch("backend.core.iceberg.buffer._meta_mod.purge_committed_buffer_rows") as mock_purge,
+    ):
+        swept = sweep_tombstoned_buffer_files(src, table_name="logs", grace_seconds=60, now=now)
+
+    assert swept == 1
+    assert not p1.exists()
+    assert not m1.exists()
+    assert p2.exists()
+    assert m2.exists()
+
+    # Now sweep with table_name="client_errors" (recursive) -> should delete level 2
+    with (
+        patch("backend.core.iceberg._core._buffer_dir", return_value=str(buf)),
+        patch("backend.core.iceberg.buffer._meta_mod.purge_committed_buffer_rows") as mock_purge,
+    ):
+        swept = sweep_tombstoned_buffer_files(src, table_name="client_errors", grace_seconds=60, now=now)
+
+    assert swept == 1
+    assert not p2.exists()
+    assert not m2.exists()

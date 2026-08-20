@@ -169,10 +169,10 @@ describe('buildValidateOnSuccess', () => {
     expect(deps.setStep).toHaveBeenCalledWith('join')
   })
 
-  it('advances to "storage" step for the default create mode', () => {
+  it('advances to "features" step for the default create mode', () => {
     const deps = makeDeps('create')
     buildValidateOnSuccess(deps)({})
-    expect(deps.setStep).toHaveBeenCalledWith('storage')
+    expect(deps.setStep).toHaveBeenCalledWith('features')
   })
 
   it('skips setTokenInfo and setConfig when neither key is present', () => {

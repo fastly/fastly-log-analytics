@@ -7,7 +7,10 @@ import dynamic from 'next/dynamic'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/BackToAdminLink'
+import { DeployRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/DeployRemoteFrontendDialog'
+import { TeardownRemoteFrontendDialog } from '@/components/DeployRemoteFrontendDialog/TeardownRemoteFrontendDialog'
 import { PageHeader } from '@/components/ui/page-header'
+import { useSearchParams } from 'next/navigation'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { SharingControlPanel } from '@/components/share-dashboard/SharingControlPanel'
@@ -45,6 +48,9 @@ type ShareLiveFields = Partial<Pick<
 
 export default function ShareDashboardPage() {
   const queryClient = useQueryClient()
+  const searchParams = useSearchParams()
+  const activeServiceId = searchParams?.get('service')
+
   const [actionError, setActionError] = React.useState('')
   const [activeTab, setActiveTab] = React.useState('invites')
   const [auditEmailFilter, setAuditEmailFilter] = React.useState('')
@@ -55,7 +61,8 @@ export default function ShareDashboardPage() {
   const { data: status, error: statusError, refetch } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET('/api/admin/share/status' as any, { signal, })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data, response } = await client.GET('/api/admin/share/status' as any, { signal })
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data as ShareStatus
     },
@@ -73,6 +80,7 @@ export default function ShareDashboardPage() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data, response } = await client.GET('/api/admin/share/live' as any, { signal })
       if (!response.ok) throw new Error(`live ${response.status}`)
       return data as ShareLiveFields
@@ -94,7 +102,7 @@ export default function ShareDashboardPage() {
     queryClient.invalidateQueries({ queryKey: SHARE_LIVE_QUERY_KEY })
   }, [refetch, queryClient])
   const statusErrorMsg = statusError
-    ? extractApiError(statusError as any) || (statusError as Error).message || 'unable to load status'
+    ? extractApiError(statusError) || (statusError as Error).message || 'unable to load status'
     : ''
   // Merge /live fields into /status so SharingControlPanel (which reads
   // active_session_count + rate_limits + telemetry) sees fresh data on
@@ -103,6 +111,8 @@ export default function ShareDashboardPage() {
     ? { ...status, ...(live ?? {}) }
     : null
 
+  const activeService = status?.services?.find((s) => s.service_id === activeServiceId)
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -110,6 +120,15 @@ export default function ShareDashboardPage() {
         description="Start the share tunnel, manage analyst invitations, monitor live sessions, and review the audit trail."
         icon={ShieldAlert}
       >
+        {activeService && activeService.remote_frontend_deployed ? (
+          <TeardownRemoteFrontendDialog
+            serviceId={activeService.service_id}
+            domainName={activeService.sharing_domain || ''}
+            onSuccess={refresh}
+          />
+        ) : (
+          <DeployRemoteFrontendDialog />
+        )}
         <BackToAdminLink />
       </PageHeader>
 

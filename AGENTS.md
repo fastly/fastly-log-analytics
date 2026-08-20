@@ -674,6 +674,63 @@ if live_fields:
 ### 26. Tombstoned buffer parquets must be excluded from DIRECT buffer reads
 Post-commit, buffer parquets are not unlinked — `tombstone_buffer_files` ([backend/core/iceberg/buffer.py](backend/core/iceberg/buffer.py)) writes a `.parquet.consumed-<ts>` sidecar and the file lingers for a grace window so views bound BEFORE the commit stay readable. Its rows are ALREADY in the hourly partitions, so any code reading the buffer dir directly (not via `buffer_files()`, which filters) must skip `_tombstoned_parquet_paths(buffer_dir)` or it double-counts — the dashboard's direct active-hour read (`_create_active_hour_temp_direct` in [_base.py](backend/repositories/_base.py), the ~6 ms replacement for the ~700 ms view path on the live slice) double-counted up to ~10 min of the freshest rows before the fix (prod 2026-07-07: 40 of 55 buffer files were tombstoned). New consumers of the live slice should reuse the per-request shared temp via `begin_shared_active_hour_temps()` / `end_shared_active_hour_temps()` rather than rolling their own read.
 
+### 27. System-managed custom fields must be re-asserted on every `log_fields` write
+Session scoring and CMCD each inject a canonical set of `log_fields.custom_fields` generated from code. `_is_system_field` ([backend/core/field_registry.py](backend/core/field_registry.py)) hides them from the user-editable list, so **every writer that persists `log_fields` from a list it did not author omits them** — the log-fields UI round-trip, a `state_sync` pull of a remote `admin_state.json`, and a provisioning reconcile whose `log_fields` was built from groups alone.
+
+The omission is not cosmetic: `reconcile_vcl_state` regenerates the Fastly log format from the persisted config, so a dropped field leaves its extraction VCL installed and running while nothing writes its output to the log line. The column then ingests **empty string, not NULL** (the field is absent from the format, so ingest fills the schema default), the feature's `available` probe still passes because the DuckDB column exists, and the page renders all zeros with no error to explain why.
+
+Two incidents, same root cause:
+- **2026-06-02** — `state_sync` overwrote scoring's 8 fields on every ~30 s metadata_sync tick.
+- **2026-08-12** — the SE-demo service lost all 14 `cmcd_*` fields. CMCD had been enabled since 2026-07-13 and never collected a single value; the cache-key probe (`?CMCD=` vs a control param) proved the snippet was still stripping CMCD from `req.url` the whole time. The trigger was `update_logging_endpoint` assigning `cfg["log_fields"]` **wholesale** with no merge guard, unlike its `cli.py` / `api_service_log_fields_set` siblings.
+
+Route every such write through `reconcile_system_custom_fields` / `reconcile_cfg_system_custom_fields` in [backend/provision/system_fields.py](backend/provision/system_fields.py), and key it on the **current** feature state, never on a state transition — a reconcile that says nothing about the feature must still re-assert its fields, and a disable must strip them. The transition-only guard in `update_service_config` is exactly what let the SE-demo config stay broken across a month of reconciles. **If you add a third system-managed feature, add its flag to `system_feature_flags` — do not add a fourth re-injection block.**
+
+### 28. Never resolve the Iceberg metadata pointer from an unpaginated listing
+`list_objects_v2` caps a single response at **1000 keys**, and pyiceberg names metadata files `<zero-padded-version>-<uuid>.metadata.json`. So the lexicographically-first page holds the **oldest** versions — and `sorted(metadata_files)[-1]` over that page resolves an ancient snapshot while presenting as "latest".
+
+**2026-08 SE-demo incident.** The service's `metadata/` held 9,314 metadata.json objects. The truncated first page ended at `00952-…`; current was `08999-…`. `_read_metadata_pointer`'s discovery fallback resolved **v952**, the table committed forward from that stale base (reaching v1247), and every data file referenced only by v953…v8999 became unreachable — **41 days, 2026-07-01 → 2026-08-10, ~1.05 GB of July parquet alone**. Ingest kept reporting success the whole time because the buffer→commit path was healthy; only the *base* was wrong. The parquet was never deleted, just dereferenced, so it stayed fully recoverable.
+
+The trigger was cheap: both pointer-key candidates in `_read_metadata_pointer` are wrapped in `except Exception: continue`, so **one transient CDN 5xx or timeout** on `metadata_location.txt` is enough to drop into discovery. Note the pointer is CDN-fronted with a 10 s TTL + `stale_while_revalidate` (see the iceberg-metadata snippet), so transient misses are normal operation, not an exotic failure.
+
+Three independent defenses now exist in [backend/core/iceberg/_core.py](backend/core/iceberg/_core.py) — keep all three:
+1. **Paginate** — `_list_metadata_json_keys` uses a paginator. Never call `list_objects_v2` directly for metadata discovery.
+2. **Order by parsed version** — `_newest_metadata_key` / `metadata_version`, not a raw string sort (which is only accidentally correct while digit widths match).
+3. **Refuse to regress** — both `_read_metadata_pointer` and `_refresh_local_catalog_metadata` reject a resolution older than the known-good location and log at ERROR. This one alone would have prevented the incident; it is the backstop, not the fix.
+
+Recovery for an already-rolled-back table is [scripts/recover_orphaned_iceberg_metadata.py](scripts/recover_orphaned_iceberg_metadata.py) (dry-run by default). It reattaches the abandoned branch by moving the pointer to the newest version, and reports any data on the *current* branch that the recovered branch lacks — reattaching without handling that list trades one gap for another. **If you add another metadata-resolution path, paginate it and guard it, or this recurs silently.**
+
+### 29. Feature extraction VCL must be emitted BEFORE field capture
+Generated `vcl_recv` puts two related blocks in one snippet: **extraction** parses a source into `req.http.x-<feature>:*`, and **capture** promotes it into `req.http.x-fos-edge-data:<field>` — and only the promoted header is what the log format reads. Emit capture first and it copies empty strings; the extraction then runs too late to matter.
+
+**2026-08 CMCD outage.** `generate_capture_vcl` appended the `cmcd_enabled` block *after* the `get_capture_vcl_statements` loop (the deployed snippet had capture at lines 186-199 and extraction at 209-225). Every `cmcd_*` column logged empty. It hid for a month because the failure is completely silent in all three places you'd look:
+
+- Nothing errors — the VCL is valid and Fastly's `validate` passes.
+- The DuckDB columns exist, so the feature's `available` probe returns true and /streaming renders zeros rather than "not enabled".
+- **The extraction genuinely works.** It still runs `querystring.filter(req.url, "CMCD")`, so an edge-side cache-key probe (`?CMCD=A` vs `?CMCD=B` vs a control param) proves CMCD is being handled — and that proof is real but says nothing about whether the value reached the log line.
+
+The invariant is pinned by [tests/utils/test_cmcd_capture_ordering.py](tests/utils/test_cmcd_capture_ordering.py) for all 14 fields, in BOTH generators (`fastly_api.generate_capture_vcl` and `declarative/generators.generate_consolidated_snippet`). **When you add a feature that extracts into a `req.http.x-*` header for logging, order it before capture and add it to that test.** To verify a capture-stage field end-to-end, don't infer from edge behaviour — send a uniquely-tagged request and query for the tag.
+
+### 30. The log-line budget silently truncates late custom fields
+`generate_log_format` tracks an aggregate `budget` (`FASTLY_LOG_LINE_DELIVER_MAX`) and clamps each variable-length field to what's left: `cf_limit = max(0, min(cf_limit, budget))`, allocated greedily in `custom_fields` list order. Once the budget runs dry, later fields get `substr(x, 0, 0)` and **log null forever** with no warning.
+
+On the SE-demo service (groups A–M + 23 custom fields) this squeezed `cmcd_sid` to `substr(..., 0, 26)` — truncating 36-char UUID session ids to 26 chars and breaking session-level joins. Values logged before the squeeze are full length, so the same column holds both 26- and 40-char ids, which reads like a client quirk rather than a config effect.
+
+**Do not "fix" this by adding `byte_limit` to individual fields without measuring.** `byte_limit` only ever *lowers* a cap — it cannot create budget — and shifting the allocation moved other fields to zero when tried. Check the real generated format first:
+```python
+generate_log_format(cfg)  # then grep for substr(..., 0, 0) and per-field caps
+```
+The genuine levers are reducing enabled groups/custom fields or raising the line budget, both of which trade against Fastly silently dropping over-long log lines.
+
+### 31. Teardown: dereference before delete, and ENUMERATE what you remove
+Teardown touches a service the customer still serves traffic from, so ordering is a correctness property, not a preference. **Every step that strips VCL from the customer's service must complete before any step that deletes a service that VCL points at.** Otherwise their active version routes to a deleted host and their site breaks — caused by our teardown. Order in `perform_teardown`: scoring VCL strip + Compute delete → logging endpoint + all owned VCL off the customer service → FOS keys → FOS bucket → analytics-owned CDN service last (the logging endpoint is what referenced it).
+
+Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/test_teardown_dereference_order.py](tests/utils/test_teardown_dereference_order.py):
+
+- **Blind DELETE by hardcoded name = silent no-op.** `remove_logging_endpoint` DELETEd a hardcoded list of snippet names and swallowed every 404. The names on the service didn't match, so it logged *"removed 0 active snippets"* and reported success, leaving the entire capture VCL live on a "torn down" service. Endpoints, conditions and dictionaries were removed correctly because those three already enumerated-then-matched. The list was also missing `- vcl_pass`. **Always GET the list and delete what you can attribute; never guess names.** Attribution must be narrow: the `Fastly Log Analytics` prefix plus the canonical `scoring_snippet_names()` / `cmcd_snippet_names()` / RUM sets. Do NOT prefix-match `Session ` — a customer's own `Session Tracking - *` snippets sit beside our `Session Scoring - *` ones.
+- **Best-effort dereference + unconditional delete.** `teardown_scoring_resources` treated the VCL strip as best-effort ("the operator cares most about not paying for an orphaned Compute service") and deleted the Compute service anyway. That trade is backwards: an orphaned Compute service is pennies and re-deletable, a dangling backend on live traffic is an incident — and Fastly 500s on these calls are real. It now aborts and leaves the Compute service in place.
+
+Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read ``Deleting CDN service '<customer-domain>'`` while actually deleting a different service id entirely — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
@@ -687,6 +744,7 @@ These apply to every change, regardless of scope.
 5. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
 6. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
 7. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
+8. **NEVER claim any fix, optimization, or feature is verified until the code has been committed, pushed to origin, successfully deployed to the GCE production machine, and verified to have resolved the issue with actual tests and real queries on the live production service.** Never rely on local-dev verification or green unit tests to declare victory. Always chain the git push, local tests, and GCE VM deployment/validation commands into a single contiguous block of tool execution instead of pausing mid-stream.
 
 ### Code Changes
 

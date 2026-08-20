@@ -171,7 +171,28 @@ def test_rollup_compact_skips_when_start_cron_run_raises(monkeypatch, stub_sourc
     compact_mock.assert_not_called()
 
 
+def _mock_rollups(monkeypatch):
+    monkeypatch.setattr("backend.core.rollups.backfill_day_bundles", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles", lambda *a, **kw: {"missing": 0, "bundled": 0}
+    )
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_ip_spread", lambda *a, **kw: {"missing": 0, "rebuilt": 0}
+    )
+    monkeypatch.setattr("backend.core.rollups.compact_network_rtt_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_network_speed_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_ngwaf_bots_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_dims_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_latency_ts_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_summary_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_overview_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_perf_latency_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_security_dims_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_verified_bots_ts_closed_days_to_daily", lambda *a, **kw: 0)
+
+
 def test_rollup_compact_success_records_rebuilt_and_bundled(monkeypatch, stub_source, stub_progress):
+    _mock_rollups(monkeypatch)
     monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", MagicMock(return_value=14))
     monkeypatch.setattr("backend.core.rollups.backfill_day_bundles", MagicMock(return_value=7))
 
@@ -186,6 +207,7 @@ def test_rollup_compact_success_records_rebuilt_and_bundled(monkeypatch, stub_so
 
 
 def test_rollup_compact_logs_warning_when_bundle_step_fails(monkeypatch, stub_source, stub_progress, caplog):
+    _mock_rollups(monkeypatch)
     monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", MagicMock(return_value=5))
     monkeypatch.setattr(
         "backend.core.rollups.backfill_day_bundles",
@@ -207,6 +229,7 @@ def test_rollup_compact_logs_warning_when_bundle_step_fails(monkeypatch, stub_so
 
 
 def test_rollup_compact_records_error_on_exception(monkeypatch, stub_source, stub_progress):
+    _mock_rollups(monkeypatch)
     monkeypatch.setattr(
         "backend.core.rollups.compact_closed_days_to_daily",
         MagicMock(side_effect=RuntimeError("manifest read failed")),

@@ -245,12 +245,12 @@ def test_deep_health_widens_staleness_for_historically_quiet_service():
 def test_deep_health_still_degrades_on_a_real_outage():
     # Same historical cadence as above, but now it's been quiet for 200
     # minutes — well past even the widened (80min) threshold. Must still
-    # degrade; adaptive widening isn't a way to silence a genuine outage.
+    # flag stale (HTTP 200, 'stale'); adaptive widening isn't a way to silence a genuine outage.
     history = _steady_cadence_rows(12, gap_minutes=40, start_after_minutes=200)
     code, body = _deep_health(history, ingest_minutes_ago=200)
-    assert code == 503
+    assert code == 200
     svc = body["services"][0]
-    assert svc["status"] == "degraded"
+    assert svc["status"] == "stale"
     assert svc["stale_minutes_used"] == 80
     assert "no ingest since" in svc["reason"]
 

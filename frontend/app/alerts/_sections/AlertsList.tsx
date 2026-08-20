@@ -149,6 +149,15 @@ export function AlertsList({
               {a.operator} {a.threshold} (last {windowStr})
             </span>
           )
+        } else if (evalType === 'anomaly_zscore') {
+          const zThresh = a.zscore_threshold !== undefined ? a.zscore_threshold : (a.threshold || 3.0)
+          const baseDays = a.baseline_period_days || 7
+          return (
+            <span className="text-sm font-mono flex items-center gap-1" title={`Z-Score > ${zThresh} vs rolling baseline over last ${baseDays} days`}>
+              <span className="text-purple-600 dark:text-purple-400 font-bold">Z-Score</span> &gt; {zThresh}
+              <span className="text-muted-foreground text-[10px]">({baseDays}d baseline)</span>
+            </span>
+          )
         } else {
           const isIncrease = evalType === 'relative_increase'
           const compStr = a.comparison_period_min ? (a.comparison_period_min >= 1440 ? `${a.comparison_period_min/1440}d` : `${a.comparison_period_min >= 60 ? a.comparison_period_min/60 + 'h' : a.comparison_period_min + 'm'}`) : '?'

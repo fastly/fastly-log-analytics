@@ -92,6 +92,8 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - E2e: Playwright with axe a11y + keyboard nav gates
 - Derive test fixture keys from the PRODUCER (the code that writes), not the consumer
 - `gc_collect_iterations=0` in conftest to suppress pytest9 "unclosed database" spam
+- **NEVER** claim a fix/feature is verified until committed, pushed, deployed to production GCE VM, and validated with actual queries on the live service. Always chain the git push, local tests, and GCE VM deployment/validation commands into a single contiguous block of tool execution instead of pausing mid-stream.
+
 
 ### Deployment
 - Single GCE VM: Docker Compose + Caddy reverse proxy
@@ -99,8 +101,21 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Admin access via SSH tunnel to :3001; analyst access via `/share-login`
 - Deploy: `gcloud compute ssh <INSTANCE> --zone=<ZONE> --command="~/restart.sh"`
 - Verify on dev (ports 13002/18002) before GCE deploy
-- `local-docs/` and `pending-docs/` are local-only; `docs/` is PUBLIC
+- `local-docs/` and `pending-docs/` never reach `main`; `docs/` is PUBLIC
 - Repo is PUBLIC — never commit GCE/bucket/service-ID strings; use `infra-leak-sweep` skill
+
+### Pre-merge / PR readiness
+- **`local-docs/` and `pending-docs/` must be deleted before squash-merging.** They are working notes,
+  committed on a feature branch on purpose so parallel sessions can read them, then removed in the
+  re-squash so they never land on `main`. They ARE tracked while the branch lives — so treat them as
+  public (no GCE/bucket/service-ID strings) and verify they're gone before the merge.
+  Check with `git ls-files local-docs pending-docs` — a non-empty result blocks the merge.
+- Run the full gate (`make ci`) and confirm every ratchet: coverage floor, ESLint ceiling (drive DOWN,
+  never raise — ratchet it down when the count lands under it), security-regression floor,
+  import-contracts, openapi-drift.
+- **Measure any gate regression against the merge-base, not against an earlier commit on the same
+  branch** — an earlier branch commit may already carry the regression, which reads as "pre-existing"
+  when it isn't. Use an isolated `git worktree` at the merge-base.
 
 ### OpenAPI contract
 - After editing backend routes or models: run `make gen-types` to regenerate `frontend/openapi.json` + `frontend/types/api.generated.ts`

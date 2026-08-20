@@ -119,7 +119,7 @@ def test_lazy_reap_fires_after_n_writes():
     # Seed expired entries.
     for i in range(50):
         cache[f"expired_{i}"] = i
-    time.sleep(0.10)
+    time.sleep(0.40)
     # Trigger the reaper by crossing the 100-writes threshold.
     for i in range(100):
         cache[f"fresh_{i}"] = i

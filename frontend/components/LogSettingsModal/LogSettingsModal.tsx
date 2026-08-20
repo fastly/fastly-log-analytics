@@ -115,9 +115,9 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setSampleRate(loggingSettings.sample_rate ?? 100)
         setEdgeOnly(loggingSettings.edge_only ?? true)
         setCustomCondition(loggingSettings.custom_condition || '')
-        setCmcdEnabled(loggingSettings.cmcd_enabled ?? false)
-        setCmcdMode(loggingSettings.cmcd_mode ?? 'query_string')
-        setCmcdVersion(loggingSettings.cmcd_version ?? 1)
+        setCmcdEnabled(loggingSettings.cmcd?.enabled ?? false)
+        setCmcdMode(loggingSettings.cmcd?.mode ?? 'query_string')
+        setCmcdVersion(loggingSettings.cmcd?.version ?? 1)
       }
     }
   }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.

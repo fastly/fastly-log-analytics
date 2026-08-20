@@ -12,6 +12,7 @@ export type Step =
   | "mode"
   | "token"
   | "service"
+  | "features"
   | "storage"
   | "ngwaf"
   | "fields"
@@ -62,6 +63,15 @@ export interface ProvisionConfig {
   cmcd_enabled: boolean;
   cmcd_mode: string;
   cmcd_version: number;
+  logging_enabled: boolean;
+  rum_enabled: boolean;
+  log_retention_days: number;
+  rum_retention_days: number;
+  rum_custom_condition: string;
+  // Pinned Faro Web SDK version chosen in the RUM version picker
+  // (StorageStep). null = unpinned — the backend serves whatever is
+  // currently pinned on the service, or nothing if RUM was never enabled.
+  faro_version: string | null;
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
@@ -90,6 +100,12 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cmcd_enabled: false,
   cmcd_mode: "query_string",
   cmcd_version: 1,
+  logging_enabled: true,
+  rum_enabled: false,
+  log_retention_days: 30,
+  rum_retention_days: 30,
+  rum_custom_condition: "",
+  faro_version: null,
 };
 
 export type PersistedConfig = Omit<
@@ -121,13 +137,13 @@ export interface WizardDraft {
 // Mapping from Fastly Object Storage region to Fastly Shield POP
 export const SHIELD_MAP: Record<string, string> = {
   "us-east-1": "iad-va-us", // Ashburn, VA
-  "us-west": "sea-wa-us", // Seattle, WA
-  "us-central-1": "mdw-il-us", // Chicago, IL
-  "eu-central": "fra-de-eu", // Frankfurt, Germany
-  "eu-south-1": "mxp-it-eu", // Milan, Italy
-  "uk-east-1": "lcy-gb-eu", // London, UK
-  "jp-central-1": "tyo-jp-asia", // Tokyo, Japan
-  "au-east-1": "syd-au-aus", // Sydney, Australia
+  "us-west": "bfi-wa-us", // Seattle, WA (BFI)
+  "us-central-1": "chi-il-us", // Chicago, IL (CHI)
+  "eu-central": "frankfurt-de", // Frankfurt, Germany
+  "eu-south-1": "mxp-milan-it", // Milan, Italy
+  "uk-east-1": "london-uk", // London, UK
+  "jp-central-1": "nrt-tokyo-jp", // Tokyo, Japan (NRT)
+  "au-east-1": "sydney-au", // Sydney, Australia
 };
 
 export const REGION_LABELS: Record<string, string> = {
@@ -144,35 +160,46 @@ export const REGION_LABELS: Record<string, string> = {
 export const SHIELD_LABELS: Record<string, string> = {
   none: "None",
   "iad-va-us": "IAD (Ashburn)",
-  "sea-wa-us": "SEA (Seattle)",
-  "mdw-il-us": "MDW (Chicago)",
-  "fra-de-eu": "FRA (Frankfurt)",
-  "mxp-it-eu": "MXP (Milan)",
-  "lcy-gb-eu": "LCY (London)",
-  "tyo-jp-asia": "TYO (Tokyo)",
-  "syd-au-aus": "SYD (Sydney)",
+  "bfi-wa-us": "BFI (Seattle)",
+  "chi-il-us": "CHI (Chicago)",
+  "frankfurt-de": "FRA (Frankfurt)",
+  "mxp-milan-it": "MXP (Milan)",
+  "london-uk": "LHR (London)",
+  "nrt-tokyo-jp": "NRT (Tokyo)",
+  "sydney-au": "SYD (Sydney)",
 };
 
 export function getStepsForMode(
   mode: WizardMode,
+  config?: { logging_enabled?: boolean }
 ): { id: Step; label: string }[] {
-  return mode === "join"
-    ? [
-        { id: "mode", label: "Role" },
-        { id: "join", label: "Connect" },
-        { id: "analyze", label: "Analyze" },
-        { id: "settings", label: "Settings" },
-        { id: "confirm", label: "Confirm" },
-      ]
-    : [
-        { id: "mode", label: "Role" },
-        { id: "token", label: "Auth" },
-        { id: "service", label: "Service" },
-        { id: "storage", label: "Storage" },
-        { id: "ngwaf", label: "NGWAF" },
-        { id: "fields", label: "Log Fields" },
-        { id: "execute", label: "Review" },
-      ];
+  if (mode === "join") {
+    return [
+      { id: "mode", label: "Role" },
+      { id: "join", label: "Connect" },
+      { id: "analyze", label: "Analyze" },
+      { id: "settings", label: "Settings" },
+      { id: "confirm", label: "Confirm" },
+    ];
+  }
+
+  const steps = [
+    { id: "mode" as Step, label: "Role" },
+    { id: "token" as Step, label: "Auth" },
+    { id: "service" as Step, label: "Service" },
+    { id: "features" as Step, label: "Features" },
+    { id: "storage" as Step, label: "Storage" },
+  ];
+
+  if (!config || config.logging_enabled !== false) {
+    steps.push(
+      { id: "ngwaf" as Step, label: "NGWAF" },
+      { id: "fields" as Step, label: "Log Fields" }
+    );
+  }
+
+  steps.push({ id: "execute" as Step, label: "Review" });
+  return steps;
 }
 
 export const PERIOD_LABELS: Record<string, string> = {

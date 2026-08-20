@@ -47,7 +47,6 @@ const ROUTES = [
   '/alerts',
   '/logs',
   '/query',
-  '/charts',
   '/insights',
   '/control-room',
 ]

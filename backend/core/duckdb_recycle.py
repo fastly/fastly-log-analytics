@@ -103,6 +103,17 @@ def _sources_by_db_path() -> dict[str, list[dict]]:
         except Exception:
             continue
         groups.setdefault(_db.db_path_for_source(src), []).append(src)
+
+        # If RUM is enabled for the service, register the isolated RUM source for recycling too
+        rum_cfg = cfg.get("rum") or {}
+        if rum_cfg.get("enabled") or cfg.get("rum_enabled"):
+            try:
+                from backend.core.duckdb import rum_source_for
+
+                rum_src = rum_source_for(src)
+                groups.setdefault(_db.db_path_for_source(rum_src), []).append(rum_src)
+            except Exception:
+                pass
     return groups
 
 

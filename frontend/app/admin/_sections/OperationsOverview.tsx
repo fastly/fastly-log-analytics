@@ -83,6 +83,7 @@ function LiveQueriesCard() {
       return r.json()
     },
     initialData: seed,
+    retry: false,
     staleTime: POLL_MS,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
@@ -131,6 +132,7 @@ function IngestHealthCard() {
     },
     initialData: seed,
     enabled: !!activeServiceId,
+    retry: false,
     // Freshness via useAdminEventStream. 5-min poll is the safety
     // net; the DuckDB COUNT(*) only runs on the safety tick now.
     staleTime: 30_000,
@@ -156,21 +158,25 @@ function IngestHealthCard() {
   // caveat). gap_pct can be negative (we have more rows than Fastly — usually
   // in-flight bucket noise); only POSITIVE gaps mean real loss, which is what
   // the tone reflects.
-  const tone: CardTone = sustained
-    ? 'critical'
-    : gapPct >= 0.1
-      ? 'warning'
-      : gapPct >= 0.02
-        ? 'attention'
-        : 'default'
+  const tone: CardTone = isError
+    ? 'muted'
+    : sustained
+      ? 'critical'
+      : gapPct >= 0.1
+        ? 'warning'
+        : gapPct >= 0.02
+          ? 'attention'
+          : 'default'
   const primary = data?.totals
     ? `${(gapPct * 100).toFixed(gapPct === 0 ? 0 : 1)}%`
     : '—'
-  const secondary = sustained
-    ? `sustained: ${sustained.n_buckets} bucket(s), ${sustained.total_lost_lines.toLocaleString()} lost`
-    : gapPct >= 0.02
-      ? 'recent loss — check ingest accounting'
-      : 'healthy · 24h'
+  const secondary = isError
+    ? 'unconfigured or credentials missing'
+    : sustained
+      ? `sustained: ${sustained.n_buckets} bucket(s), ${sustained.total_lost_lines.toLocaleString()} lost`
+      : gapPct >= 0.02
+        ? 'recent loss — check ingest accounting'
+        : 'healthy · 24h'
   return (
     <OverviewCard
       href="/admin/usage-log"
@@ -220,6 +226,7 @@ function SlowQueriesTeaser() {
     },
     initialData: seed,
     enabled: !!activeServiceId,
+    retry: false,
     // Freshness via useAdminEventStream. Safety-net poll only.
     staleTime: POLL_MS,
     refetchInterval: 5 * 60_000,

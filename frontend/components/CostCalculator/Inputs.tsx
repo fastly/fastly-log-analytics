@@ -26,6 +26,9 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log sample rate (%)' tooltip="Percentage of requests logged. 100 = all requests, 1 = 1% of requests.">
           <NumInput value={s.sampleRate} onChange={set('sampleRate')} min={1} max={100} />
         </Row>
+        <Row label='Estimated RUM Beacons / day' tooltip="Estimated beacons collected by Real User Monitoring (RUM) scripts on client browsers. Each beacon generates 1 Class A FOS write.">
+          <NumInput value={s.rumBeaconsDay} onChange={set('rumBeaconsDay')} wide />
+        </Row>
         <Row label='Edge-only logging' tooltip="Only log requests handled by the Edge, omitting Shield requests. This uses the 'Edge requests per day' volume for calculation.">
           <Switch checked={s.edgeOnly} onCheckedChange={set('edgeOnly')} />
         </Row>

@@ -11,13 +11,13 @@ FASTLY_LOG_FIELDS = ("log", "log_records", "log_entries", "logging_requests")
 # Source: https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#managing-object-storage-buckets-and-objects
 SHIELD_MAP = {
     "us-east-1": "iad-va-us",  # Ashburn, VA
-    "us-west": "sea-wa-us",  # Seattle, WA
-    "us-central-1": "mdw-il-us",  # Chicago, IL
-    "eu-central": "fra-de-eu",  # Frankfurt, Germany
-    "eu-south-1": "mxp-it-eu",  # Milan, Italy
-    "uk-east-1": "lcy-gb-eu",  # London, UK
-    "jp-central-1": "tyo-jp-asia",  # Tokyo, Japan
-    "au-east-1": "syd-au-aus",  # Sydney, Australia
+    "us-west": "bfi-wa-us",  # Seattle, WA (BFI)
+    "us-central-1": "chi-il-us",  # Chicago, IL (CHI)
+    "eu-central": "frankfurt-de",  # Frankfurt, Germany
+    "eu-south-1": "mxp-milan-it",  # Milan, Italy
+    "uk-east-1": "london-uk",  # London, UK
+    "jp-central-1": "nrt-tokyo-jp",  # Tokyo, Japan (NRT)
+    "au-east-1": "sydney-au",  # Sydney, Australia
 }
 
 

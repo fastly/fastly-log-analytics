@@ -21,7 +21,6 @@ beforeEach(() => {
       startTime: '',
       endTime: '',
       isAutoRange: true,
-      hasSyncedExtents: false,
       compareMode: false,
       compareStartTime: null,
       compareEndTime: null,

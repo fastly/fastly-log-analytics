@@ -135,7 +135,7 @@ def get_sync_status(
         if skip_fos:
             # Re-inject current runtime fields that might have changed
             cached_status["access_level"] = src.get("access_level", "read_write")
-            cached_status["storage_mode"] = STORAGE_MODE
+            cached_status["storage_mode"] = src.get("storage_mode", "cloud")
             cached_status["configured"] = True
             return cached_status
     table_name = _safe_table_name(src["name"])
@@ -411,7 +411,7 @@ def get_sync_status(
         "latest_available_file_at": latest_available_file_at,
         "access_level": src.get("access_level", "read_write"),
         "configured": is_configured(src),
-        "storage_mode": STORAGE_MODE,
+        "storage_mode": src.get("storage_mode", "cloud"),
         "logging_service_id": src.get("logging_service_id", ""),
         "cdn_service_id": src.get("cdn_service_id", ""),
         "cron_stats": cron_stats,
@@ -507,6 +507,75 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         # remains bounded by the 60 s heavy cadence either way.
         if include_top_values:
             status["schema"] = get_schema(con, source)
+
+        # Separate RUM and REQUEST metrics computed in the background
+        rum_latest = None
+        rum_total = 0
+        rum_last_sync = None
+        request_total = status.get("local_rows", 0)
+        request_latest = status.get("latest_log_at")
+        request_last_sync = None
+
+        try:
+            from backend.core.metadata.cron_log import latest_cron_per_task
+
+            cron_data = latest_cron_per_task(service_id)
+            rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
+            request_last_sync = cron_data.get("sync", {}).get("started_at")
+        except Exception:
+            pass
+
+        # RUM metrics from DuckDB RUM views
+        rum_enabled = bool(source.get("rum_enabled", False) or (source.get("rum") or {}).get("enabled", False))
+        if rum_enabled:
+            try:
+                import datetime
+
+                from backend.core.duckdb import rum_source_for
+                from backend.core.iceberg import execute_with_stale_view_retry
+                from backend.deps import _ConnectionHolder
+
+                rum_source = rum_source_for(source)
+                with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+
+                    def _query_rum_bootstrap(con):
+                        distinct_id = (
+                            "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+                        )
+                        cnt = (
+                            con.execute(
+                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
+                            ).fetchone()[0]
+                            or 0
+                        )
+                        l_row = con.execute(
+                            "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+                        ).fetchone()
+                        l_ts = l_row[0] if l_row else None
+                        return cnt, l_ts
+
+                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, _query_rum_bootstrap)
+
+                if rum_count > 0:
+                    rum_total = rum_count
+                    if rum_last_dt:
+                        if isinstance(rum_last_dt, datetime.datetime):
+                            rum_latest = rum_last_dt.isoformat()
+                        else:
+                            rum_latest = str(rum_last_dt)
+            except Exception:
+                pass
+
+        status["rum"] = {
+            "latest_log_at": rum_latest,
+            "total_rows": rum_total,
+            "last_sync_at": rum_last_sync,
+        }
+        status["request"] = {
+            "latest_log_at": request_latest,
+            "total_rows": request_total,
+            "last_sync_at": request_last_sync,
+        }
 
         svcconfig.update_status(service_id, status)
 

@@ -42,6 +42,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
   const [syncRetention, setSyncRetention] = useState('7')
 
   const [dataRetention, setDataRetention] = useState('30')
+  const [rumRetention, setRumRetention] = useState('90')
   const [cacheRetention, setCacheRetention] = useState('90')
 
   const [compactEnabled, setCompactEnabled] = useState(false)
@@ -53,6 +54,9 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
   const [ngwafRetention, setNgwafRetention] = useState('7')
 
   const [syncIntervalMins, setSyncIntervalMins] = useState('2')
+  const [rumSyncIntervalSeconds, setRumSyncIntervalSeconds] = useState('60')
+  const [rumDeleteAfter, setRumDeleteAfter] = useState(false)
+
   const isAnalyst = service?.access_level === 'read_only'
 
   useEffect(() => {
@@ -64,6 +68,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       setSyncLogEnabled(service.cron_sync?.log_enabled !== false)
       setSyncRetention(String(service.cron_sync?.log_retention_days ?? 7))
       setDataRetention(String(service.cron_sync?.data_retention_days ?? 30))
+      setRumRetention(String(service.cron_sync?.rum_retention_days ?? 30))
       setCacheRetention(String(service.cron_sync?.cache_retention_days ?? 90))
 
       setCompactEnabled(service.cron_compact?.enabled ?? false)
@@ -73,6 +78,11 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       setNgwafInterval(String(service.cron_ngwaf?.interval_mins ?? 5))
       setNgwafLogEnabled(service.cron_ngwaf?.log_enabled !== false)
       setNgwafRetention(String(service.cron_ngwaf?.log_retention_days ?? 7))
+
+      // RUM settings
+      const syncIntervalsecs = service.cron_sync?.interval_mins ? service.cron_sync.interval_mins * 60 : 60
+      setRumSyncIntervalSeconds(String(syncIntervalsecs))
+      setRumDeleteAfter(service.cron_sync?.delete_after ?? false)
     }
     reset()
   }, [service, open, reset, isAnalyst])
@@ -99,6 +109,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
         log_enabled: syncLogEnabled,
         log_retention_days: parseInt(syncRetention),
         data_retention_days: parseInt(dataRetention),
+        rum_retention_days: parseInt(rumRetention),
         cache_retention_days: parseInt(cacheRetention)
       },
       cron_compact: {
@@ -111,6 +122,12 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
           interval_mins: parseInt(ngwafInterval),
           log_enabled: ngwafLogEnabled,
           log_retention_days: parseInt(ngwafRetention),
+        },
+      } : {}),
+      ...(service.rum_enabled ? {
+        rum: {
+          sync_interval_seconds: parseInt(rumSyncIntervalSeconds),
+          delete_after: rumDeleteAfter,
         },
       } : {}),
     }
@@ -143,7 +160,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className={cn("sm:max-w-xl", panelDialogContent)} showCloseButton={status !== 'streaming'}>
+      <DialogContent className={cn("sm:max-w-4xl", panelDialogContent)} showCloseButton={status !== 'streaming'}>
         <DialogHeader className={panelDialogHeaderMuted}>
           <div className="flex items-center justify-between">
             <DialogTitle className="flex items-center gap-2">
@@ -189,6 +206,13 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
                 isAnalyst={isAnalyst}
                 syncIntervalNum={syncIntervalNum}
                 adminSyncSeconds={adminSyncSeconds}
+                rumRetention={rumRetention}
+                setRumRetention={setRumRetention}
+                rumEnabled={service.rum_enabled ?? false}
+                rumSyncIntervalSeconds={rumSyncIntervalSeconds}
+                setRumSyncIntervalSeconds={setRumSyncIntervalSeconds}
+                rumDeleteAfter={rumDeleteAfter}
+                setRumDeleteAfter={setRumDeleteAfter}
               />
 
               {service.ngwaf_workspace_id && (

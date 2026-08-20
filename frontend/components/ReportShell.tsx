@@ -1,9 +1,7 @@
 'use client'
 
 import React from 'react'
-import { useFilterStore } from '@/stores/filterStore'
 import { useEffectiveServiceId, useIsDataReady, useBootstrapResolved } from '@/hooks/useIsDataReady'
-import { useShallow } from 'zustand/react/shallow'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
 import { Loader2, LucideIcon } from 'lucide-react'
@@ -44,13 +42,9 @@ export function ReportShell({
   // selected" before useBootstrap's post-mount effect populates the
   // persisted Zustand store.
   const activeServiceId = useEffectiveServiceId()
-  const { isAutoRange, hasSyncedExtents } = useFilterStore(
-    useShallow(s => ({ isAutoRange: s.isAutoRange, hasSyncedExtents: s.hasSyncedExtents }))
-  )
   const isDataReady = useIsDataReady()
-  const rangeReady = !isAutoRange || hasSyncedExtents
 
-  const isReady = isReadyOverride ?? (requireService ? isDataReady : rangeReady)
+  const isReady = isReadyOverride ?? (requireService ? isDataReady : true)
 
   // Gate the "No service selected" fallback on the bootstrap query
   // having actually resolved — without it, a cold load with empty

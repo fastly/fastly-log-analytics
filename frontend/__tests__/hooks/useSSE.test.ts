@@ -222,4 +222,21 @@ describe('useSSE', () => {
     expect(result.current.status).toBe('error')
     expect(result.current.error).toMatch(/500/)
   })
+
+  it('surfaces an error when the stream ends unexpectedly without a done event', async () => {
+    const messages = [
+      'data: {"type":"status","message":"starting"}\n\n',
+    ]
+    vi.mocked(fetch).mockResolvedValue(makeStreamResponse(messages))
+
+    const { useSSE } = await import('@/hooks/useSSE')
+    const { result } = renderHook(() => useSSE())
+
+    await act(async () => {
+      await result.current.start('/api/x')
+    })
+
+    expect(result.current.status).toBe('error')
+    expect(result.current.error).toBe('Connection closed unexpectedly before completion.')
+  })
 })

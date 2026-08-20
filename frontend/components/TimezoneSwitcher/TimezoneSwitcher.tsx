@@ -31,6 +31,7 @@ export function TimezoneSwitcher() {
   const { mode, timezone, setTimezone, setSystemTimezone } = useTimezoneStore()
 
   React.useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true)
   }, [])
 

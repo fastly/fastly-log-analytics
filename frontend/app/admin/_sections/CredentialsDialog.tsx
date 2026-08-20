@@ -32,6 +32,7 @@ export function CredentialsDialog({ service, onClose, initialMode }: Props) {
 
   // Reset local state whenever a new service is opened.
   React.useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCredMode(initialMode)
     setCredApiToken('')
     setCredAccessKey('')

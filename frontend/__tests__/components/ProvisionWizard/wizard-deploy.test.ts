@@ -262,6 +262,24 @@ describe('runDeploy', () => {
     expect(body).not.toHaveProperty('cdn_url')
   })
 
+  it('threads the picked faro_version into the deploy body', () => {
+    const args = makeArgs({
+      config: { ...FULL_CONFIG, faro_version: '1.9.0' },
+    })
+    runDeploy(args)
+    const [, body] = (args.start as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(body.faro_version).toBe('1.9.0')
+  })
+
+  it('sends faro_version: null when the operator never pinned one (registry outage or skipped)', () => {
+    const args = makeArgs({
+      config: { ...FULL_CONFIG, faro_version: null },
+    })
+    runDeploy(args)
+    const [, body] = (args.start as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(body.faro_version).toBeNull()
+  })
+
   it('serializes log_fields to a JSON string', () => {
     const args = makeArgs({
       config: {

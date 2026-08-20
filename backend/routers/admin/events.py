@@ -209,4 +209,4 @@ async def admin_events_stream(
                 t.cancel()
             await asyncio.gather(*feeders, return_exceptions=True)
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)

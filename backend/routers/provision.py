@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
+from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import (
     CheckFosRequest,
@@ -27,6 +28,7 @@ from backend.models.provision import (
     ProvisionExecuteRequest,
     ProvisionIngestResponse,
     ProvisionLakeInfoResponse,
+    ProvisionReconcileRequest,
     ProvisionTeardownRequest,
     ProvisionValidateRequest,
     ProvisionValidateResponse,
@@ -89,6 +91,8 @@ def provision_list_services(token: str = Query(...)):
     from backend.core.fastly.client import fastly
     from backend.provision.fos_setup import object_storage_enabled
 
+    existing_ids = set(svcconfig.list_service_ids())
+
     try:
         services = fastly("GET", "/service", token=token)
     except Exception as e:
@@ -111,7 +115,6 @@ def provision_list_services(token: str = Query(...)):
             ),
         )
 
-    existing_ids = set(svcconfig.list_service_ids())
     return [
         {"id": s["id"], "name": s["name"], "provisioned": s["id"] in existing_ids}
         for s in services
@@ -177,17 +180,25 @@ def provision_validate(body: ProvisionValidateRequest):
     response_model=ProvisionCheckDomainResponse,
     response_model_exclude_unset=True,
 )
-def provision_check_domain(prefix: str = Query(...)):
+def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(False)):
     if not prefix:
         raise HTTPException(status_code=400, detail={"error": "Prefix is required"})
-    if not re.match(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
-        return {
-            "available": False,
-            "reason": "Prefix must be alphanumeric and may contain hyphens (cannot start/end with hyphen)",
-        }
+    if is_custom:
+        domain = prefix.strip() if prefix else ""
+        if not domain or "." not in domain or not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+            return {
+                "available": False,
+                "reason": "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
+            }
+    else:
+        if not re.match(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
+            return {
+                "available": False,
+                "reason": "Prefix must be alphanumeric and may contain hyphens (cannot start/end with hyphen)",
+            }
+        domain = f"{prefix}.global.ssl.fastly.net"
     from backend.utils.telemetry import get_tracked_calls
 
-    domain = f"{prefix}.global.ssl.fastly.net"
     available, reason = _check_domain_available(domain)
     result: dict = {"available": available}
     if reason:
@@ -277,11 +288,14 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     token: str = body.token
     service_id: str | None = body.service_id
     remove_logging: bool = body.remove_logging
+    remove_rum: bool = body.remove_rum
     remove_cdn: bool = body.remove_cdn
     remove_bucket: bool = body.remove_bucket
+    remove_cloud_files: bool = body.remove_cloud_files
     remove_scoring: bool = body.remove_scoring
     remove_cache: bool = body.remove_cache
     remove_cron: bool = body.remove_cron
+    remove_fos_tokens: bool = body.remove_fos_tokens
     from backend import config as svcconfig
     from backend.core import duckdb as _db
     from backend.provision import _sync_crontab, perform_teardown
@@ -301,12 +315,18 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 "logging_service_id": service_id,
                 "fos_bucket_name": svc_cfg.get("fos_bucket", ""),
                 "fos_region": svc_cfg.get("fos_region", "us-east-1"),
+                "fos_prefix": svc_cfg.get("fos_prefix", ""),
                 "fos_access_key": svc_cfg.get("fos_access_key_id", ""),
                 "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
-                "fos_key_id": prov.get("fos_key_id", ""),
                 "endpoint_name": prov.get("endpoint_name", "Fastly Object Storage Logs"),
                 "cdn_service_id": prov.get("cdn_service_id", ""),
-                "cdn_service_name": svc_cfg.get("name", service_id),
+                # The analytics-owned CDN service's OWN name — never
+                # svc_cfg["name"], which is the customer's service display name
+                # ("www.drew-michael.com"). Passing that made teardown log
+                # "Deleting CDN service 'www.drew-michael.com'" and read as if
+                # the customer's site were being deleted (2026-08-13). Matches
+                # the creation convention used at provision time.
+                "cdn_service_name": prov.get("cdn_service_name") or f"Log Analysis CDN Service for {service_id}",
                 "cdn_url": prov.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
                 # Carry the scoring block so perform_teardown can tear down the
@@ -326,9 +346,12 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
 
     opts = {
         "remove_logging": remove_logging,
+        "remove_rum": remove_rum,
         "remove_cdn": remove_cdn,
         "remove_bucket": remove_bucket,
+        "remove_cloud_files": remove_cloud_files,
         "remove_scoring": remove_scoring,
+        "remove_fos_tokens": remove_fos_tokens,
     }
 
     def stream():
@@ -491,7 +514,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 @router.post("/lake-info", response_model=ProvisionLakeInfoResponse, response_model_exclude_unset=True)
@@ -550,6 +573,7 @@ def provision_execute(req: ProvisionExecuteRequest):
     commit_interval_mins = req.commit_interval_mins
     enable_cron_compact = req.enable_cron_compact
     log_retention_days = req.log_retention_days
+    rum_retention_days = req.rum_retention_days
     log_fields = req.log_fields
     import secrets
 
@@ -584,6 +608,9 @@ def provision_execute(req: ProvisionExecuteRequest):
         "commit_interval_mins": commit_interval_mins,
         "enable_cron_compact": enable_cron_compact,
         "log_retention_days": log_retention_days,
+        "rum_retention_days": rum_retention_days,
+        "logging_enabled": req.logging_enabled,
+        "rum_enabled": req.rum_enabled,
     }
 
     if log_fields:
@@ -601,6 +628,33 @@ def provision_execute(req: ProvisionExecuteRequest):
             "version": req.cmcd_version if req.cmcd_version is not None else 1,
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
+
+    if getattr(req, "rum_enabled", False):
+        import datetime as _dt
+
+        from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
+        cfg["rum"] = {
+            "enabled": True,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+        # Wizard-selected pin (Task 7 version picker), falling back to
+        # DEFAULT_FARO_VERSION when the operator left it unpinned (registry
+        # outage, or skipped the picker). Always resolved to a concrete
+        # version now (F-2 audit finding) — the generated tracker JS
+        # unconditionally requests /js/faro-sdk.js with no CDN fallback, so
+        # RUM can never be enabled without a version pinned behind it; see
+        # rum_orchestrator_v2.enable_rum, which applies the same fallback.
+        cfg["rum"]["faro_version"] = req.faro_version or DEFAULT_FARO_VERSION
+        rum_cond = getattr(req, "rum_custom_condition", None) or ""
+        rum_cond = rum_cond.strip()
+        # Reject conditions that provably can't work rather than letting them
+        # reach the edge, where the no-op form is invisible and the inverse
+        # silently disables all RUM logging.
+        cond_err = validate_rum_custom_condition(rum_cond)
+        if cond_err:
+            raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_err))
+        cfg["rum"]["custom_condition"] = rum_cond
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])
@@ -706,7 +760,88 @@ def provision_execute(req: ProvisionExecuteRequest):
             if not error_already_emitted:
                 yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+
+
+@router.post("/reconcile")
+def provision_reconcile(body: ProvisionReconcileRequest):
+    """Reconcile VCL state for a service (auto-detects and removes legacy snippets).
+
+    Streams SSE events as the reconciliation proceeds through the 8-step control loop.
+    This endpoint is called during UI deployment to ensure clean VCL state and
+    automatic migration from pre-2.2 legacy snippets to consolidated VCL.
+
+    ``service_id`` and ``token`` arrive in the request body, never the query
+    string — a Fastly API token in a URL is logged by every hop that sees it.
+
+    Args:
+        body: Fastly service ID + API token.
+
+    Returns:
+        SSE stream with reconciliation status events.
+    """
+    import queue
+    import threading
+
+    service_id = body.service_id
+    token = body.token
+    if not service_id or not token:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("service_id and token are required"),
+        )
+
+    from backend.provision.declarative.reconciler import reconcile_vcl_state
+
+    events: queue.Queue = queue.Queue()
+
+    def worker():
+        try:
+
+            def status_cb(msg: str) -> None:
+                """Push status updates to the queue for immediate real-time SSE streaming."""
+                events.put({"type": "status", "message": msg})
+
+            # Run reconciliation with streaming status callback
+            result = reconcile_vcl_state(
+                service_id=service_id,
+                token=token,
+                dry_run=False,
+                status_cb=status_cb,
+            )
+
+            # Emit final reconciliation result
+            events.put(
+                {
+                    "type": "reconciliation_result",
+                    "service_id": result.service_id,
+                    "activated_version": result.activated_version,
+                    "changes_applied": result.changes_applied,
+                    "duration_ms": result.duration_ms,
+                    "error": result.error,
+                }
+            )
+            events.put({"type": "done", "success": result.error is None})
+        except Exception as e:
+            events.put({"type": "error", "message": str(e)})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name=f"reconcile-{service_id}").start()
+
+    async def stream():
+        import asyncio
+
+        while True:
+            try:
+                event = await asyncio.to_thread(events.get, timeout=1)
+                if event is None:
+                    break
+                yield json.dumps(event)
+            except queue.Empty:
+                pass
+
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
 @router.post("/terraform/preview", response_model=dict[str, str])
@@ -859,6 +994,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "commit_interval_mins": body.get("commit_interval_mins", 5),
         "enable_cron_compact": body.get("enable_cron_compact", True),
         "log_retention_days": body.get("log_retention_days", 30),
+        "rum_retention_days": body.get("rum_retention_days", 30),
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
@@ -868,6 +1004,84 @@ def provision_ingest(payload: ProvisionConfigRequest):
             state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
         except Exception:
             pass
+
+    # Construct nested CMCD config from flat fields if present
+    has_flat_cmcd = any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
+    has_nested_cmcd = "cmcd" in body and isinstance(body.get("cmcd"), dict)
+    if has_flat_cmcd or has_nested_cmcd:
+        import datetime as _dt
+
+        existing_cmcd = body.get("cmcd", {}) if isinstance(body.get("cmcd"), dict) else {}
+        state["cmcd"] = {
+            "enabled": body.get("cmcd_enabled", existing_cmcd.get("enabled", False)),
+            "mode": body.get("cmcd_mode") or existing_cmcd.get("mode", "query_string"),
+            "version": body.get("cmcd_version")
+            if body.get("cmcd_version") is not None
+            else existing_cmcd.get("version", 1),
+            "enabled_at": existing_cmcd.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    # Construct nested Scoring config from flat fields if present
+    has_flat_scoring = any(
+        k in body
+        for k in (
+            "scoring_enabled",
+            "scoring_domain",
+            "scoring_request_secret",
+            "scoring_exclude_url_regex",
+            "scoring_enforce_status_code",
+        )
+    )
+    has_nested_scoring = "scoring" in body and isinstance(body.get("scoring"), dict)
+    if has_flat_scoring or has_nested_scoring:
+        import datetime as _dt
+
+        existing_scoring = body.get("scoring", {}) if isinstance(body.get("scoring"), dict) else {}
+        state["scoring"] = {
+            "enabled": body.get("scoring_enabled", existing_scoring.get("enabled", False)),
+            "domain": body.get("scoring_domain") or existing_scoring.get("domain", ""),
+            "request_secret": body.get("scoring_request_secret", existing_scoring.get("request_secret", "")),
+            "exclude_url_regex": body.get("scoring_exclude_url_regex", existing_scoring.get("exclude_url_regex", "")),
+            "enforce_status_code": body.get(
+                "scoring_enforce_status_code", existing_scoring.get("enforce_status_code", 429)
+            ),
+            "enabled_at": existing_scoring.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    # Construct nested RUM config from flat fields if present
+    if body.get("rum_enabled"):
+        import datetime as _dt
+
+        existing_rum = body.get("rum", {}) if isinstance(body.get("rum"), dict) else {}
+        state["rum"] = {
+            "enabled": True,
+            "enabled_at": existing_rum.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            "custom_condition": body.get("rum_custom_condition") or existing_rum.get("custom_condition") or "",
+        }
+        # Preserve an already-pinned faro_version (+ its persisted upload
+        # hashes) when this ingest re-run's body doesn't carry one (#1 audit
+        # finding). write_service_config's preserved-key merge treats "rum"
+        # as present-in-state, so building state["rum"] with only
+        # {enabled, enabled_at} here silently unpins a previously-pinned
+        # service — the sync cron then sees an unrequested version change
+        # and, via its adopt-default self-heal branch, performs an
+        # unrequested Fastly VCL activation. An explicit faro_version in the
+        # request body (a deliberate re-pin) still wins over the on-disk
+        # value.
+        _faro_keys = ("faro_version", "faro_content_hash", "faro_fos_etag_md5", "faro_last_upstream_check")
+        if existing_rum.get("faro_version"):
+            for k in _faro_keys:
+                if k in existing_rum:
+                    state["rum"][k] = existing_rum[k]
+        else:
+            from backend import config as svcconfig
+
+            on_disk_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
+            on_disk_rum = on_disk_cfg.get("rum")
+            if isinstance(on_disk_rum, dict) and on_disk_rum.get("faro_version"):
+                for k in _faro_keys:
+                    if k in on_disk_rum:
+                        state["rum"][k] = on_disk_rum[k]
 
     # NB: the token was already validated against this same service_id at the
     # top of the handler (validate_destructive_token above); the prior second
@@ -885,6 +1099,24 @@ def provision_ingest(payload: ProvisionConfigRequest):
         _sync_crontab()
     except Exception:
         pass
+
+    # Eagerly trigger an initial metadata sync in a background thread to warm up the status cache
+    # so `/api/bootstrap` has populated status fields (such as "rum" and "request" sub-payloads)
+    # immediately available for the dashboard.
+    try:
+        import threading
+
+        def background_sync():
+            try:
+                from backend.cron.jobs.metadata import _run_metadata_sync
+
+                _run_metadata_sync(state["logging_service_id"])
+            except Exception as e:
+                logger.warning("[provision_ingest] Initial metadata sync after ingest failed: %s", e)
+
+        threading.Thread(target=background_sync, daemon=True).start()
+    except Exception as e:
+        logger.warning("[provision_ingest] Failed to spawn background metadata sync thread: %s", e)
 
     return {"ok": True, "service_id": state["logging_service_id"]}
 

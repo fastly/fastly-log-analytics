@@ -79,6 +79,7 @@ export function useShareStatusBanner({ enabled }: Options) {
         }
       : null
     if (lateSeed) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStatus(lateSeed)
     } else {
       tick()

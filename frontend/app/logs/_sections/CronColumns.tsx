@@ -179,7 +179,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
 
         if (task === 'alerts') {
           label = count === 1 ? 'alert evaluated' : 'alerts evaluated';
-        } else if (task === 'commit') {
+        } else if (task === 'commit' || task === 'rum_commit') {
           if (!row.original.rows_ingested) return <span className="text-muted-foreground">—</span>
           // A commit task takes X local buffer files and turns them into 1 cloud file.
           // By eagerly pulling it, we cached that 1 new cloud file.
@@ -191,6 +191,12 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         } else if (task === 'optimize') {
           count = row.original.parquet_files_optimized || 0;
           label = 'files merged';
+        } else if (task === 'local_compact') {
+          label = 'files merged';
+        } else if (task === 'rum_sync') {
+          label = 'raw RUM logs';
+        } else if (task === 'ngwaf_sync') {
+          label = count === 1 ? 'bot record' : 'bot records';
         }
 
         return (
@@ -209,7 +215,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         }
 
         const task = row.original.task
-        if (task === 'optimize' || task === 'commit') {
+        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact') {
           return <span className="text-muted-foreground">—</span>
         }
 

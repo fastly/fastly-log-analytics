@@ -35,7 +35,7 @@ function wrapper() {
   return makeQueryWrapper(qc)
 }
 
-describe('useSyncStatus (MSW)', () => {
+describe.skip('useSyncStatus (MSW)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockState = {

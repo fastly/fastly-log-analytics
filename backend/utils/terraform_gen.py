@@ -41,7 +41,13 @@ import json
 from typing import Any
 
 from backend.core.fastly.utils import load_vcl
-from backend.provision import CAPTURE_SNIPPET_PLAN, generate_capture_vcl, load_log_format
+from backend.provision.declarative.generators import (
+    desired_backends,
+    desired_logging_endpoints,
+    desired_snippets,
+    logging_service_snippets,
+)
+from backend.provision.declarative.state import FeatureState
 from backend.provision.fastly_api import _CDN_SNIPPETS
 
 
@@ -82,7 +88,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     # instructions README (plain markdown) where a stray CR/LF would break
     # the surrounding sentence. Strip both before any use.
     service_id = str(cfg.get("logging_service_id", "YOUR_SERVICE_ID")).replace("\r", "").replace("\n", "")
-    endpoint_name = cfg.get("endpoint_name", "fastly_log_analysis")
+    endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "fastly_log_analysis")
     region = cfg.get("fos_region", "us-east-1")
     bucket = cfg.get("fos_bucket_name", "your-bucket-name")
     prefix = cfg.get("fos_prefix", "").strip("/")
@@ -99,23 +105,58 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     cdn_shield = cfg.get("cdn_shield", "iad-va-us")
     cdn_secret = cfg.get("cdn_secret", "replace-with-secure-secret")
 
-    sample_rate = int(cfg.get("sample_rate", 100))
-    edge_only = bool(cfg.get("edge_only", False))
-    custom_condition = (cfg.get("custom_condition") or "").strip()
-    scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
+    # Prefer nested provisioning.* fields, fall back to legacy flat fields for backward compat
+    prov = cfg.get("provisioning", {})
+    sample_rate = prov.get("sample_rate") if "sample_rate" in prov else cfg.get("sample_rate", 100)
+    sample_rate = int(sample_rate) if sample_rate is not None else 100
+    edge_only = prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False)
+    edge_only = bool(edge_only)
+    custom_condition = prov.get("custom_condition") if "custom_condition" in prov else cfg.get("custom_condition", "")
+    custom_condition = (custom_condition or "").strip()
 
-    log_format = load_log_format(cfg.get("log_fields"))
-    vcl_snippets = generate_capture_vcl(cfg.get("log_fields"), scoring_enabled=scoring_enabled)
+    # Extract nested CMCD and Scoring config
+    cmcd_cfg = cfg.get("cmcd", {})
+    scoring_cfg = cfg.get("scoring", {})
+
+    # Construct robust declarative FeatureState to reuse all canonical VCL/endpoint rules
+    fs_cfg = {
+        "service_id": service_id,
+        "log_period": period,
+        "sample_rate": sample_rate,
+        "edge_only": edge_only,
+        "custom_condition": custom_condition,
+        "fos_prefix": prefix,
+        "logging_enabled": bool(cfg.get("logging_enabled", True)),
+        "rum_enabled": bool(cfg.get("rum_enabled", False)),
+        "cmcd": {
+            "enabled": bool(cmcd_cfg.get("enabled", False)),
+            "mode": cmcd_cfg.get("mode", "query_string"),
+            "version": int(cmcd_cfg.get("version", 1)),
+        },
+        "scoring": {
+            "enabled": bool(scoring_cfg.get("enabled", False)),
+            "domain": scoring_cfg.get("domain", ""),
+            "request_secret": scoring_cfg.get("request_secret", ""),
+            "exclude_url_regex": scoring_cfg.get("exclude_url_regex", ""),
+            "enforce_status_code": int(scoring_cfg.get("enforce_status_code", 429)),
+        },
+        "log_fields": cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []},
+    }
+    state = FeatureState.from_config(fs_cfg)
+
+    # Use the same code to generate snippets, endpoints, and formats
+    desired_snippets_list = desired_snippets(state)
+    desired_endpoints = desired_logging_endpoints(state)
+    desired_backends_list = desired_backends(state)
+
     cdn_vcl = load_vcl(rate_limiting=True)
-
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
 
     cond_parts = ["!segmented_caching.is_inner_req"]
     if edge_only:
         # Restart-tolerant when scoring is enabled: scoring restarts the request
         # (req.restarts 0→1), so gating on req.restarts == 0 would drop every
         # scored request from the logs. Mirrors fastly_api._log_sampling_edge_clause.
-        if scoring_enabled:
+        if scoring_cfg.get("enabled", False):
             cond_parts.append("fastly.ff.visits_this_service == 0")
         else:
             cond_parts.append("(req.restarts == 0 && fastly.ff.visits_this_service == 0)")
@@ -130,7 +171,6 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
 
     # ── 1. Companion VCL files (not Terraform config) ──────────────────────────
     files["cdn_proxy.vcl"] = cdn_vcl
-    files["log_format.vcl"] = log_format
 
     # ── 2. versions.tf.json — provider pinning ─────────────────────────────────
     # Pin major versions so an upstream bump (Fastly v6, AWS v7) doesn't
@@ -239,54 +279,106 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     )
 
     # ── 5. logging_service.tf.json — Logging endpoint on existing service ──────
-    # Snippet name / subroutine / priority come from CAPTURE_SNIPPET_PLAN so the
-    # Terraform output stays in lock-step with the live install path.
-    snippet_meta = {key: (name, sub, prio) for key, name, sub, prio, _req in CAPTURE_SNIPPET_PLAN}
+    # Use logging-service-specific snippets (capture VCL for all stages)
+    logging_service_snips = logging_service_snippets(state)
     logging_snippet_blocks: list[dict] = []
-    for content_key, snip_vcl in vcl_snippets.items():
-        meta = snippet_meta.get(content_key)
-        if meta:
-            snip_name, subroutine, priority = meta
-            snip_filename = f"capture_snippets/{content_key}.vcl"
-            files[snip_filename] = snip_vcl
-            logging_snippet_blocks.append(
+
+    # Track which subroutines we've already written to avoid conflicts when
+    # multiple snippets target the same subroutine (e.g., recv + recv_reset)
+    seen_filenames: set[str] = set()
+
+    for snippet in logging_service_snips:
+        subroutine = snippet.subroutine.replace("vcl_", "")
+        # Handle recv_reset specially (it's a recv snippet but needs a different filename)
+        if snippet.name == "Fastly Log Analysis Reset Client IP":
+            snip_filename = "capture_snippets/recv_reset.vcl"
+        else:
+            snip_filename = f"capture_snippets/{subroutine}.vcl"
+
+        # Avoid duplicate filenames (recv and recv_reset both target recv subroutine)
+        if snip_filename not in seen_filenames:
+            files[snip_filename] = snippet.body
+            seen_filenames.add(snip_filename)
+
+        logging_snippet_blocks.append(
+            {
+                "name": snippet.name,
+                "type": subroutine,
+                "priority": snippet.priority,
+                "content": f'${{file("${{path.module}}/{snip_filename}")}}',
+            }
+        )
+
+    logging_s3_blocks: list[dict] = []
+    condition_blocks: list[dict] = []
+
+    for endpoint in desired_endpoints:
+        if endpoint.name == "Fastly Log Analytics":
+            cond_name = f"Log Sampling - {_terraform_template_escape(endpoint_name)}"
+            condition_blocks.append(
                 {
-                    "name": snip_name,
-                    "type": subroutine,
-                    "priority": priority,
-                    "content": f'${{file("${{path.module}}/{snip_filename}")}}',
+                    "name": cond_name,
+                    "statement": _terraform_template_escape(cond_stmt),
+                    "type": "RESPONSE",
                 }
             )
+            resp_cond = cond_name
+            format_filename = "log_format.vcl"
+        else:
+            resp_cond = ""
+            format_filename = f"{endpoint.name.lower().replace(' ', '_')}_format.vcl"
+
+        files[format_filename] = endpoint.format_string
+
+        logging_s3_blocks.append(
+            {
+                "name": _terraform_template_escape(endpoint.name),
+                "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
+                "domain": _terraform_template_escape(fos_host),
+                "path": _terraform_template_escape(endpoint.path),
+                "period": endpoint.period,
+                "gzip_level": 9,
+                "message_type": "blank",
+                "timestamp_format": "%Y-%m-%dT%H:%M:%S.000",
+                "response_condition": resp_cond,
+                "format_version": 2,
+                "format": f'${{file("${{path.module}}/{format_filename}")}}',
+                "s3_access_key": _terraform_template_escape(fos_access_key),
+                "s3_secret_key": _terraform_template_escape(fos_secret_key),
+            }
+        )
+
+    logging_backends: list[dict] = []
+    for backend in desired_backends_list:
+        address = backend.address
+        if address == "fos.example.com":
+            address = fos_host
+        logging_backends.append(
+            {
+                "name": backend.name,
+                "address": _terraform_template_escape(address),
+                "port": backend.port,
+                "use_ssl": True,
+                "ssl_cert_hostname": _terraform_template_escape(address),
+                "ssl_sni_hostname": _terraform_template_escape(address),
+                "connect_timeout": backend.connect_timeout,
+                "first_byte_timeout": backend.first_byte_timeout,
+                "between_bytes_timeout": backend.between_bytes_timeout,
+                "auto_loadbalance": backend.auto_loadbalance,
+            }
+        )
 
     logging_service_block: dict[str, Any] = {
         "name": _terraform_template_escape(cfg.get("service_name", "Logging Service")),
         "domain": [{"name": "example.com"}],
-        "condition": [
-            {
-                "name": f"Log Sampling - {_terraform_template_escape(endpoint_name)}",
-                "statement": _terraform_template_escape(cond_stmt),
-                "type": "RESPONSE",
-            }
-        ],
-        "logging_s3": [
-            {
-                "name": _terraform_template_escape(endpoint_name),
-                "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
-                "domain": _terraform_template_escape(fos_host),
-                "path": _terraform_template_escape(path),
-                "period": period,
-                "gzip_level": 9,
-                "message_type": "blank",
-                "timestamp_format": "%Y-%m-%dT%H:%M:%S.000",
-                "response_condition": f"Log Sampling - {_terraform_template_escape(endpoint_name)}",
-                "format_version": 2,
-                "format": '${file("${path.module}/log_format.vcl")}',
-                "s3_access_key": _terraform_template_escape(fos_access_key),
-                "s3_secret_key": _terraform_template_escape(fos_secret_key),
-            }
-        ],
+        "logging_s3": logging_s3_blocks,
         "snippet": logging_snippet_blocks,
     }
+    if condition_blocks:
+        logging_service_block["condition"] = condition_blocks
+    if logging_backends:
+        logging_service_block["backend"] = logging_backends
+
     files["logging_service.tf.json"] = _dump(
         {
             "resource": {

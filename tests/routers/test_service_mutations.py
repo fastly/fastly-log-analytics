@@ -257,6 +257,82 @@ def test_log_fields_saves_to_config():
     assert "C" in saved["log_fields"]["groups"]
 
 
+def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
+    """REGRESSION: 2026-08-12 SE-demo incident — CMCD's 14 ``cmcd_*`` fields are
+    system-managed and hidden from the user-editable list by
+    ``_is_system_field``, so the UI always POSTs a ``custom_fields`` that omits
+    them. The pre-existing merge guard only fired when the incoming list was
+    absent/empty, and the re-injection block only covered scoring — so a POST
+    carrying one user field silently stripped all 14 CMCD entries from the
+    persisted config. ``reconcile_vcl_state`` then regenerated the Fastly log
+    format without them while the CMCD extraction VCL stayed installed: the
+    edge kept parsing CMCD into ``req.http.x-cmcd:*`` and nothing logged it,
+    so every ``cmcd_*`` column ingested empty and /streaming showed all zeros
+    with no error."""
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+
+    saved = {}
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value=_cfg(log_fields=_BASE_LF, cmcd={"enabled": True, "mode": "query_string", "version": 1}),
+        ),
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update(cfg)),
+        patch("backend.core.metadata.record_audit"),
+        patch("backend.state_sync.export_admin_state"),
+    ):
+        response = _client().post(
+            "/api/services/svc1/log-fields",
+            json={
+                "log_fields": {
+                    "preset": "standard",
+                    "groups": ["A", "B", "C"],
+                    "schema_version": 2,
+                    # Non-empty, and omits every cmcd_* entry — exactly what
+                    # the UI sends. This is what used to strip them.
+                    "custom_fields": [{"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}],
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    saved_names = {cf["name"] for cf in saved["log_fields"]["custom_fields"]}
+    for name in _CMCD_FIELD_NAMES:
+        assert name in saved_names, f"CMCD field {name!r} was stripped by a log-fields write"
+    assert "my_custom" in saved_names, "user custom_field was wrongly stripped"
+
+
+def test_log_fields_set_strips_cmcd_fields_when_cmcd_disabled():
+    """The mirror case: with CMCD off, stale cmcd_* entries must not persist."""
+    saved = {}
+
+    with (
+        patch("backend.config.load_config", return_value=_cfg(log_fields=_BASE_LF)),
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved.update(cfg)),
+        patch("backend.core.metadata.record_audit"),
+        patch("backend.state_sync.export_admin_state"),
+    ):
+        response = _client().post(
+            "/api/services/svc1/log-fields",
+            json={
+                "log_fields": {
+                    "preset": "standard",
+                    "groups": ["A", "B", "C"],
+                    "schema_version": 2,
+                    "custom_fields": [
+                        {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
+                        {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+                    ],
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    saved_names = {cf["name"] for cf in saved["log_fields"]["custom_fields"]}
+    assert saved_names == {"my_custom"}
+
+
 def test_log_fields_no_changes_detected():
     """Posting the same log_fields hash returns 'No changes detected' without saving."""
     from backend.core import log_fields as lf_module

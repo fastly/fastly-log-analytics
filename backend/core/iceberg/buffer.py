@@ -142,7 +142,7 @@ def _is_tombstone_marker(name: str) -> bool:
     return head.endswith(".parquet") and tail.isdigit()
 
 
-def _tombstoned_parquet_paths(buf_dir: str) -> set[str]:
+def _tombstoned_parquet_paths(buf_dir: str, recursive: bool = True) -> set[str]:
     """Return the set of buffer parquet paths that have an active tombstone
     sibling. Used by ``buffer_files()`` to keep tombstoned files out of
     new view binds — they stay on disk for the grace window so any view
@@ -150,7 +150,12 @@ def _tombstoned_parquet_paths(buf_dir: str) -> set[str]:
     tombstoned: set[str] = set()
     if not os.path.isdir(buf_dir):
         return tombstoned
-    for p in _glob.glob(os.path.join(buf_dir, "**", "*" + _TOMBSTONE_SUFFIX + "*"), recursive=True):
+    pattern = (
+        os.path.join(buf_dir, "**", "*" + _TOMBSTONE_SUFFIX + "*")
+        if recursive
+        else os.path.join(buf_dir, "*" + _TOMBSTONE_SUFFIX + "*")
+    )
+    for p in _glob.glob(pattern, recursive=recursive):
         base = os.path.basename(p)
         if not _is_tombstone_marker(base):
             continue
@@ -238,7 +243,7 @@ def tombstone_buffer_files(source: dict, paths: list[str], *, ts: int | None = N
 
 
 def sweep_tombstoned_buffer_files(
-    source: dict, *, grace_seconds: int = _TOMBSTONE_GRACE_SECONDS, now: int | None = None
+    source: dict, *, table_name: str = "logs", grace_seconds: int = _TOMBSTONE_GRACE_SECONDS, now: int | None = None
 ) -> int:
     """Unlink tombstoned buffer parquets whose grace window has elapsed.
 
@@ -253,12 +258,18 @@ def sweep_tombstoned_buffer_files(
     """
     if now is None:
         now = int(time.time())
-    buf = _core_mod._buffer_dir(source)
+    buf = _core_mod._buffer_dir(source, table_name=table_name)
     if not os.path.isdir(buf):
         return 0
     swept = 0
     purged_basenames: list[str] = []
-    for marker in _glob.glob(os.path.join(buf, "**", "*" + _TOMBSTONE_SUFFIX + "*"), recursive=True):
+    recursive = table_name != "logs"
+    pattern = (
+        os.path.join(buf, "**", "*" + _TOMBSTONE_SUFFIX + "*")
+        if recursive
+        else os.path.join(buf, "*" + _TOMBSTONE_SUFFIX + "*")
+    )
+    for marker in _glob.glob(pattern, recursive=recursive):
         base = os.path.basename(marker)
         if not _is_tombstone_marker(base):
             continue
@@ -301,7 +312,7 @@ def sweep_tombstoned_buffer_files(
     return swept
 
 
-def buffer_files(source: dict) -> list[str]:
+def buffer_files(source: dict, table_name: str = "logs") -> list[str]:
     """Return sorted list of Parquet files currently in the local buffer.
 
     Excludes files that have been tombstoned by ``tombstone_buffer_files``
@@ -309,13 +320,15 @@ def buffer_files(source: dict) -> list[str]:
     tombstoned files remain on disk for the grace window so any view
     bound BEFORE the tombstone can still read them.
     """
-    buf = _core_mod._buffer_dir(source)
+    buf = _core_mod._buffer_dir(source, table_name=table_name)
     if not os.path.isdir(buf):
         return []
-    tombstoned = _tombstoned_parquet_paths(buf)
+    recursive = table_name != "logs"
+    tombstoned = _tombstoned_parquet_paths(buf, recursive=recursive)
+    pattern = os.path.join(buf, "**", "*.parquet") if recursive else os.path.join(buf, "*.parquet")
     return sorted(
         p
-        for p in _glob.glob(os.path.join(buf, "**", "*.parquet"), recursive=True)
+        for p in _glob.glob(pattern, recursive=recursive)
         if os.path.isfile(p) and p not in tombstoned and not _is_tombstone_marker(os.path.basename(p))
     )
 
@@ -323,14 +336,14 @@ def buffer_files(source: dict) -> list[str]:
 _QUARANTINE_SUBDIR = ".quarantine"
 
 
-def _quarantine_dir(source: dict) -> str:
+def _quarantine_dir(source: dict, table_name: str = "logs") -> str:
     """Path to the quarantine bucket for unreadable buffer parquet files.
     Lives under the buffer dir so the path is bucket-scoped and survives
     re-mount of the cache root."""
-    return os.path.join(_core_mod._buffer_dir(source), _QUARANTINE_SUBDIR)
+    return os.path.join(_core_mod._buffer_dir(source, table_name=table_name), _QUARANTINE_SUBDIR)
 
 
-def _quarantine_buffer_file(source: dict, path: str, error: BaseException) -> str | None:
+def _quarantine_buffer_file(source: dict, path: str, error: BaseException, table_name: str = "logs") -> str | None:
     """Move a corrupt buffer parquet into the quarantine subdir with a
     timestamped name and a sidecar JSON describing the failure.
 
@@ -346,7 +359,7 @@ def _quarantine_buffer_file(source: dict, path: str, error: BaseException) -> st
         import json
         from datetime import UTC, datetime
 
-        qdir = _quarantine_dir(source)
+        qdir = _quarantine_dir(source, table_name=table_name)
         os.makedirs(qdir, exist_ok=True)
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         base = os.path.basename(path)
@@ -392,7 +405,7 @@ def _quarantine_buffer_file(source: dict, path: str, error: BaseException) -> st
         return None
 
 
-def buffer_backlog_stats(source: dict) -> dict:
+def buffer_backlog_stats(source: dict, table_name: str = "logs") -> dict:
     """Snapshot of the local buffer right now: file count, total bytes, and
     age of the oldest file in seconds.
 
@@ -402,7 +415,7 @@ def buffer_backlog_stats(source: dict) -> dict:
     growing disk usage. Surfacing oldest_age + file count lets the cron
     summary line shout when the drain is stuck.
     """
-    files = buffer_files(source)
+    files = buffer_files(source, table_name=table_name)
     if not files:
         return {"file_count": 0, "total_bytes": 0, "oldest_age_seconds": 0, "oldest_path": None}
     now = time.time()
@@ -426,7 +439,7 @@ def buffer_backlog_stats(source: dict) -> dict:
     }
 
 
-def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str) -> str:
+def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str, table_name: str = "logs") -> str:
     """Write a PyArrow table to the local buffer as a Parquet file.
 
     Called by ingest() for each batch of processed rows. The file is written
@@ -434,10 +447,15 @@ def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str) -> str:
 
     Returns the path of the written file.
     """
-    buf = _core_mod._buffer_dir(source)
+    buf = _core_mod._buffer_dir(source, table_name=table_name)
     os.makedirs(buf, exist_ok=True)
     path = os.path.join(buf, filename)
-    aligned = _core_mod._align_to_schema(arrow_table, source=source)
+    from backend import config as svcconfig
+
+    cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
+    log_fields_config = cfg.get("log_fields", {}) if cfg else None
+    target_schema = _core_mod.get_arrow_schema(log_fields_config, table_name=table_name)
+    aligned = _core_mod._align_to_schema(arrow_table, target_schema=target_schema, source=source)
     if "timestamp" in aligned.column_names:
         sort_keys = [("timestamp", "ascending")]
         if "ip" in aligned.column_names:
@@ -459,7 +477,7 @@ _BUFFER_COMMIT_CHUNK_SIZE = int(os.environ.get("BUFFER_COMMIT_CHUNK_SIZE", "50")
 _CLOUD_WRITE_LOCK_TIMEOUT_S = 30.0
 
 
-def commit_buffer(source: dict, progress_callback=None) -> dict:
+def commit_buffer(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
     """Append all local buffer files to the Iceberg table.
 
     Acquires the per-service lock (the same one ``reset_service_logs``
@@ -483,12 +501,12 @@ def commit_buffer(source: dict, progress_callback=None) -> dict:
         )
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
     try:
-        return _commit_buffer_impl(source, progress_callback)
+        return _commit_buffer_impl(source, progress_callback, table_name=table_name)
     finally:
         lock.release()
 
 
-def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
+def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
     """Append all local buffer files to the Iceberg table.
 
     Splits the buffer into chunks of ``_core_mod._BUFFER_COMMIT_CHUNK_SIZE`` files,
@@ -511,7 +529,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
     # avoids a separate scheduler registration; the cadence (every commit
     # tick) easily covers the 60 s grace window.
     try:
-        swept = sweep_tombstoned_buffer_files(source)
+        swept = sweep_tombstoned_buffer_files(source, table_name=table_name)
         if swept:
             logger.info("%s Swept %d tombstoned buffer file(s) past grace window", _core_mod._ICE, swept)
     except Exception as sweep_err:
@@ -519,7 +537,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
         # on disk until the next sweep tick.
         logger.warning("%s Tombstone sweep raised (continuing with commit): %s", _core_mod._ICE, sweep_err)
 
-    files = buffer_files(source)
+    files = buffer_files(source, table_name=table_name)
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
@@ -566,7 +584,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
     # ``test_commit_buffer_loads_table_once_per_call`` guards against.
     _table_for_scan = None
     try:
-        _table_for_scan = _core_mod._init_iceberg_table_locked(source, create=False)
+        _table_for_scan = _core_mod._init_iceberg_table_locked(source, create=False, table_name=table_name)
         if _table_for_scan is not None:
             since_ms = int((time.time() - _COMMIT_MARKER_LOOKBACK_S) * 1000)
             recent_markers = _recent_snapshot_markers(_table_for_scan, since_ms)
@@ -626,7 +644,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
         # falling through, making the create path unreachable. The extra load
         # only happens on the missing-table path (unavoidable); the happy path
         # reuses _table_for_scan and still loads the table once per call.
-        table = _core_mod.init_iceberg_table(source)
+        table = _core_mod.init_iceberg_table(source, table_name=table_name)
 
     try:
         from pyiceberg.io.pyarrow import schema_to_pyarrow
@@ -644,7 +662,9 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
 
         _cfg = _cfg_mod.load_config(source.get("service_id") or source.get("name"))
         _lf_cfg = _cfg.get("log_fields", {}) if _cfg else None
-        _mapping = create_mapping_from_schema(_core_mod.get_iceberg_schema(_lf_cfg)).model_dump_json()
+        _mapping = create_mapping_from_schema(
+            _core_mod.get_iceberg_schema(_lf_cfg, table_name=table_name)
+        ).model_dump_json()
         table.transaction().set_properties({"schema.name-mapping.default": _mapping}).commit()
 
     chunk_size = max(1, _core_mod._BUFFER_COMMIT_CHUNK_SIZE)
@@ -670,7 +690,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
                 tables.append(_core_mod._align_to_schema(t, target_schema=target_arrow_schema, source=source))
                 chunk_successful.append(path)
             except Exception as e:
-                _quarantine_buffer_file(source, path, e)
+                _quarantine_buffer_file(source, path, e, table_name=table_name)
                 quarantined_count += 1
         if not tables:
             continue
@@ -742,7 +762,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
     # instead of paying another ~865 KB metadata.json GET for the file we
     # just PUT seconds ago. Pointer-mismatch in _core_mod._load_table_cached protects
     # cross-process correctness.
-    _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
+    _core_mod._set_cached_table(source, _core_mod._table_identifier(source, table_name=table_name), table)
 
     # Apply the new snapshot's added-files delta to _core_mod._snapshot_files_cache
     # BEFORE _core_mod._write_metadata_pointer spawns the async table-summary thread.
@@ -761,7 +781,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
 
     if progress_callback:
         progress_callback("status", "Cleaning up local buffer files...")
-    _core_mod._prune_empty_dirs(_core_mod._buffer_dir(source))
+    _core_mod._prune_empty_dirs(_core_mod._buffer_dir(source, table_name=table_name))
 
     if quarantined_count:
         logger.warning(
@@ -795,7 +815,9 @@ def _commit_buffer_impl(source: dict, progress_callback=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None) -> dict:
+def optimize_table(
+    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
+) -> dict:
     """Compact small Iceberg data files into larger ones using rewrite_data_files.
 
     Acquires the per-service lock (see :func:`commit_buffer`) before
@@ -813,13 +835,13 @@ def optimize_table(source: dict, target_file_size_mb: int = 128, min_files_per_p
         )
         return {"error": "service busy (reset or another writer in progress)", "files_rewritten": 0}
     try:
-        return _optimize_table_impl(source, target_file_size_mb, min_files_per_partition)
+        return _optimize_table_impl(source, target_file_size_mb, min_files_per_partition, table_name=table_name)
     finally:
         lock.release()
 
 
 def _optimize_table_impl(
-    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None
+    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
 ) -> dict:
     """Compact small Iceberg data files into larger ones using rewrite_data_files.
 
@@ -843,7 +865,9 @@ def _optimize_table_impl(
     """
     try:
         catalog = _core_mod._get_catalog(source)
-        table = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
+        table = _core_mod._load_table_cached(
+            source, _core_mod._table_identifier(source, table_name=table_name), catalog
+        )
     except Exception as e:
         if "does not exist" in str(e):
             return {"error": "Iceberg table does not exist.", "files_rewritten": 0}
@@ -888,13 +912,20 @@ def _optimize_table_impl(
     partition_errors: list[str] = []
     eligible_partitions = sum(1 for files in partition_groups.values() if len(files) > min_files_per_partition)
 
-    from backend.core.duckdb import get_connection
+    if table_name != "logs":
+        from backend.core.duckdb import get_connection, rum_source_for
+
+        con_source = rum_source_for(source)
+    else:
+        from backend.core.duckdb import get_connection
+
+        con_source = source
 
     # optimize_table only uses DuckDB to read parquet files for partition
     # rewrites; the actual writes happen through PyIceberg's overwrite path.
     # RO + skip-view avoids contending with the writer lock and the view
     # refresh that we don't need here.
-    con = get_connection(source, skip_view_update=True, read_only=True)
+    con = get_connection(con_source, skip_view_update=True, read_only=True)
 
     try:
         for p_val, files in partition_groups.items():
@@ -1071,7 +1102,15 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) or {}
         cron_sync = cfg.get("provisioning", {}).get("cron_sync", {})
         data_retention_days = int(cron_sync.get("data_retention_days", 30))
+        rum_retention_days = int(cron_sync.get("rum_retention_days", data_retention_days))
         cache_retention_days = int(cron_sync.get("cache_retention_days", 90))
+        # Snapshot-history window. This — not the job's cadence — sets the
+        # steady-state snapshot count, and therefore metadata.json size and the
+        # per-commit read/parse/rewrite cost. Lowering it speeds up commits but
+        # trades away time-travel: the 2026-08 metadata rollback was only
+        # recoverable because old snapshots/metadata were still on FOS. Keep 7
+        # unless you have a specific reason.
+        keep_snapshot_days = max(1, int(cron_sync.get("keep_snapshot_days", 7)))
 
         catalog = _core_mod._get_catalog(source)
         table = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
@@ -1081,20 +1120,49 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
     results: dict[str, Any] = {}
 
     # 1. Delete old data from Iceberg table
-    if data_retention_days > 0:
-        data_cutoff_ms = int((datetime.now(UTC) - timedelta(days=data_retention_days)).timestamp() * 1000)
+    if data_retention_days > 0 or rum_retention_days > 0:
         try:
-            # Delete directly from the table using the timestamp column
-            from backend.utils.iceberg_expr import lt
+            from backend.utils.iceberg_expr import is_null, lt
 
-            table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
-            _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
-            results["data_deleted_before_days"] = data_retention_days
-            # Retention delete removes files from the snapshot — the cache's
-            # prev_files list would still reference them. Invalidate so the
-            # next _core_mod.sync_data rebuilds from a fresh manifest scan.
-            _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
-            _core_mod._view_cache.pop(source.get("name", "default"), None)
+            deleted_anything = False
+
+            if rum_retention_days > data_retention_days:
+                # Conditional Pruning: Delete regular logs older than data_retention_days
+                # but keep rows where rum_cid is NOT null (which are RUM telemetry)
+                from pyiceberg.expressions import And
+
+                try:
+                    cutoff_iso = (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()
+                    table.delete(And(lt("timestamp", cutoff_iso), is_null("rum_cid")))
+                    results["data_deleted_before_days"] = data_retention_days
+                    deleted_anything = True
+                except Exception as cond_e:
+                    logger.warning("[iceberg] Conditional deletion failed (falling back to standard): %s", cond_e)
+                    # If conditional deletion fails (e.g. rum_cid field is not in schema yet),
+                    # fall back to standard deletion of everything older than data_retention_days
+                    table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
+                    results["data_deleted_before_days"] = data_retention_days
+                    deleted_anything = True
+            elif data_retention_days > 0:
+                # Standard Flat Deletion: Delete everything older than data_retention_days
+                table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
+                results["data_deleted_before_days"] = data_retention_days
+                deleted_anything = True
+
+            # Ceiling Expiration: Delete everything (including RUM) older than rum_retention_days
+            if rum_retention_days > 0:
+                rum_cutoff_iso = (datetime.now(UTC) - timedelta(days=rum_retention_days)).isoformat()
+                table.delete(lt("timestamp", rum_cutoff_iso))
+                results["rum_deleted_before_days"] = rum_retention_days
+                deleted_anything = True
+
+            if deleted_anything:
+                _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
+                # Retention delete removes files from the snapshot — the cache's
+                # prev_files list would still reference them. Invalidate so the
+                # next _core_mod.sync_data rebuilds from a fresh manifest scan.
+                _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
+                _core_mod._view_cache.pop(source.get("name", "default"), None)
         except Exception as e:
             logger.warning("[iceberg] Data deletion skipped: %s", e)
             results["data_deletion_error"] = str(e)
@@ -1111,7 +1179,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
     #    here — expire drops only old snapshot metadata; the current snapshot's file
     #    membership is unchanged, so the snapshot fast-path stays valid. (Contrast
     #    with step 1's data-delete and the optimize-table path, which do invalidate.)
-    keep_snapshot_days = 7
+    # keep_snapshot_days resolved from cron_sync above (default 7).
     snapshot_cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
     try:
         # Load fresh from the catalog. Note: catalog is the FosSqlCatalog
