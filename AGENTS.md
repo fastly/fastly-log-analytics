@@ -744,7 +744,6 @@ These apply to every change, regardless of scope.
 5. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
 6. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
 7. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
-8. **NEVER claim any fix, optimization, or feature is verified until the code has been committed, pushed to origin, successfully deployed to the GCE production machine, and verified to have resolved the issue with actual tests and real queries on the live production service.** Never rely on local-dev verification or green unit tests to declare victory. Always chain the git push, local tests, and GCE VM deployment/validation commands into a single contiguous block of tool execution instead of pausing mid-stream.
 
 ### Code Changes
 

@@ -92,7 +92,6 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - E2e: Playwright with axe a11y + keyboard nav gates
 - Derive test fixture keys from the PRODUCER (the code that writes), not the consumer
 - `gc_collect_iterations=0` in conftest to suppress pytest9 "unclosed database" spam
-- **NEVER** claim a fix/feature is verified until committed, pushed, deployed to production GCE VM, and validated with actual queries on the live service. Always chain the git push, local tests, and GCE VM deployment/validation commands into a single contiguous block of tool execution instead of pausing mid-stream.
 
 
 ### Deployment

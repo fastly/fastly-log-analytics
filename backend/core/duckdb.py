@@ -1046,14 +1046,22 @@ def get_connection(
             _escaped_dir = _service_temp_dir.replace("'", "''")
             con.execute(f"SET temp_directory = '{_escaped_dir}';")
         except Exception as e:
-            logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+            err_msg = str(e)
+            if "cannot switch temporary directory" in err_msg.lower():
+                logger.warning(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
+            else:
+                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
 
     # Configure max temp directory size with environment override or default to 10GB
     try:
         _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
         con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
     except Exception as e:
-        logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+        err_msg = str(e)
+        if "cannot switch temporary directory" in err_msg.lower() or "cannot change" in err_msg.lower():
+            logger.warning(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
+        else:
+            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
 
     # ALWAYS update the view to ensure local buffer files
     # are included. DuckDB views are session-scoped when they reference temp tables

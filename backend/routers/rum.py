@@ -669,20 +669,36 @@ def update_rum_settings(
             logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
         raise HTTPException(status_code=500, detail={"error": f"Failed to upload RUM tracker wrapper to FOS: {e}"})
 
-    # Reconcile VCL state so the new custom condition is deployed to Fastly
-    from backend.provision.declarative.reconciler import reconcile_vcl_state
+    # Reconcile VCL state so the new custom condition is deployed to Fastly,
+    # but only if RUM was not previously enabled or if the custom condition has changed.
+    # If the custom condition is unchanged and RUM is already enabled, the VCL is
+    # already correct, and the client-side settings are fully deployed via the
+    # updated and uploaded rum-tracker.js on FOS.
+    orig_rum = original_cfg.get("rum") or {}
+    rum_was_enabled = bool(original_cfg.get("rum_enabled", False) or orig_rum.get("enabled", False))
+    condition_changed = orig_rum.get("custom_condition") != body.custom_condition
 
-    try:
-        reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
-    except Exception as e:
-        # Roll back on Fastly reconciliation failure
+    needs_reconciliation = not rum_was_enabled or condition_changed
+
+    if needs_reconciliation:
+        from backend.provision.declarative.reconciler import reconcile_vcl_state
+
         try:
-            svcconfig.save_config(service_id, original_cfg)
-        except Exception as rollback_err:
-            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-        raise HTTPException(
-            status_code=500,
-            detail={"error": f"Failed to reconcile and deploy updated RUM conditions to Fastly: {e}"},
+            reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
+        except Exception as e:
+            # Roll back on Fastly reconciliation failure
+            try:
+                svcconfig.save_config(service_id, original_cfg)
+            except Exception as rollback_err:
+                logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
+            raise HTTPException(
+                status_code=500,
+                detail={"error": f"Failed to reconcile and deploy updated RUM conditions to Fastly: {e}"},
+            )
+    else:
+        logger.info(
+            f"[rum] Bypassing Fastly VCL reconciliation for service {service_id} "
+            "because RUM is already enabled and custom_condition is unchanged."
         )
 
     return {
