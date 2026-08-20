@@ -126,8 +126,14 @@ cd /mnt/app-data/fastly-log-analytics
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 
 BEFORE="$(git rev-parse HEAD)"
-git pull || exit 1
+# Attempt pull, but if it fails (e.g. after a history squash/force-push),
+# fall back to git fetch + git reset --hard to match origin exactly.
+if ! git pull; then
+  echo "git pull failed (likely due to force-push/diverged history); resetting to origin..."
+  git fetch origin && git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD)" || exit 1
+fi
 CHANGED="$(git diff --name-only "$BEFORE" HEAD)"
+
 
 # 1. Build the app images while the current stack keeps serving.
 "${COMPOSE[@]}" build backend frontend || {
