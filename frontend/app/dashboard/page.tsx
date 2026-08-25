@@ -58,6 +58,9 @@ import DashboardClient from './_sections/DashboardClient'
 // non-loopback Host — the transport gate fails CLOSED), seedDehydratedState(null)
 // yields a null state, and DashboardBody's useDashboardBundle picks up the cold
 // client fetch unchanged.
+import { Suspense } from 'react'
+import DashboardLoading from './loading'
+
 export const dynamic = 'force-dynamic'
 
 export default async function DashboardPage({
@@ -68,8 +71,20 @@ export default async function DashboardPage({
   const params = await searchParams
   const urlServiceId = firstParam(params.service) ?? undefined
 
-  let bootstrap: any = null
-  let seed: any = null
+  return (
+    <Suspense fallback={<DashboardLoading />}>
+      <DashboardPageContent urlServiceId={urlServiceId} />
+    </Suspense>
+  )
+}
+
+async function DashboardPageContent({
+  urlServiceId,
+}: {
+  urlServiceId: string | undefined
+}) {
+  let bootstrap: unknown = null
+  let seed: { rangeToken: string; anchor: string; data: unknown } | null = null
   const now = new Date()
 
   if (urlServiceId) {
@@ -115,7 +130,7 @@ export default async function DashboardPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <DashboardClient />
+      <DashboardClient nowServerStr={now.toISOString()} />
     </HydrationBoundary>
   )
 }

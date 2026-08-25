@@ -30,21 +30,8 @@ interface MatrixVersionsCardProps {
 type MatrixVersionsResponse = components['schemas']['ScoringMatrixVersionsResponse']
 type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
 
-function formatBytes(bytes?: number | null): string {
-  if (!bytes) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-}
-
-function formatTimestamp(iso?: string | null): string {
-  if (!iso) return '—'
-  try {
-    return new Date(iso).toLocaleString()
-  } catch {
-    return iso
-  }
-}
+import { formatBytes } from '@/lib/format'
+import { formatDeterministicUTC } from '@/lib/date'
 
 export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
   const qc = useQueryClient()
@@ -166,10 +153,10 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
                     </div>
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {formatTimestamp(v.last_modified)}
+                    {formatDeterministicUTC(v.last_modified)}
                   </TableCell>
                   <TableCell className="text-xs font-mono tabular-nums">
-                    {formatBytes(v.size_bytes)}
+                    {formatBytes(v.size_bytes ?? 0)}
                   </TableCell>
                   <TableCell className="text-right">
                     <Button

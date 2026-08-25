@@ -6,7 +6,7 @@
  *
  * @vitest-environment jsdom
  */
-import { render, act, fireEvent } from '@testing-library/react'
+import { render, act, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import {
@@ -88,11 +88,12 @@ vi.mock('maplibre-gl', () => {
     }
   }
   return {
-    default: { Map: MockMap, LngLatBounds: class {}, NavigationControl: class {}, GlobeControl: class {} },
+    default: { Map: MockMap, LngLatBounds: class {}, NavigationControl: class {}, GlobeControl: class {}, setWorkerUrl: () => {} },
     Map: MockMap,
     LngLatBounds: class {},
     NavigationControl: class {},
     GlobeControl: class {},
+    setWorkerUrl: () => {},
   }
 })
 
@@ -382,9 +383,11 @@ describe('ShieldingMap component', () => {
     })
     expect(mapInstances.length).toBe(1)
     const instance = mapInstances[0]
-    expect(Object.keys(instance.sources)).toEqual(
-      expect.arrayContaining(['world', 'arcs', 'dots']),
-    )
+    await waitFor(() => {
+      expect(Object.keys(instance.sources)).toEqual(
+        expect.arrayContaining(['world', 'arcs', 'dots']),
+      )
+    })
   })
 
   it('renders the edge-only fallback when edgeOnly is true', () => {

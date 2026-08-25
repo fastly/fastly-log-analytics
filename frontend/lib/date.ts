@@ -119,12 +119,67 @@ export function getTimezoneAbbr(date: Date, tz: string) {
 }
 
 /**
- * Format a duration in seconds as the largest single unit (e.g. ``"5s"``,
- * ``"10m"``, ``"5h"``, ``"3d"``). Negative or zero values return
- * ``"any second"`` — used by countdown timers (next-run badges) that hit
+ * Format a duration in seconds as the largest single unit (e.g. "5s",
+ * "10m", "5h", "3d"). Negative or zero values return
+ * "any second" — used by countdown timers (next-run badges) that hit
  * zero before the next interval fires.
  */
 export function formatCompactDuration(seconds: number): string {
   if (seconds <= 0) return 'any second'
   return compactUnit(seconds)
+}
+
+/**
+ * Format a duration in seconds into a human-readable string with dynamic detail
+ * (e.g. "45s", "12m 30s", "3h 15m", "5d 6h").
+ */
+export function formatDuration(seconds: number | null | undefined, options?: { round?: boolean }): string {
+  if (seconds == null || seconds < 0) return '—'
+  const round = options?.round ?? true
+  const rounded = round ? Math.round(seconds) : seconds
+  if (rounded < 60) return `${rounded}s`
+
+  const m = Math.floor(rounded / 60)
+  const s = rounded % 60
+  if (m < 60) {
+    return s > 0 ? `${m}m ${s}s` : `${m}m`
+  }
+
+  const h = Math.floor(m / 60)
+  const mRemaining = m % 60
+  if (h < 24) {
+    return mRemaining > 0 ? `${h}h ${mRemaining}m` : `${h}h`
+  }
+
+  const d = Math.floor(h / 24)
+  const hRemaining = h % 24
+  return hRemaining > 0 ? `${d}d ${hRemaining}h` : `${d}d`
+}
+
+/**
+ * Safari-safe, deterministic UTC timestamp formatter.
+ * Connects the date and time parts manually to bypass browser connection-string locale drift
+ * (which throws React hydration errors on dehydrated SSR pages).
+ */
+export function formatDeterministicUTC(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return iso
+
+    const datePart = d.toLocaleDateString('en-US', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    })
+    const timePart = d.toLocaleTimeString('en-US', {
+      timeZone: 'UTC',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    return `${datePart}, ${timePart} UTC`
+  } catch {
+    return iso
+  }
 }

@@ -23,6 +23,13 @@ vi.mock('@/hooks/useBootstrap', () => ({
 vi.mock('@/hooks/useLogFieldsCatalog', () => ({
   useLogFieldsCatalog: () => useLogFieldsCatalog(),
 }))
+vi.mock('@/app/dashboard/_sections/categories', () => ({
+  CATEGORIZED_CARD_IDS: new Set([
+    'status', 'method', '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind',
+    'rid', 'prid', 'waf_sig', 'waf_req_id', 'ottfb', 'tcp_rtt'
+  ]),
+  CARD_CATEGORIES: [],
+}))
 
 function loadHook() {
   return import('@/hooks/useDashboardCards')
@@ -144,10 +151,10 @@ describe('useDashboardCards', () => {
     const { useDashboardCards } = await loadHook()
     const { result } = renderHook(() => useDashboardCards())
     const byId = Object.fromEntries(result.current.map(c => [c.id, c.inActiveFormat]))
-    expect(byId.rid).toBe(false)
-    expect(byId.prid).toBe(false)
-    expect(byId.waf_sig).toBe(false)
-    expect(byId.waf_req_id).toBe(false)
+    expect(byId.rid).toBeUndefined()
+    expect(byId.prid).toBeUndefined()
+    expect(byId.waf_sig).toBeUndefined()
+    expect(byId.waf_req_id).toBeUndefined()
     expect(byId.status).toBe(true)
   })
 
@@ -168,5 +175,39 @@ describe('useDashboardCards', () => {
     const { result } = renderHook(() => useDashboardCards())
     // status (standard) appears once; cf-1 appended; duplicate dropped.
     expect(result.current.map(c => c.id)).toEqual(['status', 'cf-1'])
+  })
+
+  it('filters out system custom fields, uncategorized built-in fields, non-dashboard user custom fields, and non-top-N metric fields', async () => {
+    useBootstrap.mockReturnValue({
+      data: {
+        active_log_field_ids: [],
+        custom_dashboard_cards: [],
+      },
+    })
+    useLogFieldsCatalog.mockReturnValue({
+      data: {
+        fields: [
+          // Categorized standard field: should be shown
+          { id: 'status', label: 'S', group: 'EDGE' },
+          // Categorized but non-top-N fields: should be hidden
+          { id: 'ottfb', label: 'Origin TTFB', group: 'L' },
+          { id: 'tcp_rtt', label: 'TCP RTT', group: 'F' },
+          // Uncategorized standard field (e.g. io_input_bytes, not in mocked categories): should be hidden
+          { id: 'io_input_bytes', label: 'IO Input', group: 'M' },
+          // System custom fields: should be hidden
+          { id: 'edge_score', label: 'Edge Score', group: 'custom', is_custom: true },
+          { id: 'cmcd_version', label: 'CMCD Version', group: 'custom', is_custom: true },
+          { id: 'rum_cid', label: 'RUM Session ID', group: 'custom', is_custom: true },
+          { id: 'fastly_req_id', label: 'Fastly Req ID', group: 'custom', is_custom: true },
+          // User custom field with show_in_dashboard=true: should be shown
+          { id: 'user_cf_1', label: 'My Custom Field', group: 'custom', is_custom: true, show_in_dashboard: true },
+          // User custom field with show_in_dashboard=false: should be hidden
+          { id: 'user_cf_2', label: 'Other Custom Field', group: 'custom', is_custom: true, show_in_dashboard: false },
+        ],
+      },
+    })
+    const { useDashboardCards } = await loadHook()
+    const { result } = renderHook(() => useDashboardCards())
+    expect(result.current.map(c => c.id)).toEqual(['status', 'user_cf_1'])
   })
 })

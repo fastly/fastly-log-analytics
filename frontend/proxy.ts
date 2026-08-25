@@ -33,7 +33,7 @@ const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 // a stray Content-Security-Policy header on every chunk download is
 // just wire noise. The matcher below also excludes them; the
 // early-return here is belt-and-braces.
-const STATIC_PATH_RE = /^\/(_next\/static|_next\/image|favicon\.ico|geo\/|public\/)/
+const STATIC_PATH_RE = /^\/(_next\/static|_next\/image|favicon\.ico|geo\/|public\/|maplibre-gl-worker\.mjs|maplibre-gl-shared\.mjs)/
 
 // Dev-only CSP escape hatches:
 //   1. WebSocket: Turbopack (and webpack-mode) HMR connects to the dev
@@ -108,7 +108,7 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const nonce = Buffer.from(crypto.randomUUID()).toString('base64')
+  const nonce = btoa(crypto.randomUUID())
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
 
@@ -145,7 +145,7 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: '/((?!_next/static|_next/image|favicon.ico|geo/|public/).*)',
+      source: '/((?!_next/static|_next/image|favicon.ico|geo/|public/|maplibre-gl-worker\\.mjs|maplibre-gl-shared\\.mjs).*)',
     },
     {
       source: '/:path*',

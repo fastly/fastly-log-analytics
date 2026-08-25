@@ -10,9 +10,45 @@ import duckdb
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import (
+    bucket_time_to_minute,
+    cache_get,
+    cache_put,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.bounded_cache import BoundedTTLCache
 
 # CMCD fields that must exist in the schema for any section to return data.
 _CMCD_REQUIRED_COL = "cmcd_sid"
+
+_RESPONSE_CACHE_TTL = 30.0
+_RESPONSE_CACHE_MAXSIZE = 128
+_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+
+
+def _response_cache_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    bucket_seconds: int,
+    top_n: int,
+    sections: set[str] | None,
+    mask_ips: bool,
+) -> str:
+    # Key field order is load-bearing (serialized as-is): s, e, f, bs, tn, sec, mi.
+    sec_val = sorted(list(sections)) if sections is not None else None
+    payload = {
+        "s": bucket_time_to_minute(start_time),
+        "e": bucket_time_to_minute(end_time),
+        "f": serialize_filters_for_key(filters),
+        "bs": bucket_seconds,
+        "tn": top_n,
+        "sec": sec_val,
+        "mi": mask_ips,
+    }
+    return digest_cache_key(payload, src)
 
 
 def get_cmcd_aggregates(
@@ -52,6 +88,20 @@ def get_cmcd_aggregates(
             "section_timings": section_timings,
             **runner.telemetry(),
         }
+
+    cache_key = _response_cache_key(
+        src=src,
+        start_time=start_time,
+        end_time=end_time,
+        filters=filters,
+        bucket_seconds=bucket_seconds,
+        top_n=top_n,
+        sections=sections,
+        mask_ips=mask_ips,
+    )
+    cached = cache_get(_response_cache, cache_key)
+    if cached is not None:
+        return {**cached, "section_timings": section_timings, **runner.telemetry()}
 
     table_name = _safe_table(src["name"])
 
@@ -217,62 +267,107 @@ def get_cmcd_aggregates(
             desc = [d[0] for d in runner.con.description]
             col_idx = {name: i for i, name in enumerate(desc)}
 
-            if want_ts["sessions_ts"]:
-                first_bucket = _bucket_expr(bucket_ms).replace("timestamp", "first_ts")
-                new_sess_sql = f"""
-                    SELECT {first_bucket} AS bucket, COUNT(*) AS new_sessions
-                    FROM (
-                        SELECT cmcd_sid, MIN(timestamp) AS first_ts
-                        FROM {t} WHERE {w} GROUP BY cmcd_sid
-                    ) sub
-                    GROUP BY 1
-                """
-                new_sess_rows = runner.execute(new_sess_sql).fetchall()
-                new_sess_map = {str(r[0]): r[1] for r in new_sess_rows}
+            if len(rows) > 0:
+                if want_ts["sessions_ts"]:
+                    first_bucket = _bucket_expr(bucket_ms).replace("timestamp", "first_ts")
+                    new_sess_sql = f"""
+                        SELECT {first_bucket} AS bucket, COUNT(*) AS new_sessions
+                        FROM (
+                            SELECT cmcd_sid, MIN(timestamp) AS first_ts
+                            FROM {t} WHERE {w} GROUP BY cmcd_sid
+                        ) sub
+                        GROUP BY 1
+                    """
+                    new_sess_rows = runner.execute(new_sess_sql).fetchall()
+                    new_sess_map = {str(r[0]): r[1] for r in new_sess_rows}
 
-                results["sessions_ts"] = [
-                    {
-                        "bucket": str(r[col_idx["bucket"]]),
-                        "concurrent_sessions": r[col_idx["concurrent_sessions"]] or 0,
-                        "rebuffer_session_pct": _round_pct(r[col_idx["rebuffer_session_pct"]]),
-                        "new_sessions": new_sess_map.get(str(r[col_idx["bucket"]]), 0),
+                    sessions_ts_dict = {
+                        str(r[col_idx["bucket"]]): {
+                            "concurrent_sessions": r[col_idx["concurrent_sessions"]] or 0,
+                            "rebuffer_session_pct": _round_pct(r[col_idx["rebuffer_session_pct"]]),
+                            "new_sessions": new_sess_map.get(str(r[col_idx["bucket"]]), 0),
+                        }
+                        for r in rows
                     }
-                    for r in rows
-                ]
-            if want_ts["buffer_health_ts"]:
-                results["buffer_health_ts"] = [
-                    {
-                        "bucket": str(r[col_idx["bucket"]]),
-                        "p50_buffer": _round_val(r[col_idx["p50_buffer"]]),
-                        "p95_buffer": _round_val(r[col_idx["p95_buffer"]]),
-                        "starvation_rate": _round_pct(r[col_idx["starvation_rate"]]),
+                    results["sessions_ts"] = _pad_timeseries(
+                        start_time,
+                        end_time,
+                        bucket_seconds,
+                        sessions_ts_dict,
+                        {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
+                    )
+                if want_ts["buffer_health_ts"]:
+                    buffer_health_dict = {
+                        str(r[col_idx["bucket"]]): {
+                            "p50_buffer": _round_val(r[col_idx["p50_buffer"]]),
+                            "p95_buffer": _round_val(r[col_idx["p95_buffer"]]),
+                            "starvation_rate": _round_pct(r[col_idx["starvation_rate"]]),
+                        }
+                        for r in rows
                     }
-                    for r in rows
-                ]
-            if want_ts["bitrate_ts"]:
-                results["bitrate_ts"] = [
-                    {
-                        "bucket": str(r[col_idx["bucket"]]),
-                        "avg_bitrate": _round_val(r[col_idx["avg_bitrate"]]),
-                        "utilization_ratio": _round_val(r[col_idx["utilization_ratio"]]),
+                    results["buffer_health_ts"] = _pad_timeseries(
+                        start_time,
+                        end_time,
+                        bucket_seconds,
+                        buffer_health_dict,
+                        {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
+                    )
+                if want_ts["bitrate_ts"]:
+                    bitrate_dict = {
+                        str(r[col_idx["bucket"]]): {
+                            "avg_bitrate": _round_val(r[col_idx["avg_bitrate"]]),
+                            "utilization_ratio": _round_val(r[col_idx["utilization_ratio"]]),
+                        }
+                        for r in rows
                     }
-                    for r in rows
-                ]
-            if want_ts["throughput_ts"]:
-                results["throughput_ts"] = [
-                    {
-                        "bucket": str(r[col_idx["bucket"]]),
-                        "p50": _round_val(r[col_idx["p50_throughput"]]),
-                        "p95": _round_val(r[col_idx["p95_throughput"]]),
-                        "p99": _round_val(r[col_idx["p99_throughput"]]),
+                    results["bitrate_ts"] = _pad_timeseries(
+                        start_time,
+                        end_time,
+                        bucket_seconds,
+                        bitrate_dict,
+                        {"avg_bitrate": None, "utilization_ratio": None},
+                    )
+                if want_ts["throughput_ts"]:
+                    throughput_dict = {
+                        str(r[col_idx["bucket"]]): {
+                            "p50": _round_val(r[col_idx["p50_throughput"]]),
+                            "p95": _round_val(r[col_idx["p95_throughput"]]),
+                            "p99": _round_val(r[col_idx["p99_throughput"]]),
+                        }
+                        for r in rows
                     }
-                    for r in rows
-                ]
-            if want_ts["startup_ts"]:
-                results["startup_ts"] = [
-                    {"bucket": str(r[col_idx["bucket"]]), "startup_ratio": _round_pct(r[col_idx["startup_ratio"]])}
-                    for r in rows
-                ]
+                    results["throughput_ts"] = _pad_timeseries(
+                        start_time,
+                        end_time,
+                        bucket_seconds,
+                        throughput_dict,
+                        {"p50": None, "p95": None, "p99": None},
+                    )
+                if want_ts["startup_ts"]:
+                    startup_dict = {
+                        str(r[col_idx["bucket"]]): {
+                            "startup_ratio": _round_pct(r[col_idx["startup_ratio"]]),
+                        }
+                        for r in rows
+                    }
+                    results["startup_ts"] = _pad_timeseries(
+                        start_time,
+                        end_time,
+                        bucket_seconds,
+                        startup_dict,
+                        {"startup_ratio": None},
+                    )
+            else:
+                if want_ts["sessions_ts"]:
+                    results["sessions_ts"] = []
+                if want_ts["buffer_health_ts"]:
+                    results["buffer_health_ts"] = []
+                if want_ts["bitrate_ts"]:
+                    results["bitrate_ts"] = []
+                if want_ts["throughput_ts"]:
+                    results["throughput_ts"] = []
+                if want_ts["startup_ts"]:
+                    results["startup_ts"] = []
             timer.mark("timeseries_combined", _t)
 
         # ── Top Content (single scan, no self-join) ───────────────────────
@@ -459,6 +554,7 @@ def get_cmcd_aggregates(
             timer.mark("session_duration_dist", _t)
 
     results["section_timings"] = section_timings
+    cache_put(_response_cache, cache_key, results, strip=("section_timings",))
     return results
 
 
@@ -488,3 +584,49 @@ def _round_pct(v: Any) -> Any:
     if v is None:
         return None
     return round(float(v), 2)
+
+
+def _pad_timeseries(
+    start_time: str | None,
+    end_time: str | None,
+    bucket_seconds: int,
+    db_rows_dict: dict[str, dict[str, Any]],
+    default_vals: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not start_time or not end_time:
+        return sorted([{"bucket": k, **v} for k, v in db_rows_dict.items()], key=lambda x: x["bucket"])
+
+    import datetime
+    from datetime import UTC
+
+    import dateutil.parser
+
+    try:
+        st = dateutil.parser.isoparse(start_time)
+        et = dateutil.parser.isoparse(end_time)
+    except Exception:
+        return sorted([{"bucket": k, **v} for k, v in db_rows_dict.items()], key=lambda x: x["bucket"])
+
+    st_epoch = int(st.timestamp())
+    st_aligned = st_epoch - (st_epoch % bucket_seconds)
+    st_dt = datetime.datetime.fromtimestamp(st_aligned, tz=UTC)
+
+    et_epoch = int(et.timestamp())
+    et_aligned = et_epoch - (et_epoch % bucket_seconds)
+    et_dt = datetime.datetime.fromtimestamp(et_aligned, tz=UTC)
+
+    padded = []
+    curr = st_dt
+    while curr <= et_dt:
+        bucket_str = curr.strftime("%Y-%m-%d %H:%M:%S")
+        if bucket_str in db_rows_dict:
+            padded.append({"bucket": bucket_str, **db_rows_dict[bucket_str]})
+        else:
+            padded.append({"bucket": bucket_str, **default_vals})
+        curr += datetime.timedelta(seconds=bucket_seconds)
+    return padded
+
+
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("cmcd._response_cache", _response_cache)

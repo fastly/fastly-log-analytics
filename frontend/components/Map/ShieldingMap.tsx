@@ -2,8 +2,9 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import * as maplibregl from 'maplibre-gl'
+
+maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { Shield, Maximize2 } from 'lucide-react'
 import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
@@ -323,9 +324,11 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
 
     if (!map.current) {
       try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       map.current = new maplibregl.Map({
         container: mapContainer.current,
         renderWorldCopies: true,
+        preserveDrawingBuffer: true,
         style: {
           version: 8,
           // Default to a 3D globe: edge→shield arcs are great-circle paths
@@ -353,7 +356,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         // buttons. In the fullscreen dialog there's nothing to scroll behind
         // it, so let a bare wheel zoom the globe directly.
         cooperativeGestures: !fillHeight,
-      })
+      } as any)
 
       map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
       // Globe ⇄ Mercator toggle button (MapLibre v5 built-in), stacked under

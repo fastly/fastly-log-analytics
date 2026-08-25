@@ -1424,6 +1424,141 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
     """
 
 
+CRAWLER_DISPARITY = """
+        WITH crawler_traffic AS (
+            SELECT
+                CASE
+                    WHEN ua ILIKE '%Claude-SearchBot%' THEN 'Anthropic (Claude)'
+                    WHEN ua ILIKE '%Amzn-SearchBot%' THEN 'Amazon (Rufus/Alexa)'
+                    WHEN ua ILIKE '%GPTBot%' OR ua ILIKE '%ChatGPT-User%' THEN 'OpenAI'
+                    WHEN ua ILIKE '%SemrushBot%' THEN 'Semrush'
+                    WHEN ua ILIKE '%AhrefsBot%' THEN 'Ahrefs'
+                    ELSE 'Other Crawler'
+                END AS bot_brand,
+                COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_crawls,
+                COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_crawls
+            FROM {table_name}
+            WHERE ua ILIKE '%bot%' OR ua ILIKE '%crawler%' OR ua ILIKE '%spider%' OR ua ILIKE '%ahrefs%' OR ua ILIKE '%semrush%'
+            GROUP BY bot_brand
+        ),
+        referred_traffic AS (
+            SELECT
+                CASE
+                    WHEN referer ILIKE '%claude.ai%' OR ua ILIKE '%Claude-User%' THEN 'Anthropic (Claude)'
+                    WHEN referer ILIKE '%amazon.com%' OR referer ILIKE '%amazon.co%' THEN 'Amazon (Rufus/Alexa)'
+                    WHEN referer ILIKE '%openai.com%' OR referer ILIKE '%chatgpt.com%' THEN 'OpenAI'
+                    WHEN referer ILIKE '%semrush.com%' THEN 'Semrush'
+                    WHEN referer ILIKE '%ahrefs.com%' THEN 'Ahrefs'
+                    ELSE 'Other Crawler'
+                END AS bot_brand,
+                COUNT(DISTINCT ip) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_referrals,
+                COUNT(DISTINCT ip) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_referrals
+            FROM {table_name}
+            WHERE ua NOT ILIKE '%bot%' AND ua NOT ILIKE '%crawler%' AND ua NOT ILIKE '%spider%'
+            GROUP BY bot_brand
+        )
+        SELECT
+            c.bot_brand AS label,
+            c.w_crawls,
+            COALESCE(r.w_referrals, 0) AS w_referrals,
+            c.w_crawls * 1.0 / GREATEST(COALESCE(r.w_referrals, 0), 1) AS crawls_per_referral,
+            c.b_crawls * 1.0 / GREATEST(COALESCE(r.b_referrals, 0), 1) AS baseline_crawls_per_referral
+        FROM crawler_traffic c
+        LEFT JOIN referred_traffic r ON c.bot_brand = r.bot_brand
+        WHERE c.w_crawls >= 100 AND (r.w_referrals IS NULL OR c.w_crawls * 1.0 / GREATEST(r.w_referrals, 1) >= 1000.0)
+        ORDER BY crawls_per_referral DESC LIMIT 10
+    """
+
+
+STALE_BROWSER_VERSION = r"""
+        WITH ua_parsed AS (
+            SELECT
+                ip,
+                ua,
+                regexp_extract(ua, 'Chrome/([0-9]+)\.', 1) AS chrome_version,
+                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {table_name}
+            WHERE ua ILIKE '%Chrome%' AND ua NOT ILIKE '%bot%' AND ua NOT ILIKE '%crawler%' AND ua NOT ILIKE '%spider%'
+        ),
+        version_aggregates AS (
+            SELECT
+                chrome_version,
+                COUNT(*) FILTER (WHERE is_w) AS w_reqs,
+                COUNT(DISTINCT ip) FILTER (WHERE is_w) AS w_ips,
+                COUNT(*) FILTER (WHERE is_b) AS b_reqs,
+                COUNT(DISTINCT ip) FILTER (WHERE is_b) AS b_ips
+            FROM ua_parsed
+            WHERE chrome_version IS NOT NULL AND chrome_version != ''
+            GROUP BY chrome_version
+        )
+        SELECT
+            'Chrome ' || chrome_version AS label,
+            w_reqs,
+            w_ips,
+            w_reqs * 1.0 / GREATEST(COALESCE(b_reqs, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1.0) AS surge_ratio
+        FROM version_aggregates
+        WHERE CAST(chrome_version AS INTEGER) < 131
+          AND w_reqs >= 500
+          AND w_reqs > COALESCE(b_reqs, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours} * 2.5
+        ORDER BY surge_ratio DESC LIMIT 10
+    """
+
+
+ORPHANED_DEEP_CRAWL = """
+        WITH deep_requests AS (
+            SELECT
+                ip,
+                url,
+                referer,
+                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {table_name}
+            WHERE url LIKE '/%/%/%'
+              AND url NOT LIKE '%.%'
+              AND (referer IS NULL OR referer = '' OR referer = '-')
+        )
+        SELECT
+            ip AS label,
+            COUNT(*) FILTER (WHERE is_w) AS w_reqs,
+            COUNT(DISTINCT url) FILTER (WHERE is_w) AS w_distinct_urls,
+            COUNT(*) FILTER (WHERE is_b) AS b_reqs,
+            w_reqs * 1.0 / GREATEST(COUNT(DISTINCT url) FILTER (WHERE is_w), 1.0) AS requests_per_url,
+            w_reqs * 1.0 / GREATEST(COALESCE(b_reqs, 0) / GREATEST({baseline_hours}, 1.0) * {window_hours}, 1.0) AS surge_ratio
+        FROM deep_requests
+        GROUP BY ip
+        HAVING w_reqs >= 50 AND COUNT(DISTINCT url) FILTER (WHERE is_w) >= 10
+        ORDER BY w_reqs DESC LIMIT 15
+    """
+
+
+RESIDENTIAL_FINGERPRINT_DISPERSION = """
+        WITH fingerprint_asn_maps AS (
+            SELECT
+                ja4,
+                ip,
+                asn,
+                p_type,
+                (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+                (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+            FROM {table_name}
+            WHERE ja4 IS NOT NULL AND ja4 != ''
+              AND (p_type IS NULL OR p_type != 'hosting')
+        )
+        SELECT
+            ja4 AS label,
+            COUNT(DISTINCT ip) FILTER (WHERE is_w) AS w_ips,
+            COUNT(DISTINCT asn) FILTER (WHERE is_w) AS w_asns,
+            COUNT(*) FILTER (WHERE is_w) AS w_requests,
+            COUNT(DISTINCT ip) FILTER (WHERE is_b) AS b_ips,
+            w_asns * 1.0 / GREATEST(COUNT(DISTINCT asn) FILTER (WHERE is_b), 1.0) AS asn_expansion_ratio
+        FROM fingerprint_asn_maps
+        GROUP BY ja4
+        HAVING w_ips >= 30 AND w_asns >= 5
+        ORDER BY asn_expansion_ratio DESC LIMIT 10
+    """
+
+
 __all__ = [
     "NEW_PROBES",
     "NEW_PROBE_REGEX",
@@ -1478,6 +1613,10 @@ __all__ = [
     "PAYLOAD_COMPRESSION_REGRESSION",
     "SESSION_HARVESTING",
     "TIMEOUT_SPLIT",
+    "CRAWLER_DISPARITY",
+    "STALE_BROWSER_VERSION",
+    "ORPHANED_DEEP_CRAWL",
+    "RESIDENTIAL_FINGERPRINT_DISPERSION",
     # repository.py templates
     "COALESCED_CITY_AGGREGATES",
     "COALESCED_URL_AGGREGATES",

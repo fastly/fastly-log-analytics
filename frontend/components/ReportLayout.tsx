@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useActiveService } from '@/hooks/useActiveService'
+import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useTimeRange } from '@/hooks/useTimeRange'
 import { useTimezone } from '@/hooks/useTimezone'
 import { useReportConfig, type ReportConfiguration } from '@/hooks/useReportConfig'
@@ -66,8 +67,8 @@ export function ReportLayout<TData = unknown>({
   children
 }: ReportLayoutProps<TData>) {
   const { startTime, endTime } = useTimeRange()
-  const { activeServiceId: storeActiveServiceId } = useActiveService()
-  const activeServiceId = serviceId !== undefined ? serviceId : storeActiveServiceId
+  const effectiveServiceId = useEffectiveServiceId()
+  const activeServiceId = (serviceId !== undefined ? serviceId : effectiveServiceId) ?? null
   const timezone = useTimezone()
   const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
   // Pass `true` so the FilterBar's "Edge only" toggle injects

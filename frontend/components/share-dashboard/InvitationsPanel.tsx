@@ -270,25 +270,27 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 )}
               </TableCell>
               <TableCell className="text-xs">
-                {(invite.service_ids || []).map((s: string) => {
-                  const nm = svcNameById.get(s)
-                  return (
-                    <Badge
-                      key={s}
-                      variant="secondary"
-                      className="mr-1 mb-1 text-[10px]"
-                      title={nm ? `${nm} (${s})` : s}
-                    >
-                      {nm ? (
-                        <>
-                          {nm} <span className="opacity-60">({s})</span>
-                        </>
-                      ) : (
-                        s
-                      )}
-                    </Badge>
-                  )
-                })}
+                <div className="flex flex-col gap-1 items-start">
+                  {(invite.service_ids || []).map((s: string) => {
+                    const nm = svcNameById.get(s)
+                    return (
+                      <Badge
+                        key={s}
+                        variant="secondary"
+                        className="text-[10px]"
+                        title={nm ? `${nm} (${s})` : s}
+                      >
+                        {nm ? (
+                          <>
+                            {nm} <span className="opacity-60">({s})</span>
+                          </>
+                        ) : (
+                          s
+                        )}
+                      </Badge>
+                    )
+                  })}
+                </div>
               </TableCell>
               <TableCell className="text-xs">{formatStamp(invite.expires_at)}</TableCell>
               <TableCell className="text-right space-x-1">

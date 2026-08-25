@@ -631,3 +631,239 @@ def test_list_views_respects_limit_param(client):
 
     assert response.status_code == 200
     assert len(response.json()) == 2
+
+
+def test_list_all_alerts_admin(client):
+    # Seed alerts under two different services
+    client.post("/api/alerts/", json=_ALERT_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
+    other_service_id = "other-service-id"
+    client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "service_id": other_service_id, "name": "Other Service Alert"},
+        headers={"x-fastly-service-id": other_service_id},
+    )
+
+    with (
+        patch("backend.routers.alerts._analyst_allowed_services", return_value=None),
+        patch(
+            "backend.repositories.alerts.svcconfig.list_configs",
+            return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
+        ),
+    ):
+        response = client.get("/api/alerts/")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    names = [a["name"] for a in data]
+    assert "High 5xx Rate" in names
+    assert "Other Service Alert" in names
+
+
+def test_list_all_alerts_analyst_filters_scope(client):
+    # Seed alerts under two different services
+    client.post("/api/alerts/", json=_ALERT_BODY, headers={"x-fastly-service-id": _SERVICE_ID})
+    other_service_id = "other-service-id"
+    client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "service_id": other_service_id, "name": "Other Service Alert"},
+        headers={"x-fastly-service-id": other_service_id},
+    )
+
+    # Scoped only to _SERVICE_ID (not other_service_id)
+    with (
+        patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
+        patch(
+            "backend.repositories.alerts.svcconfig.list_configs",
+            return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
+        ),
+    ):
+        response = client.get("/api/alerts/")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    names = [a["name"] for a in data]
+    assert "High 5xx Rate" in names
+    assert "Other Service Alert" not in names
+
+
+def test_preview_alert_anomaly_zscore(client, in_memory_duckdb):
+    _seed_preview_table(in_memory_duckdb)
+    body = _preview_body(
+        evaluation_type="anomaly_zscore",
+        baseline_period_days=7,
+        zscore_threshold=3.0,
+    )
+    with patch(
+        "backend.core.duckdb.get_source_for_service",
+        return_value={"name": "test_service", "service_id": _SERVICE_ID},
+    ):
+        resp = client.post("/api/alerts/preview", json=body)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["type"] == "anomaly_zscore"
+    assert "hist_values" in data
+    assert "threshold_values" in data
+    assert len(data["hist_values"]) == len(data["values"])
+    assert len(data["threshold_values"]) == len(data["values"])
+
+
+def test_toggle_alert_missing_service_id_returns_400(client):
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: None
+    try:
+        response = client.patch(
+            "/api/alerts/alert-id/enabled",
+            json={"enabled": False},
+            headers={"x-fastly-service-id": ""},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "service_id_required"
+    finally:
+        del app.dependency_overrides[get_service_id]
+
+
+def test_toggle_alert_analyst_not_authorized_returns_403(client):
+    # Seed alert under other_service_id
+    other_service_id = "other-service-id"
+    alert_resp = client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "service_id": other_service_id, "name": "Other Service Alert"},
+        headers={"x-fastly-service-id": other_service_id},
+    )
+    alert_id = alert_resp.json()["data"]["id"]
+
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: other_service_id
+
+    try:
+        # Analyst scoped to _SERVICE_ID trying to toggle other_service_id's alert
+        with (
+            patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
+            patch(
+                "backend.repositories.alerts.svcconfig.list_configs",
+                return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
+            ),
+        ):
+            response = client.patch(
+                f"/api/alerts/{alert_id}/enabled",
+                json={"enabled": False},
+            )
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "service_not_authorized"
+    finally:
+        del app.dependency_overrides[get_service_id]
+
+
+def test_delete_alert_missing_service_id_returns_400(client):
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: None
+    try:
+        response = client.delete(
+            "/api/alerts/alert-id",
+            headers={"x-fastly-service-id": ""},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "service_id_required"
+    finally:
+        del app.dependency_overrides[get_service_id]
+
+
+def test_delete_alert_analyst_not_authorized_returns_403(client):
+    # Seed alert under other_service_id
+    other_service_id = "other-service-id"
+    alert_resp = client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "service_id": other_service_id, "name": "Other Service Alert"},
+        headers={"x-fastly-service-id": other_service_id},
+    )
+    alert_id = alert_resp.json()["data"]["id"]
+
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: other_service_id
+
+    try:
+        # Analyst scoped to _SERVICE_ID trying to delete other_service_id's alert
+        with (
+            patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
+            patch(
+                "backend.repositories.alerts.svcconfig.list_configs",
+                return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_service_id}],
+            ),
+        ):
+            response = client.delete(f"/api/alerts/{alert_id}")
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "service_not_authorized"
+    finally:
+        del app.dependency_overrides[get_service_id]
+
+
+def test_status_cache_has_data_handles_exception(client, in_memory_duckdb):
+    _seed_preview_table(in_memory_duckdb)
+    body = _preview_body(evaluation_type="absolute")
+    with (
+        patch(
+            "backend.core.duckdb.get_source_for_service",
+            return_value={"name": "test_service", "service_id": _SERVICE_ID},
+        ),
+        patch("backend.config.get_status", side_effect=Exception("mocked status exception")),
+    ):
+        resp = client.post("/api/alerts/preview", json=body)
+    assert resp.status_code == 200
+
+
+def test_delete_view_missing_service_id_returns_400(client):
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: None
+    try:
+        response = client.delete(
+            "/api/views/view-id",
+            headers={"x-fastly-service-id": ""},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "service_id_required"
+    finally:
+        del app.dependency_overrides[get_service_id]
+
+
+def test_delete_view_analyst_not_authorized_returns_403(client):
+    # Seed a view under other_service_id
+    other_service_id = "other-service-id"
+    view_body = {
+        **_VIEW_BODY,
+        "service_id": other_service_id,
+        "name": "Other Service View",
+    }
+    view_resp = client.post(
+        "/api/views/",
+        json=view_body,
+        headers={"x-fastly-service-id": other_service_id},
+    )
+    assert view_resp.status_code == 201
+    view_id = view_resp.json()["id"]
+
+    from backend.deps import get_service_id
+    from backend.main import app
+
+    app.dependency_overrides[get_service_id] = lambda: other_service_id
+
+    try:
+        # Analyst scoped only to _SERVICE_ID trying to delete other_service_id's view
+        with (
+            patch("backend.routers.views.require_service_in_scope", return_value={_SERVICE_ID}),
+        ):
+            response = client.delete(f"/api/views/{view_id}")
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "service_not_authorized"
+    finally:
+        del app.dependency_overrides[get_service_id]

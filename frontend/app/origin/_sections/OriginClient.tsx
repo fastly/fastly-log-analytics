@@ -2,6 +2,7 @@
 
 import { useTimeseriesToTraces } from '@/hooks/useTimeseriesToTraces'
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
@@ -282,13 +283,15 @@ function OriginReportContent({
   )
 }
 
-export default function OriginClient() {
+export default function OriginClient({ nowServerStr }: { nowServerStr?: string }) {
   // Time-range wire inputs (lib/range-wire.ts; resolved in OriginReportContent
   // where startTime/endTime are available). A quick-preset pill / the cold-load
   // default → a server-reproducible token ("24h"), matching the hard-clamped
   // chart x-axis AND keeping the SSR seed key byte-matched. A custom absolute
   // range (relativeRange null + isAutoRange false) → the explicit start/end
   // bounds, so it scans exactly what it displays.
+  const mounted = useMounted()
+
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
   const storeEndTime = useFilterStore((s) => s.endTime)
@@ -300,8 +303,10 @@ export default function OriginClient() {
   // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
-    return quantizeAnchor(storeEndTime)
-  }, [storeEndTime])
+    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout

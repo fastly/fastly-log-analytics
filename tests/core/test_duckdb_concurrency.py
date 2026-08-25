@@ -115,11 +115,23 @@ def test_uses_exponential_backoff(tmp_path, monkeypatch):
     real_sleep = time.sleep
 
     def _capture_sleep(seconds):
-        sleeps.append(seconds)
+        if threading.current_thread() is threading.main_thread():
+            sleeps.append(seconds)
         # Don't actually sleep — keep the test fast.
         real_sleep(0)
 
     monkeypatch.setattr(duckdb_mod.time, "sleep", _capture_sleep)
+
+    # Trigger the False branch of _capture_sleep from a background thread
+    bg_sleeps = []
+
+    def bg_thread():
+        duckdb_mod.time.sleep(1.23)
+        bg_sleeps.append(1.23)
+
+    t = threading.Thread(target=bg_thread)
+    t.start()
+    t.join()
 
     src = _src(db_path)
     con = get_connection(src, max_wait=30.0)
@@ -127,6 +139,7 @@ def test_uses_exponential_backoff(tmp_path, monkeypatch):
 
     # Five retries → five sleeps.
     assert len(sleeps) == 5
+    assert bg_sleeps == [1.23]
     # 50ms, 100ms, 200ms, 400ms, then capped at 500ms.
     # Allow tiny floating-point fuzz.
     expected = [0.05, 0.10, 0.20, 0.40, 0.50]

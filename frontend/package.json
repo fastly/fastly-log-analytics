@@ -1,13 +1,13 @@
 {
   "name": "fastly-log-analysis-frontend",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "private": true,
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "dev": "npm run gen:types && next dev -H 127.0.0.1",
-    "build": "npm run gen:types && next build",
+    "dev": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', '');\" && npm run gen:types && next dev -H 127.0.0.1",
+    "build": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', '');\" && npm run gen:types && next build",
     "start": "next start",
     "lint": "eslint",
     "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js",
@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test --project=chromium",
     "test:e2e:all": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "postinstall": "node -e \"const fs=require('fs'); if (fs.existsSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js')) { fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', ''); }\""
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

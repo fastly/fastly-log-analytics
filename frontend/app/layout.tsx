@@ -4,6 +4,7 @@ import { cookies, headers } from "next/headers";
 import { QueryClient, dehydrate } from "@tanstack/react-query";
 import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
 import { AppLayout } from "@/components/AppLayout";

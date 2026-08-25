@@ -976,3 +976,31 @@ def test_get_fields_includes_safe_custom_fields_skips_unsafe():
     assert "bad-with-dash" not in fields
     assert "disabled_cf" not in fields
     assert "hidden_cf" not in fields
+
+
+# ── _build_copy_query and _build_copy_ip_query NULL filters ─────────────────
+
+
+def test_build_copy_query_filters_out_nulls_and_empty():
+    """Assert that _build_copy_query generates SQL that explicitly filters out
+    NULL and empty string values for the rollup field to prevent populating
+    the rollups cache with natural nulls of optional fields."""
+    from backend.core.rollups._common import _build_copy_query
+
+    sql = _build_copy_query("logs_svc", "cookie_session", "timestamp >= '2026-08-20T00:00:00'")
+
+    # Check that we have our new IS NOT NULL and NULLIF filters on cookie_session
+    assert 'AND "cookie_session" IS NOT NULL' in sql
+    assert "AND NULLIF(CAST(\"cookie_session\" AS VARCHAR), '') IS NOT NULL" in sql
+
+
+def test_build_copy_ip_query_filters_out_nulls_and_empty():
+    """Assert that _build_ip_spread_select_query generates SQL that explicitly filters out
+    NULL and empty string values for the rollup field, in addition to the standard ip filters."""
+    from backend.core.rollups._common import _build_ip_spread_select_query
+
+    sql = _build_ip_spread_select_query("logs_svc", "ja3", "timestamp >= '2026-08-20T00:00:00'")
+
+    assert 'AND "ip" IS NOT NULL' in sql
+    assert 'AND "ja3" IS NOT NULL' in sql
+    assert "AND NULLIF(CAST(\"ja3\" AS VARCHAR), '') IS NOT NULL" in sql

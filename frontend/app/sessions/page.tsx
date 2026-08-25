@@ -8,6 +8,7 @@ import dynamic from 'next/dynamic'
 import { client, extractApiError } from '@/lib/api'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { useScoringLabels } from '@/hooks/useScoringLabels'
+import { useActiveServiceCmcdEnabled } from '@/hooks/useActiveService'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/UpdatingBadge'
 import type { components } from '@/types/api.generated'
@@ -73,6 +74,7 @@ function SessionsBody({
   setMin4xxPct,
 }: SessionsBodyProps) {
   const isReady = useIsDataReady()
+  const cmcdEnabled = useActiveServiceCmcdEnabled(activeServiceId)
 
   // Mirror backend's 7-day guard client-side so the request never
   // fires on a too-wide range. Backend rejects with a 400 either
@@ -182,6 +184,7 @@ function SessionsBody({
       ) : null}
 
       <ScoringControls
+        cmcdEnabled={cmcdEnabled}
         flaggedOnly={flaggedOnly}
         setFlaggedOnly={setFlaggedOnly}
         streamingOnly={streamingOnly}

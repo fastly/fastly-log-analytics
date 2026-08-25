@@ -33,6 +33,13 @@ _logger = logging.getLogger(__name__)
 # its projection on the small-window path).
 _ROLLUP_MIN_WINDOW_SECONDS = 3 * 86400
 
+# The maximum number of top distinct User Agents (UAs) retrieved from the database
+# (via rollups or live temp tables) to pass to the regex-based classifier.
+# Lowering this from 50,000 to 2,000 reduces CPU-bound regex evaluation times
+# by up to 25x, preventing Python GIL starvation and drastically speeding up
+# the home dashboard bundle load.
+_BOT_UA_CLASSIFY_LIMIT = int(os.getenv("BOT_UA_CLASSIFY_LIMIT", "2000"))
+
 # Canonical projection order for the catalog temp. The temp materializes
 # ONLY the columns the live (rollup-missed) sections actually touch — see
 # the per-section column-needs in _build_security_response. asn / req_bytes
@@ -416,8 +423,8 @@ def get_top_bots(
                 ["ua"],
                 start_time,
                 end_time,
-                limit=50000,
-                per_field_limits={"ua": 50000},
+                limit=_BOT_UA_CLASSIFY_LIMIT,
+                per_field_limits={"ua": _BOT_UA_CLASSIFY_LIMIT},
             )
             timer.mark("top_bots:ua_rollup_query", _t)
             ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
@@ -524,7 +531,7 @@ def get_top_bots(
             if needs_filtered_ua_scan:
                 try:
                     _t = _time.perf_counter()
-                    q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table)
+                    q = SQL.TOP_UAS_BY_COUNT.format(temp_table=temp_table, limit=_BOT_UA_CLASSIFY_LIMIT)
                     rows = runner.execute(q).fetchall()
                     timer.mark("top_bots:top_uas_query", _t)
                     _t = _time.perf_counter()

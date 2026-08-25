@@ -8,6 +8,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 
 WORKDIR /app
 
+ENV UV_LINK_MODE=copy
+ENV UV_HTTP_TIMEOUT=300
+
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project

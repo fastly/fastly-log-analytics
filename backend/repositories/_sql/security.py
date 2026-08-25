@@ -18,7 +18,7 @@ TOP_UAS_BY_COUNT = """
                     WHERE ua IS NOT NULL
                     GROUP BY ua
                     ORDER BY cnt DESC
-                    LIMIT 50000
+                    LIMIT {limit}
                 """
 """Top distinct UAs by request count over the filtered temp table.
 

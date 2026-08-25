@@ -6,6 +6,7 @@ export interface Service {
   id: string
   name: string
   accessLevel?: string
+  cmcdEnabled?: boolean
 }
 
 interface ServiceState {

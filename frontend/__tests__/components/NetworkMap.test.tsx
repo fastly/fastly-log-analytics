@@ -5,7 +5,10 @@ import React from 'react'
 // Isolate the presentational overlay (loading / error / empty) from the
 // MapLibre canvas: useMapInit/useMapData touch WebGL + browser APIs jsdom
 // can't provide, so stub the GL layer and render only the React shell.
-vi.mock('maplibre-gl', () => ({ default: {} }))
+vi.mock('maplibre-gl', () => ({
+  default: { setWorkerUrl: () => {} },
+  setWorkerUrl: () => {},
+}))
 vi.mock('@/components/Map/NetworkMap/MapLayer', () => ({
   formatBucket: (b: string) => String(b),
   useMapInit: () => {},

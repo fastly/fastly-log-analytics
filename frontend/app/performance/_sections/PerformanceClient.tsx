@@ -2,6 +2,7 @@
 
 import { SlowestUrlsHelp, SlowestNetworksHelp, CacheTtlHelp, OriginVsEdgeHelp } from "../help-content";
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
@@ -315,7 +316,7 @@ function PerformanceBody({
   )
 }
 
-export default function PerformanceClient() {
+export default function PerformanceClient({ nowServerStr }: { nowServerStr?: string }) {
   const getFieldLabel = useFieldLabel()
 
   const [urlVisibility, setUrlVisibility, onUrlVisChange] = useColumnVisibility()
@@ -326,6 +327,8 @@ export default function PerformanceClient() {
   // ("24h"), keeping the SSR seed key byte-matched. A custom absolute range
   // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
   // the latency tables/distributions reflect exactly the selected window.
+  const mounted = useMounted()
+
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
   const storeEndTime = useFilterStore((s) => s.endTime)
@@ -337,8 +340,10 @@ export default function PerformanceClient() {
   // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
-    return quantizeAnchor(storeEndTime)
-  }, [storeEndTime])
+    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout

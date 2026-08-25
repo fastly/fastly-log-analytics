@@ -26,6 +26,7 @@ afterEach(() => cleanup())
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof ScoringControls>> = {}) {
   return {
+    cmcdEnabled: false,
     flaggedOnly: false,
     setFlaggedOnly: vi.fn(),
     streamingOnly: false,
@@ -153,5 +154,15 @@ describe('ScoringControls', () => {
       <ScoringControls {...baseProps({ isFetching: true, isLoadingInitial: false })} />,
     )
     expect(container.querySelector('.opacity-40')).toBeInTheDocument()
+  })
+
+  it('renders the streaming sessions switch when cmcdEnabled is true', () => {
+    render(<ScoringControls {...baseProps({ cmcdEnabled: true })} />)
+    expect(screen.getByText(/streaming sessions/i)).toBeInTheDocument()
+  })
+
+  it('does not render the streaming sessions switch when cmcdEnabled is false', () => {
+    render(<ScoringControls {...baseProps({ cmcdEnabled: false })} />)
+    expect(screen.queryByText(/streaming sessions/i)).toBeNull()
   })
 })

@@ -1688,15 +1688,20 @@ class QueryRunner:
                 # construction so a hostile field name can never reach the
                 # SQL builder via this fast path — audit finding 004.
                 #
-                # Narrow the LIVE top-up to fields the dashboard actually renders
-                # as facet panels: skip per-request identifiers / raw metrics
-                # (_LIVE_TOPN_SKIP_FIELDS) whose live current-hour top-N nobody
-                # sees but whose near-unique GROUP-BYs dominate the cost. The
-                # rollup path above is untouched (still uses safe_fields), so a
-                # skipped field is simply rollup-only — no rendered panel loses
-                # current-hour freshness. Narrowing here also keeps the
-                # high-cardinality columns out of the active-hour temp itself.
-                live_topn_fields = [f for f in safe_fields if f not in _LIVE_TOPN_SKIP_FIELDS]
+                lf_config = self.src.get("log_fields") or {}
+                custom_fields = {
+                    cf["name"]
+                    for cf in lf_config.get("custom_fields", [])
+                    if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
+                }
+                live_topn_fields = []
+                for f in safe_fields:
+                    if f in _LIVE_TOPN_SKIP_FIELDS:
+                        continue
+                    if f.startswith("cmcd_") or f.startswith("edge_") or f.startswith("rum_") or f == "fastly_req_id":
+                        if f not in custom_fields:
+                            continue
+                    live_topn_fields.append(f)
                 _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
                 if tmp_name is None:
@@ -1836,7 +1841,20 @@ class QueryRunner:
                         schema_types = schema_types_seed
                     else:
                         schema_types = {col["name"]: col["type"] for col in _get_schema(self.con, self.src)}
-                heal_topn_fields = [f for f in safe_fields if f not in _LIVE_TOPN_SKIP_FIELDS]
+                lf_config = self.src.get("log_fields") or {}
+                custom_fields = {
+                    cf["name"]
+                    for cf in lf_config.get("custom_fields", [])
+                    if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
+                }
+                heal_topn_fields = []
+                for f in safe_fields:
+                    if f in _LIVE_TOPN_SKIP_FIELDS:
+                        continue
+                    if f.startswith("cmcd_") or f.startswith("edge_") or f.startswith("rum_") or f == "fastly_req_id":
+                        if f not in custom_fields:
+                            continue
+                    heal_topn_fields.append(f)
                 # Clamp to the requested window so a mid-hour window edge
                 # (custom range) can't over-count rows outside it; the IN
                 # list prunes to exactly the un-rolled hours in between.
@@ -2227,11 +2245,115 @@ class QueryRunner:
             )
         return out
 
+    def try_count_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        table_name: str,
+        where_clause: str,
+        params: list,
+        unfiltered_window: bool = False,
+    ) -> int | None:
+        """Serve the total requests count from per-hour rollup parquets when eligible.
+
+        Returns the total row count (int), or None to fall back to raw query.
+        """
+        import os
+        from datetime import UTC, datetime, timedelta
+
+        from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+        from backend.utils.date_utils import parse_iso_utc
+
+        if not unfiltered_window:
+            return None
+        if not start_time or not end_time:
+            return None
+
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None:
+            return None
+        if et <= st:
+            return None
+        if (et - st) > timedelta(days=366):
+            return None
+
+        bundled_root = _hour_bundled_root(self.src)
+        if not os.path.isdir(bundled_root):
+            return None
+
+        active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+        active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        if collected is None:
+            return None
+        rollup_paths, crosses_active = collected
+
+        if not rollup_paths and not crosses_active:
+            return None
+
+        st_tz = st.astimezone(UTC).isoformat()
+        et_tz = et.astimezone(UTC).isoformat()
+
+        select_clauses: list[str] = []
+        if rollup_paths:
+            paths_sql = quote_path_list(rollup_paths)
+            select_clauses.append(
+                f"SELECT COALESCE(SUM(requests), 0) AS num "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
+                f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
+            )
+
+        direct_live_tmp: str | None = None
+        live_needs_params = False
+        if crosses_active:
+            live_start = max(st, active_hour_dt)
+            live_end = et
+            live_st_tz = live_start.astimezone(UTC).isoformat()
+            live_et_tz = live_end.astimezone(UTC).isoformat()
+
+            if unfiltered_window:
+                try:
+                    direct_live_tmp = self._create_active_hour_temp_direct([], [], live_start, live_end)
+                except Exception:
+                    direct_live_tmp = None
+            if direct_live_tmp is not None:
+                live_source, live_where = direct_live_tmp, "1=1"
+            else:
+                live_source, live_where = table_name, where_clause
+                live_needs_params = True
+
+            select_clauses.append(
+                f"SELECT COUNT(*) AS num "
+                f"FROM {live_source} "
+                f"WHERE {live_where} "
+                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
+            )
+
+        if not select_clauses:
+            return 0
+
+        unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
+        final_sql = f"SELECT COALESCE(SUM(num), 0) FROM ({unioned})"
+
+        try:
+            return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
+        except Exception as e:
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug("[count_rollup] read failed, falling back to raw: %s", e)
+            return None
+        finally:
+            if direct_live_tmp is not None:
+                self.release_active_direct_temp(direct_live_tmp)
+
     # Minimum window-hours below which the rollup read isn't worth the
     # closed-hour enumeration. The slow_urls panel hits raw under 48 h
     # in well under a second on most services, so the rollup path is
     # for the 7 d / 30 d cases that actually hurt.
-    _SLOW_URLS_ROLLUP_MIN_HOURS = 48
+    _SLOW_URLS_ROLLUP_MIN_HOURS = 24
 
     def _eligible_rollup_window(
         self,
@@ -3221,6 +3343,7 @@ class QueryRunner:
         end_time: str | None,
         *,
         has_filters: bool,
+        bucket_seconds: int = 3600,
     ) -> list | None:
         """Serve the /api/network-health ``heatmap`` section (and the
         derived ``leaderboard`` / ``summary`` / ``buckets`` sections)
@@ -3242,6 +3365,9 @@ class QueryRunner:
         ``None`` on any eligibility miss / read error.
         """
         from backend.core.rollups._common import NETWORK_HEATMAP_BUNDLE_FILENAME
+
+        if bucket_seconds != 3600:
+            return None
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
         if win is None:
@@ -3290,6 +3416,7 @@ class QueryRunner:
         *,
         map_asn: str = "all",
         has_filters: bool,
+        bucket_seconds: int = 3600,
     ) -> tuple[list, list] | None:
         """Serve the /api/network-health ``map_buckets`` + ``cities`` +
         ``metro_leaderboard`` sections from per-hour network_geo parquets.
@@ -3313,6 +3440,9 @@ class QueryRunner:
         Returns ``None`` on any eligibility miss / read error.
         """
         from backend.core.rollups._common import NETWORK_GEO_BUNDLE_FILENAME
+
+        if bucket_seconds != 3600:
+            return None
 
         if map_asn != "all":
             return None  # per-ASN map drill-down not supported by geo rollup
@@ -4328,30 +4458,35 @@ class QueryRunner:
             col_type = schema_types.get(sql_col, "VARCHAR")
             field_limit = int(_pfl.get(field, limit))
 
-            # Normalized VARCHAR value expression for this field. Empty-string
-            # folding for VARCHAR cols is done via NULLIF so the
-            # ``WHERE value IS NOT NULL`` filter handles both null and
-            # empty-string in one place.
+            # Escape single quotes defensively on field names
+            field_lit = field.replace("'", "''")
+
+            # Simplify projection and filter predicates to allow direct column
+            # scan pushdown inside DuckDB, avoiding intermediate subqueries/views.
             if col_type == "VARCHAR":
-                value_expr = f"NULLIF({sql_col}, '')"
+                branches.append(
+                    f"(SELECT '{field_lit}' AS field, \"{sql_col}\" AS value, count(*) AS c "
+                    f"FROM {table_name} "
+                    f'WHERE "{sql_col}" IS NOT NULL AND "{sql_col}" != \'\' '
+                    f"GROUP BY 2 "
+                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
+                )
             elif field in INT_AGGREGATE_FIELDS:
-                value_expr = (
-                    f"CASE WHEN {sql_col} IS NULL THEN NULL ELSE CAST(CAST(ROUND({sql_col}) AS INTEGER) AS VARCHAR) END"
+                branches.append(
+                    f"(SELECT '{field_lit}' AS field, CAST(CAST(ROUND(\"{sql_col}\") AS INTEGER) AS VARCHAR) AS value, count(*) AS c "
+                    f"FROM {table_name} "
+                    f'WHERE "{sql_col}" IS NOT NULL '
+                    f"GROUP BY 2 "
+                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
                 )
             else:
-                value_expr = f"CAST({sql_col} AS VARCHAR)"
-
-            # Field name reaches the SQL as a string literal. _is_safe_ident
-            # already restricted it to a safe identifier; escape single quotes
-            # defensively anyway.
-            field_lit = field.replace("'", "''")
-            branches.append(
-                f"(SELECT '{field_lit}' AS field, value, count(*) AS c "
-                f"FROM (SELECT {value_expr} AS value FROM {table_name}) "
-                f"WHERE value IS NOT NULL "
-                f"GROUP BY value "
-                f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
-            )
+                branches.append(
+                    f"(SELECT '{field_lit}' AS field, CAST(\"{sql_col}\" AS VARCHAR) AS value, count(*) AS c "
+                    f"FROM {table_name} "
+                    f'WHERE "{sql_col}" IS NOT NULL '
+                    f"GROUP BY 2 "
+                    f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
+                )
             field_order.append(field)
 
         if not branches:

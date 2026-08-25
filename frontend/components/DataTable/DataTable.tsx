@@ -45,8 +45,10 @@ import { DataTableBody } from './DataTableBody'
 import { DataTablePagination } from './DataTablePagination'
 import { useDataTableState } from './useDataTableState'
 import { reportUxEvent } from '@/lib/ux-telemetry'
+import { cn } from '@/lib/utils'
 
 interface DataTableProps<TData, TValue> {
+  tableContainerClassName?: string
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
   searchKey?: string
@@ -86,6 +88,7 @@ interface DataTableProps<TData, TValue> {
 }
 
 function DataTableImpl<TData, TValue>({
+  tableContainerClassName,
   columns,
   data,
   searchKey,
@@ -338,7 +341,7 @@ function DataTableImpl<TData, TValue>({
         onDragEnd={handleDragEnd}
         sensors={sensors}
       >
-        <div ref={tableContainerRef} className="rounded-md border overflow-auto w-full max-h-[min(600px,calc(100dvh-200px))]">
+        <div ref={tableContainerRef} className={cn("rounded-md border overflow-auto w-full", tableContainerClassName || "max-h-[min(600px,calc(100dvh-200px))]")}>
           <Table style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
             <caption className="sr-only">
               {tableCaption || (typeof title === 'string' ? title : 'Data Table')}

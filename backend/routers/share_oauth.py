@@ -242,7 +242,7 @@ def oauth_authorize(
         value=sealed,
         max_age=flow_state.COOKIE_MAX_AGE_S,
         httponly=True,
-        secure=True,
+        secure=request.url.scheme == "https",
         samesite="lax",  # REQUIRED: sent on the top-level redirect back from the IdP
         path=flow_state.COOKIE_PATH,
     )
@@ -374,7 +374,7 @@ def oauth_callback(
         key=target_cookie,
         value=session.session_id,
         httponly=True,
-        secure=True,
+        secure=request.url.scheme == "https",
         # SameSite=Lax (NOT Strict, unlike the passcode path): the landing after
         # this 302 is a top-level navigation whose chain was INITIATED cross-site
         # by the IdP, so a Strict cookie would be withheld on that first request

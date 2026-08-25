@@ -1782,3 +1782,161 @@ registry.register(
         severity_logic=timeout_split_severity,
     )
 )
+
+
+# ── 46. Crawler Referral Disparity ───────────────────────────────────────────
+
+
+def crawler_disparity_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [bot_brand, w_crawls, w_referrals, crawls_per_referral, baseline_crawls_per_referral]
+    brand = row[0] or "Other Crawler"
+    w_crawls = int(row[1] or 0)
+    w_referrals = int(row[2] or 0)
+    c_per_r = float(row[3] or 0)
+    b_c_per_r = float(row[4] or 0)
+    return {
+        "label": brand,
+        "current_val": c_per_r,
+        "baseline_val": b_c_per_r,
+        "unit": "crawls/referral",
+        "meta": {
+            "crawls": w_crawls,
+            "referrals": w_referrals,
+            "crawls_per_referral": c_per_r,
+            "baseline_crawls_per_referral": b_c_per_r,
+        },
+        "severity": "critical" if c_per_r >= 10000 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="crawler_disparity",
+        category=InsightCategory.security,
+        title="Crawler Referral Disparity",
+        description="Identifies crawlers performing high-volume scraping while driving negligible human referral traffic back to the platform",
+        sql_template=SQL.CRAWLER_DISPARITY,
+        required_fields=["ua", "referer", "ip", "timestamp"],
+        row_processor=crawler_disparity_processor,
+    )
+)
+
+
+# ── 47. Stale Headless Browser version ──────────────────────────────────────
+
+
+def stale_browser_version_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [label, w_reqs, w_ips, surge_ratio]
+    label = row[0] or "Unknown Chrome"
+    w_reqs = int(row[1] or 0)
+    w_ips = int(row[2] or 0)
+    surge = float(row[3] or 0)
+    return {
+        "label": label,
+        "current_val": w_reqs,
+        "baseline_val": w_ips,
+        "baseline_label": "distinct IPs",
+        "unit": "requests",
+        "meta": {
+            "requests": w_reqs,
+            "ips": w_ips,
+            "surge_ratio": surge,
+        },
+        "severity": "critical" if surge >= 5.0 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="stale_browser_version",
+        category=InsightCategory.security,
+        title="Stale Headless Browser",
+        description="Detects anomalous clusters of request traffic using stale Chrome major versions, a standard fingerprint for un-updated Puppeteer/Playwright headless bots",
+        sql_template=SQL.STALE_BROWSER_VERSION,
+        required_fields=["ua", "ip", "timestamp"],
+        row_processor=stale_browser_version_processor,
+    )
+)
+
+
+# ── 48. Orphaned Deep Crawl ──────────────────────────────────────────────────
+
+
+def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ip, w_reqs, w_distinct_urls, b_reqs, requests_per_url, surge_ratio]
+    ip = row[0]
+    if context.get("mask_ips") and ip:
+        ip = mask_ip(ip)
+    w_reqs = int(row[1] or 0)
+    w_distinct = int(row[2] or 0)
+    b_reqs = int(row[3] or 0)
+    reqs_per_url = float(row[4] or 0)
+    surge = float(row[5] or 0)
+    return {
+        "label": ip or "(unknown)",
+        "current_val": w_reqs,
+        "baseline_val": b_reqs,
+        "unit": "requests",
+        "meta": {
+            "requests": w_reqs,
+            "distinct_urls": w_distinct,
+            "requests_per_url": reqs_per_url,
+            "surge_ratio": surge,
+            "filters": {"ip": row[0]},
+        },
+        "severity": "critical" if reqs_per_url >= 20.0 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="orphaned_deep_crawl",
+        category=InsightCategory.security,
+        title="Orphaned Deep Crawl",
+        description="Flags client IPs performing direct, deep scans of nested catalog/database resource routes with empty HTTP referer headers",
+        sql_template=SQL.ORPHANED_DEEP_CRAWL,
+        required_fields=["ip", "url", "referer", "timestamp"],
+        row_processor=orphaned_deep_crawl_processor,
+    )
+)
+
+
+# ── 49. Residential Fingerprint Dispersion ───────────────────────────────────
+
+
+def residential_fingerprint_dispersion_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
+    # row schema: [ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion_ratio]
+    ja4 = row[0] or "(empty)"
+    w_ips = int(row[1] or 0)
+    w_asns = int(row[2] or 0)
+    w_requests = int(row[3] or 0)
+    b_ips = int(row[4] or 0)
+    asn_expansion = float(row[5] or 0)
+    return {
+        "label": ja4,
+        "current_val": w_asns,
+        "baseline_val": b_ips,
+        "baseline_label": "baseline IPs",
+        "unit": "ASNs",
+        "meta": {
+            "ja4": ja4,
+            "ips": w_ips,
+            "asns": w_asns,
+            "requests": w_requests,
+            "asn_expansion_ratio": asn_expansion,
+        },
+        "severity": "critical" if asn_expansion >= 3.0 else "warning",
+    }
+
+
+registry.register(
+    InsightDefinition(
+        id="residential_fingerprint_dispersion",
+        category=InsightCategory.security,
+        title="Residential Fingerprint Dispersion",
+        description="Identifies identical TLS/TCP client handshakes distributed across multiple residential ASNs, signaling rotated botnet scans evading ASN blocks",
+        sql_template=SQL.RESIDENTIAL_FINGERPRINT_DISPERSION,
+        required_fields=["ja4", "ip", "asn", "p_type", "timestamp"],
+        row_processor=residential_fingerprint_dispersion_processor,
+    )
+)

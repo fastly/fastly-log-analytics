@@ -14,6 +14,7 @@ import {
   Lock,
   Bot,
   KeyRound,
+  Globe,
 } from 'lucide-react'
 import type { InsightContent } from '../types'
 
@@ -399,6 +400,244 @@ export function getSecurityContent(id: string): InsightContent | null {
               <li className="flex gap-3">
                 <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
                 <span><strong>Privacy:</strong> the client IP on this card is masked for analysts (like every IP-keyed insight), and the session hash itself is never surfaced.</span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'crawler_disparity':
+      return {
+        title: 'Crawler Referral Disparity',
+        icon: <Bot className="h-5 w-5 text-primary" />,
+        fields: ['ua', 'referer', 'ip', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Identifies crawlers performing intensive, high-volume scraping while driving virtually zero human referrals or organic traffic back to your platform.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Bot className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>High-Volume Scraping:</strong> Automated crawlers and AI bots crawl your pages at a high rate, consuming significant server and network resources.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Search className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Negligible Referral Traffic:</strong> A genuine search crawler drives actual user referral clicks (where User-Agent is human and HTTP referer matches the search engine). If the crawls-to-referral ratio is extremely high, the bot is extracting data without providing any marketing or SEO value.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Update your <code>robots.txt</code> to block or throttle aggressive crawler user-agents, or deploy rate-limiting rules at the Fastly CDN edge to protect your resources.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'stale_browser_version':
+      return {
+        title: 'Stale Headless Browser',
+        icon: <Fingerprint className="h-5 w-5 text-primary" />,
+        fields: ['ua', 'ip', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Detects anomalous clusters of request traffic using stale Chrome major versions, a classic signature of un-updated Puppeteer/Playwright headless bots.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Outdated User-Agents:</strong> Real human users naturally auto-update to the latest Chrome major versions. In contrast, automated scraping farms and vulnerability scanners typically run inside static Docker containers configured with older, pinned browser versions.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>High-Signal Threat:</strong> A sudden spike in requests using old major releases (e.g. Chrome 100) indicates coordinated automated scanning or content scraping.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Lock className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Set up edge challenge policies (e.g., CAPTCHA or JS challenge) for requests matching extremely outdated browser versions, or use client-side fingerprinting to verify the TLS stack.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'orphaned_deep_crawl':
+      return {
+        title: 'Orphaned Deep Crawl',
+        icon: <Search className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'url', 'referer', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Flags specific client IP addresses that are performing deep, direct scans of nested catalog or resource database routes with empty HTTP referer headers.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Globe className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Direct Link Traversals:</strong> Human browsing naturally flows from landing pages to categories and finally to items, generating consecutive HTTP <code>Referer</code> headers. Scrapers and API harvesters bypass these pathways, hitting nested resource links directly.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Pricing & Inventory Scraping:</strong> High counts of direct catalog requests with empty referers strongly signal automated inventory, pricing, or catalog scraping.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Set up Fastly rate limits or challenge triggers targeting direct traversals of nested resource pages that lack referer headers.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'residential_fingerprint_dispersion':
+      return {
+        title: 'Residential Fingerprint Dispersion',
+        icon: <ShieldAlert className="h-5 w-5 text-primary" />,
+        fields: ['ja4', 'ip', 'asn', 'p_type', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Identifies identical client TLS/TCP handshakes (JA4/JA3) distributed across multiple residential ASNs, signaling rotated botnet scans evading per-IP limits.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Fingerprint className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>TLS Handshake Tracking:</strong> Traditional per-IP blocks are ineffective against botnets using residential proxy pools (rotating through home IPs). However, the botnet client&apos;s TLS stack (ciphers, curves, extensions) remains static, producing identical JA4 handshakes.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>ASN Dispersion:</strong> Finding the exact same JA4 handshake footprint operating concurrently across many distinct residential ASNs is statistically impossible for real users and confirms a rotating botnet.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Lock className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Rate-limit or block the specific JA4 handshake fingerprint directly at the edge, rendering their rotating IP proxy pool completely ineffective.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'cipher_spread':
+      return {
+        title: 'Cipher Fingerprint Clustering',
+        icon: <Fingerprint className="h-5 w-5 text-primary" />,
+        fields: ['tls_ciphers_sha', 'ip', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Flags client TLS cipher suites being used by an unusually large and spiking number of distinct IP addresses.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Fingerprint className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Unique TLS Signature:</strong> Client TLS libraries present a specific list and order of cipher suites during the TLS handshake. A coordinated botnet or scraping application built using a specific library (e.g. Go, Python HTTP client, older OpenSSL version) exhibits the exact same TLS cipher footprint.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Coordinated Attack Signature:</strong> If a rare or specific cipher suite list suddenly experiences a massive spike in unique source IPs, it confirms a highly distributed, coordinated bot campaign.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Lock className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Create custom edge challenge rules or ACL blocks matching the flagged cipher list or JA3/JA4 fingerprint representing the bot cluster.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'connection_abuse':
+      return {
+        title: 'Connection Reuse Anomaly',
+        icon: <Activity className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'conn_requests', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Detects client IP addresses making an exceptionally high number of HTTP requests over a single TCP connection, well beyond the standard baseline.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Server className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Connection Reuse Patterns:</strong> Standard web browsers naturally reuse TCP connections (keep-alive) but limit requests per connection (usually 10 to 100) before opening new ones or refreshing. Automated scripts, scraper pipelines, or DoS tools bypass this, pushing thousands of requests over a single persistent TCP tunnel.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Infrastructure Strain:</strong> Connection reuse abuse can saturate origin threads and keep CDN/WAF resources open indefinitely, leading to resource starvation on upstream application servers.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Set maximum request limits per connection in your origin or CDN configuration, challenging or disconnecting clients exceeding standard browser thresholds.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'request_size_anomaly':
+      return {
+        title: 'Oversized Request Headers',
+        icon: <AlertTriangle className="h-5 w-5 text-primary" />,
+        fields: ['ip', 'req_header_bytes', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Flags client IPs transmitting HTTP request headers that are significantly larger than your baseline distribution, signaling potential DoS or data exfiltration.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Lock className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Header Size Abuse:</strong> Extremely large request headers (e.g. bloated Cookie fields, custom authorization payload stuffing) can trigger buffer overflows or crash upstream web servers (known as HTTP Request Smuggling or Slowloris variants).
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Data Exfiltration/Exploitation:</strong> Malicious actors also pack structured data or exploit payloads into request headers to bypass standard URL-based WAF rule checks.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Enforce strict request header size limits (e.g., maximum 8KB or 16KB total) at the Fastly edge, rejecting oversized headers with an immediate HTTP 400 or 431 Bad Request.
+                </span>
               </li>
             </ul>
           </div>

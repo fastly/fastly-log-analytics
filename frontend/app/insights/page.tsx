@@ -2,7 +2,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import { fetchInsightsServerSide } from '@/lib/ssr/insights'
-import { seedDehydratedState } from '@/lib/ssr/seed'
+import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import InsightsClient from './_sections/InsightsClient'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights
@@ -31,10 +31,17 @@ import InsightsClient from './_sections/InsightsClient'
 // state, and InsightsClient's useQuery picks up the cold client fetch unchanged.
 export const dynamic = 'force-dynamic'
 
-export default async function InsightsPage() {
+export default async function InsightsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[] }>
+}) {
+  const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
   const serviceId =
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ?? undefined
+    firstParam(params.service) ??
+    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
+    undefined
   const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
   const seed = await fetchInsightsServerSide(serviceId, logExtents)

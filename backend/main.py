@@ -8,7 +8,11 @@ Run from the project root:
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+
+# Explicitly register .mjs as application/javascript to pass strict browser MIME checks
+mimetypes.add_type("application/javascript", ".mjs")
 
 # Mitigate macOS malloc/free C++ heap corruption (Abort trap 6)
 # DuckDB and PyArrow both use jemalloc internally which causes fatal crashes
@@ -589,7 +593,7 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.4.0",
+    version="2.4.1",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
@@ -975,7 +979,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.4.0"
+    _APP_VERSION = "2.4.1"
 
 
 # Documents the canonical error codes this probe can surface — notably the

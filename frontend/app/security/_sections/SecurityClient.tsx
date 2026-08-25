@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import dynamic from 'next/dynamic'
 import { useTimezone } from '@/hooks/useTimezone'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
@@ -256,7 +257,7 @@ function SecurityBody({
   )
 }
 
-export default function SecurityClient() {
+export default function SecurityClient({ nowServerStr }: { nowServerStr?: string }) {
   const getFieldLabel = useFieldLabel()
   const timezone = useTimezone()
 
@@ -266,6 +267,8 @@ export default function SecurityClient() {
   // AND keeping the SSR seed key byte-matched. A custom absolute range
   // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
   // it scans exactly what it displays.
+  const mounted = useMounted()
+
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
   const storeEndTime = useFilterStore((s) => s.endTime)
@@ -277,8 +280,9 @@ export default function SecurityClient() {
   // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
   // byte-matches within the quantum.
   const anchor = React.useMemo(() => {
-    return quantizeAnchor(storeEndTime)
-  }, [storeEndTime])
+    const baseStr = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
   const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()
