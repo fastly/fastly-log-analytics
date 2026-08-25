@@ -121,3 +121,34 @@ def test_network_health_shielding_failure_returns_error_sentinel(client, in_memo
     assert sa is not None
     assert sa["error"] is True
     assert sa["has_data"] is False
+
+
+def test_get_pop_health_returns_data(client, in_memory_duckdb, test_service_source):
+    from datetime import UTC, datetime, timedelta
+
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["pop"] = "IAD"
+        log["status"] = 200
+        log["tcp_rtt"] = 12000
+        log["ttfb"] = 50.0
+        log["cache"] = "HIT"
+        log["resp_bytes"] = 1000
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    now = datetime.now(UTC)
+    st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
+    et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
+
+    response = client.get(
+        f"/api/network/pop-health?start_time={st}&end_time={et}",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) > 0
+    assert data[0]["pop"] == "IAD"
+    assert data[0]["requests"] == 5
+    assert data[0]["errors"] == 0
+    assert data[0]["cache_hit_rate"] == 100.0

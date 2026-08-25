@@ -282,6 +282,8 @@ function useMapDataHarness(opts: {
     // dance for these data-only assertions.
     const mod = maplibreMockFactory()
     map.current = new (mod.default.Map as any)({ container: document.createElement('div') })
+    map.current.addSource('heatmap', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.current.addLayer({ id: 'countries', type: 'fill', source: 'heatmap' })
   }
 
   useMapData({

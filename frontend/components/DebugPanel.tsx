@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/debugStore'
 import { Button } from '@/components/ui/button'
-import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2, Copy, Check } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
@@ -14,6 +14,58 @@ import type { components } from '@/types/api.generated'
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
+interface DebugQuery {
+  id: string
+  sql: string
+  time_ms: number
+  is_cached?: boolean
+}
+
+interface DebugCall {
+  id: string
+  service: string
+  caller?: string
+  method: string
+  path: string
+  status: string
+  time_ms: number
+  details?: string
+}
+
+interface CopyButtonProps {
+  text: string
+}
+
+function CopyButton({ text }: CopyButtonProps) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy text: ', err)
+    }
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="h-5 w-5 text-muted-foreground hover:text-foreground hover:bg-muted ml-1 shrink-0"
+      onClick={handleCopy}
+      title="Copy for AI Analysis"
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-green-500" />
+      ) : (
+        <Copy className="h-3 w-3" />
+      )}
+    </Button>
+  )
+}
+
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
@@ -21,8 +73,8 @@ export function DebugPanel() {
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
   const pathname = usePathname()
   const queryClient = useQueryClient()
-  const [queries, setQueries] = useState<any[]>([])
-  const [calls, setCalls] = useState<any[]>([])
+  const [queries, setQueries] = useState<DebugQuery[]>([])
+  const [calls, setCalls] = useState<DebugCall[]>([])
   // SQLite scope: 'page' shows the statements embedded in this page's API
   // responses (_debug_sqlite, request-scoped on the backend); 'buffer'
   // shows the process-global ring buffer, which includes cron/background
@@ -36,8 +88,8 @@ export function DebugPanel() {
   // arrays and call setQueries/setCalls with fresh references, which
   // re-rendered, which re-fired the cache subscribers, which looped to
   // "Maximum update depth exceeded" in dev.
-  const queriesRef = useRef<any[]>([])
-  const callsRef = useRef<any[]>([])
+  const queriesRef = useRef<DebugQuery[]>([])
+  const callsRef = useRef<DebugCall[]>([])
   const sqlitePageRef = useRef<SqliteEntry[]>([])
 
   // SQLite ring-buffer poll. Only active when SQL debug is on AND the
@@ -102,14 +154,21 @@ export function DebugPanel() {
       return
     }
 
-    const sameQueries = (a: any[], b: any[]) => {
+    interface DebugData {
+      _debug_queries?: DebugQuery[]
+      _debug_calls?: DebugCall[]
+      _debug_sqlite?: SqliteEntry[]
+      _is_cached?: boolean
+    }
+
+    const sameQueries = (a: DebugQuery[], b: DebugQuery[]) => {
       if (a.length !== b.length) return false
       for (let i = 0; i < a.length; i++) {
         if (a[i].sql !== b[i].sql || a[i].time_ms !== b[i].time_ms || a[i].is_cached !== b[i].is_cached) return false
       }
       return true
     }
-    const sameCalls = (a: any[], b: any[]) => {
+    const sameCalls = (a: DebugCall[], b: DebugCall[]) => {
       if (a.length !== b.length) return false
       for (let i = 0; i < a.length; i++) {
         if (a[i].service !== b[i].service || a[i].method !== b[i].method || a[i].path !== b[i].path || a[i].time_ms !== b[i].time_ms) return false
@@ -127,16 +186,18 @@ export function DebugPanel() {
     }
 
     const updateDebugInfo = () => {
-      const extractedQueries: any[] = []
-      const extractedCalls: any[] = []
+      const extractedQueries: DebugQuery[] = []
+      const extractedCalls: DebugCall[] = []
       const extractedSqlite: SqliteEntry[] = []
       const seenSql = new Set<string>()
       const seenCalls = new Set<string>()
       const seenSqliteSeq = new Set<number>()
+      let queryCounter = 0
+      let callCounter = 0
 
-      const extractSqlite = (data: Record<string, unknown>) => {
+      const extractSqlite = (data: DebugData) => {
         if (!enabled || !Array.isArray(data._debug_sqlite)) return
-        for (const sq of data._debug_sqlite as SqliteEntry[]) {
+        for (const sq of data._debug_sqlite) {
           if (!seenSqliteSeq.has(sq.seq)) {
             extractedSqlite.push(sq)
             seenSqliteSeq.add(sq.seq)
@@ -147,26 +208,26 @@ export function DebugPanel() {
       // 1. Find all data from active queries
       const activeQueries = queryClient.getQueryCache().findAll({ type: 'active' })
       for (const q of activeQueries) {
-        const data = q.state.data as any
+        const data = q.state.data as DebugData | null
         if (!data || typeof data !== 'object') continue
 
         // Extract queries
-        if (enabled && '_debug_queries' in data && Array.isArray(data._debug_queries)) {
+        if (enabled && Array.isArray(data._debug_queries)) {
           const isCached = data._is_cached === true
           for (const dq of data._debug_queries) {
             if (!seenSql.has(dq.sql)) {
-              extractedQueries.push({ ...dq, is_cached: isCached })
+              extractedQueries.push({ ...dq, id: `query-${queryCounter++}`, is_cached: isCached })
               seenSql.add(dq.sql)
             }
           }
         }
 
         // Extract API/FOS calls
-        if (apiCallsEnabled && '_debug_calls' in data && Array.isArray(data._debug_calls)) {
+        if (apiCallsEnabled && Array.isArray(data._debug_calls)) {
           for (const dc of data._debug_calls) {
             const callKey = `${dc.service}-${dc.method}-${dc.path}`
             if (!seenCalls.has(callKey)) {
-              extractedCalls.push(dc)
+              extractedCalls.push({ ...dc, id: `call-${callCounter++}` })
               seenCalls.add(callKey)
             }
           }
@@ -178,23 +239,23 @@ export function DebugPanel() {
       // 2. Also check mutations
       const activeMutations = queryClient.getMutationCache().findAll({ status: 'success' })
       for (const m of activeMutations) {
-        const data = m.state.data as any
+        const data = m.state.data as DebugData | null
         if (!data || typeof data !== 'object') continue
 
-        if (enabled && '_debug_queries' in data && Array.isArray(data._debug_queries)) {
+        if (enabled && Array.isArray(data._debug_queries)) {
           for (const dq of data._debug_queries) {
             if (!seenSql.has(dq.sql)) {
-              extractedQueries.push({ ...dq, is_cached: false })
+              extractedQueries.push({ ...dq, id: `query-mut-${queryCounter++}`, is_cached: false })
               seenSql.add(dq.sql)
             }
           }
         }
 
-        if (apiCallsEnabled && '_debug_calls' in data && Array.isArray(data._debug_calls)) {
+        if (apiCallsEnabled && Array.isArray(data._debug_calls)) {
           for (const dc of data._debug_calls) {
             const callKey = `${dc.service}-${dc.method}-${dc.path}`
             if (!seenCalls.has(callKey)) {
-              extractedCalls.push(dc)
+              extractedCalls.push({ ...dc, id: `call-mut-${callCounter++}` })
               seenCalls.add(callKey)
             }
           }
@@ -241,6 +302,17 @@ export function DebugPanel() {
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
 
+  const duckDbCopyText = `DuckDB Queries (Total Time: ${totalQueryTime.toFixed(2)}ms)
+${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.is_cached ? ', Cached' : ''}):
+${q.sql}`).join('\n\n')}`
+
+  const sqliteCopyText = `SQLite Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
+${sqliteEntries.map((q) => `[${q.ts}] #${q.seq} ${q.op} (${q.time_ms.toFixed(2)}ms, rows: ${q.rows}):
+${q.sql}`).join('\n\n')}`
+
+  const callsCopyText = `Fastly API & FOS Calls (Total Time: ${totalCallTime.toFixed(2)}ms)
+${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_ms.toFixed(1)}ms)${c.details ? `\nDetails: ${c.details}` : ''}`).join('\n\n')}`
+
   return (
     <div className="mt-12 border-t pt-8 space-y-8 pb-12">
       {enabled && (
@@ -262,9 +334,11 @@ export function DebugPanel() {
               </Button>
             </div>
             <div className="flex items-center gap-3">
-              <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center">
+              <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
                 {isCached && <span className="text-blue-500 font-bold mr-2 uppercase tracking-wider text-[10px] bg-blue-500/10 px-1.5 py-0.5 rounded">Cached Result</span>}
                 <span>Total query time: <span className="font-bold text-foreground">{totalQueryTime.toFixed(2)}ms</span></span>
+                <span className="w-[1px] h-3 bg-border" />
+                <CopyButton text={duckDbCopyText} />
               </div>
             </div>
           </div>
@@ -272,7 +346,7 @@ export function DebugPanel() {
           {isQueryOpen && (
             <div className="grid gap-4 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
               {queries.map((q, i) => (
-                <div key={`query-${i}-${q.sql.length}-${q.time_ms}`} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
+                <div key={q.id} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
                     <span className="text-muted-foreground font-semibold">
                       QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
@@ -354,6 +428,8 @@ export function DebugPanel() {
                 <span>
                   Total time: <span className="font-bold text-foreground">{totalSqliteTime.toFixed(2)}ms</span>
                 </span>
+                <span className="w-[1px] h-3 bg-border" />
+                <CopyButton text={sqliteCopyText} />
               </div>
             </div>
           </div>
@@ -426,8 +502,10 @@ export function DebugPanel() {
               </Button>
             </div>
             <div className="flex items-center gap-3">
-              <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center">
+              <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
                 <span>Total call time: <span className="font-bold text-foreground">{totalCallTime.toFixed(2)}ms</span></span>
+                <span className="w-[1px] h-3 bg-border" />
+                <CopyButton text={callsCopyText} />
               </div>
             </div>
           </div>
@@ -439,8 +517,8 @@ export function DebugPanel() {
                   No Fastly API or FOS calls were made during this request.
                 </div>
               ) : (
-                calls.map((c, i) => (
-                  <div key={`${c.service}-${c.method}-${c.path}-${i}`} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
+                calls.map((c) => (
+                  <div key={c.id} className="bg-muted/30 p-3 rounded-md border font-mono text-[11px] flex flex-col gap-2">
                     <div className="flex justify-between items-start">
                       <div className="flex items-center gap-2 flex-wrap">
                         <Badge variant="outline" className={`text-[10px] ${c.service === 'FOS' ? 'bg-blue-500/10 text-blue-500 border-blue-500/20' : 'bg-orange-500/10 text-orange-500 border-orange-500/20'}`}>

@@ -310,6 +310,8 @@ def _build_ip_spread_select_query(table_ident: str, field: str, where_sql: str) 
             FROM {table_ident}
             WHERE {where_sql}
               AND "ip" IS NOT NULL
+              AND "{field}" IS NOT NULL
+              AND NULLIF(CAST("{field}" AS VARCHAR), '') IS NOT NULL
             GROUP BY 1, 2, 3
         ) WHERE rn <= {TOP_K}
     """
@@ -335,6 +337,8 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
                 ) AS rn
             FROM {table_ident}
             WHERE {where_sql}
+              AND "{field}" IS NOT NULL
+              AND NULLIF(CAST("{field}" AS VARCHAR), '') IS NOT NULL
             GROUP BY 1, 2, 3
         ) WHERE rn <= {TOP_K}
     """

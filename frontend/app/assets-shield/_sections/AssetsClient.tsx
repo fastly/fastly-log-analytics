@@ -11,21 +11,7 @@ import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText } f
 import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
-
-
-// Helper to format byte counts into human-readable strings
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
-
-// Helper to format percentages
-function formatPercent(ratio: number): string {
-  return `${(ratio * 100).toFixed(1)}%`
-}
+import { formatBytes, formatPercent } from '@/lib/format'
 
 export function AssetsReportContent({
   startTime,

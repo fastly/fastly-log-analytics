@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "2.4.0"
+version = "2.4.1"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 # The codebase uses PEP 695 type-parameter syntax (``def foo[T]``) and
 # ``from datetime import UTC``, which require 3.12 and 3.11 respectively; the
@@ -46,11 +46,11 @@ dependencies = [
     # (med), max_line_size fragment bypass (med), DigestAuth cross-
     # origin credential leak (med), TLS hostname override on conn-reuse
     # (low), host-only cookie persistence drift (low).
-    "aiohttp>=3.14.1,<4",
+    "aiohttp>=3.14.3,<4",
     # Floor raised 2026-06-17 to clear Dependabot #18 (high): cryptography
     # wheels bundled vulnerable OpenSSL across all platforms. 48.0.1
     # ships patched OpenSSL.
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     # Pinned ≥1.3.1 to clear Dependabot #19 (low, unvalidated authority
     # poisoning) + #20 (high, request.form() limits silently ignored).
     # FastAPI normally pulls this transitively; the explicit floor is

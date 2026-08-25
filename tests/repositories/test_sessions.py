@@ -42,9 +42,19 @@ def test_get_sessions_returns_expected_keys(in_memory_duckdb, test_service_sourc
 
 def test_get_sessions_flagged_only(in_memory_duckdb, test_service_source):
     """Result correctly applies flagging rules and filters to flagged_only=True."""
+    from datetime import UTC, datetime, timedelta
+
     logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
+    base_time = datetime.now(UTC) - timedelta(minutes=5)
+
     # Force 6 requests to have one IP (flagged) and 4 requests to have another IP (not flagged)
+    # Ensure they have sequential timestamps close to each other to guarantee they belong to the same session
     for i, log in enumerate(logs):
+        log_time = base_time + timedelta(seconds=i)
+        log["timestamp"] = log_time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if log["timestamp"].endswith("0000"):
+            log["timestamp"] = log["timestamp"][:-4] + "00:00"
+
         if i < 6:
             log["ip"] = "1.1.1.1"
         else:

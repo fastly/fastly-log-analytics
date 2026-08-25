@@ -302,6 +302,16 @@ def config_to_source(cfg: dict) -> dict:
 
     prov = cfg.get("provisioning", {})
 
+    log_fields = cfg.get("log_fields") or {}
+    if log_fields and "format_hash" not in log_fields:
+        try:
+            from backend.core import log_fields as lf_module
+
+            log_fields = dict(log_fields)
+            log_fields["format_hash"] = lf_module.format_hash(log_fields)
+        except Exception:
+            pass
+
     return {
         "name": cfg.get("service_id", "default"),
         "service_id": cfg.get("service_id", "default"),
@@ -321,7 +331,7 @@ def config_to_source(cfg: dict) -> dict:
         "access_level": cfg.get("access_level", "read_write"),
         "storage_mode": cfg.get("storage_mode", "cloud"),
         "log_period": int(cfg.get("log_period", 60)),
-        "log_fields": cfg.get("log_fields", {}),
+        "log_fields": log_fields,
         "provisioning": prov,
         "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
         "rum": cfg.get("rum", {}),

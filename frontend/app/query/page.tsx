@@ -31,6 +31,7 @@ import { ResultsTable } from './_sections/ResultsTable'
 import { QueryToolbar } from './_sections/QueryToolbar'
 
 const HISTORY_KEY = 'fastly_qe_history'
+const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
   const router = useRouter()
@@ -480,26 +481,39 @@ function QueryPageInner() {
         </Alert>
       )}
 
+      {/* Empty results initial placeholder */}
+      {!queryMutation.data && !queryMutation.isPending && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10">
+          <div className="mx-auto flex max-w-[420px] flex-col items-center justify-center text-center">
+            <Terminal className="h-10 w-10 text-muted-foreground/60 mb-4" />
+            <h3 className="text-lg font-semibold">No query results yet</h3>
+            <p className="mb-4 mt-2 text-sm text-muted-foreground">
+              Configure filters or write custom SQL above and click &quot;Run Query&quot; to fetch logs.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* First-run loading state: backend returns ``elapsed_ms`` BUT the
           browser still pays JSON parse + ColumnDef rebuild + first render
           (perceptible on 10k-row responses). Without this skeleton the
           results region is empty between the click and the table paint,
           and the only loading hint is the button's spinner. */}
       {queryMutation.isPending && !queryMutation.data && (
-        <div className="space-y-3">
+        <div className="space-y-3 min-h-[380px]">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Database className="h-3 w-3 animate-spin" />
             <span>Running query…</span>
           </div>
           <Skeleton className="h-9 w-full rounded-md" />
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={`skeleton-row-${i}`} className="h-8 w-full rounded-md opacity-60" />
+          {SKELETON_ROWS.map((k) => (
+            <Skeleton key={k} className="h-8 w-full rounded-md opacity-60" />
           ))}
         </div>
       )}
 
       {queryMutation.data && (
-        <div className="relative">
+        <div className="relative min-h-[380px]">
           {/* Re-run overlay: keeps the prior data visible (preserves scroll
               + sort context) while indicating that fresh results are on
               the way. Pointer-events-none so the user can still scroll. */}

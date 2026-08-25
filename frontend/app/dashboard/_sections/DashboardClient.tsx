@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import { useRouter } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
 import { useQuery } from '@tanstack/react-query'
@@ -458,10 +459,12 @@ function DashboardBody({
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
-export default function DashboardClient() {
+export default function DashboardClient({ nowServerStr }: { nowServerStr?: string }) {
   // Persist filter state to URL so back-nav, refresh, and shared links
   // all round-trip the user's current dashboard view. Hydration happens
   // in AppLayout.
+
+  const mounted = useMounted()
 
   const allCards = useDashboardCards()
 
@@ -493,8 +496,10 @@ export default function DashboardClient() {
   // way (quantizeAnchor ≡ backend quantize_anchor) — still byte-matches within
   // the quantum.
   const anchor = React.useMemo(() => {
-    return quantizeAnchor(storeEndTime)
-  }, [storeEndTime])
+    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout

@@ -422,6 +422,14 @@ def ingest_rum_logs(
                                     except Exception:
                                         dt = datetime.now(UTC)
 
+                                    # Extract edge connection variables if present in the RUM log format
+                                    city_val = log_data.get("city") or log_data.get("geo_city") or ""
+                                    region_val = log_data.get("region") or log_data.get("geo_region") or ""
+                                    country_val = log_data.get("country") or log_data.get("geo_country_code") or ""
+                                    pop_val = log_data.get("pop") or log_data.get("server_pop") or ""
+                                    tls_val = log_data.get("tls") or log_data.get("tls_version") or ""
+                                    ttfb_val = safe_float(log_data.get("ttfb") or log_data.get("time_to_first_byte"))
+
                                     # Try to extract metrics/exceptions from raw JSON in rum_body first
                                     raw_body = log_data.get("rum_body")
                                     extracted_metrics = []
@@ -471,6 +479,12 @@ def ingest_rum_logs(
                                                         "device": device_val,
                                                         "cid": cid_val,
                                                         "req_id": req_id_val,
+                                                        "city": city_val,
+                                                        "region": region_val,
+                                                        "country": country_val,
+                                                        "pop": pop_val,
+                                                        "tls": tls_val,
+                                                        "ttfb": ttfb_val,
                                                     }
                                                 )
                                                 errors_count_for_file += 1
@@ -489,6 +503,12 @@ def ingest_rum_logs(
                                                         "device": device_val,
                                                         "cid": cid_val,
                                                         "req_id": req_id_val,
+                                                        "city": city_val,
+                                                        "region": region_val,
+                                                        "country": country_val,
+                                                        "pop": pop_val,
+                                                        "tls": tls_val,
+                                                        "ttfb": ttfb_val,
                                                     }
                                                 )
                                                 vitals_count_for_file += 1
@@ -565,6 +585,12 @@ def ingest_rum_logs(
                                                     "device": device_val,
                                                     "cid": cid_val,
                                                     "req_id": req_id_val,
+                                                    "city": city_val,
+                                                    "region": region_val,
+                                                    "country": country_val,
+                                                    "pop": pop_val,
+                                                    "tls": tls_val,
+                                                    "ttfb": ttfb_val,
                                                 }
                                             )
                                             errors_count_for_file += 1
@@ -582,6 +608,12 @@ def ingest_rum_logs(
                                                     "device": device_val,
                                                     "cid": cid_val,
                                                     "req_id": req_id_val,
+                                                    "city": city_val,
+                                                    "region": region_val,
+                                                    "country": country_val,
+                                                    "pop": pop_val,
+                                                    "tls": tls_val,
+                                                    "ttfb": ttfb_val,
                                                 }
                                             )
                                             vitals_count_for_file += 1

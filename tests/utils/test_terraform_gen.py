@@ -36,6 +36,12 @@ from backend.utils.terraform_gen import generate_terraform
 TERRAFORM_INSTALLED = shutil.which("terraform") is not None
 RUN_VALIDATE = os.environ.get("TERRAFORM_VALIDATE") == "1"
 TFLINT_INSTALLED = shutil.which("tflint") is not None
+TFLINT_REQUIRED = os.environ.get("TFLINT_REQUIRED") == "1"
+
+if TFLINT_REQUIRED and not TFLINT_INSTALLED:
+    raise RuntimeError(
+        "TFLINT_REQUIRED=1 but the tflint binary is not on PATH. Install tflint or unset TFLINT_REQUIRED to allow skipping."
+    )
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

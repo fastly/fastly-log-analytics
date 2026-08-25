@@ -33,7 +33,13 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
             os VARCHAR,
             device VARCHAR,
             cid VARCHAR,
-            req_id VARCHAR
+            req_id VARCHAR,
+            city VARCHAR,
+            region VARCHAR,
+            country VARCHAR,
+            pop VARCHAR,
+            tls VARCHAR,
+            ttfb DOUBLE
         )
     """)
     con.execute("""
@@ -48,7 +54,13 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
             os VARCHAR,
             device VARCHAR,
             cid VARCHAR,
-            req_id VARCHAR
+            req_id VARCHAR,
+            city VARCHAR,
+            region VARCHAR,
+            country VARCHAR,
+            pop VARCHAR,
+            tls VARCHAR,
+            ttfb DOUBLE
         )
     """)
     con.close()
@@ -97,6 +109,14 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
         cid_val = b.get("cid") or "test_cid_1"
         req_id_val = b.get("req_id") if "req_id" in b else f"req_{id(b)}"
 
+        # Get optional edge fields or default
+        city_val = b.get("city") or "Austin"
+        region_val = b.get("region") or "TX"
+        country_val = b.get("country") or "US"
+        pop_val = b.get("pop") or "SIN"
+        tls_val = b.get("tls") or "1.3"
+        ttfb_val = float(b["ttfb"]) if "ttfb" in b else 45.0
+
         # Load times / performance vitals
         if "load_time" in b:
             vitals_rows.append(
@@ -111,6 +131,12 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
                     device_val,
                     cid_val,
                     req_id_val,
+                    city_val,
+                    region_val,
+                    country_val,
+                    pop_val,
+                    tls_val,
+                    ttfb_val,
                 )
             )
 
@@ -123,7 +149,24 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
             else:
                 rating = "poor"
             vitals_rows.append(
-                (dt, "lcp", val, rating, pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
+                (
+                    dt,
+                    "lcp",
+                    val,
+                    rating,
+                    pathname_val,
+                    browser_val,
+                    os_val,
+                    device_val,
+                    cid_val,
+                    req_id_val,
+                    city_val,
+                    region_val,
+                    country_val,
+                    pop_val,
+                    tls_val,
+                    ttfb_val,
+                )
             )
 
         if "cls" in b:
@@ -135,7 +178,24 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
             else:
                 rating = "poor"
             vitals_rows.append(
-                (dt, "cls", val, rating, pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
+                (
+                    dt,
+                    "cls",
+                    val,
+                    rating,
+                    pathname_val,
+                    browser_val,
+                    os_val,
+                    device_val,
+                    cid_val,
+                    req_id_val,
+                    city_val,
+                    region_val,
+                    country_val,
+                    pop_val,
+                    tls_val,
+                    ttfb_val,
+                )
             )
 
         if "inp" in b:
@@ -147,7 +207,24 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
             else:
                 rating = "poor"
             vitals_rows.append(
-                (dt, "inp", val, rating, pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
+                (
+                    dt,
+                    "inp",
+                    val,
+                    rating,
+                    pathname_val,
+                    browser_val,
+                    os_val,
+                    device_val,
+                    cid_val,
+                    req_id_val,
+                    city_val,
+                    region_val,
+                    country_val,
+                    pop_val,
+                    tls_val,
+                    ttfb_val,
+                )
             )
 
         # Exceptions
@@ -166,13 +243,23 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
                     device_val,
                     cid_val,
                     req_id_val,
+                    city_val,
+                    region_val,
+                    country_val,
+                    pop_val,
+                    tls_val,
+                    ttfb_val,
                 )
             )
 
     if vitals_rows:
-        con.executemany("INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vitals_rows)
+        con.executemany(
+            "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vitals_rows
+        )
     if errors_rows:
-        con.executemany("INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", errors_rows)
+        con.executemany(
+            "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", errors_rows
+        )
 
     con.close()
 

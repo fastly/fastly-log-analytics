@@ -23,6 +23,9 @@ import UsageLogClient from './_sections/UsageLogClient'
 // force-dynamic is required because the fetcher reads cookies +
 // Caddy markers via next/headers; the seed must be per-request.
 
+import { Suspense } from 'react'
+import UsageLogLoading from './loading'
+
 export const dynamic = 'force-dynamic'
 
 const HEAD_PAGE_SIZE = 50
@@ -35,10 +38,24 @@ export default async function UsageLogPage({
 }) {
   const params = await searchParams
   const serviceId = firstParam(params.service)
+  const nowMs = Date.now()
 
+  return (
+    <Suspense fallback={<UsageLogLoading />}>
+      <UsageLogPageContent serviceId={serviceId} nowMs={nowMs} />
+    </Suspense>
+  )
+}
+
+async function UsageLogPageContent({
+  serviceId,
+  nowMs,
+}: {
+  serviceId: string | undefined
+  nowMs: number
+}) {
   // Mirror the client's window math (floor-to-minute) so the SSR
   // cache key aligns with what useQuery looks up on first render.
-  const nowMs = Date.now()
   const nowFlooredMs = Math.floor(nowMs / 60_000) * 60_000
   const end = toQueryDate(new Date(nowFlooredMs))
   const start = toQueryDate(new Date(nowFlooredMs - DEFAULT_PRESET_HOURS * 3600 * 1000))

@@ -4,7 +4,6 @@ import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
 import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
-  SECURITY_SSR_SECTIONS,
 } from '@/lib/ssr/security'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import SecurityClient from './_sections/SecurityClient'
@@ -47,6 +46,9 @@ import SecurityClient from './_sections/SecurityClient'
 // non-loopback Host — the transport gate fails CLOSED), seedDehydratedState(null)
 // yields a null state, and SecurityClient's useQuery picks up the cold client
 // fetch unchanged.
+import { Suspense } from 'react'
+import SecurityLoading from './loading'
+
 export const dynamic = 'force-dynamic'
 
 export default async function SecurityPage({
@@ -62,6 +64,20 @@ export default async function SecurityPage({
     undefined
   const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
+  return (
+    <Suspense fallback={<SecurityLoading />}>
+      <SecurityPageContent serviceId={serviceId} logExtents={logExtents} />
+    </Suspense>
+  )
+}
+
+async function SecurityPageContent({
+  serviceId,
+  logExtents,
+}: {
+  serviceId: string | undefined
+  logExtents: unknown
+}) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveSecurityDefaultKey + fetchSecurityServerSide both floor it).
   const now = new Date()
@@ -84,7 +100,7 @@ export default async function SecurityPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <SecurityClient />
+      <SecurityClient nowServerStr={now.toISOString()} />
     </HydrationBoundary>
   )
 }

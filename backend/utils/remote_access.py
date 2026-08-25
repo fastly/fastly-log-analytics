@@ -1168,6 +1168,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             path in _UNAUTH_ANALYST_PATHS
             or path.startswith("/api/share/claim/")
             or path.startswith("/api/share/oauth/")
+            or path.startswith("/js/")
         ):
             response = await call_next(request)
             # /api/bootstrap is in _UNAUTH_ANALYST_PATHS so it short-circuits

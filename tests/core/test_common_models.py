@@ -59,7 +59,14 @@ def test_build_where_clause_inline():
     assert "(country NOT IN ('US'))" in sql
 
 
-# ── build_where_clause extended cases ─────────────────────────────────────────
+def test_build_where_clause_excludes_rum_beacons():
+    """Test that /rum-beacon is unconditionally excluded when url is present in actual_cols."""
+    params, sql = build_where_clause(None, None, {}, actual_cols=["url"])
+    assert "url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'" in sql
+
+    # If url is not present, no exclusion should be added
+    params, sql = build_where_clause(None, None, {}, actual_cols=["ip"])
+    assert "url != '/rum-beacon'" not in sql
 
 
 class TestBuildWhereClauseExtended:

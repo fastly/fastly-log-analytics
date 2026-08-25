@@ -1106,10 +1106,8 @@ def _apply_diff(
     if has_main_cond:
         if status_cb:
             status_cb("➕ Configuring log analytics condition 'log_analytics_condition'...")
-        cond_parts = ["!segmented_caching.is_inner_req"]
+        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
         if desired_state:
-            if desired_state.rum_enabled:
-                cond_parts.append('req.url.path != "/rum-beacon"')
             scoring_enabled = desired_state.scoring.enabled
             if desired_state.edge_only:
                 from backend.provision.fastly_api import _log_sampling_edge_clause

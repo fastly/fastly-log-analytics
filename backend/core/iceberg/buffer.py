@@ -1208,51 +1208,59 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         # fire here — ExpireSnapshots stages only AssertTableUUID (no
         # AssertRefSnapshotId), so we narrow the ValueError check to the
         # "does not exist" message to avoid masking unrelated bugs.
-        _EXPIRE_RETRIES = 3
-        for _retry in range(_EXPIRE_RETRIES):
-            try:
-                fresh_table.maintenance.expire_snapshots().older_than(snapshot_cutoff).commit()
-                break
-            except (CommitFailedException, ValueError) as cas_err:
-                msg = str(cas_err)
-                is_recoverable = isinstance(cas_err, CommitFailedException) or "does not exist" in msg
-                if not is_recoverable or _retry == _EXPIRE_RETRIES - 1:
-                    raise
-                logger.warning(
-                    "[iceberg] %s: CAS conflict expiring snapshots (attempt %d/%d), reloading and retrying: %s",
-                    source.get("name"),
-                    _retry + 1,
-                    _EXPIRE_RETRIES,
-                    cas_err,
-                )
+        if snapshots_before == 0:
+            snapshots_expired = 0
+            results["snapshots_expired_before_days"] = keep_snapshot_days
+            results["snapshots_after"] = 0
+            results["snapshots_expired_count"] = 0
+            results["snapshot_expiry_note"] = "no snapshots present in table metadata"
+            logger.info("[iceberg] %s: no snapshots present to expire", source.get("name"))
+        else:
+            _EXPIRE_RETRIES = 3
+            for _retry in range(_EXPIRE_RETRIES):
                 try:
-                    # Invalidate the FosSqlCatalog pointer cache so the reload
-                    # bypasses the 2-sec _POINTER_CACHE_TTL_SEC and actually
-                    # re-resolves the post-conflict metadata pointer. Without
-                    # this, all retries finish within microseconds and read
-                    # the same pre-conflict cache entry.
-                    _core_mod._pointer_cache_invalidate(source, _core_mod._table_identifier(source))
-                    fresh_table = catalog.load_table(_core_mod._table_identifier(source))
-                except Exception as reload_err:
-                    raise cas_err from reload_err
-                # Re-pin the baseline against the reloaded head so the diff
-                # below reflects expirations only, not concurrent additions.
-                snapshots_before = len(fresh_table.metadata.snapshots)
-                results["snapshots_before"] = snapshots_before
+                    fresh_table.maintenance.expire_snapshots().older_than(snapshot_cutoff).commit()
+                    break
+                except (CommitFailedException, ValueError) as cas_err:
+                    msg = str(cas_err)
+                    is_recoverable = isinstance(cas_err, CommitFailedException) or "does not exist" in msg
+                    if not is_recoverable or _retry == _EXPIRE_RETRIES - 1:
+                        raise
+                    logger.warning(
+                        "[iceberg] %s: CAS conflict expiring snapshots (attempt %d/%d), reloading and retrying: %s",
+                        source.get("name"),
+                        _retry + 1,
+                        _EXPIRE_RETRIES,
+                        cas_err,
+                    )
+                    try:
+                        # Invalidate the FosSqlCatalog pointer cache so the reload
+                        # bypasses the 2-sec _POINTER_CACHE_TTL_SEC and actually
+                        # re-resolves the post-conflict metadata pointer. Without
+                        # this, all retries finish within microseconds and read
+                        # the same pre-conflict cache entry.
+                        _core_mod._pointer_cache_invalidate(source, _core_mod._table_identifier(source))
+                        fresh_table = catalog.load_table(_core_mod._table_identifier(source))
+                    except Exception as reload_err:
+                        raise cas_err from reload_err
+                    # Re-pin the baseline against the reloaded head so the diff
+                    # below reflects expirations only, not concurrent additions.
+                    snapshots_before = len(fresh_table.metadata.snapshots)
+                    results["snapshots_before"] = snapshots_before
 
-        snapshots_after = len(fresh_table.metadata.snapshots)
-        snapshots_expired = max(0, snapshots_before - snapshots_after)
+            snapshots_after = len(fresh_table.metadata.snapshots)
+            snapshots_expired = max(0, snapshots_before - snapshots_after)
 
-        _core_mod._set_cached_table(source, _core_mod._table_identifier(source), fresh_table)
-        _core_mod._write_metadata_pointer(source, fresh_table.metadata_location, table=fresh_table)
-        # Keep the outer-scope `table` consistent for the local-cache cleanup
-        # step below (currently doesn't use it, but a future addition between
-        # steps 2 and 3 would expect the post-expire handle).
-        table = fresh_table
+            _core_mod._set_cached_table(source, _core_mod._table_identifier(source), fresh_table)
+            _core_mod._write_metadata_pointer(source, fresh_table.metadata_location, table=fresh_table)
+            # Keep the outer-scope `table` consistent for the local-cache cleanup
+            # step below (currently doesn't use it, but a future addition between
+            # steps 2 and 3 would expect the post-expire handle).
+            table = fresh_table
 
-        results["snapshots_expired_before_days"] = keep_snapshot_days
-        results["snapshots_after"] = snapshots_after
-        results["snapshots_expired_count"] = snapshots_expired
+            results["snapshots_expired_before_days"] = keep_snapshot_days
+            results["snapshots_after"] = snapshots_after
+            results["snapshots_expired_count"] = snapshots_expired
         if snapshots_expired > 0:
             results["snapshot_expiry_note"] = (
                 "metadata entries only; underlying data/manifest files are not deleted by pyiceberg 0.11.1"

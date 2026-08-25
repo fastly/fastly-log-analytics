@@ -17,7 +17,7 @@ vi.mock('@/lib/api', () => ({
 // status reactively. Mock useBootstrap so every test can control
 // is_remote_analyst. Each test that wants the hook to fire must set
 // mockBootstrap = { settings: { is_remote_analyst: true } }.
-let mockBootstrap: { data: any } = {
+const mockBootstrap: { data: any } = {
   data: { settings: { is_remote_analyst: true }, header_badge: {} },
 }
 vi.mock('@/hooks/useBootstrap', () => ({

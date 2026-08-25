@@ -25,7 +25,24 @@ vi.mock('maplibre-gl', () => ({
     LngLatBounds: function LngLatBoundsMock() {
       return { extend: vi.fn() }
     },
+    setWorkerUrl: vi.fn(),
   },
+  Map: function MapMock() {
+    return {
+      on: vi.fn(),
+      remove: vi.fn(),
+      resize: vi.fn(),
+      isStyleLoaded: vi.fn(() => false),
+      getLayer: vi.fn(() => null),
+      getSource: vi.fn(() => null),
+      setPaintProperty: vi.fn(),
+      fitBounds: vi.fn(),
+    }
+  },
+  LngLatBounds: function LngLatBoundsMock() {
+    return { extend: vi.fn() }
+  },
+  setWorkerUrl: vi.fn(),
 }))
 
 // ResizeObserver is not available in jsdom

@@ -21,6 +21,12 @@ CLIENT_VITALS_ARROW_SCHEMA = pa.schema(
         ("device", pa.string()),
         ("cid", pa.string()),
         ("req_id", pa.string()),
+        ("city", pa.string()),
+        ("region", pa.string()),
+        ("country", pa.string()),
+        ("pop", pa.string()),
+        ("tls", pa.string()),
+        ("ttfb", pa.float64()),
     ]
 )
 
@@ -37,6 +43,12 @@ CLIENT_ERRORS_ARROW_SCHEMA = pa.schema(
         ("device", pa.string()),
         ("cid", pa.string()),
         ("req_id", pa.string()),
+        ("city", pa.string()),
+        ("region", pa.string()),
+        ("country", pa.string()),
+        ("pop", pa.string()),
+        ("tls", pa.string()),
+        ("ttfb", pa.float64()),
     ]
 )
 
@@ -57,6 +69,12 @@ CLIENT_VITALS_ICEBERG_SCHEMA = Schema(
     NestedField(field_id=8, name="device", field_type=StringType(), required=False),
     NestedField(field_id=9, name="cid", field_type=StringType(), required=False),
     NestedField(field_id=10, name="req_id", field_type=StringType(), required=False),
+    NestedField(field_id=11, name="city", field_type=StringType(), required=False),
+    NestedField(field_id=12, name="region", field_type=StringType(), required=False),
+    NestedField(field_id=13, name="country", field_type=StringType(), required=False),
+    NestedField(field_id=14, name="pop", field_type=StringType(), required=False),
+    NestedField(field_id=15, name="tls", field_type=StringType(), required=False),
+    NestedField(field_id=16, name="ttfb", field_type=DoubleType(), required=False),
 )
 
 CLIENT_ERRORS_ICEBERG_SCHEMA = Schema(
@@ -71,6 +89,12 @@ CLIENT_ERRORS_ICEBERG_SCHEMA = Schema(
     NestedField(field_id=9, name="device", field_type=StringType(), required=False),
     NestedField(field_id=10, name="cid", field_type=StringType(), required=False),
     NestedField(field_id=11, name="req_id", field_type=StringType(), required=False),
+    NestedField(field_id=12, name="city", field_type=StringType(), required=False),
+    NestedField(field_id=13, name="region", field_type=StringType(), required=False),
+    NestedField(field_id=14, name="country", field_type=StringType(), required=False),
+    NestedField(field_id=15, name="pop", field_type=StringType(), required=False),
+    NestedField(field_id=16, name="tls", field_type=StringType(), required=False),
+    NestedField(field_id=17, name="ttfb", field_type=DoubleType(), required=False),
 )
 
 RUM_ICEBERG_SCHEMAS = {

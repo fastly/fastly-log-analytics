@@ -66,10 +66,11 @@ vi.mock('maplibre-gl', () => {
     addControl() {}
   }
   return {
-    default: { Map: MockMap, NavigationControl: class {}, LngLatBounds: class {} },
+    default: { Map: MockMap, NavigationControl: class {}, LngLatBounds: class {}, setWorkerUrl: () => {} },
     Map: MockMap,
     NavigationControl: class {},
     LngLatBounds: class {},
+    setWorkerUrl: () => {},
   }
 })
 

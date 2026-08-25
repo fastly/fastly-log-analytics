@@ -447,6 +447,20 @@ def get_aggregates(
                 # the perf win. If we ever need exact per-field totals here,
                 # add a `__total__` aggregate row to each rollup parquet.
                 try:
+                    rollup_count = runner.try_count_from_rollup(
+                        start_time,
+                        end_time,
+                        _table_name,
+                        _where,
+                        _params,
+                        unfiltered_window=True,
+                    )
+                    if rollup_count is not None:
+                        return rollup_count
+                except Exception:
+                    pass
+
+                try:
                     return runner.execute(
                         f"SELECT {CANONICAL_METRICS['requests']} FROM {_table_name} WHERE {_where}", _params
                     ).fetchone()[0]

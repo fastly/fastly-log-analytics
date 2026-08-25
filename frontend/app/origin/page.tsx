@@ -59,6 +59,9 @@ import OriginClient from './_sections/OriginClient'
 // Caddy-marker on a non-loopback Host — the transport gate fails CLOSED),
 // seedDehydratedState(null) yields a null state, and OriginClient's useQuery
 // picks up the cold client fetch unchanged.
+import { Suspense } from 'react'
+import OriginLoading from './loading'
+
 export const dynamic = 'force-dynamic'
 
 export default async function OriginPage({
@@ -74,6 +77,20 @@ export default async function OriginPage({
     undefined
   const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
+  return (
+    <Suspense fallback={<OriginLoading />}>
+      <OriginPageContent serviceId={serviceId} logExtents={logExtents} />
+    </Suspense>
+  )
+}
+
+async function OriginPageContent({
+  serviceId,
+  logExtents,
+}: {
+  serviceId: string | undefined
+  logExtents: unknown
+}) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveOriginDefaultKey + fetchOriginServerSide both floor it).
   const now = new Date()
@@ -101,7 +118,7 @@ export default async function OriginPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <OriginClient />
+      <OriginClient nowServerStr={now.toISOString()} />
     </HydrationBoundary>
   )
 }

@@ -228,6 +228,7 @@ class BootstrapService(BaseModel):
     service_id: str
     name: str | None = None
     access_level: str | None = None
+    cmcd_enabled: bool | None = None
 
 
 class BootstrapResponse(BaseResponse):

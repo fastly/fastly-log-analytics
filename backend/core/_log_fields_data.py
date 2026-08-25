@@ -1689,6 +1689,38 @@ INSIGHT_DEFINITIONS = [
         "required_fields": ["oconnect_ms", "ottfb"],
         "required_groups": ["L"],
     },
+    {
+        "id": "crawler_disparity",
+        "category": "security",
+        "title": "Crawler Referral Disparity",
+        "description": "Identifies crawlers performing high-volume scraping while driving negligible human referral traffic back to the platform",
+        "required_fields": ["ua", "referer", "ip", "timestamp"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "stale_browser_version",
+        "category": "security",
+        "title": "Stale Headless Browser",
+        "description": "Detects anomalous clusters of request traffic using stale Chrome major versions, a standard fingerprint for un-updated Puppeteer/Playwright headless bots",
+        "required_fields": ["ua", "ip", "timestamp"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "orphaned_deep_crawl",
+        "category": "security",
+        "title": "Orphaned Deep Crawl",
+        "description": "Flags client IPs performing direct, deep scans of nested catalog/database resource routes with empty HTTP referer headers",
+        "required_fields": ["ip", "url", "referer", "timestamp"],
+        "required_groups": ["A"],
+    },
+    {
+        "id": "residential_fingerprint_dispersion",
+        "category": "security",
+        "title": "Residential Fingerprint Dispersion",
+        "description": "Identifies identical TLS/TCP client handshakes distributed across multiple residential ASNs, signaling rotated botnet scans evading ASN blocks",
+        "required_fields": ["ja4", "ip", "asn", "p_type", "timestamp"],
+        "required_groups": ["H", "I"],
+    },
 ]
 
 # ---------------------------------------------------------------------------

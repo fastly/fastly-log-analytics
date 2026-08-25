@@ -298,3 +298,21 @@ def test_origin_aggregates_coupling_expands_ts_status_path(client, in_memory_duc
     # Other branches must NOT fire.
     for blocked in ("summary", "slow_urls", "pop_latency", "ip_health"):
         assert blocked not in timings, f"selector did not suppress {blocked}; got {timings}"
+
+
+def test_origin_aggregates_range_token(client, in_memory_duckdb, test_service_source):
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    with (
+        patch("backend.config.get_status", return_value={"earliest_log_at": "2026-08-24T00:00:00Z"}),
+        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
+        patch(
+            "backend.utils.time_window.resolve_window", return_value=("2026-08-24T12:00:00Z", "2026-08-24T13:00:00Z")
+        ),
+    ):
+        resp = client.post(
+            "/api/origin/aggregates",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={"filters": {}, "range_token": "30d", "anchor": "2026-08-24T13:00:00Z"},
+        )
+    assert resp.status_code == 200
+    assert "summary" in resp.json()

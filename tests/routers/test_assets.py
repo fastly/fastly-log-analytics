@@ -38,7 +38,7 @@ def test_assets_aggregates_range_token(client, in_memory_duckdb, test_service_so
         headers={"x-fastly-service-id": MOCK_SERVICE_ID},
         json={
             "filters": {},
-            "range_token": "last_24h",
+            "range_token": "24h",
             "anchor": "2026-08-19T12:00:00Z",
         },
     )

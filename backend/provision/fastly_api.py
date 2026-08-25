@@ -1138,7 +1138,7 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         custom_condition = (custom_condition or "").strip()
 
         scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        cond_parts = ["!segmented_caching.is_inner_req"]
+        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
         if edge_only:
             cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
         if sample_rate < 100:

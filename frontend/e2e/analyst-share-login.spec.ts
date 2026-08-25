@@ -21,7 +21,7 @@ const SHARE_LOGIN_PATH = '/api/share/login'
 test.describe('analyst share-login', () => {
   test('brute-force lockout: 30 invalid passcodes return 429 + rate_limited shape', async ({ request }) => {
     let firstLockoutBody: { error?: string; retry_after_s?: number } | null = null
-    let statusCounts = { '401': 0, '429': 0, other: 0 }
+    const statusCounts = { '401': 0, '429': 0, other: 0 }
 
     for (let i = 0; i < 35; i++) {
       const r = await request.post(SHARE_LOGIN_PATH, {

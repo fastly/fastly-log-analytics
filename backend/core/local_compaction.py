@@ -62,7 +62,7 @@ _MAX_PARTITION_BYTES = int(os.environ.get("LOCAL_COMPACT_MAX_PARTITION_MB", "256
 # Partitions older than this become eligible for cross-hour daily compaction.
 # Recent hours stay hourly so the dashboard's time-range pruning stays tight
 # at the file level (each scan opens one daily file vs 24 hourly files).
-_DAILY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_DAILY_TIER_DAYS", "7"))
+_DAILY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_DAILY_TIER_DAYS", "1"))
 
 # Daily files older than this become eligible for cross-day weekly compaction.
 # Only useful when log_retention_days > this; otherwise daily files just age

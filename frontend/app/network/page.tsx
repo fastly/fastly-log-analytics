@@ -589,7 +589,7 @@ export default function NetworkPage() {
               </div>
             }
           >
-            <div className="flex flex-col h-[420px] overflow-auto">
+            <div className="flex flex-col h-[420px] overflow-hidden">
               {shieldingData?.has_data ? (
                 <>
                   <DataTable
@@ -598,6 +598,7 @@ export default function NetworkPage() {
                     hideToolbar
                     columnVisibility={shieldingVisibility}
                     onColumnVisibilityChange={setShieldingVisibility}
+                    tableContainerClassName="max-h-[295px]"
                   />
                   {/* M1: the backend returns a (top-by-volume ∪ top-by-overhead)
                       subset when there are more routes than the cap, so a

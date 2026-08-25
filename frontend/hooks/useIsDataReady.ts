@@ -2,6 +2,7 @@
 
 import { useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'next/navigation'
 
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -23,6 +24,11 @@ import { useServiceStore } from '@/stores/serviceStore'
  * whenever the store hasn't been populated yet so the gate flips true
  * on first render.
  *
+ * Deep-link extension (added 2026-08-24): if the URL contains a `?service=`
+ * query parameter, prioritize that on first paint before Zustand is
+ * initialized so that we immediately know the correct active service,
+ * preventing layout shift.
+ *
  * Previously also required `hasSyncedExtents`. That flag is set in
  * FilterBar's effect after /api/sync-status returns (~1s wall-clock on a
  * cold load). Gating data fetches on it meant every first page load
@@ -31,9 +37,16 @@ import { useServiceStore } from '@/stores/serviceStore'
 export function useEffectiveServiceId(): string | null | undefined {
   const stored = useServiceStore(s => s.activeServiceId)
   const isInitialized = useServiceStore(s => s.isInitialized)
+  const searchParams = useSearchParams()
   const queryClient = useQueryClient()
+
   if (isInitialized) return stored
   if (stored) return stored
+
+  // Prioritize URL service parameter on first paint
+  const urlServiceId = searchParams?.get('service')
+  if (urlServiceId) return urlServiceId
+
   const bootstrap = queryClient.getQueryData(queryKeys.bootstrap()) as
     | { active_service_id?: string | null }
     | undefined

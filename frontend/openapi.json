@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "2.4.0"
+    "version": "2.4.1"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -40523,6 +40523,17 @@
               }
             ],
             "title": "Access Level"
+          },
+          "cmcd_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cmcd Enabled"
           }
         },
         "additionalProperties": true,

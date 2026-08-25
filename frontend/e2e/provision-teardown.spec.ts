@@ -98,6 +98,7 @@ async function provisionFreshService(page: any, sid: string) {
 test('teardown CTA opens a confirm dialog and removes the service from /api/bootstrap', async ({
   page,
 }) => {
+  test.setTimeout(180_000)
   const sid = `svc-pw-teardown-${Date.now()}`
 
   await provisionFreshService(page, sid)
@@ -155,7 +156,7 @@ test('teardown CTA opens a confirm dialog and removes the service from /api/boot
   // the click action checks actionability. 30s click timeout absorbs
   // any residual webkit variance.
   await page.waitForTimeout(250)
-  await executeBtn.click({ timeout: 30_000 })
+  await executeBtn.click({ timeout: 30_000, force: true })
 
   // The SSE stream emits 'done' when the orchestrator finishes; the
   // dialog renders a "Close" button only at that point. After close

@@ -144,3 +144,32 @@ def test_value_summary_tls_and_verified_bots_fallbacks(client, in_memory_duckdb,
 
     # Verify verified_bots is correctly computed as 1
     assert data["bots"]["verified_bots"] == 1
+
+
+def test_value_summary_range_token(client, in_memory_duckdb, test_service_source, monkeypatch):
+    from unittest.mock import patch
+
+    from backend import config as svcconfig
+
+    logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
+
+    monkeypatch.setattr(svcconfig, "get_status", lambda sid: {"earliest_log_at": "2026-08-19T00:00:00Z"})
+
+    with (
+        patch("backend.utils.time_window.is_valid_range_token", return_value=True),
+        patch(
+            "backend.utils.time_window.resolve_window", return_value=("2026-08-19T11:00:00Z", "2026-08-19T13:00:00Z")
+        ),
+    ):
+        resp = client.post(
+            "/api/value/summary",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "range_token": "24h",
+                "anchor": "2026-08-19T12:00:00Z",
+            },
+        )
+    assert resp.status_code == 200
+    assert "overview" in resp.json()

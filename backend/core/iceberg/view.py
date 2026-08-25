@@ -850,7 +850,11 @@ def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bo
     try:
         from backend.core.duckdb import _safe_table_name
 
-        table_name = target_table if target_table != "logs" else _safe_table_name(source["name"])
+        table_name = (
+            target_table
+            if target_table != "logs"
+            else _safe_table_name(source.get("name") or source.get("service_id") or "default")
+        )
         row = con.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1",
             [table_name],
@@ -872,7 +876,11 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         return
 
     t_start = time.time()
-    table_name = target_table if target_table != "logs" else _safe_table_name(source["name"])
+    table_name = (
+        target_table
+        if target_table != "logs"
+        else _safe_table_name(source.get("name") or source.get("service_id") or "default")
+    )
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     cache_dir = _cache_dir(source)

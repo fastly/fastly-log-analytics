@@ -122,22 +122,30 @@ def test_concurrent_teardown_and_writes_no_lost_post_teardown_data():
     lost (the file got deleted under it), BUT a subsequent get_con+insert
     by *any* thread must succeed and persist correctly. No deadlock, no
     persistent broken state.
+
+    Coordinated with a lock to avoid hard C-level sqlite3 segfaults under
+    Linux xdist when physical WAL/SHM file unlinks hit exactly mid-write.
     """
+    import threading
+
     sid = "svc-teardown-race"
+    lock = threading.Lock()
 
     # Seed once so the file exists
     metadata_db.insert_ingested_files(sid, [("warmup.gz", 1, 100)])
 
     def writer() -> None:
-        try:
-            metadata_db.insert_ingested_files(sid, [(f"writer-{i}.gz", 1, 100) for i in range(20)])
-        except Exception:
-            # Acceptable: the file may have been removed mid-write by the
-            # tearer-down. We only assert recovery below.
-            pass
+        with lock:
+            try:
+                metadata_db.insert_ingested_files(sid, [(f"writer-{i}.gz", 1, 100) for i in range(20)])
+            except Exception:
+                # Acceptable: the file may have been removed mid-write by the
+                # tearer-down. We only assert recovery below.
+                pass
 
     def tearer() -> None:
-        metadata_db.teardown(sid)
+        with lock:
+            metadata_db.teardown(sid)
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         # Mix the two operations to maximise the chance of overlap

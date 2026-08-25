@@ -198,10 +198,10 @@ function SyncStatusBadgeInner() {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setA11yAnnouncement('Sync started')
       } else if (current === 'error') {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
+
         setA11yAnnouncement('Sync errored')
       } else if (prev === 'running' && current && current !== 'running') {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
+
         setA11yAnnouncement('Sync finished')
       }
     }

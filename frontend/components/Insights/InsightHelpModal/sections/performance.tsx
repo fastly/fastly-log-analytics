@@ -235,6 +235,158 @@ export function getPerformanceContent(id: string): InsightContent | null {
         )
       }
 
+    case 'origin_latency_spike':
+      return {
+        title: 'Origin Latency Spike',
+        icon: <Clock className="h-5 w-5 text-primary" />,
+        fields: ['ottfb', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Detects a sudden and significant increase in the 95th percentile (P95) response time (TTFB) directly from your origin servers for specific endpoints.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Clock className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Slow Backend Processing:</strong> Compares the current window&apos;s P95 origin time-to-first-byte (<code>ottfb</code>) against its baseline distribution per URL to identify specific route slowdowns.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Infrastructure Bottlenecks:</strong> Highlights database lockups, slow code execution paths, or API bottlenecks that are dragging down backend performance.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Info className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Investigate backend database queries or memory utilization, profile the slow endpoint, or adjust CDN caching rules to shield your origin.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'origin_retries':
+      return {
+        title: 'Origin Retries Elevated',
+        icon: <Activity className="h-5 w-5 text-primary" />,
+        fields: ['oretries', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Flags specific endpoints that are experiencing a high volume of connection or fetch retries from Fastly to your origin servers.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Network className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Failed Fetch Attempts:</strong> Tracks requests where Fastly encountered a connection timeout or handshake failure on the first try and had to retry the fetch.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Origin Connection Instability:</strong> High retry rates point at origin thread pool exhaustion, aggressive firewall blocks, or regional packet loss.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Info className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Verify origin TCP keep-alive, firewall rules, and load balancer capacity, ensuring they match peak concurrent connections.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'shield_path_degradation':
+      return {
+        title: 'Shield Path Degradation',
+        icon: <Network className="h-5 w-5 text-primary" />,
+        fields: ['rid', 'prid', 'edge', 'pop', 'ottfb', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Detects a significant latency increase on the specific network transit path between your edge POPs and your designated shield POPs.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <strong>POP-to-POP Transit:</strong> Measures transit time specifically between the receiving edge node and the shield layer before forwarding to the origin.
+              </li>
+              <li className="flex gap-3">
+                <strong>Regional Congestion:</strong> Isolates regional cloud routing delays or peering bottlenecks between Fastly POPs from standard origin slowness.
+              </li>
+              <li className="flex gap-3">
+                <strong>Actionable Mitigation:</strong> Check Fastly network status or consider switching to a different shield location if transit degradation persists.
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'region_latency':
+      return {
+        title: 'Regional Latency Degradation',
+        icon: <Clock className="h-5 w-5 text-primary" />,
+        fields: ['server_region', 'elapsed', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Flags broad geographical regions experiencing a significant aggregate increase in response time compared to baseline.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <strong>Geographic Impact:</strong> Aggregates response time (<code>elapsed</code>) by continent or geographic server region to pinpoint location-specific slowness.
+              </li>
+              <li className="flex gap-3">
+                <strong>Transit Outages:</strong> Often indicates submarine cable cuts, ISP routing loops, or global transit provider disruptions affecting specific regions.
+              </li>
+              <li className="flex gap-3">
+                <strong>Actionable Mitigation:</strong> Verify routing loops or latency patterns per ISP in the affected region, or check for regional CDN routing updates.
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
+    case 'tail_latency':
+      return {
+        title: 'Tail Latency Anomaly',
+        icon: <TrendingUp className="h-5 w-5 text-primary" />,
+        fields: ['url', 'elapsed', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Uncovers endpoints experiencing a severe &quot;long tail&quot; latency distribution, where P99 response time is more than 5× higher than P50 response time.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <TrendingUp className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Outlier Response Distribution:</strong> Identifies routes where most requests are served quickly, but a small percentage of users experience extreme, frustrating delays.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Clock className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Resource Contention:</strong> Usually caused by backend locking issues, memory garbage collection pauses, un-indexed database queries, or occasional huge payloads.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Info className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Profile the slow P99 requests to check for resource locks or database table scans, and optimize heavy query paths.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
     default:
       return null
   }

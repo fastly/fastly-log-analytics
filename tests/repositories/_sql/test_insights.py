@@ -63,6 +63,10 @@ def test_registry_sql_templates_match_module_constants():
         "origin_retries": "ORIGIN_RETRIES",
         "origin_ip_failure": "ORIGIN_IP_FAILURE",
         "shield_path_degradation": "SHIELD_PATH_DEGRADATION",
+        "crawler_disparity": "CRAWLER_DISPARITY",
+        "stale_browser_version": "STALE_BROWSER_VERSION",
+        "orphaned_deep_crawl": "ORPHANED_DEEP_CRAWL",
+        "residential_fingerprint_dispersion": "RESIDENTIAL_FINGERPRINT_DISPERSION",
     }
 
     for insight_id, const_name in expected.items():
@@ -407,3 +411,27 @@ def test_new_probe_regex_contains_all_probes_escaped():
 
     for probe in SQL.NEW_PROBES:
         assert re.escape(probe) in SQL.NEW_PROBE_REGEX, f"probe {probe!r} missing from regex"
+
+
+def test_crawler_disparity_renders():
+    rendered = SQL.CRAWLER_DISPARITY.format(table_name="t_logs")
+    assert "crawler_traffic" in rendered
+    assert rendered.count("?") == 4
+
+
+def test_stale_browser_version_renders():
+    rendered = SQL.STALE_BROWSER_VERSION.format(table_name="t_logs", baseline_hours=24, window_hours=1)
+    assert "version_aggregates" in rendered
+    assert rendered.count("?") == 2
+
+
+def test_orphaned_deep_crawl_renders():
+    rendered = SQL.ORPHANED_DEEP_CRAWL.format(table_name="t_logs", baseline_hours=24, window_hours=1)
+    assert "deep_requests" in rendered
+    assert rendered.count("?") == 2
+
+
+def test_residential_fingerprint_renders():
+    rendered = SQL.RESIDENTIAL_FINGERPRINT_DISPERSION.format(table_name="t_logs")
+    assert "fingerprint_asn_maps" in rendered
+    assert rendered.count("?") == 2

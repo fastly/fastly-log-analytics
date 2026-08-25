@@ -5792,6 +5792,8 @@ export interface components {
             name?: string | null;
             /** Access Level */
             access_level?: string | null;
+            /** Cmcd Enabled */
+            cmcd_enabled?: boolean | null;
         } & {
             [key: string]: unknown;
         };

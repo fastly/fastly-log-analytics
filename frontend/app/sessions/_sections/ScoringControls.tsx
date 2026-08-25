@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
 interface ScoringControlsProps {
+  cmcdEnabled: boolean
   flaggedOnly: boolean
   setFlaggedOnly: (v: boolean) => void
   streamingOnly: boolean
@@ -24,6 +25,7 @@ interface ScoringControlsProps {
 }
 
 export function ScoringControls({
+  cmcdEnabled,
   flaggedOnly,
   setFlaggedOnly,
   streamingOnly,
@@ -50,7 +52,7 @@ export function ScoringControls({
         </Label>
       </div>
 
-      {data?.has_cmcd && (
+      {cmcdEnabled && (
         <div className="flex items-center gap-2">
           <Switch
             id="streaming-only"
