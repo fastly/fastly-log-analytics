@@ -113,6 +113,14 @@ services:
     restart: unless-stopped
   postgres:
     image: postgres:17-alpine
+    # max_connections raised from the default 100: the metadata pool is sized
+    # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker +
+    # beat each hold their own, while DuckLake's catalog connections draw on
+    # the same budget. 100 is not enough for 3 * 32 + DuckLake + exporters.
+    command:
+    - postgres
+    - -c
+    - max_connections=300
     environment:
     # Local-dev credentials only (see header comment) — override with
     # DUCKLAKE_PG_PASSWORD for anything beyond a workstation.

@@ -40,4 +40,4 @@ version: 1
 # retry policy in backend.core.fastly.client. The status codes are the
 # contract being tested, not the body; refresh after verifying retries
 # still behave the same way against the live endpoint.
-recorded_at: '2026-06-16T00:00:00Z'
+recorded_at: '2026-09-02T00:00:00Z'

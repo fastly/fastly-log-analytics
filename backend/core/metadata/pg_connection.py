@@ -72,7 +72,30 @@ def get_pg_pool() -> ConnectionPool:
         # "one write unit per execute()+commit() pair" shape every SQLite
         # call site already assumes, without needing a real transaction
         # manager here. See PgConnectionWrapper.commit()/rollback().
-        _pool = ConnectionPool(conninfo=dsn, kwargs={"row_factory": dict_row, "autocommit": True})
+        # Sizing is load-bearing, not a tuning nicety. get_pg_thread_connection()
+        # holds ONE connection per thread for the life of the thread (mirroring
+        # SQLite's per-thread pool semantics) and never returns it, so the pool
+        # must be at least as large as the number of threads that ever touch
+        # metadata: FastAPI's anyio threadpool (40 by default) plus the
+        # scheduler and RT-poller threads. psycopg_pool defaults to
+        # min_size=4 / max_size=None, and None means "same as min_size" — so
+        # the unsized pool capped at 4 and the 5th thread blocked for
+        # timeout seconds and then raised PoolTimeout. Observed live the moment
+        # metadata moved to Postgres: every metadata-touching route hung 30 s
+        # and 503'd.
+        #
+        # Keep METADATA_PG_POOL_MAX * (backend + worker + beat processes) below
+        # the server's max_connections, and remember DuckLake's own catalog
+        # connections share that budget.
+        max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "32"))
+        min_size = min(int(os.environ.get("METADATA_PG_POOL_MIN", "2")), max_size)
+        _pool = ConnectionPool(
+            conninfo=dsn,
+            kwargs={"row_factory": dict_row, "autocommit": True},
+            min_size=min_size,
+            max_size=max_size,
+            timeout=float(os.environ.get("METADATA_PG_POOL_TIMEOUT", "30")),
+        )
     return _pool
 
 
