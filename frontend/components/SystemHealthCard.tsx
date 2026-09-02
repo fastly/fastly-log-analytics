@@ -318,7 +318,7 @@ export function SystemHealthCard() {
         <Stat
           label="Active queries"
           value={inFlight.length}
-          sub={inFlight.length > 0 ? inFlight.slice(0, 2).map(r => r.task).join(', ') : 'idle'}
+          sub={inFlight.length > 0 ? `${inFlight.length} tasks running` : 'idle'}
           trend={series['active_query_count']}
           formatTrendValue={(v) => v.toFixed(0)}
         />
