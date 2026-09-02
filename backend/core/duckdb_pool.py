@@ -38,6 +38,14 @@ Concurrency:
     — they share the in-memory database state.
   * All connections open with ``read_only=False`` (``get_connection`` forces
     this) so cron write connections never conflict with pool connections.
+  * That safety is WITHIN ONE PROCESS only. DuckDB takes a process-exclusive
+    lock on a read-write single-file database, so a SECOND backend process
+    (e.g. a second pod sharing the PVC) fails every checkout with ``Could
+    not set lock on file``; the retry loop below classifies it transient and
+    surfaces ``DBBusyError`` -> 503 on every data request. This is why the
+    serving tier is single-pod even though ingest scales horizontally --
+    "multi-pod scalable architecture" refers to the Celery ingest fleet, not
+    to this pool. See docs/adr/18-serving-tier-single-pod.md.
 
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a

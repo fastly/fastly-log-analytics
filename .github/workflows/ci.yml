@@ -211,6 +211,32 @@ jobs:
         # compose/Dockerfile/env. Also runnable locally via `make ci`.
         run: bash scripts/check_no_console_otel.sh
 
+      - name: Deploy config validation (compose + helm chart)
+        # Mirrors `make deploy-validate`. `docker compose config -q` parses +
+        # validates docker-compose.multipod.yml without a daemon; helm lint +
+        # template validate deploy/chart/fastly-log-analytics (ubuntu runners
+        # ship both docker and helm).
+        run: |
+          docker compose -f docker-compose.multipod.yml config -q
+          if command -v helm >/dev/null 2>&1; then
+            helm lint deploy/chart/fastly-log-analytics
+            helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null
+          else
+            echo "helm not installed; skipping chart lint/template"
+          fi
+
+      - name: Stray file gate (*.bak, root openapi.json)
+        # Mirrors `make stray-file-gate`. Fails if any *.bak file or a
+        # ROOT-level openapi.json is tracked — frontend/openapi.json is the
+        # canonical generated spec; a root copy is always session debris.
+        run: |
+          stray="$(git ls-files '*.bak' 'openapi.json')"
+          if [ -n "$stray" ]; then
+            echo "ERROR: stray files are tracked (delete them or add to .gitignore):"
+            echo "$stray"
+            exit 1
+          fi
+
       - name: Security-regression count gate
         # v2.0 cleanup Phase 0.8: asserts the
         # @pytest.mark.security_regression count never drops below the

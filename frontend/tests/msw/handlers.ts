@@ -326,6 +326,7 @@ export const handlers = [
   ),
   http.patch(`${API_BASE}/api/admin/usage-logging`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/commit-iceberg`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/ducklake/migrate`, ok({ ok: true, started: true })),
   http.post(`${API_BASE}/api/admin/ingest-logs`, ok({ ok: true, ingested: 0 })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),
@@ -349,6 +350,9 @@ export const handlers = [
   http.get(`${API_BASE}/api/cron-runs`, () => HttpResponse.json({ runs: [] })),
   http.get(`${API_BASE}/api/cron-schedule`, () =>
     HttpResponse.json({ schedule: [], next_run_at: null }),
+  ),
+  http.get(`${API_BASE}/api/admin/celery/status`, () =>
+    HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
 
   // ── AppLayout always-on calls (every page render hits these) ─────

@@ -395,7 +395,7 @@ def get_top_bots(
     actual_cols = runner.get_schema_cols()
     timer.mark("top_bots:get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(bots=[], ngwaf_bots=[])
+        return empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry())
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -583,16 +583,15 @@ def get_security_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(
-            tls_fingerprints=[],
-            req_size_dist=[],
-            ipv6_adoption=[],
-            proxy_dist=[],
-            conn_reuse_dist=[],
-            http_versions=[],
-            section_timings=section_timings,
+        return {
+            "tls_fingerprints": [],
+            "req_size_dist": [],
+            "ipv6_adoption": [],
+            "proxy_dist": [],
+            "conn_reuse_dist": [],
+            "section_timings": section_timings,
             **runner.telemetry(),
-        )
+        }
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)

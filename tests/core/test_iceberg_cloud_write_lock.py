@@ -146,7 +146,7 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
     reset_thread.start()
     try:
         assert reached_middle.wait(timeout=5), "reset never reached the FOS purge"
-        # Resolve the source the same way _run_commit does in production
+        # Resolve the source the same way _run_log_ingest does in production
         # (get_source_for_service), NOT the raw fos_source fixture — its
         # "name" field doesn't equal its "service_id" the way a real
         # config-derived source's does, which would silently lock on a

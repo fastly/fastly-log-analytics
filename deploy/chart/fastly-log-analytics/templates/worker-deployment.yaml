@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-worker
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-worker
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.workers.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "fastly-log-analytics.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: celery-worker
+          image: "{{ .Values.image.repository }}-backend:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Prefork pool (celery default) so task_time_limit is enforceable.
+          # `celery` covers tasks not matched by task_routes (default queue).
+          command:
+            - celery
+            - -A
+            - backend.celery_app
+            - worker
+            - --loglevel=info
+            - -Q
+            - q.ingest,q.control,celery
+            - --concurrency=2
+          env:
+            {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
+            - name: SSE_BACKPLANE
+              value: {{ .Values.config.sseBackplane | quote }}
+            - name: DUCKDB_MEMORY_LIMIT
+              value: {{ .Values.config.duckdbMemoryLimit | quote }}
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -A backend.celery_app inspect ping -d celery@$HOSTNAME --timeout 10
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "fastly-log-analytics.dataVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "fastly-log-analytics.dataVolumes" . | nindent 8 }}

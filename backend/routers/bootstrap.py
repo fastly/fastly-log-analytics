@@ -502,10 +502,16 @@ def _bootstrap_sync(
                 except Exception:
                     pass
 
-                # Get last sync times for each type
+                # Get last sync times for each type. 'sync' is the pre-v3
+                # task name — keep it as a fallback so pre-upgrade history
+                # still renders, but prefer the current 'log_discovery' rows
+                # (reading only 'sync' froze the SSR-rendered Last Sync at
+                # whatever the pre-rename history ended with).
                 cron_data = latest_cron_per_task(valid_active_id)
                 rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
-                request_last_sync = cron_data.get("sync", {}).get("started_at")
+                request_last_sync = cron_data.get("log_discovery", {}).get("started_at") or cron_data.get(
+                    "sync", {}
+                ).get("started_at")
 
             except Exception:
                 pass
@@ -662,7 +668,9 @@ def _bootstrap_sync(
         try:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
-            sync_row = latest_cron_per_task(valid_active_id).get("sync")
+            # 'sync' kept as the pre-v3-rename fallback for pre-upgrade history.
+            per_task = latest_cron_per_task(valid_active_id)
+            sync_row = per_task.get("log_discovery") or per_task.get("sync")
             if sync_row:
                 last_sync_payload = {
                     "started_at": sync_row.get("started_at"),

@@ -3,6 +3,12 @@
 Tracks raw .gz files copied to the ``errors/`` FOS prefix because they
 contained corrupt/invalid lines during ingestion. Provides CRUD for the
 ``quarantined_files`` table — admin listing, summary stats, and auto-purge.
+
+Every query scopes rows by ``service_id``, like every other table under a
+shared Postgres metadata database (ADR-15). ``source_name`` is retained as
+informational only: these readers used to filter on it while binding the
+service id, which worked solely because the two coincide today. See
+migration 020.
 """
 
 from __future__ import annotations
@@ -33,12 +39,13 @@ def insert_quarantined_file(
     con.execute(
         """
         INSERT OR REPLACE INTO quarantined_files
-            (file_name, source_name, fos_key, error_key, meta_key,
+            (service_id, file_name, source_name, fos_key, error_key, meta_key,
              valid_rows, corrupt_rows, file_size_bytes, corrupt_samples,
              reason_counts, error_size_bytes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            service_id,
             file_name,
             source_name,
             fos_key,
@@ -72,10 +79,11 @@ def list_quarantined_files(service_id: str, limit: int = 100, offset: int = 0) -
                valid_rows, corrupt_rows, file_size_bytes, corrupt_samples,
                quarantined_at, reason_counts
         FROM quarantined_files
+        WHERE service_id = ?
         ORDER BY quarantined_at DESC
         LIMIT ? OFFSET ?
         """,
-        (limit, offset),
+        (service_id, limit, offset),
     ).fetchall()
     result = []
     for r in rows:
@@ -107,7 +115,9 @@ def get_quarantine_summary(service_id: str) -> dict:
                min(quarantined_at),
                max(quarantined_at)
         FROM quarantined_files
-        """
+        WHERE service_id = ?
+        """,
+        (service_id,),
     ).fetchone()
     return {
         "total_files": row[0] if row else 0,
@@ -120,7 +130,8 @@ def get_quarantine_summary(service_id: str) -> dict:
 def get_expired_quarantined_files(service_id: str, retention_days: int = 14) -> list[dict]:
     con = get_con(service_id)
     rows = con.execute(
-        f"SELECT id, error_key, meta_key FROM quarantined_files WHERE quarantined_at < datetime('now', '-{retention_days} days')"
+        f"SELECT id, error_key, meta_key FROM quarantined_files WHERE service_id = ? AND quarantined_at < datetime('now', '-{retention_days} days')",
+        (service_id,),
     ).fetchall()
     return [{"id": r[0], "error_key": r[1], "meta_key": r[2]} for r in rows]
 
@@ -157,7 +168,9 @@ def get_quarantined_file_by_id(service_id: str, quarantine_id: int) -> dict | No
 
 def get_quarantine_storage_total(service_id: str) -> int:
     con = get_con(service_id)
-    row = con.execute("SELECT coalesce(sum(error_size_bytes), 0) FROM quarantined_files").fetchone()
+    row = con.execute(
+        "SELECT coalesce(sum(error_size_bytes), 0) FROM quarantined_files WHERE service_id = ?", (service_id,)
+    ).fetchone()
     return row[0] if row else 0
 
 
@@ -166,6 +179,8 @@ def delete_quarantined_rows(service_id: str, ids: list[int]) -> int:
         return 0
     con = get_con(service_id)
     placeholders = ", ".join("?" * len(ids))
-    cur = con.execute(f"DELETE FROM quarantined_files WHERE id IN ({placeholders})", ids)
+    cur = con.execute(
+        f"DELETE FROM quarantined_files WHERE service_id = ? AND id IN ({placeholders})", [service_id, *ids]
+    )
     con.commit()
     return cur.rowcount

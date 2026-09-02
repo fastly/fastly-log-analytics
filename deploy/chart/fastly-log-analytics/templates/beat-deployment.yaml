@@ -1,0 +1,71 @@
+{{- if .Values.beat.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-beat
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-beat
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # Beat must be a singleton — RedBeat locks in the broker, but running two
+  # schedulers on purpose is never correct.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-beat
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-beat
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "fastly-log-analytics.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: celery-beat
+          image: "{{ .Values.image.repository }}-backend:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - celery
+            - -A
+            - backend.celery_app
+            - beat
+            - -S
+            - redbeat.RedBeatScheduler
+            - --loglevel=info
+          env:
+            {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
+          livenessProbe:
+            # Broker-reachability check: `inspect ping` round-trips through the
+            # broker to the worker fleet, so it fails when beat has lost the
+            # broker (the condition that actually wedges scheduling).
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -A backend.celery_app inspect ping --timeout 10
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

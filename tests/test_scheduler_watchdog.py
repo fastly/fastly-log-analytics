@@ -1,7 +1,7 @@
 """Tests for the hard-cap watchdog inside ``backend.cron.decorators.cron_task``.
 
 Pins the deadlock fix landed for the 2026-05-21 incident where
-``_run_service_cron`` hung 10+ minutes on the usage-log step and APScheduler's
+``_run_log_discovery_cron`` hung 10+ minutes on the usage-log step and APScheduler's
 ``max_instances=1`` wedged every subsequent tick. The watchdog runs the cron
 body on a single-worker ThreadPoolExecutor with a hard cap; on timeout it
 returns control to APScheduler so the next tick can fire, leaking the stuck

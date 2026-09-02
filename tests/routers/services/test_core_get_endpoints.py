@@ -345,7 +345,7 @@ def test_cron_schedule_returns_schedules_list(client):
     next_run_time + last_run_status. Pinned because the Settings
     panel renders the per-task row from this exact shape."""
     fake_per_task = {
-        "sync": {
+        "log_discovery": {
             "started_at": "2026-05-18T00:00:00Z",
             "status": "ok",
             "duration_s": 1.2,
@@ -366,8 +366,8 @@ def test_cron_schedule_returns_schedules_list(client):
 
     assert resp.status_code == 200
     schedules = resp.json()["schedules"]
-    # The sync task has no scheduled job but has a last_run — should appear
-    sync_entries = [s for s in schedules if s["task"] == "sync"]
+    # The log_discovery task has no scheduled job but has a last_run — should appear
+    sync_entries = [s for s in schedules if s["task"] == "log_discovery"]
     assert len(sync_entries) == 1
     assert sync_entries[0]["last_run_status"] == "ok"
     assert sync_entries[0]["next_run_time"] is None

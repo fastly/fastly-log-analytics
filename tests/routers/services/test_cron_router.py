@@ -18,9 +18,10 @@ def _seed_cron_runs(service_id: str, runs: list[dict]) -> list[int]:
     ids: list[int] = []
     for r in runs:
         cur = con.execute(
-            "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys, summary) "
-            "VALUES (?, ?, ?, ?, '[]', ?)",
+            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys, summary) "
+            "VALUES (?, ?, ?, ?, ?, '[]', ?)",
             (
+                service_id,
                 r.get("task", "sync"),
                 r.get("started_at", "2026-05-15T00:00:00Z"),
                 r.get("duration_s", 1.0),

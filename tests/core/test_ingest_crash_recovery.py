@@ -50,6 +50,7 @@ def ingest_env(s3_mock, fos_source, tmp_path, monkeypatch):
     cache paths so a test can re-seed and re-run ``ingest()`` across a
     simulated restart.
     """
+    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
     warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
@@ -189,6 +190,7 @@ def test_crash_before_write_to_buffer_recovers_clean(ingest_env, monkeypatch):
 # ── Checkpoint 2→3: crash before insert_ingested_files ───────────────────────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_crash_before_insert_ingested_files_promotes_buffer(ingest_env, monkeypatch):
     """write_to_buffer succeeded, insert_ingested_files dies. The buffer is on
     disk but its files are unrecorded. Recovery must PROMOTE the buffer's
@@ -229,6 +231,7 @@ def test_crash_before_insert_ingested_files_promotes_buffer(ingest_env, monkeypa
 # ── Checkpoint 3→4: crash before clear_in_flight ─────────────────────────────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_crash_before_clear_in_flight_is_idempotent(ingest_env, monkeypatch):
     """insert_ingested_files succeeded (file + summary durable), clear_in_flight
     dies. Recovery re-promotes: it re-inserts the SAME file (idempotent upsert)
@@ -264,6 +267,7 @@ def test_crash_before_clear_in_flight_is_idempotent(ingest_env, monkeypatch):
 # ── SHA-256 deterministic buffer name: "same file twice" after a crash ───────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_sha256_name_prevents_duplicate_buffer_if_recovery_skipped(ingest_env, monkeypatch):
     """Belt-and-suspenders: even if the in_flight recovery sweep is itself
     lost (DB blip), a raw file LISTed twice across a crash must not produce

@@ -419,10 +419,187 @@ def _migration_014_cron_task_status_started_composite(con: sqlite3.Connection) -
     con.execute("CREATE INDEX IF NOT EXISTS idx_cron_task_status ON cron_runs(task, status, started_at)")
 
 
+def _migration_015_add_service_ids(con: sqlite3.Connection) -> None:
+    """Add service_id column to cron_runs and local_compacted_files for Postgres seam compatibility."""
+    import os
+
+    # In SQLite, the service ID is the basename of the file before .metadata.db
+    # We can fetch it by inspecting the attached database file.
+    db_file = con.execute("PRAGMA database_list").fetchone()[2]
+    service_id = ""
+    if db_file and os.path.basename(db_file).endswith(".metadata.db"):
+        service_id = os.path.basename(db_file).replace(".metadata.db", "")
+
+    if _has_table(con, "cron_runs") and not _has_column(con, "cron_runs", "service_id"):
+        con.execute("ALTER TABLE cron_runs ADD COLUMN service_id TEXT")
+        if service_id:
+            con.execute("UPDATE cron_runs SET service_id = ?", (service_id,))
+
+    if _has_table(con, "local_compacted_files") and not _has_column(con, "local_compacted_files", "service_id"):
+        con.execute("ALTER TABLE local_compacted_files ADD COLUMN service_id TEXT")
+        if service_id:
+            con.execute("UPDATE local_compacted_files SET service_id = ?", (service_id,))
+
+
+def _migration_016_ingest_ledger_retry_columns(con: sqlite3.Connection) -> None:
+    """Add attempts/last_error to ingest_ledger so convert failures are
+    visible and bounded (quarantine after N attempts) instead of an
+    invisible infinite reclaim loop."""
+    if _has_table(con, "ingest_ledger"):
+        if not _has_column(con, "ingest_ledger", "attempts"):
+            con.execute("ALTER TABLE ingest_ledger ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        if not _has_column(con, "ingest_ledger", "last_error"):
+            con.execute("ALTER TABLE ingest_ledger ADD COLUMN last_error TEXT")
+        if not _has_column(con, "ingest_ledger", "discovered_at"):
+            con.execute("ALTER TABLE ingest_ledger ADD COLUMN discovered_at REAL")
+
+
+def _migration_017_ingest_ledger_epoch_timestamps(con: sqlite3.Connection) -> None:
+    """Normalize legacy TEXT datetimes in ingest_ledger to epoch floats.
+
+    The first ledger writer stored ``datetime('now')`` TEXT into the REAL
+    claimed_at/committed_at columns; the sweeper now compares epoch floats,
+    and SQLite orders every number BEFORE every text value — so legacy text
+    claims would never satisfy ``claimed_at < <cutoff>`` and stuck rows from
+    the pre-fix era would never be reclaimed."""
+    if not _has_table(con, "ingest_ledger"):
+        return
+    for col in ("claimed_at", "committed_at"):
+        con.execute(
+            f"UPDATE ingest_ledger SET {col} = CAST(strftime('%s', {col}) AS REAL) WHERE typeof({col}) = 'text'"
+        )
+
+
+def _migration_018_ingest_ledger_raw_deleted_at(con: sqlite3.Connection) -> None:
+    """Track raw .gz deletion per ledger row so the celery-mode log_ingest
+    cron can delete durable-committed raw files (delete_after) without a
+    second bookkeeping table, and re-runs stay idempotent."""
+    if _has_table(con, "ingest_ledger") and not _has_column(con, "ingest_ledger", "raw_deleted_at"):
+        con.execute("ALTER TABLE ingest_ledger ADD COLUMN raw_deleted_at REAL")
+
+
+def _migration_019_job_runs_running_lease_unique_index(con: sqlite3.Connection) -> None:
+    """Add the partial unique index that makes lease acquisition atomic
+    under concurrent writers (multiple pods against one Postgres metadata
+    backend): at most one 'running' row per (service_id, job_name). Also
+    in ``base.py``'s ``_SCHEMA`` for brand-new databases — this migration
+    covers every already-provisioned service's existing metadata.db.
+
+    Defensively dedupes first: a pre-existing DB could (rarely — the
+    orphaned-lease trap this same index exists to close) already hold two
+    literal 'running' rows for the same (service_id, job_name), which would
+    make CREATE UNIQUE INDEX fail outright and wedge every future migration
+    on this DB. Keep the most recently heartbeated row; mark the rest
+    'reaped' — they are, definitionally, the losers of a race that
+    predates this fix.
+    """
+    if not _has_table(con, "job_runs"):
+        return
+    con.execute(
+        """
+        UPDATE job_runs SET status = 'reaped', detail = COALESCE(detail, 'superseded — pre-dates lease uniqueness fix')
+        WHERE status = 'running' AND id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY service_id, job_name ORDER BY heartbeat_at DESC, id DESC
+                ) AS rn
+                FROM job_runs WHERE status = 'running'
+            ) WHERE rn = 1
+        )
+        """
+    )
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_runs_running_lease "
+        "ON job_runs(service_id, job_name) WHERE status = 'running'"
+    )
+
+
 # Insertion order = application order. Use integer keys. The key=3 slot
 # (a rebuild of usage_log_hourly_summary) was retired alongside the
 # legacy usage_log schema; the gap is intentional and apply_pending
 # tolerates it (the iterator just skips missing keys).
+
+
+def _migration_020_quarantined_files_service_id(con: sqlite3.Connection) -> None:
+    """Make ``service_id`` the tenant discriminator on ``quarantined_files``.
+
+    Five readers (``list_quarantined_files``, ``get_quarantine_summary``,
+    ``get_expired_quarantined_files``, ``get_quarantine_storage_total``,
+    ``delete_quarantined_rows``) filtered ``WHERE source_name = ?`` while
+    binding the *service_id*. That worked only because the two coincide
+    today (``src["name"]`` is the service id). Under a shared Postgres
+    metadata database every other table scopes rows by a ``service_id``
+    column (ADR-15), so this one is brought in line rather than left
+    depending on the coincidence — otherwise a source named differently
+    from its service makes its quarantined files invisible to the admin
+    view AND to the retention sweeper, while they keep occupying FOS.
+
+    The UNIQUE constraint moves with it: ``INSERT OR REPLACE`` dedupes on
+    it, so it must be ``(service_id, file_name)`` to match the Postgres
+    ``ON CONFLICT`` target. SQLite cannot alter a UNIQUE in place, hence
+    the rebuild-and-copy.
+    """
+    import os
+
+    if not _has_table(con, "quarantined_files"):
+        return
+    if _has_column(con, "quarantined_files", "service_id"):
+        return
+
+    # Same derivation migration 015 uses: the service id is the metadata
+    # filename stem. Empty for an in-memory/atypical DB — rows then carry
+    # NULL and are healed by the next insert for that file.
+    db_file = con.execute("PRAGMA database_list").fetchone()[2]
+    service_id = ""
+    if db_file and os.path.basename(db_file).endswith(".metadata.db"):
+        service_id = os.path.basename(db_file).replace(".metadata.db", "")
+
+    con.execute(
+        """CREATE TABLE quarantined_files_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id TEXT,
+            file_name TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            fos_key TEXT NOT NULL,
+            error_key TEXT NOT NULL,
+            meta_key TEXT NOT NULL,
+            valid_rows INTEGER NOT NULL DEFAULT 0,
+            corrupt_rows INTEGER NOT NULL DEFAULT 0,
+            file_size_bytes INTEGER,
+            error_size_bytes INTEGER,
+            corrupt_samples TEXT,
+            reason_counts TEXT,
+            quarantined_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(service_id, file_name)
+        )"""
+    )
+    # Column-by-column copy: migrations 008/009 added reason_counts /
+    # error_size_bytes, so an older DB may lack them.
+    has_reason = _has_column(con, "quarantined_files", "reason_counts")
+    has_err_size = _has_column(con, "quarantined_files", "error_size_bytes")
+    reason_sel = "reason_counts" if has_reason else "NULL"
+    err_size_sel = "error_size_bytes" if has_err_size else "NULL"
+    # GROUP BY collapses any pre-existing duplicate (service_id, file_name)
+    # pairs the looser old constraint allowed, keeping the newest row —
+    # without it the INSERT would trip the new UNIQUE and abort the upgrade.
+    con.execute(
+        f"""INSERT INTO quarantined_files_new
+            (service_id, file_name, source_name, fos_key, error_key, meta_key,
+             valid_rows, corrupt_rows, file_size_bytes, error_size_bytes,
+             corrupt_samples, reason_counts, quarantined_at)
+        SELECT ?, file_name, source_name, fos_key, error_key, meta_key,
+               valid_rows, corrupt_rows, file_size_bytes, {err_size_sel},
+               corrupt_samples, {reason_sel}, max(quarantined_at)
+        FROM quarantined_files
+        GROUP BY file_name""",
+        (service_id or None,),
+    )
+    con.execute("DROP TABLE quarantined_files")
+    con.execute("ALTER TABLE quarantined_files_new RENAME TO quarantined_files")
+    con.execute("DROP INDEX IF EXISTS idx_quarantined_at")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(service_id, quarantined_at)")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_add_ingested_files_error_count,
     2: _migration_002_add_ingested_files_file_date,
@@ -437,6 +614,12 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _migration_012_rum_file_date,
     13: _migration_013_add_alert_anomaly_and_channel_fields,
     14: _migration_014_cron_task_status_started_composite,
+    15: _migration_015_add_service_ids,
+    16: _migration_016_ingest_ledger_retry_columns,
+    17: _migration_017_ingest_ledger_epoch_timestamps,
+    18: _migration_018_ingest_ledger_raw_deleted_at,
+    19: _migration_019_job_runs_running_lease_unique_index,
+    20: _migration_020_quarantined_files_service_id,
 }
 
 LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0

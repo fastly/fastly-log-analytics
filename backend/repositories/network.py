@@ -470,6 +470,9 @@ def get_health(
         _leader_temp_name: list[str | None] = [None]
 
         def _build_temp_results() -> tuple[list[str], list[Any], list[Any], list[Any]]:
+            if not filters:
+                timer.mark("network:temp_skipped_unfiltered", _time.perf_counter())
+                return [], [], [], []
             _t0 = _time.perf_counter()
             temp_name = runner.create_filtered_temp_table(
                 all_net_cols, list(actual_cols), table_name, where_clause, params

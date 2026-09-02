@@ -1,6 +1,6 @@
 # ADR-01 — Storage Model
 
-**Status:** Accepted (Phase 0)
+**Status:** Accepted (Phase 0). Partially superseded by [ADR-14](14-ducklake-replacement.md) — the commit-path catalog is DuckLake, not pyiceberg, as of v3.0.0. The live-buffer tier, the "rollups are a query optimization, not a tier" decision, and the local-warehouse fallback rule below are still in force.
 **Decided by:** v2.0 cleanup planning
 **Supersedes:** implicit storage model that grew over the perf-improvement branch
 

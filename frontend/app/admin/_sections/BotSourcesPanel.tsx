@@ -4,6 +4,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { components } from '@/types/api.generated'
+
+type BotSourceList = components['schemas']['BotSourcesResponse']
 import { SSEModal } from '@/components/SSEModal/SSEModal'
 import {
   Dialog,
@@ -37,8 +40,8 @@ function RebuildLocalViewButton() {
       const { error: apiError } = await client.POST('/api/admin/rebuild-local-view', {})
       if (apiError) throw new Error(extractApiError(apiError))
       setConfirmOpen(false)
-    } catch (e: any) {
-      setError(e?.message ?? 'rebuild failed')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'rebuild failed')
     } finally {
       setBusy(false)
     }
@@ -93,7 +96,7 @@ export function BotSourcesPanel() {
     queryKey: ['bot-sources'],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/bot-sources", { signal })
-      return data as any
+      return data as BotSourceList
     },
     staleTime: 60_000,
   })
@@ -136,7 +139,7 @@ export function BotSourcesPanel() {
             </tr>
           </thead>
           <tbody>
-            {(botSourcesData?.sources ?? []).map((src: any) => (
+            {(botSourcesData?.sources ?? []).map((src: components['schemas']['BotSourceMeta']) => (
               <tr key={src.id} className="border-t">
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-1.5">

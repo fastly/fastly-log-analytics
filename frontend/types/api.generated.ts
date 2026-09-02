@@ -1844,6 +1844,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/celery/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Celery Status
+         * @description Expose Celery queue depths, worker status, RedBeat schedule, and
+         *     ingest-ledger summary.
+         */
+        get: operations["api_celery_status_api_admin_celery_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/optimize-now": {
         parameters: {
             query?: never;
@@ -2334,6 +2355,32 @@ export interface paths {
          *     still looks wrong. This is the nuclear-option version of refresh.
          */
         post: operations["rebuild_local_view_endpoint_api_admin_rebuild_local_view_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ducklake/migrate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ducklake Migrate Endpoint
+         * @description Adopt this service's legacy pyiceberg-era local parquet into DuckLake.
+         *
+         *     Returns 202 Accepted — the adoption runs in a background thread
+         *     (registering thousands of files can take a while). Idempotent: files
+         *     already tracked by the DuckLake catalog are skipped, so re-running
+         *     after a partial failure is safe. Check backend logs for the summary
+         *     (adopted/skipped file counts and row totals).
+         */
+        post: operations["ducklake_migrate_endpoint_api_admin_ducklake_migrate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5794,6 +5841,8 @@ export interface components {
             access_level?: string | null;
             /** Cmcd Enabled */
             cmcd_enabled?: boolean | null;
+            /** Rum Enabled */
+            rum_enabled?: boolean | null;
         } & {
             [key: string]: unknown;
         };
@@ -6490,6 +6539,8 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
@@ -6997,6 +7048,13 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HealthCeleryStats */
+        HealthCeleryStats: {
+            /** Queue Depth */
+            queue_depth: number;
+            /** Active Workers */
+            active_workers: number;
+        };
         /**
          * HealthConfigBackup
          * @description Freshness of the off-VM service-config backup (SRE-11 / ADR-13 §2.1).
@@ -7138,6 +7196,7 @@ export interface components {
             fos?: {
                 [key: string]: components["schemas"]["HealthFosProbe"];
             } | null;
+            celery?: components["schemas"]["HealthCeleryStats"] | null;
         };
         /** IOFormatBreakdown */
         IOFormatBreakdown: {
@@ -11440,6 +11499,8 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
@@ -11657,9 +11718,9 @@ export interface components {
              */
             has_cmcd: boolean;
             /** Min Reqs Flag */
-            min_reqs_flag: number;
+            min_reqs_flag?: number | null;
             /** Min 4Xx Pct Flag */
-            min_4xx_pct_flag: number;
+            min_4xx_pct_flag?: number | null;
         };
         /**
          * SettingsPayload
@@ -12088,6 +12149,15 @@ export interface components {
              */
             op: "execute" | "executemany" | "executescript";
         };
+        /** StreamMetrics */
+        StreamMetrics: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Total Rows */
+            total_rows?: number | null;
+            /** Last Sync At */
+            last_sync_at?: string | null;
+        };
         /**
          * SummaryResponse
          * @description Cheap counts that power the live-monitor tab badge.
@@ -12149,6 +12219,8 @@ export interface components {
             } | null;
             /** Ngwaf Workspace Id */
             ngwaf_workspace_id?: string | null;
+            rum?: components["schemas"]["StreamMetrics"] | null;
+            request?: components["schemas"]["StreamMetrics"] | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -23911,6 +23983,107 @@ export interface operations {
             };
         };
     };
+    api_celery_status_api_admin_celery_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     optimize_now_api_admin_optimize_now_post: {
         parameters: {
             query?: {
@@ -26060,6 +26233,113 @@ export interface operations {
         };
     };
     rebuild_local_view_endpoint_api_admin_rebuild_local_view_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    ducklake_migrate_endpoint_api_admin_ducklake_migrate_post: {
         parameters: {
             query?: {
                 service?: string | null;

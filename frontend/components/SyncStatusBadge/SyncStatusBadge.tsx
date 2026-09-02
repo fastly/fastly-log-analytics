@@ -236,8 +236,8 @@ function SyncStatusBadgeInner() {
   const activeSvc = bootstrap?.services?.find(s => s.service_id === activeServiceId)
   const isRumEnabled = activeSvc?.rum_enabled ?? false
 
-  const rumMetrics = headerBadge?.rum
-  const requestMetrics = headerBadge?.request
+  const rumMetrics = status?.rum ?? headerBadge?.rum
+  const requestMetrics = status?.request ?? headerBadge?.request
 
   // Derive real-time values for REQUEST using the live-updated sync status query
   const rumTotal = rumMetrics?.total_rows ?? 0
@@ -246,9 +246,6 @@ function SyncStatusBadgeInner() {
 
   const requestLatestLogAt = status?.latest_log_at ?? requestMetrics?.latest_log_at ?? null
   const requestLastSyncAt = lastSync?.started_at ?? requestMetrics?.last_sync_at ?? null
-
-  const hasRumData = isRumEnabled && (rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0))
-  const hasRequestData = requestLatestLogAt || (requestTotal != null && requestTotal > 0)
 
   const renderStreamRow = (
     label: string,
@@ -260,9 +257,6 @@ function SyncStatusBadgeInner() {
     isRunning: boolean = false,
     startedAt: string | null | undefined = null,
   ) => {
-    const hasData = latestTs || totalRows != null
-    if (!hasData) return null
-
     return (
       <div key={label} className="flex items-center gap-1 min-w-0 text-[10px]">
         {/* Column 0: Live Dot (fixed w-3 to preserve grid alignment even if empty) */}
@@ -340,73 +334,31 @@ function SyncStatusBadgeInner() {
     )
   }
 
-  // If we have separate RUM/REQUEST data, show two rows; otherwise fall back to combined view
-  const showSeparateStreams = isRumEnabled && (hasRumData || hasRequestData)
-
   return (
     <div className="hidden md:flex flex-col gap-0.5 mr-2 animate-in fade-in zoom-in-95">
-      {showSeparateStreams ? (
-        <div className="flex flex-col gap-0.5">
-          {/* REQUEST logs row with live dot */}
-          {renderStreamRow(
-            'REQUEST',
-            showLiveDot,
-            requestLatestLogAt,
-            requestTotal,
-            requestLastSyncAt,
-            false,
-            lastSync?.status === 'running',
-            lastSync?.started_at,
-          )}
+      <div className="flex flex-col gap-0.5">
+        {/* REQUEST logs row with live dot */}
+        {renderStreamRow(
+          'REQUEST',
+          showLiveDot,
+          requestLatestLogAt,
+          requestTotal,
+          requestLastSyncAt,
+          true,
+          lastSync?.status === 'running',
+          lastSync?.started_at,
+        )}
 
-          {/* RUM logs row with live dot */}
-          {isRumEnabled && renderStreamRow(
-            'RUM',
-            showLiveDot,
-            rumMetrics?.latest_log_at,
-            rumMetrics?.total_rows,
-            rumMetrics?.last_sync_at,
-            false,
-          )}
-        </div>
-      ) : (
-        <>
-          {/* Fallback to combined view when no separate stream data */}
-          {localRows != null && (
-            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[172px] tabular-nums">
-              <strong className="text-foreground mr-1">Total Logs:</strong>
-              {localRows.toLocaleString()}
-            </Badge>
-          )}
-
-          {fileTs ? (
-            <Tooltip>
-              <TooltipTrigger render={
-                <Badge
-                  variant="secondary"
-                  tabIndex={0}
-                  role="button"
-                  aria-label="Latest log details"
-                  aria-live="off"
-                  className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[156px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <strong className="text-foreground mr-1">Latest Log:</strong>
-                  <TimeAgo timestamp={fileTs} />
-                  <StalenessDot timestamp={fileTs} />
-                </Badge>
-              } />
-              <TooltipContent className="text-xs">
-                {full(fileTs)} {abbr()}
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10">
-              <strong className="text-foreground mr-1">Latest Log:</strong>
-              Never
-            </Badge>
-          )}
-        </>
-      )}
+        {/* RUM logs row with live dot */}
+        {isRumEnabled && renderStreamRow(
+          'RUM',
+          showLiveDot,
+          rumMetrics?.latest_log_at,
+          rumMetrics?.total_rows,
+          rumMetrics?.last_sync_at,
+          true,
+        )}
+      </div>
 
       {/* a11y: sr-only live region for screen readers */}
       <span role="status" aria-live="polite" className="sr-only">

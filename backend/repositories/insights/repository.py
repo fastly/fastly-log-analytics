@@ -655,7 +655,7 @@ def get_insights(
     # visibility AND in-memory storage. The scratch is unique per request
     # so two concurrent requests on the same pool connection don't collide.
     scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
-    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias}")
+    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias} (READ_ONLY FALSE)")
     scratch_attached = True
     temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
 

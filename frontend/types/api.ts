@@ -8,6 +8,7 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     name: s.name || s.service_id,
     accessLevel: s.access_level ?? undefined,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
+    rum_enabled: s.rum_enabled ?? undefined,
   }
 }
 

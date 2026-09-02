@@ -583,3 +583,61 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 
 _CacheRegistry.register("config._name_cache", _name_cache)
 _CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)
+
+# Cloud / Scalability Overrides (Phase 2+)
+INGEST_MODE = os.getenv("INGEST_MODE", "sync")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
+DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
+DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
+HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
+HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")
+HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
+SSE_BACKPLANE = os.getenv("SSE_BACKPLANE", "local")
+SCHEDULER_MODE = os.getenv("SCHEDULER_MODE", "inprocess")
+
+
+def validate_ingest_mode() -> None:
+    """Fail fast on incoherent Celery-mode configuration.
+
+    Called from the backend lifespan AND celery worker init so both
+    processes refuse to run rather than degrade invisibly:
+
+    - Celery mode without a broker: discovery would dispatch into nothing.
+    - Celery mode on a DuckDB-FILE DuckLake catalog: worker processes write
+      while the backend reads, which a file catalog cannot support (single
+      process holds the file lock; concurrent merges tear the catalog and
+      leave it referencing parquet that never landed — observed live as
+      404 NoSuchKey on reads). A transactional multi-writer catalog
+      (Postgres DSN) is REQUIRED.
+    - Celery mode on per-pod SQLite metadata: the cron lease, the ingest
+      ledger, and ingested-file bookkeeping would each be private to one
+      process, so nothing serializes the fleet. A shared Postgres metadata
+      database (``METADATA_DSN``) is REQUIRED. See ADR-15.
+
+    ``METADATA_DSN`` is read from the environment here rather than captured
+    as a module constant so this gate and
+    ``metadata.pg_connection.is_postgres()`` (which also reads it live)
+    can never disagree about which backend is active.
+    """
+    if INGEST_MODE != "celery":
+        return
+    if not CELERY_BROKER_URL:
+        raise RuntimeError("INGEST_MODE=celery requires CELERY_BROKER_URL to be set")
+    if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "INGEST_MODE=celery requires DUCKLAKE_CATALOG to be a Postgres DSN — "
+            "a DuckDB-file catalog is single-process and cannot serve concurrent "
+            "worker writers plus backend readers (torn merges corrupt the catalog). "
+            f"Got: {DUCKLAKE_CATALOG!r}"
+        )
+    metadata_dsn = os.getenv("METADATA_DSN", "")
+    if not metadata_dsn.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "INGEST_MODE=celery requires METADATA_DSN to be a Postgres DSN — "
+            "per-service SQLite metadata is a pod-local file, so the cron lease "
+            "(job_runs), the ingest ledger, and the ingested-file manifest would "
+            "each be private to one process: every worker would re-discover and "
+            "re-convert the same objects and no lease could serialize them. A "
+            "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
+            f"Got: {metadata_dsn!r}"
+        )

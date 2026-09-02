@@ -199,7 +199,7 @@ def oldest_unenriched_timestamp(src: dict) -> str | None:
                 row = con.execute(f"""
                     SELECT MIN(t.timestamp)
                     FROM {table_name} t
-                    LEFT JOIN _ngwaf_oldest.ngwaf_bots nb USING (waf_req_id)
+                    LEFT JOIN temp._ngwaf_oldest_ngwaf_bots nb USING (waf_req_id)
                     WHERE t.waf_req_id IS NOT NULL
                       AND t.waf_req_id != ''
                       AND t.waf_sig LIKE '%VERIFIED-BOT%'

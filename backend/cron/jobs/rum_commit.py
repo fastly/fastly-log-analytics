@@ -13,7 +13,7 @@ from backend.cron.decorators import cron_task
 logger = logging.getLogger(__name__)
 
 
-@cron_task("cron_rum_commit")
+@cron_task("cron_rum_commit", job_name="rum_commit")
 def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = None, **kwargs) -> None:
     """Compact RUM tables from DuckDB cache to Iceberg/FOS."""
     from backend import config as svcconfig

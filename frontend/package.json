@@ -1,6 +1,6 @@
 {
-  "name": "fastly-log-analysis-frontend",
-  "version": "2.4.1",
+  "name": "fastly-log-analytics",
+  "version": "3.0.0",
   "private": true,
   "engines": {
     "node": ">=24"

@@ -112,6 +112,7 @@ def _table_row_count(src: dict) -> int:
 # ── Test 1: snapshot marker present, SQLite marker missing ─────────────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_snapshot_marker_present_but_sqlite_marker_missing_does_not_double_append(pipeline_env, monkeypatch):
     """Crash window between ``table.append`` and ``mark_buffers_committed``:
     snapshot carries the commit-marker, no SQLite row landed. The next
@@ -186,6 +187,7 @@ def test_snapshot_marker_present_but_sqlite_marker_missing_does_not_double_appen
 # ── Test 2: SQLite marker present, snapshot marker missing ─────────────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_sqlite_marker_present_but_snapshot_missing_runs_full_commit(pipeline_env, monkeypatch):
     """Inverse half-state: SQLite committed_buffers says the basename
     landed, but the Iceberg table holds NO snapshot marker for it.

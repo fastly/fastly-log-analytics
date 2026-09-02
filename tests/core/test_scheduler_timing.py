@@ -1,7 +1,7 @@
 """Tests for scheduler timing correctness.
 
 Regression suite for the bug where `time.time() - start_time` was used instead
-of `time.time() - start_time_exec` in _run_service_cron, causing a TypeError
+of `time.time() - start_time_exec` in _run_log_discovery_cron, causing a TypeError
 when start_time was a str|None date-range parameter.
 """
 
@@ -11,33 +11,33 @@ from unittest.mock import patch
 
 class TestRunServiceCronSignature:
     def test_start_time_is_str_not_float(self):
-        """start_time in _run_service_cron must be str|None, not float."""
-        from backend.cron.jobs.sync import _run_service_cron
+        """start_time in _run_log_discovery_cron must be str|None, not float."""
+        from backend.cron.jobs.sync import _run_log_discovery_cron
 
-        sig = inspect.signature(_run_service_cron)
+        sig = inspect.signature(_run_log_discovery_cron)
         ann = sig.parameters["start_time"].annotation
         ann_str = str(ann)
         assert "str" in ann_str and "None" in ann_str
         assert "float" not in ann_str, "start_time became float — timing regression risk"
 
     def test_end_time_is_str_not_float(self):
-        from backend.cron.jobs.sync import _run_service_cron
+        from backend.cron.jobs.sync import _run_log_discovery_cron
 
-        sig = inspect.signature(_run_service_cron)
+        sig = inspect.signature(_run_log_discovery_cron)
         ann = sig.parameters["end_time"].annotation
         ann_str = str(ann)
         assert "str" in ann_str and "None" in ann_str
 
 
 class TestRunCommitUsesLocalStartTime:
-    """_run_commit uses a local `start_time = time.time()` variable (correct).
+    """_run_log_ingest uses a local `start_time = time.time()` variable (correct).
 
     Verify it doesn't reference an outer scope start_time that could be str|None.
     """
 
-    def test_run_commit_no_str_subtraction(self):
-        """_run_commit should not raise TypeError even if called with no string start_time."""
-        from backend.cron.jobs.commit import _run_commit
+    def test_run_log_ingest_no_str_subtraction(self):
+        """_run_log_ingest should not raise TypeError even if called with no string start_time."""
+        from backend.cron.jobs.commit import _run_log_ingest
 
         mock_src = {
             "name": "test",
@@ -53,9 +53,11 @@ class TestRunCommitUsesLocalStartTime:
         ):
             # RuntimeError from start_cron_run causes early return — no TypeError expected
             try:
-                _run_commit("test-service")
+                _run_log_ingest("test-service")
             except TypeError as exc:
-                raise AssertionError(f"TypeError in _run_commit — likely str used in float arithmetic: {exc}") from exc
+                raise AssertionError(
+                    f"TypeError in _run_log_ingest — likely str used in float arithmetic: {exc}"
+                ) from exc
 
 
 class TestLogCronRunDurationIsFloat:
@@ -63,7 +65,7 @@ class TestLogCronRunDurationIsFloat:
 
     def test_duration_passed_to_log_cron_run_is_float(self):
         """Mock ingest to yield a done event and capture what log_cron_run receives."""
-        from backend.cron.jobs.sync import _run_service_cron
+        from backend.cron.jobs.sync import _run_log_discovery_cron
 
         mock_src = {
             "name": "test",
@@ -104,7 +106,7 @@ class TestLogCronRunDurationIsFloat:
             patch("backend.utils.usage_logger.run_usage_log_cleanup"),
             patch("backend.core.duckdb.update_cron_duration"),
         ):
-            _run_service_cron("test", force=True, run_id=1)
+            _run_log_discovery_cron("test", force=True, run_id=1)
 
         assert "value" in captured_duration, "log_cron_run was never called"
         assert isinstance(captured_duration["value"], float), (
@@ -162,19 +164,23 @@ class TestIngestTimingVariableNames:
         )
 
     def test_no_time_minus_start_time_in_scheduler(self):
-        """_run_service_cron must not subtract the str|None start_time from time.time()."""
+        """_run_log_discovery_cron must not subtract the str|None start_time from time.time()."""
         import ast
         import pathlib
 
-        # After the cron carve, _run_service_cron lives in backend/cron/jobs/sync.py.
+        # After the cron carve, _run_log_discovery_cron lives in backend/cron/jobs/sync.py.
         src = pathlib.Path("backend/cron/jobs/sync.py").read_text()
         tree = ast.parse(src)
 
         run_cron_fn = next(
-            (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_run_service_cron"),
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_run_log_discovery_cron"
+            ),
             None,
         )
-        assert run_cron_fn is not None, "_run_service_cron not found in backend/cron/jobs/sync.py"
+        assert run_cron_fn is not None, "_run_log_discovery_cron not found in backend/cron/jobs/sync.py"
 
         bad_subtractions = [
             node
@@ -185,6 +191,6 @@ class TestIngestTimingVariableNames:
             and node.right.id == "start_time"
         ]
         assert not bad_subtractions, (
-            f"Found {len(bad_subtractions)} instance(s) of `... - start_time` in _run_service_cron(). "
+            f"Found {len(bad_subtractions)} instance(s) of `... - start_time` in _run_log_discovery_cron(). "
             "Use start_time_exec (float) for wall-clock arithmetic."
         )

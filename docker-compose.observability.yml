@@ -1,0 +1,91 @@
+# Local-only observability sidecar for the multipod stack. Merge it in:
+#   docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml up -d
+# Everything binds 127.0.0.1, matching the multipod file's local-dev posture.
+services:
+  # App pods export their OTel signals when this override is active:
+  # metrics go straight to Prometheus's OTLP receiver, traces to Tempo.
+  backend:
+    environment:
+      - OTEL_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp/v1/metrics
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4318/v1/traces
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # OTLP ingest for the app's OTel metrics; remote-write ingest for
+      # Tempo's span-derived RED metrics.
+      - --web.enable-otlp-receiver
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [app-network]
+    ports:
+      - 127.0.0.1:9090:9090
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/var/tempo
+    networks: [app-network]
+
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/fla.yml:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [app-network]
+    ports:
+      - 127.0.0.1:3000:3000
+
+  # Per-container CPU/mem/net via the Docker Engine API. cAdvisor can't run
+  # here: this engine's containerd-backed image store has no classic
+  # overlayfs layerdb, which aborts cAdvisor's docker handler for every
+  # container (confirmed on v0.49 and v0.52). The Engine API itself has no
+  # such dependency (`docker stats` works fine), so a tiny stdlib exporter
+  # talks to it directly instead of chasing a cAdvisor fix.
+  docker-stats-exporter:
+    image: python:3.13-alpine
+    command: ["python", "/exporter/docker_stats_exporter.py"]
+    volumes:
+      - ./observability/docker_stats_exporter.py:/exporter/docker_stats_exporter.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [app-network]
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    environment:
+      - REDIS_ADDR=redis://valkey:6379
+    networks: [app-network]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      - DATA_SOURCE_NAME=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake?sslmode=disable
+    networks: [app-network]
+
+  celery-exporter:
+    image: danihodovic/celery-exporter:0.11.3
+    command: ["--broker-url=redis://valkey:6379/0"]
+    networks: [app-network]
+
+  # celery-exporter consumes worker task events, which are off by default —
+  # re-declare the worker command with -E added. The worker also exports its
+  # own OTel signals (ingest/cron spans, pool-wait histogram).
+  worker:
+    command: ["python", "-m", "celery", "-A", "backend.celery_app", "worker", "-E", "-l", "info", "-Q", "q.ingest,q.control,celery", "--concurrency=2"]
+    environment:
+      - OTEL_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp/v1/metrics
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4318/v1/traces
+
+volumes:
+  tempo-data:

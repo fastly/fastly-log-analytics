@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: docker
+    static_configs: [{ targets: ["docker-stats-exporter:9417"] }]
+  - job_name: valkey
+    static_configs: [{ targets: ["redis-exporter:9121"] }]
+  - job_name: postgres
+    static_configs: [{ targets: ["postgres-exporter:9187"] }]
+  - job_name: celery
+    static_configs: [{ targets: ["celery-exporter:9808"] }]

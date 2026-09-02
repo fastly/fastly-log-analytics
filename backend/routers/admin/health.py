@@ -260,6 +260,27 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         except Exception:
             out["fos"] = None
 
+    # ── Celery Metrics ───────────────────────────────────────────────
+    try:
+        if os.environ.get("INGEST_MODE") == "celery":
+            from backend.celery_app import app as celery_app
+            from backend.celery_status import celery_queue_depths
+
+            i = celery_app.control.inspect(timeout=0.5)
+            active = i.active()
+            worker_count = len(active) if active else 0
+
+            queues, broker_reachable = celery_queue_depths()
+            out["celery"] = {
+                "queue_depth": sum(queues.values()),
+                "active_workers": worker_count,
+                "broker_reachable": broker_reachable,
+            }
+        else:
+            out["celery"] = None
+    except Exception as e:
+        out["celery"] = {"error": str(e)[:200]}
+
     return out
 
 

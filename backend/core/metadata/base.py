@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import threading
 
+from backend.core.metadata import pg_connection
 from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ _ORPHAN_THRESHOLD_MINS = 60
 # healthy slow run (sync's ingest budget is max_seconds=240 → 10 min is ~2.5×).
 # Incident 2026-06-19: a leaked sync row blocked ingestion ~20 min at the old
 # 60-min cutoff. Tasks not listed here fall back to _ORPHAN_THRESHOLD_MINS.
-_TASK_ORPHAN_THRESHOLD_MINS = {"sync": 10}
+_TASK_ORPHAN_THRESHOLD_MINS = {"sync": 10, "log_discovery": 10}
 
 
 class InvalidServiceIdError(ValueError):
@@ -184,10 +185,11 @@ _all_connections_lock = _pool._all_connections_lock
 
 
 def get_con(service_id: str) -> sqlite3.Connection:
-    """Return a thread-local SQLite connection for the given service.
+    """Return a thread-local connection scoped to the given service.
 
-    Lazily initialises the file (creating ``data/services/`` and the schema)
-    on first use per (thread, service_id) pair.
+    SQLite (default): lazily initialises the per-service file (creating
+    ``data/services/`` and the schema) on first use per (thread,
+    service_id) pair.
 
     Concurrency: ``PRAGMA journal_mode=WAL`` requires an exclusive writer
     lock to switch from the default (delete) journal mode. If N threads
@@ -196,15 +198,37 @@ def get_con(service_id: str) -> sqlite3.Connection:
     the connection's 30s timeout. The pool holds ``_init_lock`` across the
     connect+PRAGMA window so cold-start is serialised once per process;
     subsequent calls hit the thread-local pool early and pay nothing.
+
+    Postgres (``METADATA_DSN`` set — the multi-writer/multi-pod backend):
+    ``service_id`` is validated but otherwise unused for connection
+    selection — every service shares ONE connection per thread, since rows
+    are scoped by the ``service_id`` column migration 015 added, not by
+    which physical database they live in. See
+    :mod:`backend.core.metadata.pg_connection` for the full rationale.
     """
+    if pg_connection.is_postgres():
+        _validate_service_id_or_raise(service_id)
+        wrapper = pg_connection.get_pg_thread_connection()
+        # Retag for the Live Query Monitor on every call — see
+        # PgConnectionWrapper.__init__'s docstring on why this is safe for
+        # a connection shared across services on one thread.
+        wrapper._service_id = service_id
+        return wrapper  # type: ignore[return-value]
     return _pool.get(service_id)
 
 
 def get_con_readonly(service_id: str) -> sqlite3.Connection:
-    """Return a short-lived read-only SQLite connection for the given service.
+    """Return a short-lived read-only connection for the given service.
 
-    This connection is not pooled and should be closed immediately.
+    This connection is not pooled and should be closed immediately (callers
+    use ``contextlib.closing(...)``). Under Postgres, ``.close()`` returns
+    the connection to the pool rather than severing a socket.
     """
+    if pg_connection.is_postgres():
+        _validate_service_id_or_raise(service_id)
+        wrapper = pg_connection.get_pg_readonly_connection()
+        wrapper._service_id = service_id
+        return wrapper  # type: ignore[return-value]
     if not os.path.exists(db_path(service_id)):
         get_con(service_id)
     return _pool.open_readonly(service_id)
@@ -217,6 +241,9 @@ def close_all_connections() -> None:
     opened on FastAPI TestClient worker threads — the fixture only has
     access to its own thread's ``_local`` and would otherwise leak those.
     """
+    if pg_connection.is_postgres():
+        pg_connection.close_all_pg_connections()
+        return
     _pool.close_all()
 
 
@@ -226,7 +253,14 @@ def teardown(service_id: str) -> None:
     Called from ``backend/provision.py`` during service teardown. Safe to call
     even if the file does not exist or other threads still hold connections —
     other threads will reopen lazily and re-init schema if the file is missing.
+
+    Under Postgres this is a no-op: there is no per-service file to delete,
+    and row-level deletion for a torn-down service is a data-retention
+    decision the provisioning teardown flow does not currently make for any
+    backend. Scope it there if/when that's needed.
     """
+    if pg_connection.is_postgres():
+        return
     _pool.teardown(service_id)
     _clear_ingested_filenames_cache(service_id)
 
@@ -239,6 +273,46 @@ def teardown(service_id: str) -> None:
 
 
 _SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS ingest_ledger (
+        service_id TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        etag TEXT,
+        size_bytes INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('discovered','claimed','committed','quarantined','dead_letter')),
+        claimed_by TEXT,
+        claimed_at REAL,
+        committed_at REAL,
+        snapshot_ref TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        discovered_at REAL,
+        raw_deleted_at REAL,
+        PRIMARY KEY (service_id, object_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS job_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT,
+        job_name TEXT NOT NULL,
+        started_at REAL NOT NULL,
+        heartbeat_at REAL NOT NULL,
+        lease_ttl_s INTEGER NOT NULL,
+        finished_at REAL,
+        status TEXT NOT NULL,
+        detail TEXT
+    )
+    """,
+    # Makes lease acquisition atomic under CONCURRENT writers (multiple
+    # pods against one Postgres metadata backend): at most one 'running'
+    # row can exist per (service_id, job_name) at a time. start_cron_run's
+    # INSERT targets this index with ON CONFLICT ... DO NOTHING and reads
+    # back rowcount to learn whether it won the lease — a single atomic
+    # statement, unlike the old check-then-insert (SELECT count, then
+    # INSERT), which raced under autocommit (see cron_log.py).
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_job_runs_running_lease
+        ON job_runs(service_id, job_name) WHERE status = 'running'""",
     """CREATE TABLE IF NOT EXISTS sources (
         name TEXT PRIMARY KEY,
         config TEXT,
@@ -315,6 +389,7 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_in_flight_source ON ingest_in_flight(source_name)",
     """CREATE TABLE IF NOT EXISTS cron_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT,
         task TEXT NOT NULL,
         started_at TEXT NOT NULL,
         duration_s REAL,
@@ -436,10 +511,17 @@ _SCHEMA = [
     # registry as "intentionally absent locally, do not re-fetch".
     """CREATE TABLE IF NOT EXISTS local_compacted_files (
         file_name TEXT PRIMARY KEY,
+        service_id TEXT,
         compacted_at TEXT DEFAULT (datetime('now'))
     )""",
+    # service_id — not source_name — is the tenant discriminator, matching
+    # every other table under a shared Postgres metadata database (ADR-15).
+    # source_name is retained as informational only: readers used to filter
+    # on it while binding service_id, which worked solely because the two
+    # coincide today (src["name"] is the service id). See migration 020.
     """CREATE TABLE IF NOT EXISTS quarantined_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT,
         file_name TEXT NOT NULL,
         source_name TEXT NOT NULL,
         fos_key TEXT NOT NULL,
@@ -451,9 +533,9 @@ _SCHEMA = [
         error_size_bytes INTEGER,
         corrupt_samples TEXT,
         quarantined_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(file_name, source_name)
+        UNIQUE(service_id, file_name)
     )""",
-    "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(source_name, quarantined_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(service_id, quarantined_at)",
 ]
 
 

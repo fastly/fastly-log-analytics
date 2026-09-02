@@ -1,4 +1,4 @@
-.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e
+.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e deploy-validate stray-file-gate
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -270,7 +270,7 @@ ci:
 	$(MAKE) gen-types
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
-	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci
+	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci deploy-validate stray-file-gate
 	$(MAKE) e2e
 
 # ── v2.0 cleanup targets ──────────────────────────────────────────────────────
@@ -291,6 +291,30 @@ security-regression:
 # OTEL_EXPORTER=console spam mode (the 2026-06-10 prod-stdout-flood incident).
 otel-guard:
 	bash scripts/check_no_console_otel.sh
+
+# Deploy-surface validation. `docker compose config -q` parses + validates the
+# multipod compose (no daemon needed); helm lint + template validate the chart
+# when helm is installed (GH runners ship it; skipped with a note otherwise).
+# Mirrors the "Deploy config validation" step in ci.yml.
+deploy-validate:
+	docker compose -f docker-compose.multipod.yml config -q
+	@if command -v helm >/dev/null 2>&1; then \
+		helm lint deploy/chart/fastly-log-analytics && \
+		helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null; \
+	else \
+		echo "helm not installed; skipping chart lint/template"; \
+	fi
+
+# Stray-artifact gate: fails if any *.bak file or a ROOT-level openapi.json is
+# tracked (frontend/openapi.json is the canonical generated spec; a root copy
+# is always editor/session debris). Mirrors the "Stray file gate" step in ci.yml.
+stray-file-gate:
+	@stray="$$(git ls-files '*.bak' 'openapi.json')"; \
+	if [ -n "$$stray" ]; then \
+		echo "ERROR: stray files are tracked (delete them or add to .gitignore):"; \
+		echo "$$stray"; \
+		exit 1; \
+	fi
 
 # Architectural baseline snapshot. Captures LOC, large files,
 # TODO/FIXME markers, # Security: comment count, and mypy ignore

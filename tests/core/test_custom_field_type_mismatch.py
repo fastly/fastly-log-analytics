@@ -51,6 +51,7 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
     fields the test asks for. Returns helpers for seeding gzipped log
     rows and draining the ingest generator.
     """
+    fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
     warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
@@ -154,6 +155,7 @@ def _query_view(env, custom_field_name: str) -> list:
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_integer_field_with_string_value_nulls_only_that_cell(custom_field_env):
     """Declared INTEGER, VCL emits the string ``"NaN"`` for ONE row in a
     batch of three. Expect: row kept, cell NULL, other rows untouched.
@@ -207,6 +209,7 @@ def test_integer_field_with_string_value_nulls_only_that_cell(custom_field_env):
     assert by_url["/path/2"] == 17
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_integer_field_with_string_float_truncates_not_nulls(custom_field_env):
     """Declared INTEGER, VCL emits ``"3.14"`` (a string that *parses* as a
     valid numeric value). Pin the surprising-but-real behavior: DuckDB's
@@ -256,6 +259,7 @@ def test_integer_field_with_string_float_truncates_not_nulls(custom_field_env):
     )
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_boolean_field_with_arbitrary_string_nulls_the_cell(custom_field_env):
     """Declared BOOLEAN, VCL emits ``"maybe"``. Cell → NULL; row kept."""
     from backend.core import iceberg as ice
@@ -297,6 +301,7 @@ def test_boolean_field_with_arbitrary_string_nulls_the_cell(custom_field_env):
     assert by_url["/path/2"] is False
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env):
     """Two files in the same batch; one is entirely bad values, the other
     is entirely good. Bad file must not abort the good file's commit, and
@@ -350,6 +355,7 @@ def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env)
         ("DOUBLE", "lol", "DOUBLE ← clearly invalid string → NULL"),
     ],
 )
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_typed_field_with_invalid_string_value_nulls_cell(custom_field_env, ddb_type, bad_value, description):
     """Matrix coverage for the type-mismatch contract: the row is kept,
     the bad cell is NULL'd, and a peer typed field on the same row

@@ -59,12 +59,12 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest as _run_commit
     from backend.utils.router_utils import start_or_resume_cron
 
     return start_or_resume_cron(
         source,
-        "commit",
+        "log_ingest",
         _run_commit,
         target_kwargs={"force": True},
         success_msg="Commit started.",
@@ -124,6 +124,33 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
     t.start()
     return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+
+
+@router.post("/admin/ducklake/migrate", status_code=202)
+def ducklake_migrate_endpoint(source: dict = Depends(get_source)):
+    """Adopt this service's legacy pyiceberg-era local parquet into DuckLake.
+
+    Returns 202 Accepted — the adoption runs in a background thread
+    (registering thousands of files can take a while). Idempotent: files
+    already tracked by the DuckLake catalog are skipped, so re-running
+    after a partial failure is safe. Check backend logs for the summary
+    (adopted/skipped file counts and row totals).
+    """
+    import threading
+
+    from backend.core.iceberg._ducklake_migration import adopt_iceberg_to_ducklake
+
+    service_id = source["name"]
+
+    def worker():
+        try:
+            result = adopt_iceberg_to_ducklake(service_id)
+            logger.info("ducklake migrate %s finished: %s", service_id, result)
+        except Exception:
+            logger.exception("ducklake migrate %s failed", service_id)
+
+    threading.Thread(target=worker, daemon=True, name=f"ducklake-migrate-{service_id}").start()
+    return {"ok": True, "message": "DuckLake adoption started.", "service_id": service_id}
 
 
 # response_model intentionally omitted: SSE progress stream (EventSourceResponse),

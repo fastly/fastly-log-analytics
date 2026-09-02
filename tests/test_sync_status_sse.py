@@ -289,14 +289,24 @@ def test_log_extents_stream_projects_to_two_safe_fields_only():
     assert len(events) >= 2, f"Expected snapshot + 1 push event, got {events}"
 
     # Initial snapshot is projected.
-    assert events[0] == {"latest_log_at": "2026-06-15T22:46:46+00:00", "local_rows": 6_659_858}
+    assert events[0] == {
+        "latest_log_at": "2026-06-15T22:46:46+00:00",
+        "local_rows": 6_659_858,
+        "request": None,
+        "rum": None,
+    }
     # Pushed event is projected.
-    assert {"latest_log_at": "2026-06-15T22:48:00+00:00", "local_rows": 6_660_000} in events
+    assert {
+        "latest_log_at": "2026-06-15T22:48:00+00:00",
+        "local_rows": 6_660_000,
+        "request": None,
+        "rum": None,
+    } in events
 
     # CRUCIAL: every event in the body has EXACTLY these two keys —
     # nothing else slips through. Catches a regression where someone
     # widens the projection without noticing what they expose.
     for ev in events:
-        assert set(ev.keys()) == {"latest_log_at", "local_rows"}, (
+        assert set(ev.keys()) == {"latest_log_at", "local_rows", "request", "rum"}, (
             f"Analyst projection leaked extra keys: {sorted(ev.keys() - {'latest_log_at', 'local_rows'})}"
         )

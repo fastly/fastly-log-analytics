@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "2.4.1"
+    "version": "3.0.0"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -17649,6 +17649,116 @@
         }
       }
     },
+    "/api/admin/celery/status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Celery Status",
+        "description": "Expose Celery queue depths, worker status, RedBeat schedule, and\ningest-ledger summary.",
+        "operationId": "api_celery_status_api_admin_celery_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/optimize-now": {
       "post": {
         "tags": [
@@ -21123,6 +21233,182 @@
         "summary": "Rebuild Local View Endpoint",
         "description": "One-button \"fix it\" for a stuck or stale local DuckDB view.\n\nReturns 202 Accepted \u2014 the rebuild runs asynchronously in a worker\nthread and the response body carries a ``run_id`` the caller can\npoll for completion.\n\nClears the in-memory + on-disk caches that drive view SQL generation,\nthen triggers a metadata_sync that re-pulls the catalog from the cloud\nand rebuilds the view. The local raw buffer is NOT touched \u2014\nun-committed data is safe.\n\nWhen to use: after manually editing parquet files, after a catalog\nschema-mapping desync, or when \"Sync All\" already ran and the view\nstill looks wrong. This is the nuclear-option version of refresh.",
         "operationId": "rebuild_local_view_endpoint_api_admin_rebuild_local_view_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ducklake/migrate": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Ducklake Migrate Endpoint",
+        "description": "Adopt this service's legacy pyiceberg-era local parquet into DuckLake.\n\nReturns 202 Accepted \u2014 the adoption runs in a background thread\n(registering thousands of files can take a while). Idempotent: files\nalready tracked by the DuckLake catalog are skipped, so re-running\nafter a partial failure is safe. Check backend logs for the summary\n(adopted/skipped file counts and row totals).",
+        "operationId": "ducklake_migrate_endpoint_api_admin_ducklake_migrate_post",
         "parameters": [
           {
             "name": "service",
@@ -40534,6 +40820,17 @@
               }
             ],
             "title": "Cmcd Enabled"
+          },
+          "rum_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Enabled"
           }
         },
         "additionalProperties": true,
@@ -42266,6 +42563,17 @@
             ],
             "title": "Cache Retention Days"
           },
+          "rollup_retention_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup Retention Months"
+          },
           "keep_snapshot_days": {
             "anyOf": [
               {
@@ -43409,6 +43717,24 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HealthCeleryStats": {
+        "properties": {
+          "queue_depth": {
+            "type": "integer",
+            "title": "Queue Depth"
+          },
+          "active_workers": {
+            "type": "integer",
+            "title": "Active Workers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queue_depth",
+          "active_workers"
+        ],
+        "title": "HealthCeleryStats"
+      },
       "HealthConfigBackup": {
         "properties": {
           "last_backup_at": {
@@ -43804,6 +44130,16 @@
               }
             ],
             "title": "Fos"
+          },
+          "celery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthCeleryStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -55266,6 +55602,17 @@
             ],
             "title": "Cache Retention Days"
           },
+          "rollup_retention_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup Retention Months"
+          },
           "keep_snapshot_days": {
             "anyOf": [
               {
@@ -55857,11 +56204,25 @@
             "default": false
           },
           "min_reqs_flag": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Min Reqs Flag"
           },
           "min_4xx_pct_flag": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Min 4Xx Pct Flag"
           }
         },
@@ -55873,9 +56234,7 @@
           "limit",
           "has_rtt",
           "has_ja4",
-          "has_edge",
-          "min_reqs_flag",
-          "min_4xx_pct_flag"
+          "has_edge"
         ],
         "title": "SessionsResponse"
       },
@@ -56993,6 +57352,45 @@
         ],
         "title": "SqliteProfilerEntry"
       },
+      "StreamMetrics": {
+        "properties": {
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "total_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Rows"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          }
+        },
+        "type": "object",
+        "title": "StreamMetrics"
+      },
       "SummaryResponse": {
         "properties": {
           "active_total": {
@@ -57181,6 +57579,26 @@
               }
             ],
             "title": "Ngwaf Workspace Id"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_debug_queries": {
             "items": {

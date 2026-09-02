@@ -168,7 +168,7 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	# Gateway. 120 s lets the slow path finish at the cost of one stuck
 	# worker per such request. Once the time_series rollup backfill is
 	# in place, queries return in <1 s and the timeout never matters.
-	@api path /api/*
+	@api path /api/* /js/* /rum-beacon
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
 		transport http {
@@ -391,7 +391,7 @@ https://localhost:8443, https://127.0.0.1:8443 {
 	# API → backend (preserve Host so backend's DNS-rebinding gate matches the
 	# registered public_endpoint). Pin X-Forwarded-For to 127.0.0.1 so the
 	# backend classifies the operator as the local admin.
-	@api path /api/*
+	@api path /api/* /js/* /rum-beacon
 	reverse_proxy @api 127.0.0.1:8000 {
 		header_up X-Forwarded-For 127.0.0.1
 		flush_interval -1

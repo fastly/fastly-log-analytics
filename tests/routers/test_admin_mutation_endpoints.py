@@ -85,7 +85,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.sync._run_service_cron"),
+        patch("backend.cron.jobs.sync._run_log_discovery_cron"),
     ):
         resp = client.post(
             "/api/admin/ingest-logs",
@@ -98,7 +98,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     assert body["run_id"] == "run-123"
     assert "started" in body["message"].lower()
     # Read-write services run the regular sync (not metadata_sync)
-    assert started["task"] == "sync"
+    assert started["task"] == "log_discovery"
 
 
 def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_source):
@@ -157,7 +157,7 @@ def test_ingest_endpoint_returns_existing_run_id_when_already_running(client, te
     from backend.cron_progress import _run_metadata
 
     _run_metadata.clear()
-    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "sync"}
+    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "log_discovery"}
 
     try:
         with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("sync busy")):
@@ -377,14 +377,14 @@ def test_commit_iceberg_starts_commit_in_background(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.commit._run_commit"),
+        patch("backend.cron.jobs.commit._run_log_ingest"),
     ):
         resp = client.post("/api/admin/commit-iceberg", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
     assert resp.status_code == 202
     body = resp.json()
     assert body["run_id"] == "commit-run-789"
-    assert started["task"] == "commit"
+    assert started["task"] == "log_ingest"
 
 
 def test_commit_iceberg_returns_existing_run_when_already_running(client, test_service_source):
@@ -392,7 +392,7 @@ def test_commit_iceberg_returns_existing_run_when_already_running(client, test_s
     from backend.cron_progress import _run_metadata
 
     _run_metadata.clear()
-    _run_metadata["existing-commit"] = {"service_id": test_service_source["name"], "task": "commit"}
+    _run_metadata["existing-commit"] = {"service_id": test_service_source["name"], "task": "log_ingest"}
 
     try:
         with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("commit busy")):

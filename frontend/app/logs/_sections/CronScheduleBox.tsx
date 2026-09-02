@@ -13,7 +13,7 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { useElapsedTime } from '@/hooks/useElapsedTime'
 import { TimeAgo } from '@/components/TimeAgo'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
-import { CRON_EXPLANATIONS } from './CronExplanations'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 
 export function LiveTimer({ startedAt }: { startedAt: string }) {
   const elapsed = useElapsedTime(startedAt)
@@ -86,7 +86,7 @@ export function CronScheduleBox({
             <TooltipTrigger render={
               <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 ${isRunning ? 'text-blue-500' : 'text-muted-foreground'}`} />
             }>
-              {schedule.task === 'metadata_sync' ? 'sync' : schedule.task}
+              {CRON_DISPLAY_NAMES[schedule.task] || schedule.task}
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-[250px] text-xs">
               {CRON_EXPLANATIONS[schedule.task] || 'Background job.'}

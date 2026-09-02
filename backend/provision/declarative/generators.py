@@ -14,6 +14,7 @@ from backend.core.fastly.rum_provisioning import (
     generate_rum_asset_fetch_vcl,
     generate_rum_vcl,
 )
+from backend.provision import log_paths
 from backend.provision.declarative.diff import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
 from backend.provision.declarative.state import FeatureState
 from backend.provision.fastly_api import generate_capture_vcl
@@ -554,7 +555,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             LoggingEndpoint(
                 name=state.logging_endpoint_name,
                 endpoint_type="s3",
-                path=f"{state.fos_prefix}/raw/%Y/%m/%d/%H/analytics_log_%M.json.gz",
+                path=log_paths.analytics_log_path(state.fos_prefix),
                 period=state.log_period,
                 response_condition="log_analytics_condition",
                 format_string=log_format,
@@ -576,7 +577,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
                 endpoint_type="s3",
-                path=f"{state.fos_prefix}/rum/raw/%Y/%m/%d/%H/rum_log_%M.json.gz",
+                path=log_paths.rum_log_path(state.fos_prefix),
                 period=state.log_period,
                 response_condition="rum_log_condition",
                 format_string=rum_format,

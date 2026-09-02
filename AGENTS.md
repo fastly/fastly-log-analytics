@@ -29,12 +29,12 @@ The canonical reference for any contributor or AI agent working on this project.
 
 ## Overview
 
-FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + Apache Iceberg and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
+FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + DuckLake (formerly PyIceberg) using a Celery/Valkey architecture and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
 
 User-facing pitch + features list lives in [README.md](README.md). This file documents *how it works internally*.
 
 **Stack:**
-- Backend: FastAPI, DuckDB, PyIceberg, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
+- Backend: FastAPI, DuckDB, DuckLake, Celery, Valkey, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
 - Frontend: Next.js 16, React 19, TanStack Query v5, Zustand, shadcn/ui, openapi-fetch, vitest
 - Storage: FOS (S3-compatible), per-service DuckDB + SQLite (operational metadata), global SQLite for NGWAF bot cache + live-share
 - Optional: [`falco`](https://github.com/ysugimoto/falco) VCL linter — detected via `shutil.which("falco")`, degrades gracefully to regex checks when absent
@@ -48,17 +48,17 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 | Layer | Location | Purpose |
 |---|---|---|
 | Raw logs | `s3://{bucket}/{prefix}/raw/**/*.gz` | Immutable gzipped JSON from Fastly |
-| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and Iceberg commit |
-| Iceberg table | `s3://{bucket}/{prefix}/iceberg/` | Durable long-term storage, hour-partitioned |
-| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance) |
+| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and commit |
+| DuckLake table | Catalog: local `.ducklake` file or Postgres DSN (multi-pod/celery-mode requires Postgres); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Durable long-term storage. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0 — see [ADR-14](docs/adr/14-ducklake-replacement.md). `buffer.py`/`sync.py` still carry pyiceberg-era code for the commit machinery itself; not yet fully retired. |
+| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Path predates the DuckLake cutover; unaffected since it was never part of the Iceberg/DuckLake commit-path catalog. |
 | DuckDB | `data/services/{service_id}.duckdb` | Per-service analytical engine **only**: session-scoped `logs` view + temp tables |
-| Service metadata DB | `data/services/{service_id}.metadata.db` | Per-service SQLite (WAL): `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries` |
+| Service metadata DB | `data/services/{service_id}.metadata.db`, or a shared Postgres database (`METADATA_DSN`, required for multi-pod — see [ADR-15](docs/adr/15-multi-writer-topology.md)) | Per-service SQLite (WAL): `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `ingest_ledger` (celery mode — see [ADR-16](docs/adr/16-ingest-ledger.md)) |
 | Usage-log DB | `data/services/{service_id}.usage_log.db` | Per-service SQLite (WAL): `usage_log` + `usage_log_hourly_summary`, split out of `metadata.db` so the cron writer's lock never blocks admin readers |
 | NGWAF bot cache | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite for VERIFIED-BOT enrichment |
 | Live-share DB | `data/system/remote_share.db` | Singleton SQLite (WAL): invites, sessions, audit, TOS, lockouts |
 | Service configs | `configs/{logging_service_id}.json` | Credentials, settings, log_fields config |
 
-The DuckDB `logs` view stitches the Iceberg table and the local Parquet buffer so queries always see all data without callers caring which layer holds which row.
+The DuckDB `logs` view stitches the DuckLake table and the local Parquet buffer so queries always see all data without callers caring which layer holds which row.
 
 ### Package layout (post v2.0 carve-ups)
 
@@ -92,25 +92,29 @@ Other new modules introduced by the cleanup:
 The README explains the two collaboration modes for end users. Implementation pointers:
 
 - **Admin** (`access_level: "read_write"`) — full ingest/management surface. Config: `configs/{logging_service_id}.json`.
-- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode.
+- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode. **Known gap as of v3.0.0**: this flow was never updated for the DuckLake cutover — pyiceberg's catalog was reconstructible purely from FOS-resident `metadata.json` pointers, which is what let a Path-A instance with only bucket credentials work standalone; DuckLake's catalog (Postgres or a local file) is not FOS-resident, so a Path-A analyst against a DuckLake/celery-mode service currently has no way to discover committed table state. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md) (Proposed, unimplemented) before touching this flow for such a service.
 - **Analyst Path B — live shared instance** (direct-mode against an HTTPS public_endpoint; the SSH-tunnel-to-localhost.run option was deleted in v2.0). No FOS credentials, uses admin's running process. See [Live Dashboard Sharing](#live-dashboard-sharing) below for components.
 
 **Both paths must keep working.** Don't remove either. Don't introduce a "unified" replacement without keeping the JSON-config flow intact — it's the only option when the admin's instance can't stay running.
 
 ## Ingest Pipeline
 
-APScheduler runs the core sync-family jobs per service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note):
+Two data planes, selected by `INGEST_MODE` (`local` default vs `celery`) — see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design. Both commit to the same DuckLake table and the same unified `logs` view.
+
+**Default (`local`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0 rework — grep history for the old names if you're reading pre-v3 code or logs:
 
 | Job | Schedule | Function |
 |---|---|---|
-| `sync_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
-| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → Iceberg table, flush usage log |
+| `log_discovery_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
+| `log_ingest_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → DuckLake table, flush usage log |
 | `local_compact_{id}` | every 2 min | Compact local-only hourly/daily Parquet files, flush usage log |
 | `rollup_heal_{id}` | hourly at :05 | Re-run the idempotent `backfill_missing_hour_bundles` (1-day lookback) so closed hours the per-sync recompute missed get their top-N rollups within ~1 h; local-only writes |
 | `rollup_compact_{id}` | daily 02:00 UTC | Consolidate closed-day per-hour rollup parquet into per-day files (30-day deep pass); local-only writes |
-| `optimize_{id}` | daily 03:00 UTC | Compact small Iceberg data files, flush usage log |
-| `expire_{id}` | weekly Sun 04:00 UTC | Expire old Iceberg snapshots, flush usage log |
+| `optimize_{id}` | daily 03:00 UTC | DuckLake-native (`db_iceberg.optimize_table` → `_optimize_table_impl`): `CALL ducklake_flush_inlined_data('lake')` **then** `CALL ducklake_rewrite_data_files('lake')`. The flush is a DURABILITY step, not an optimization — DuckLake inlines small commits into the metadata catalog, and neither `ducklake_rewrite_data_files` nor `ducklake_merge_adjacent_files` promotes inlined rows (both only touch already-materialized files), so without it a table stays at `file_count = 0` forever and the catalog DB holds the only copy of the data (the raw `.gz` is deleted after ingest). Complements celery mode's `ducklake_merge_adjacent_files` (called from `commit_batch`). |
+| `expire_{id}` | weekly Sun 04:00 UTC | DuckLake-native since v3.0.0 (`db_iceberg.run_cloud_maintenance` → `_run_cloud_maintenance_impl`). Four steps, each isolated so one failure records its own `*_error` result key (→ `warning` cron run) and the rest proceed: **(1)** retention delete — `DELETE FROM lake.<table> WHERE timestamp < ?` for `data_retention_days`, plus `rum_retention_days` over `client_vitals`/`client_errors` (RUM telemetry lives in those tables keyed by `cid`; `logs.rum_cid` is only the CDN-side correlation key, present solely when RUM provisioning injected that log field). **`0` means keep forever for BOTH knobs** — the pyiceberg original would have resolved `data_retention_days=0` + `rum_retention_days>0` to a "delete everything from now backwards" cutoff; that is now gated on `data_retention_days > 0`. **(2)** `ducklake_expire_snapshots('lake', older_than => ?)` for `keep_snapshot_days`, then a `ducklake_cleanup_old_files('lake', older_than => ?)` sweep. Expiry reclaims NO bytes on its own; it queues unreferenced parquet, and because a file is queued at expiry time a LATER run unlinks it — which is why the sweep is unconditional, not gated on "this run expired something". Never call `ducklake_delete_orphaned_files` here: it sweeps the data path by listing and would eat local-compaction output. Also note a snapshot cannot be expired while a live data file still anchors to it, so reclamation mostly follows the daily `optimize` rewrite. **(3)/(4)** filesystem-only purges of the local `data/` cache and `rollups/` (`cache_retention_days`, `rollup_retention_months`) — untouched by the DuckLake port. Under a shared Postgres `DUCKLAKE_CATALOG` the snapshot log is catalog-WIDE, so `snapshots_before`/`snapshots_after` and the expiry itself span every tenant, not just the one service. No CAS-retry loop: there is no metadata-pointer race to lose, the job holds the per-service write lock, and the pyiceberg exception shapes it keyed on cannot be raised. |
 | `metadata_sync_{id}` | varies | Sync admin state to FOS, flush usage log |
+
+**`INGEST_MODE=celery` mode** — discovery and conversion fan out across Celery workers instead of running in one pod's scheduler loop, backed by the `ingest_ledger` state machine (`discovered → claimed → committed`/`quarantined`/`dead_letter`). `log_discovery_{id}`/`log_ingest_{id}` still exist as job names but run inline on a RedBeat-scheduled worker rather than the backend's APScheduler, plus a new `ledger_sweep_{id}` job (crash-net recovery: reclaims stuck claims, re-dispatches lost messages with a queue-depth guard, catches up via an FOS-diff). Requires a Postgres `DUCKLAKE_CATALOG` and `METADATA_DSN` (enforced at boot by `config.validate_ingest_mode()`) — a file-based catalog cannot serve concurrent worker writers. RUM beacon ingest is ported to this mode too (`rum_discovery_{id}` + `ledger_rum_sweep_{id}` in [backend/cron/jobs/rum_ledger.py](backend/cron/jobs/rum_ledger.py), both in `_REDBEAT_JOB_PREFIXES`); the v2 `rum_sync_{id}`/`rum_commit_{id}` pair remains the sync-mode path. **Ingest scales horizontally; the SERVING tier does not — it is single-pod, see [ADR-18](docs/adr/18-serving-tier-single-pod.md).**
 
 Teardown removes jobs on the next `_sync_jobs()` reload. The `config not found, skipping` warning during teardown is normal — a job fired after the config was deleted; harmless.
 
@@ -138,7 +142,7 @@ The window between `iceberg.write_to_buffer` and `metadata_db.insert_ingested_fi
 
 ### Health probe
 
-`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `sync` cron run per service; returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last sync errored, or a sync row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition — or the latest `commit` / `metadata_sync` cron errored). SQLite-only, never FOS or Fastly. Safe to wire into a load balancer.
+`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `log_discovery` cron run per service (queries match both `'log_discovery'` and the pre-v3.0.0 `'sync'` name — `cron_runs` history predates the rename); returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last discovery errored, or a discovery row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition, name unchanged since it's an internal constant, not a job name — or the latest `log_ingest` / `metadata_sync` cron errored). Celery mode additionally derives freshness straight from `ingest_ledger` (`max(committed_at)`, oldest non-committed row age, worker count vs. queue depth) rather than relying on `cron_runs` timing alone — see [ADR-16](docs/adr/16-ingest-ledger.md). SQLite-only, never FOS or Fastly. Safe to wire into a load balancer.
 
 ## VCL Log Format & Custom Fields
 
@@ -730,6 +734,24 @@ Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/tes
 - **Best-effort dereference + unconditional delete.** `teardown_scoring_resources` treated the VCL strip as best-effort ("the operator cares most about not paying for an orphaned Compute service") and deleted the Compute service anyway. That trade is backwards: an orphaned Compute service is pennies and re-deletable, a dangling backend on live traffic is an incident — and Fastly 500s on these calls are real. It now aborts and leaves the Compute service in place.
 
 Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read ``Deleting CDN service '<customer-domain>'`` while actually deleting a different service id entirely — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
+
+### 32. DuckLake inlines small commits — only `ducklake_flush_inlined_data` makes them durable
+DuckLake does not write parquet for a small INSERT. It **inlines** the rows straight into the metadata catalog (Postgres, or the `.ducklake` file), visible as `changes: {'inlined_insert': [...]}` in `ducklake_snapshots`. `ducklake_table_info` then honestly reports `file_count = 0` for a table holding real committed rows.
+
+**Neither compaction primitive promotes inlined rows.** Verified empirically on a throwaway catalog: `ducklake_merge_adjacent_files` (celery path) and `ducklake_rewrite_data_files` (default path, via `optimize_table`) both leave `file_count = 0` with zero parquet on disk, because both operate on already-materialized files. A table whose every commit was inlined stays inlined forever no matter how often compaction runs. `ducklake_flush_inlined_data` is the ONLY primitive that promotes them.
+
+This was a live bug on this branch and it is a **durability** bug, not a layout preference: `finalize_committed_raw` deletes the raw `.gz` once its ledger row has been committed for `RAW_DELETE_GRACE_S`, so with no flush the only copy of every ingested row is the catalog itself. Observed on the live test service before the fix: 27,613 committed files, 27,615 catalog snapshots, FOS `ducklake/` prefix **empty**, and 4 raw files left in the bucket. Losing the Postgres volume would have been total data loss with nothing to re-ingest.
+
+Both compaction paths now flush first — `merge_lake_files` (celery) and `_optimize_table_impl` (default). **If you add a third write path, it needs the flush too**, and setting `DATA_PATH` to FOS is not a substitute: DATA_PATH only says where parquet goes *once written*. Pinned by `test_merge_lake_files_flushes_inlined_rows_to_parquet` and `test_optimize_table_flushes_inlined_rows_to_parquet` — both assert the durability property (`file_count > 0` after a run that starts at 0), never just that the call happens.
+
+Corollary for readers: any code inferring "is there data?" from file count alone is wrong under DuckLake. Count rows, or consult inlined state. This is what broke `get_table_info` (see [ADR-14](docs/adr/14-ducklake-replacement.md)).
+
+### 33. A catalog swap fails SILENTLY on the read side
+When the v3 DuckLake cutover moved the write path off pyiceberg, every reader still built on pyiceberg's Table API kept working — it just reported an empty, frozen catalog forever, with no error. `get_table_info` / `get_snapshot_calendar`, the post-commit `table_summary.json` writer, `lake_info.py`'s fallback, and `_run_cloud_maintenance_impl`'s retention deletion were all found in this state at different times, each discovered separately.
+
+The retention one was the worst: it is the ONLY enforcement of `data_retention_days` / `rum_retention_days`, so customer data retention silently never ran against DuckLake data. It also concealed a latent wipe — the original entered its conditional-prune branch whenever `rum_retention_days > data_retention_days` *including when `data_retention_days == 0`*, which resolves the cutoff to *now* and deletes every non-RUM row. That never fired only because the whole function was dead; making it live without gating on `> 0` would have shipped a data wipe.
+
+**When you migrate a storage backend, audit every caller of the OLD backend's read API before calling the cutover done — not just the write path.** A grep of the cron job file is not enough; read the function it calls. `optimize_{id}` and `expire_{id}` sit side by side, look identical from the scheduler, and only one of them had been migrated.
 
 ## AI Agent Directives
 

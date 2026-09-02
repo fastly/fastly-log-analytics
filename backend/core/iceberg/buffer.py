@@ -26,6 +26,7 @@ import glob as _glob
 import hashlib
 import logging
 import os
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -39,8 +40,6 @@ logger = logging.getLogger("backend.core.iceberg._core")
 # names also appear as inline imports inside specific functions; we
 # add the top-level ones here so the bare-name lookup works.
 import pyarrow.parquet as pq
-from pyiceberg.exceptions import CommitFailedException
-from pyiceberg.table.name_mapping import create_mapping_from_schema
 
 from backend.core import metadata as _meta_mod
 
@@ -48,7 +47,6 @@ from backend.core import metadata as _meta_mod
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
-from backend.utils.sql_validator import escape_sql_literal
 
 
 def __getattr__(name: str):
@@ -461,7 +459,10 @@ def write_to_buffer(source: dict, arrow_table: pa.Table, filename: str, table_na
         if "ip" in aligned.column_names:
             sort_keys.append(("ip", "ascending"))
         aligned = aligned.sort_by(sort_keys)
-    pq.write_table(aligned, path, compression="zstd", compression_level=1)
+
+    tmp_path = path + ".tmp"
+    pq.write_table(aligned, tmp_path, compression="zstd", compression_level=1)
+    os.rename(tmp_path, path)
     return path
 
 
@@ -507,312 +508,123 @@ def commit_buffer(source: dict, progress_callback=None, table_name: str = "logs"
 
 
 def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
-    """Append all local buffer files to the Iceberg table.
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.utils.sql_validator import escape_sql_literal
 
-    Splits the buffer into chunks of ``_core_mod._BUFFER_COMMIT_CHUNK_SIZE`` files,
-    appending each chunk as its own Iceberg snapshot. Why chunked:
-      * **Memory bound** — the old code concatenated every buffer file
-        into a single in-process pa.Table. At 200+ files this OOM'd the
-        commit cron. Chunking caps peak memory at one chunk's worth.
-      * **Crash safety** — each chunk that lands becomes a durable
-        snapshot, and its files are tombstoned immediately (unlinked
-        after the grace window — see ``tombstone_buffer_files``). If the
-        process dies mid-loop, the next commit cron picks up the
-        un-committed remainder rather than redoing work.
-
-    Returns ``{files_committed, rows_committed, snapshot_id, quarantined_files}``.
-    ``snapshot_id`` is the LAST snapshot id produced by the loop (the one
-    the metadata pointer now references).
-    """
-    # Sweep any tombstoned buffers whose grace window has elapsed before
-    # we scan for fresh work. Co-locating the sweep with the commit cron
-    # avoids a separate scheduler registration; the cadence (every commit
-    # tick) easily covers the 60 s grace window.
-    try:
-        swept = sweep_tombstoned_buffer_files(source, table_name=table_name)
-        if swept:
-            logger.info("%s Swept %d tombstoned buffer file(s) past grace window", _core_mod._ICE, swept)
-    except Exception as sweep_err:
-        # Sweep failures must NEVER block a commit — the file just stays
-        # on disk until the next sweep tick.
-        logger.warning("%s Tombstone sweep raised (continuing with commit): %s", _core_mod._ICE, sweep_err)
+    # Sweep tombstones whose grace window elapsed — the sweep cadence is
+    # tied to the commit cron on purpose (no separate cron registration).
+    sweep_tombstoned_buffer_files(source, table_name=table_name)
 
     files = buffer_files(source, table_name=table_name)
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
+    con = get_connection(source)
 
-    # Crash-recovery: tombstone any buffer file whose previous commit
-    # tick succeeded at ``table.append`` but died before the SQLite
-    # checkpoint + tombstone landed. Two independent sources of truth:
-    #
-    # 1. SQLite ``committed_buffers`` (fast path, sub-ms). Written by
-    #    ``mark_buffers_committed`` AFTER ``table.append`` succeeds and
-    #    BEFORE ``tombstone_buffer_files``. Closes the original race.
-    #
-    # 2. Iceberg snapshot-summary markers (durable proof, ~50 ms read).
-    #    Each ``table.append`` carries ``snapshot_properties`` with one
-    #    marker per buffer file. If a snapshot in the last hour has a
-    #    marker for this buffer, the append landed — regardless of
-    #    whether SQLite step (1) made it. Closes the residual race
-    #    where the SQLite write itself fails between append and tombstone.
-    #
-    # Either signal is sufficient to tombstone+skip the buffer. Both
-    # being unavailable falls back to re-appending (compaction-dedup
-    # will clean up any resulting dups).
-    service_id = source.get("service_id") or source.get("name", "")
-    # Build the basename→path map once; the two later filter passes (recovery
-    # and skip-already-committed) reuse it instead of recomputing
-    # os.path.basename on every file.
-    basename_to_path = {os.path.basename(p): p for p in files}
-    all_basenames = list(basename_to_path.keys())
+    # Detach and re-attach as read-write
     try:
-        already_committed = _meta_mod.list_committed_basenames(service_id, all_basenames)
-    except Exception as recovery_err:
-        logger.warning("%s commit-recovery (SQLite) raised: %s", _core_mod._ICE, recovery_err)
-        already_committed = set()
-    # Iceberg-snapshot marker scan: cheap on tables with few snapshots,
-    # bounded to the last hour on tables with many. Any basename whose
-    # marker is in a recent snapshot is added to ``already_committed``
-    # even if SQLite missed it.
-    #
-    # The Table object loaded here is also reused as ``table`` for the
-    # append below (see the L555 region) so we only pay one
-    # ``_init_iceberg_table_locked`` round-trip per commit_buffer call.
-    # Without this reuse the recovery scan + the write path would each
-    # load the table independently, doubling the per-commit
-    # metadata.json read cost — exactly the regression
-    # ``test_commit_buffer_loads_table_once_per_call`` guards against.
-    _table_for_scan = None
+        con.execute("DETACH lake")
+    except Exception:
+        pass
+
+    if not _ducklake_attach(con, source, read_only=False):
+        logger.error("%s Failed to attach DuckLake in read-write mode", _core_mod._ICE)
+        con.close()
+        return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
+
+    lake_table = ducklake_table_name(source, table_name)
+    lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
+
+    rows_committed = 0
+    committed_paths: list[str] = []
     try:
-        _table_for_scan = _core_mod._init_iceberg_table_locked(source, create=False, table_name=table_name)
-        if _table_for_scan is not None:
-            since_ms = int((time.time() - _COMMIT_MARKER_LOOKBACK_S) * 1000)
-            recent_markers = _recent_snapshot_markers(_table_for_scan, since_ms)
-            if recent_markers:
-                marker_to_basename = {_buffer_basename_marker(bn): bn for bn in all_basenames}
-                iceberg_recovered = {bn for marker, bn in marker_to_basename.items() if marker in recent_markers}
-                new_via_iceberg = iceberg_recovered - already_committed
-                if new_via_iceberg:
-                    logger.warning(
-                        "%s commit-recovery (Iceberg-marker) rescued %d buffer file(s) "
-                        "not in SQLite checkpoint — closes the post-append crash window",
-                        _core_mod._ICE,
-                        len(new_via_iceberg),
-                    )
-                already_committed.update(iceberg_recovered)
-    except Exception as recovery_err:
-        logger.warning("%s commit-recovery (Iceberg) raised: %s", _core_mod._ICE, recovery_err)
-    if already_committed:
-        recovered_paths = [basename_to_path[bn] for bn in already_committed if bn in basename_to_path]
-        logger.warning(
-            "%s commit-recovery: %d buffer file(s) had committed_buffers rows but no tombstone — "
-            "tombstoning now and skipping re-append",
-            _core_mod._ICE,
-            len(recovered_paths),
-        )
-        try:
-            tombstone_buffer_files(source, recovered_paths)
-        except Exception as ts_err:
-            logger.warning("%s commit-recovery tombstone failed (continuing): %s", _core_mod._ICE, ts_err)
-        files = [p for bn, p in basename_to_path.items() if bn not in already_committed]
-        if not files:
-            return {
-                "files_committed": 0,
-                "rows_committed": 0,
-                "snapshot_id": None,
-                "quarantined_files": 0,
-            }
-
-    if progress_callback:
-        progress_callback("status", f"Found {len(files)} buffer file(s) to commit")
-
-    # Reuse the Table object the recovery scan above already loaded so
-    # commit_buffer makes at most one ``_init_iceberg_table_locked``
-    # call per invocation (the regression that
-    # ``test_commit_buffer_loads_table_once_per_call`` pins). The
-    # recovery scan and the append run sequentially inside the same
-    # service lock — no other writer can have changed the catalog
-    # state between the two consumers, so a fresh re-load would only
-    # add a cloud round-trip without changing behaviour.
-    table = _table_for_scan
-    if table is None:
-        # _table_for_scan is None when the recovery scan above found no table
-        # (the table is genuinely missing, OR its load raised and was caught).
-        # Use create=True (init_iceberg_table) so a never-provisioned / lost
-        # table is created here rather than crashing every commit cycle with
-        # NoSuchTableError. The previous create=False call raised instead of
-        # falling through, making the create path unreachable. The extra load
-        # only happens on the missing-table path (unavoidable); the happy path
-        # reuses _table_for_scan and still loads the table once per call.
-        table = _core_mod.init_iceberg_table(source, table_name=table_name)
-
-    try:
-        from pyiceberg.io.pyarrow import schema_to_pyarrow
-
-        target_arrow_schema = schema_to_pyarrow(table.schema())
-    except Exception as e:
-        logger.warning(f"[iceberg] Failed to extract arrow schema from iceberg table: {e}")
-        target_arrow_schema = None
-
-    # Apply name-mapping once up-front so we don't repeat the check per chunk.
-    if "schema.name-mapping.default" not in table.properties:
-        if progress_callback:
-            progress_callback("status", "Updating table name-mapping...")
-        from backend import config as _cfg_mod
-
-        _cfg = _cfg_mod.load_config(source.get("service_id") or source.get("name"))
-        _lf_cfg = _cfg.get("log_fields", {}) if _cfg else None
-        _mapping = create_mapping_from_schema(
-            _core_mod.get_iceberg_schema(_lf_cfg, table_name=table_name)
-        ).model_dump_json()
-        table.transaction().set_properties({"schema.name-mapping.default": _mapping}).commit()
-
-    chunk_size = max(1, _core_mod._BUFFER_COMMIT_CHUNK_SIZE)
-    total_files = len(files)
-    total_chunks = (total_files + chunk_size - 1) // chunk_size
-    total_rows = 0
-    total_committed_paths: list[str] = []
-    quarantined_count = 0
-    snapshot_id: int | None = None
-
-    for chunk_idx in range(total_chunks):
-        chunk_paths = files[chunk_idx * chunk_size : (chunk_idx + 1) * chunk_size]
-        if progress_callback:
-            progress_callback(
-                "status",
-                f"Reading chunk {chunk_idx + 1}/{total_chunks} ({len(chunk_paths)} files)...",
-            )
-        tables: list[pa.Table] = []
-        chunk_successful: list[str] = []
-        for path in chunk_paths:
+        for f in files:
+            path_lit = escape_sql_literal(f)
             try:
-                t = pq.read_table(path)
-                tables.append(_core_mod._align_to_schema(t, target_schema=target_arrow_schema, source=source))
-                chunk_successful.append(path)
+                # Ensure the per-service table exists (schema cloned from the
+                # buffer parquet — buffer files are already schema-aligned).
+                con.execute(
+                    f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet('{path_lit}') LIMIT 0"
+                )
+
+                # Sync schema: add missing columns from parquet to the table
+                table_cols: set[str] = set()
+                try:
+                    table_cols = {r[0] for r in con.execute(f"DESCRIBE {lake_ident}").fetchall()}
+                    parquet_cols_res = con.execute(
+                        f"DESCRIBE SELECT * FROM read_parquet('{path_lit}') LIMIT 0"
+                    ).fetchall()
+                    parquet_cols = {r[0] for r in parquet_cols_res}
+                    for p_col, p_type, *_ in parquet_cols_res:
+                        if p_col not in table_cols:
+                            col_ident = '"{}"'.format(p_col.replace('"', '""'))
+                            con.execute(f"ALTER TABLE {lake_ident} ADD COLUMN {col_ident} {p_type}")
+                            table_cols.add(p_col)
+                except Exception as e:
+                    logger.warning("%s Failed to sync schema for %s: %s", _core_mod._ICE, f, e)
+                    parquet_cols = set()
+
+                # Idempotent per-file commit: DELETE any rows previously
+                # committed from the same raw FOS source keys, then INSERT —
+                # inside ONE DuckLake transaction. A crash between INSERT and
+                # tombstone used to duplicate the whole file on the next
+                # cycle; now the retry replaces instead of appending. Keyed
+                # on ``_source_file`` (the raw FOS object key ingest stamps
+                # on every row); skipped when either side lacks the column
+                # (e.g. RUM tables) — plain append, same as before.
+                delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    if delete_by_source:
+                        con.execute(
+                            f"DELETE FROM {lake_ident} WHERE _source_file IN "
+                            f"(SELECT DISTINCT _source_file FROM read_parquet('{path_lit}'))"
+                        )
+                    res = con.execute(
+                        f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet('{path_lit}')"
+                    ).fetchone()
+                    con.execute("COMMIT")
+                except Exception:
+                    try:
+                        con.execute("ROLLBACK")
+                    except Exception as rb_err:
+                        logger.warning("%s ROLLBACK failed after commit error on %s: %s", _core_mod._ICE, f, rb_err)
+                    raise
+                if res:
+                    rows_committed += res[0]
+                committed_paths.append(f)
             except Exception as e:
-                _quarantine_buffer_file(source, path, e, table_name=table_name)
-                quarantined_count += 1
-        if not tables:
-            continue
-        combined = pa.concat_tables(tables, promote_options="default")
-        chunk_rows = len(combined)
-        if progress_callback:
-            progress_callback(
-                "status",
-                f"Appending chunk {chunk_idx + 1}/{total_chunks} ({chunk_rows:,} rows) to Iceberg table in FOS...",
-            )
-        # Tag the snapshot with one marker per buffer file in this chunk.
-        # The recovery sweep at the top of the next commit tick scans
-        # recent snapshots for these markers, giving at-most-once
-        # semantics even if every other durability channel (SQLite
-        # checkpoint, tombstone) fails. ~24 bytes per marker in
-        # metadata.json — negligible vs the row payload.
-        chunk_snapshot_props = {
-            f"{_COMMIT_MARKER_PREFIX}{_buffer_basename_marker(os.path.basename(p))}": "1" for p in chunk_successful
-        }
-        table.append(combined, snapshot_properties=chunk_snapshot_props)
-        # Free the chunk's in-memory tables before the next iteration so
-        # peak RSS doesn't accumulate across chunks.
-        del tables, combined
-        snapshot_id = table.current_snapshot().snapshot_id if table.current_snapshot() else snapshot_id
-        total_rows += chunk_rows
-        # Durable checkpoint: record that THIS buffer batch has been
-        # appended BEFORE tombstoning. If we crash between this line and
-        # the tombstone below, the next commit tick's recovery sweep
-        # (above) sees the committed_buffers row, tombstones the buffer,
-        # and skips the re-append — no duplicate rows. The previous
-        # design (no checkpoint) relied on the tombstone alone, so a
-        # crash in this window let the next tick re-read the buffer and
-        # re-append it. That race produced the ~12-day, ~2× row
-        # duplication audited 2026-06-12 (PR #21 added compaction-dedup
-        # as a safety net; this is the source-side fix that prevents
-        # the dups from being created in the first place).
+                logger.error("%s Commit buffer error on %s: %s", _core_mod._ICE, f, e)
+    finally:
+        # Always restore to read-only for the pool
         try:
-            _meta_mod.mark_buffers_committed(service_id, [os.path.basename(p) for p in chunk_successful])
-        except Exception as ckpt_err:
-            # If the checkpoint write fails we've lost our crash-recovery
-            # signal for this batch — log and continue. Worst case: a
-            # crash before tombstone → dup → compaction-dedup heals.
-            logger.warning(
-                "%s mark_buffers_committed failed (continuing, dup risk on crash): %s",
-                _core_mod._ICE,
-                ckpt_err,
-            )
-        # Per-chunk tombstone: if we crash on a later chunk, the next
-        # commit cron only re-processes the un-committed remainder
-        # (tombstoned files are excluded from buffer_files()). The
-        # actual ``os.remove`` is deferred to ``sweep_tombstoned_buffer_files``
-        # after a grace window so concurrent dashboard queries whose
-        # view was bound BEFORE this commit don't crash on
-        # "No files found ... batch_X.parquet". See
-        # ``tombstone_buffer_files`` docstring for the full rationale.
-        tombstone_buffer_files(source, chunk_successful)
-        total_committed_paths.extend(chunk_successful)
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+        _ducklake_attach(con, source, read_only=True)
+        con.close()
 
-    if not total_committed_paths:
-        return {
-            "files_committed": 0,
-            "rows_committed": 0,
-            "snapshot_id": snapshot_id,
-            "quarantined_files": quarantined_count,
-        }
+    # Tombstone (NOT unlink) the committed buffer parquets: views bound
+    # BEFORE this commit still reference these paths, and a hard unlink
+    # surfaces as "No files found" on their next read (the 2026-06-05
+    # incident class). buffer_files() filters tombstoned paths, so new
+    # view binds exclude them; the sweep above reclaims them after the
+    # grace window.
+    if committed_paths:
+        tombstone_buffer_files(source, committed_paths)
 
-    # Cache the post-commit table so the metadata_sync that fires next on this
-    # thread (scheduler.py: _run_metadata_sync → _core_mod.init_iceberg_table) reuses it
-    # instead of paying another ~865 KB metadata.json GET for the file we
-    # just PUT seconds ago. Pointer-mismatch in _core_mod._load_table_cached protects
-    # cross-process correctness.
-    _core_mod._set_cached_table(source, _core_mod._table_identifier(source, table_name=table_name), table)
+    if rows_committed > 0:
+        try:
+            _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
+        except Exception as e:
+            logger.warning("%s metadata pointer sync after commit failed: %s", _core_mod._ICE, e)
 
-    # Apply the new snapshot's added-files delta to _core_mod._snapshot_files_cache
-    # BEFORE _core_mod._write_metadata_pointer spawns the async table-summary thread.
-    # Order matters: the async thread races straight into _get_cached_or_scan_metadata
-    # which reads _manifest_metadata_cache; the delta path pre-seeds that cache for
-    # the new manifest, eliminating a redundant ~10 KB .avro GET per commit. Without
-    # the swap, the async worker can scan the manifest before the delta seed lands.
-    # The delta also avoids the next _core_mod.sync_data's full tbl.scan().plan_files() —
-    # re-reading ~1080 immutable manifest files just to find the handful we added.
-    try:
-        _core_mod._update_snapshot_cache_from_delta(source, table)
-    except Exception as e:
-        logger.warning("[iceberg] snapshot cache delta update raised: %s", e)
-
-    _core_mod._write_metadata_pointer(source, table.metadata_location, table=table)
-
-    if progress_callback:
-        progress_callback("status", "Cleaning up local buffer files...")
-    _core_mod._prune_empty_dirs(_core_mod._buffer_dir(source, table_name=table_name))
-
-    if quarantined_count:
-        logger.warning(
-            "%s Committed %d rows from %d buffer file(s) in %d chunk(s); quarantined %d unreadable file(s), snapshot %s",
-            _core_mod._ICE,
-            total_rows,
-            len(total_committed_paths),
-            total_chunks,
-            quarantined_count,
-            snapshot_id,
-        )
-    else:
-        logger.info(
-            "%s Committed %d rows from %d buffer file(s) in %d chunk(s), snapshot %s",
-            _core_mod._ICE,
-            total_rows,
-            len(total_committed_paths),
-            total_chunks,
-            snapshot_id,
-        )
     return {
-        "files_committed": len(total_committed_paths),
-        "rows_committed": total_rows,
-        "snapshot_id": snapshot_id,
-        "quarantined_files": quarantined_count,
+        "files_committed": len(committed_paths),
+        "rows_committed": rows_committed,
+        "snapshot_id": "ducklake",
+        "quarantined_files": 0,
     }
-
-
-# ---------------------------------------------------------------------------
-# Maintenance
-# ---------------------------------------------------------------------------
 
 
 def optimize_table(
@@ -843,228 +655,50 @@ def optimize_table(
 def _optimize_table_impl(
     source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
 ) -> dict:
-    """Compact small Iceberg data files into larger ones using rewrite_data_files.
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach
 
-    Identifies partitions with too many small files and rewrites them into
-    single larger files to maintain metadata health and query performance.
-
-    Args:
-      min_files_per_partition: only partitions with strictly more than this
-        many files are eligible for compaction. When None (default), the
-        threshold is auto-derived from observed file counts so the cron
-        self-tunes to traffic volume:
-
-          - Low-traffic site (avg ~3 files/partition): threshold ~2, very
-            aggressive — every multi-file partition gets compacted.
-          - High-traffic site (avg ~50 files/partition): threshold scales
-            up so we don't churn freshly-written files that the next sync
-            will append to anyway.
-
-        Pass an explicit number to override (e.g. 1 for a one-shot
-        aggressive cleanup on first migration).
-    """
+    con = None
     try:
-        catalog = _core_mod._get_catalog(source)
-        table = _core_mod._load_table_cached(
-            source, _core_mod._table_identifier(source, table_name=table_name), catalog
-        )
+        con = get_connection(source)
+        # Pool connections hold a READ-ONLY lake attach — re-attach
+        # read-write for the rewrite (same dance as _commit_buffer_impl).
+        try:
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+        if not _ducklake_attach(con, source, read_only=False):
+            return {"error": "Failed to attach DuckLake", "files_rewritten": 0}
+
+        # DURABILITY, not an optimization: DuckLake "inlines" small commits
+        # straight into the metadata catalog instead of writing parquet, and
+        # NEITHER ducklake_rewrite_data_files NOR ducklake_merge_adjacent_files
+        # promotes inlined rows — both only touch already-materialized files.
+        # A table whose every commit was inlined therefore stays at
+        # file_count = 0 forever, leaving the ONLY copy of the data inside the
+        # catalog DB (the raw .gz is deleted after ingest). flush first so the
+        # rewrite below has real files to compact.
+        con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
+
+        # DuckLake rewrites small files directly, capped by the catalog's
+        # target_file_size (pinned to LOCAL_COMPACT_MAX_PARTITION_MB at
+        # attach — never collapse to fewer-larger files past the cap).
+        con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
+        try:
+            _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
+        except Exception as e:
+            logger.warning("%s metadata pointer sync after rewrite failed: %s", _core_mod._ICE, e)
+        return {"files_rewritten": -1, "files_added": -1, "eligible_partitions": 1, "partition_errors": []}
     except Exception as e:
-        if "does not exist" in str(e):
-            return {"error": "Iceberg table does not exist.", "files_rewritten": 0}
         return {"error": str(e), "files_rewritten": 0}
-
-    # 1. Group files by partition to identify candidates for compaction
-    partition_groups: dict[tuple, list] = {}  # partition_values -> [DataFile]
-
-    try:
-        for f in table.scan().plan_files():
-            # partition is a Record of values like Record[492000]
-            # We convert it to a tuple to use as a dict key
-            p_val = tuple(f.file.partition)
-            if p_val not in partition_groups:
-                partition_groups[p_val] = []
-            partition_groups[p_val].append(f.file)
-    except Exception as e:
-        return {"error": f"Failed to scan partitions: {e}", "files_rewritten": 0}
-
-    # Auto-derive threshold from observed file counts when not pinned by the
-    # caller. Use the median: robust against outlier hot partitions (e.g. a
-    # spike during DDoS) skewing the threshold up. Floor at 2 so we always
-    # compact ANY partition with 3+ files; ceiling at 50 to avoid silly
-    # numbers from extreme spikes.
-    if min_files_per_partition is None:
-        sizes = sorted(len(files) for files in partition_groups.values())
-        if sizes:
-            median = sizes[len(sizes) // 2]
-            min_files_per_partition = max(2, min(50, median))
-        else:
-            min_files_per_partition = 10
-        logger.info(
-            "🗜️  [optimize] %s: auto-derived threshold=%d (median files/partition=%d across %d partitions)",
-            source.get("name"),
-            min_files_per_partition,
-            sizes[len(sizes) // 2] if sizes else 0,
-            len(sizes),
-        )
-
-    total_rewritten = 0
-    total_added = 0
-    partition_errors: list[str] = []
-    eligible_partitions = sum(1 for files in partition_groups.values() if len(files) > min_files_per_partition)
-
-    if table_name != "logs":
-        from backend.core.duckdb import get_connection, rum_source_for
-
-        con_source = rum_source_for(source)
-    else:
-        from backend.core.duckdb import get_connection
-
-        con_source = source
-
-    # optimize_table only uses DuckDB to read parquet files for partition
-    # rewrites; the actual writes happen through PyIceberg's overwrite path.
-    # RO + skip-view avoids contending with the writer lock and the view
-    # refresh that we don't need here.
-    con = get_connection(con_source, skip_view_update=True, read_only=True)
-
-    try:
-        for p_val, files in partition_groups.items():
-            if len(files) <= min_files_per_partition:
-                continue
-
-            # We want to rewrite these files.
-            # We'll use DuckDB to read them and PyIceberg's overwrite logic.
-            # But wait, PyIceberg's overwrite() with a filter is the safest way.
-            # We need to build a filter for this specific partition.
-
-            # Since we only partition by timestamp_hour (ID 1000):
-            hour_val = p_val[0]
-            # Convert hour since epoch back to a timestamp for the filter
-            from datetime import datetime
-
-            start_ts = datetime.fromtimestamp(hour_val * 3600, tz=UTC)
-            end_ts = datetime.fromtimestamp((hour_val + 1) * 3600, tz=UTC)
-
-            try:
-                overwrite_filter = f"timestamp >= '{start_ts.isoformat()}' AND timestamp < '{end_ts.isoformat()}'"
-                _CAS_RETRIES = 3
-                for _retry in range(_CAS_RETRIES):
-                    # Use DuckDB to read only these files (most efficient)
-                    paths = [f.file_path for f in files]
-                    paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
-
-                    # Read into PyArrow. Must materialise to a Table — pyiceberg's
-                    # overwrite() rejects RecordBatchReader with
-                    # "Expected PyArrow table". DuckDB 1.5.x's .arrow() now returns
-                    # a streaming reader, so use to_arrow_table() (or the older
-                    # fetch_arrow_table() alias) to force materialisation. Skipping
-                    # this turned every nightly optimize run into a silent no-op
-                    # — the ValueError got logged as a warning to stderr and the
-                    # cron recorded success with 0 files rewritten.
-                    # ``union_by_name=True``: when a partition contains files
-                    # written before AND after a schema bump (e.g. ``edge_sid``
-                    # / ``edge_cookie_compliance`` / ``edge_score*`` added
-                    # mid-day on 2026-06-01), the default positional union
-                    # raises ``Schema mismatch ... try setting
-                    # union_by_name=True`` and the partition lands in
-                    # ``partition_errors``. With union-by-name DuckDB merges
-                    # the column sets and fills missing columns with NULL,
-                    # matching how Iceberg already presents the merged schema
-                    # to readers. Verified prod incident 2026-06-06: two
-                    # partitions (494541, 494542) had been stuck at ~14 files
-                    # each since the schema bump because every nightly
-                    # optimize attempt raised here. (#optimize-cron-warning)
-                    arrow_table = con.execute(
-                        f"SELECT * FROM read_parquet([{paths_sql}], hive_partitioning=false, union_by_name=true)"
-                    ).to_arrow_table()
-
-                    # Perform an atomic overwrite of the specific time range.
-                    # In Iceberg, this will delete the old files and add the
-                    # new one. Wrapped in a small retry that reloads the
-                    # table on the sequence-number CAS conflict that fires
-                    # when an ingest commit lands between our plan_files
-                    # read and this overwrite — pyiceberg refuses with
-                    # ``ValueError: Cannot add snapshot with sequence
-                    # number N older than last sequence number N``. The
-                    # retry just refetches the table head and tries once
-                    # more; ingest's 5-min cadence makes the contention
-                    # window small enough that a single retry almost always
-                    # wins.
-                    try:
-                        table.overwrite(df=arrow_table, overwrite_filter=overwrite_filter)
-                        break
-                    except ValueError as cas_err:
-                        if "older than last sequence number" not in str(cas_err):
-                            raise
-                        if _retry == _CAS_RETRIES - 1:
-                            raise
-                        # Refresh the table to pick up the new head.
-                        # Bypass _core_mod._load_table_cached (which short-circuits
-                        # on pointer match) by going straight to the
-                        # catalog — we need the absolute latest snapshot
-                        # to commit on top of, not whatever's cached.
-                        logger.warning(
-                            "[optimize] %s: CAS conflict on hour %d (attempt %d/%d), reloading table and retrying: %s",
-                            source.get("name"),
-                            hour_val,
-                            _retry + 1,
-                            _CAS_RETRIES,
-                            cas_err,
-                        )
-                        try:
-                            table = catalog.load_table(_core_mod._table_identifier(source))
-                            _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
-                            files = [f.file for f in table.scan().plan_files() if tuple(f.file.partition) == p_val]
-                            if not files:
-                                raise cas_err
-                        except Exception as reload_err:
-                            logger.warning(
-                                "[optimize] %s: table reload failed after CAS conflict, giving up on this partition: %s",
-                                source.get("name"),
-                                reload_err,
-                            )
-                            raise cas_err from reload_err
-                _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
-                _core_mod._write_metadata_pointer(source, table.metadata_location, table=table)
-
-                # File rewrites can't be cleanly delta-tracked (old files are
-                # marked DELETED, a new file is ADDED — the cache's prev_files
-                # list now contains stale entries). Invalidate so the next
-                # _core_mod.sync_data falls into the slow path and rebuilds from scratch.
-                _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
-                _core_mod._view_cache.pop(source.get("name", "default"), None)
-
-                total_rewritten += len(files)
-                total_added += 1
-                logger.info(
-                    "🗜️ \x1b[92m[optimize]\x1b[0m %s: Compacted %d files into 1 for hour %d",
-                    source.get("name"),
-                    len(files),
-                    hour_val,
-                )
-
-                # Immediately cache the newly rewritten large file
-                try:
-                    _core_mod.sync_data(source)
-                except Exception as e:
-                    logger.warning("[iceberg] Failed to eagerly sync data after optimize: %s", e)
-            except Exception as e:
-                logger.warning("[iceberg] Failed to compact partition %s: %s", p_val, e)
-                partition_errors.append(f"partition {p_val}: {type(e).__name__}: {e}")
-                continue
-
     finally:
-        con.close()
-
-    result: dict[str, Any] = {"files_rewritten": total_rewritten, "files_added": total_added}
-    # Surface partial failures so the cron wrapper can flag them — silent
-    # per-partition warnings turned a real regression (pyiceberg rejecting
-    # DuckDB's RecordBatchReader from .arrow()) into a week of "Rewrote 0
-    # files into 0 files" successes.
-    if partition_errors:
-        result["partition_errors"] = partition_errors
-        result["eligible_partitions"] = eligible_partitions
-    return result
+        if con:
+            try:
+                con.execute("DETACH lake")
+            except Exception:
+                pass
+            _ducklake_attach(con, source, read_only=True)
+            con.close()
 
 
 def run_cloud_maintenance(source: dict) -> dict:
@@ -1089,12 +723,288 @@ def run_cloud_maintenance(source: dict) -> dict:
         lock.release()
 
 
-def _run_cloud_maintenance_impl(source: dict) -> dict:
-    """Run weekly maintenance: expire old metadata, delete old data, and purge old local cache.
+# ---------------------------------------------------------------------------
+# DuckLake retention + snapshot expiry (weekly maintenance steps 1 and 2)
+# ---------------------------------------------------------------------------
 
-    1. Deletes log data from Iceberg older than `data_retention_days` (default 30).
-    2. Deletes local Parquet files older than `cache_retention_days` (default 90).
-    3. Expires Iceberg snapshots older than 7 days to reclaim metadata storage.
+# Retention operates on DuckLake tables via plain SQL, so the table name is
+# interpolated (DuckDB cannot bind an identifier). ``ducklake_table_name``
+# already sanitizes to ``[a-z0-9_]``, but Trap #4 says validate at the point
+# of interpolation — a future naming change must fail loudly, not build SQL.
+_LAKE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# RUM beacon telemetry lives in these DuckLake tables (see
+# ``backend/core/iceberg/rum_schema.py``), keyed by ``cid``. ``logs.rum_cid``
+# is only the CDN-side correlation key for the same session.
+_RUM_BEACON_TABLES = ("client_vitals", "client_errors")
+
+
+def _lake_ident(name: str) -> str:
+    """Validate a DuckLake table name before interpolating it into SQL."""
+    if not _LAKE_IDENT_RE.match(name or ""):
+        raise ValueError(f"unsafe ducklake table name: {name!r}")
+    return name
+
+
+def _lake_columns(con, table: str) -> set[str]:
+    """Column names of ``lake.<table>``, or an empty set if it doesn't exist.
+
+    Probing with DESCRIBE (rather than catching a BinderException from the
+    DELETE itself) is what keeps retention working on a schema that predates
+    a column: an absent ``rum_cid`` falls back to the flat delete instead of
+    aborting the whole step.
+    """
+    try:
+        rows = con.execute(f'DESCRIBE lake."{_lake_ident(table)}"').fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def _lake_delete_before(con, table: str, cutoff: datetime, extra_predicate: str = "") -> int:
+    """``DELETE FROM lake.<table> WHERE timestamp < <cutoff> [AND <extra>]``.
+
+    Returns the row count DuckDB reports for the delete. The timestamp bound
+    is a real bound parameter and is ALWAYS present — this helper is the only
+    place the maintenance job emits a DELETE, so there is no path here that
+    can produce an unbounded one.
+    """
+    where = "timestamp < ?"
+    if extra_predicate:
+        where = f"{where} AND {extra_predicate}"
+    row = con.execute(f'DELETE FROM lake."{_lake_ident(table)}" WHERE {where}', [cutoff]).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _ducklake_retention_delete(con, source: dict, data_retention_days: int, rum_retention_days: int) -> dict:
+    """Step 1: enforce ``data_retention_days`` / ``rum_retention_days``.
+
+    ``0`` means "keep forever" for BOTH knobs, and each knob only ever gates
+    its own data:
+
+    - ``data_retention_days`` governs the ``logs`` table. When
+      ``rum_retention_days`` is LONGER, the prune keeps rows carrying a
+      ``rum_cid`` (they are the request-side join partner for RUM telemetry
+      that outlives them) and the ceiling pass drops them at the RUM cutoff.
+      When it isn't longer, the prune is flat.
+    - ``rum_retention_days`` governs RUM data: the ``client_vitals`` /
+      ``client_errors`` beacon tables, plus that ``logs`` ceiling.
+
+    The pyiceberg original reached the conditional-prune branch whenever
+    ``rum_retention_days > data_retention_days``, INCLUDING when
+    ``data_retention_days == 0`` — which resolved the cutoff to "now" and
+    would have deleted every non-RUM row in the table. That never fired
+    because the whole function was dead against DuckLake data; gating on
+    ``data_retention_days > 0`` keeps "0 == forever" true now that it does.
+    """
+    from backend.core.iceberg._ducklake import ducklake_table_name
+
+    out: dict[str, Any] = {}
+    now = datetime.now(UTC)
+    logs_table = ducklake_table_name(source, table_name="logs")
+    deleted_anything = False
+
+    if data_retention_days > 0:
+        cutoff = now - timedelta(days=data_retention_days)
+        predicate = ""
+        if rum_retention_days > data_retention_days and "rum_cid" in _lake_columns(con, logs_table):
+            predicate = "rum_cid IS NULL"
+        out["data_deleted_before_days"] = data_retention_days
+        out["data_rows_deleted"] = _lake_delete_before(con, logs_table, cutoff, predicate)
+        deleted_anything = True
+
+        # Ceiling expiration: once the RUM window closes, the rum_cid rows the
+        # conditional prune spared go too. Scoped to services that actually
+        # enabled log retention so a "keep logs forever" service can't have its
+        # logs capped by the RUM knob.
+        if rum_retention_days > 0:
+            out["rum_deleted_before_days"] = rum_retention_days
+            out["rum_log_rows_deleted"] = _lake_delete_before(con, logs_table, now - timedelta(days=rum_retention_days))
+
+    if rum_retention_days > 0:
+        rum_cutoff = now - timedelta(days=rum_retention_days)
+        beacon_rows = 0
+        beacon_tables = 0
+        for t_name in _RUM_BEACON_TABLES:
+            tbl = ducklake_table_name(source, table_name=t_name)
+            if not _lake_columns(con, tbl):
+                continue  # RUM was never provisioned for this service
+            beacon_rows += _lake_delete_before(con, tbl, rum_cutoff)
+            beacon_tables += 1
+        if beacon_tables:
+            out["rum_deleted_before_days"] = rum_retention_days
+            out["rum_beacon_rows_deleted"] = beacon_rows
+            deleted_anything = True
+
+    if deleted_anything:
+        # Retention removed rows from the committed table — the view-SQL and
+        # snapshot-file caches for this service (and its sub-table keys) both
+        # describe the pre-delete membership.
+        _core_mod.clear_source_caches(source.get("name", "default"))
+    return out
+
+
+def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> dict:
+    """Step 2: prune DuckLake catalog snapshots older than ``keep_snapshot_days``.
+
+    Verified signature (duckdb 1.5.4 + ducklake extension)::
+
+        ducklake_expire_snapshots(catalog VARCHAR, dry_run BOOLEAN,
+                                  versions UBIGINT[],
+                                  older_than TIMESTAMP WITH TIME ZONE)
+
+    No CAS-retry loop: the pyiceberg version needed one because a concurrent
+    commit could advance the FOS metadata pointer between load and commit.
+    DuckLake commits through a transactional catalog (SQLite file or Postgres)
+    with its own conflict handling, ``run_cloud_maintenance`` already holds the
+    per-service write lock, and neither ``CommitFailedException`` nor the
+    "Snapshot … does not exist" ValueError can be raised from here — a retry
+    keyed on those shapes would be dead code.
+
+    Under a shared ``DUCKLAKE_CATALOG`` (Postgres, the celery topology) the
+    snapshot log is catalog-WIDE, so the before/after counts and the expiry
+    itself span every tenant in that catalog, not just ``source``.
+    """
+    out: dict[str, Any] = {}
+    cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
+
+    before_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
+    snapshots_before = int(before_row[0]) if before_row else 0
+    out["snapshots_before"] = snapshots_before
+
+    if snapshots_before == 0:
+        out["snapshots_expired_before_days"] = keep_snapshot_days
+        out["snapshots_after"] = 0
+        out["snapshots_expired_count"] = 0
+        out["snapshot_expiry_note"] = "no snapshots present in the DuckLake catalog"
+        logger.info("[ducklake] %s: no snapshots present to expire", source.get("name"))
+        return out
+
+    con.execute("CALL ducklake_expire_snapshots('lake', older_than => ?)", [cutoff]).fetchall()
+
+    after_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
+    snapshots_after = int(after_row[0]) if after_row else 0
+    snapshots_expired = max(0, snapshots_before - snapshots_after)
+    out["snapshots_expired_before_days"] = keep_snapshot_days
+    out["snapshots_after"] = snapshots_after
+    out["snapshots_expired_count"] = snapshots_expired
+
+    # Measured, not assumed: expiry alone reclaims NO bytes. It deletes catalog
+    # snapshot rows and moves the parquet it unreferenced onto the catalog's
+    # scheduled-for-deletion queue; ducklake_cleanup_old_files is what unlinks
+    # those. That queue is swept on EVERY run, not only when this run expired
+    # something — a file is scheduled at expiry time, so with the cutoff below
+    # it is always a LATER run that reclaims it.
+    #
+    # cleanup_old_files only ever touches files the catalog itself already
+    # marked deleted. ducklake_delete_orphaned_files, by contrast, sweeps the
+    # data path by listing and would happily eat local-compaction output that
+    # the catalog hasn't caught up with — never call that one here.
+    #
+    # Bounded by the same cutoff so an unreferenced file stays on disk for
+    # keep_snapshot_days (a long-running reader bound to a pre-expiry snapshot
+    # is the reason for the delay). Note a snapshot cannot be expired while a
+    # live data file still anchors to it, so most reclamation only becomes
+    # possible after the daily optimize job's ducklake_rewrite_data_files
+    # supersedes those files — which is also what physically removes rows that
+    # step 1 deleted (until then they persist behind delete files).
+    files_cleaned: int | None = None
+    try:
+        cleaned = con.execute("CALL ducklake_cleanup_old_files('lake', older_than => ?)", [cutoff]).fetchall()
+        files_cleaned = len(cleaned)
+        out["data_files_cleaned"] = files_cleaned
+    except Exception as e:
+        logger.warning("[ducklake] %s: old-file cleanup after expiry failed: %s", source.get("name"), e)
+        out["data_file_cleanup_error"] = str(e)
+
+    if snapshots_expired > 0 or files_cleaned:
+        out["snapshot_expiry_note"] = (
+            "catalog metadata entries only; parquet is not deleted by the expiry itself — "
+            f"ducklake_cleanup_old_files (older_than={keep_snapshot_days}d) unlinked "
+            f"{files_cleaned if files_cleaned is not None else 'unknown'} file(s), and rows deleted "
+            "by retention persist physically until the daily ducklake_rewrite_data_files rewrite"
+        )
+        logger.info(
+            "[ducklake] %s: expired %d snapshots (%d -> %d), unlinked %s file(s)",
+            source.get("name"),
+            snapshots_expired,
+            snapshots_before,
+            snapshots_after,
+            files_cleaned,
+        )
+    return out
+
+
+def _run_ducklake_maintenance(
+    source: dict, *, data_retention_days: int, rum_retention_days: int, keep_snapshot_days: int
+) -> dict:
+    """Run steps 1 and 2 against DuckLake on one read-write ``lake`` attach.
+
+    Pool connections hold a READ-ONLY lake attach, so this performs the same
+    DETACH / read-write re-attach / restore dance as ``_optimize_table_impl``.
+    Each step is isolated: one failing records its own ``*_error`` key (which
+    the cron wrapper turns into a ``warning`` run) and the other still runs.
+    """
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach
+
+    con = None
+    try:
+        con = get_connection(source)
+        try:
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+        if not _ducklake_attach(con, source, read_only=False):
+            raise RuntimeError("Failed to attach DuckLake")
+    except Exception as e:
+        logger.warning("[ducklake] %s: maintenance could not open the lake: %s", source.get("name"), e)
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        return {"data_deletion_error": str(e), "snapshot_expiry_error": str(e)}
+
+    out: dict[str, Any] = {}
+    try:
+        if data_retention_days > 0 or rum_retention_days > 0:
+            try:
+                out.update(_ducklake_retention_delete(con, source, data_retention_days, rum_retention_days))
+            except Exception as e:
+                logger.warning("[ducklake] Data deletion skipped: %s", e)
+                out["data_deletion_error"] = str(e)
+        try:
+            out.update(_ducklake_expire_snapshots(con, source, keep_snapshot_days))
+        except Exception as e:
+            logger.warning("[ducklake] Snapshot expiry skipped: %s", e)
+            out["snapshot_expiry_error"] = str(e)
+    finally:
+        try:
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+        _ducklake_attach(con, source, read_only=True)
+        try:
+            con.close()
+        except Exception:
+            pass
+    return out
+
+
+def _run_cloud_maintenance_impl(source: dict) -> dict:
+    """Run weekly maintenance: retention deletion, snapshot expiry, local purges.
+
+    1. Deletes rows from the DuckLake tables older than ``data_retention_days``
+       (default 30) / ``rum_retention_days``.
+    2. Expires DuckLake catalog snapshots older than ``keep_snapshot_days``
+       (default 7) and unlinks the parquet that expiry unreferenced.
+    3. Deletes local cache Parquet older than ``cache_retention_days`` (90).
+    4. Deletes local rollup Parquet older than ``rollup_retention_months`` (12).
+
+    Steps 1 and 2 were pyiceberg-based until v3.0.0. Since the commit path
+    moved to DuckLake they operated on a catalog that receives no commits, so
+    customer retention deletion silently never ran.
     """
     try:
         from backend import config as svcconfig
@@ -1105,176 +1015,26 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         rum_retention_days = int(cron_sync.get("rum_retention_days", data_retention_days))
         cache_retention_days = int(cron_sync.get("cache_retention_days", 90))
         # Snapshot-history window. This — not the job's cadence — sets the
-        # steady-state snapshot count, and therefore metadata.json size and the
-        # per-commit read/parse/rewrite cost. Lowering it speeds up commits but
+        # steady-state snapshot count, and therefore the catalog's snapshot
+        # table size and per-commit cost. Lowering it speeds up commits but
         # trades away time-travel: the 2026-08 metadata rollback was only
-        # recoverable because old snapshots/metadata were still on FOS. Keep 7
-        # unless you have a specific reason.
+        # recoverable because old snapshots were still around. Keep 7 unless
+        # you have a specific reason.
         keep_snapshot_days = max(1, int(cron_sync.get("keep_snapshot_days", 7)))
-
-        catalog = _core_mod._get_catalog(source)
-        table = _core_mod._load_table_cached(source, _core_mod._table_identifier(source), catalog)
     except Exception as e:
         return {"error": str(e)}
 
     results: dict[str, Any] = {}
 
-    # 1. Delete old data from Iceberg table
-    if data_retention_days > 0 or rum_retention_days > 0:
-        try:
-            from backend.utils.iceberg_expr import is_null, lt
-
-            deleted_anything = False
-
-            if rum_retention_days > data_retention_days:
-                # Conditional Pruning: Delete regular logs older than data_retention_days
-                # but keep rows where rum_cid is NOT null (which are RUM telemetry)
-                from pyiceberg.expressions import And
-
-                try:
-                    cutoff_iso = (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()
-                    table.delete(And(lt("timestamp", cutoff_iso), is_null("rum_cid")))
-                    results["data_deleted_before_days"] = data_retention_days
-                    deleted_anything = True
-                except Exception as cond_e:
-                    logger.warning("[iceberg] Conditional deletion failed (falling back to standard): %s", cond_e)
-                    # If conditional deletion fails (e.g. rum_cid field is not in schema yet),
-                    # fall back to standard deletion of everything older than data_retention_days
-                    table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
-                    results["data_deleted_before_days"] = data_retention_days
-                    deleted_anything = True
-            elif data_retention_days > 0:
-                # Standard Flat Deletion: Delete everything older than data_retention_days
-                table.delete(lt("timestamp", (datetime.now(UTC) - timedelta(days=data_retention_days)).isoformat()))
-                results["data_deleted_before_days"] = data_retention_days
-                deleted_anything = True
-
-            # Ceiling Expiration: Delete everything (including RUM) older than rum_retention_days
-            if rum_retention_days > 0:
-                rum_cutoff_iso = (datetime.now(UTC) - timedelta(days=rum_retention_days)).isoformat()
-                table.delete(lt("timestamp", rum_cutoff_iso))
-                results["rum_deleted_before_days"] = rum_retention_days
-                deleted_anything = True
-
-            if deleted_anything:
-                _core_mod._set_cached_table(source, _core_mod._table_identifier(source), table)
-                # Retention delete removes files from the snapshot — the cache's
-                # prev_files list would still reference them. Invalidate so the
-                # next _core_mod.sync_data rebuilds from a fresh manifest scan.
-                _core_mod._snapshot_files_cache.pop(source.get("name", "default"), None)
-                _core_mod._view_cache.pop(source.get("name", "default"), None)
-        except Exception as e:
-            logger.warning("[iceberg] Data deletion skipped: %s", e)
-            results["data_deletion_error"] = str(e)
-
-    # 2. Expire snapshots (keep last 7 days of metadata).
-    #    pyiceberg 0.11.1: table.maintenance.expire_snapshots().older_than(datetime).commit()
-    #    — maintenance is a @property (no parens); older_than takes a tz-aware datetime
-    #    (not int millis). Only removes snapshot METADATA entries — the underlying
-    #    data/manifest files on the object store are NOT garbage-collected; a separate
-    #    remove_orphan_files sweep is required for byte reclamation (deferred until
-    #    pyiceberg >= 0.12, which gains that API).
-    #
-    #    Cache hygiene: intentionally do NOT pop _core_mod._snapshot_files_cache / _core_mod._view_cache
-    #    here — expire drops only old snapshot metadata; the current snapshot's file
-    #    membership is unchanged, so the snapshot fast-path stays valid. (Contrast
-    #    with step 1's data-delete and the optimize-table path, which do invalidate.)
-    # keep_snapshot_days resolved from cron_sync above (default 7).
-    snapshot_cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
-    try:
-        # Load fresh from the catalog. Note: catalog is the FosSqlCatalog
-        # whose load_table consults _read_metadata_pointer (2-sec in-process
-        # cache); freshness here is bounded by _POINTER_CACHE_TTL_SEC, not
-        # "the absolute latest head". For the FIRST attempt this is fine —
-        # the cache entry will be ≤2s old, plenty fresh for a weekly cron.
-        # The retry loop below explicitly invalidates the cache before each
-        # reload so back-to-back retries actually see post-conflict state.
-        fresh_table = catalog.load_table(_core_mod._table_identifier(source))
-        snapshots_before = len(fresh_table.metadata.snapshots)
-        results["snapshots_before"] = snapshots_before
-
-        # Concurrent writers can race us in two shapes that the retry can
-        # self-heal:
-        #   (a) CommitFailedException — catalog-level pointer race (another
-        #       commit advanced the metadata pointer between our load_table
-        #       and our commit).
-        #   (b) ValueError("Snapshot with snapshot id N does not exist") —
-        #       another expire run (admin re-trigger overlapping the scheduled
-        #       run) already removed snapshots that are still in our expire
-        #       set. Reloading and re-calling older_than rebuilds the expire
-        #       set against the post-overlap snapshot list, so the next attempt
-        #       targets only still-present snapshots.
-        # The sequence-number ValueError that optimize_table catches cannot
-        # fire here — ExpireSnapshots stages only AssertTableUUID (no
-        # AssertRefSnapshotId), so we narrow the ValueError check to the
-        # "does not exist" message to avoid masking unrelated bugs.
-        if snapshots_before == 0:
-            snapshots_expired = 0
-            results["snapshots_expired_before_days"] = keep_snapshot_days
-            results["snapshots_after"] = 0
-            results["snapshots_expired_count"] = 0
-            results["snapshot_expiry_note"] = "no snapshots present in table metadata"
-            logger.info("[iceberg] %s: no snapshots present to expire", source.get("name"))
-        else:
-            _EXPIRE_RETRIES = 3
-            for _retry in range(_EXPIRE_RETRIES):
-                try:
-                    fresh_table.maintenance.expire_snapshots().older_than(snapshot_cutoff).commit()
-                    break
-                except (CommitFailedException, ValueError) as cas_err:
-                    msg = str(cas_err)
-                    is_recoverable = isinstance(cas_err, CommitFailedException) or "does not exist" in msg
-                    if not is_recoverable or _retry == _EXPIRE_RETRIES - 1:
-                        raise
-                    logger.warning(
-                        "[iceberg] %s: CAS conflict expiring snapshots (attempt %d/%d), reloading and retrying: %s",
-                        source.get("name"),
-                        _retry + 1,
-                        _EXPIRE_RETRIES,
-                        cas_err,
-                    )
-                    try:
-                        # Invalidate the FosSqlCatalog pointer cache so the reload
-                        # bypasses the 2-sec _POINTER_CACHE_TTL_SEC and actually
-                        # re-resolves the post-conflict metadata pointer. Without
-                        # this, all retries finish within microseconds and read
-                        # the same pre-conflict cache entry.
-                        _core_mod._pointer_cache_invalidate(source, _core_mod._table_identifier(source))
-                        fresh_table = catalog.load_table(_core_mod._table_identifier(source))
-                    except Exception as reload_err:
-                        raise cas_err from reload_err
-                    # Re-pin the baseline against the reloaded head so the diff
-                    # below reflects expirations only, not concurrent additions.
-                    snapshots_before = len(fresh_table.metadata.snapshots)
-                    results["snapshots_before"] = snapshots_before
-
-            snapshots_after = len(fresh_table.metadata.snapshots)
-            snapshots_expired = max(0, snapshots_before - snapshots_after)
-
-            _core_mod._set_cached_table(source, _core_mod._table_identifier(source), fresh_table)
-            _core_mod._write_metadata_pointer(source, fresh_table.metadata_location, table=fresh_table)
-            # Keep the outer-scope `table` consistent for the local-cache cleanup
-            # step below (currently doesn't use it, but a future addition between
-            # steps 2 and 3 would expect the post-expire handle).
-            table = fresh_table
-
-            results["snapshots_expired_before_days"] = keep_snapshot_days
-            results["snapshots_after"] = snapshots_after
-            results["snapshots_expired_count"] = snapshots_expired
-        if snapshots_expired > 0:
-            results["snapshot_expiry_note"] = (
-                "metadata entries only; underlying data/manifest files are not deleted by pyiceberg 0.11.1"
-            )
-            logger.info(
-                "[iceberg] %s: expired %d snapshots (%d -> %d)",
-                source.get("name"),
-                snapshots_expired,
-                snapshots_before,
-                snapshots_after,
-            )
-    except Exception as e:
-        logger.warning("[iceberg] Snapshot expiry skipped: %s", e)
-        results["snapshot_expiry_error"] = str(e)
+    # 1. Retention deletion + 2. snapshot expiry, both against DuckLake.
+    results.update(
+        _run_ducklake_maintenance(
+            source,
+            data_retention_days=data_retention_days,
+            rum_retention_days=rum_retention_days,
+            keep_snapshot_days=keep_snapshot_days,
+        )
+    )
 
     # 3. Clean up local cache
     if cache_retention_days > 0:
@@ -1290,7 +1050,6 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
                         if not file.endswith(".parquet"):
                             continue
                         filepath = os.path.join(root, file)
-                        # Use file modification time as a proxy for file age
                         mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
                         if mtime < cache_cutoff:
                             try:
@@ -1303,6 +1062,35 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         except Exception as e:
             logger.warning("[iceberg] Local cache cleanup skipped: %s", e)
             results["local_cache_error"] = str(e)
+
+    # 4. Clean up old rollups
+    rollup_retention_months = int(cron_sync.get("rollup_retention_months") or 12)
+    if rollup_retention_months > 0:
+        try:
+            from backend.core.duckdb import _cache_dir
+
+            rollup_dir = os.path.join(_cache_dir(source), "rollups")
+            if os.path.exists(rollup_dir):
+                # Approximation: 30 days per month
+                rollup_cutoff = datetime.now(UTC) - timedelta(days=rollup_retention_months * 30)
+                deleted_rollups = 0
+                for root, _, files in os.walk(rollup_dir):
+                    for file in files:
+                        if not file.endswith(".parquet"):
+                            continue
+                        filepath = os.path.join(root, file)
+                        mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
+                        if mtime < rollup_cutoff:
+                            try:
+                                os.remove(filepath)
+                                deleted_rollups += 1
+                            except Exception:
+                                pass
+                _core_mod._prune_empty_dirs(rollup_dir)
+                results["local_rollup_files_deleted"] = deleted_rollups
+        except Exception as e:
+            logger.warning("[iceberg] Local rollup cleanup skipped: %s", e)
+            results["local_rollup_error"] = str(e)
 
     return results
 

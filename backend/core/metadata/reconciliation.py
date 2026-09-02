@@ -370,7 +370,14 @@ def cleanup_metadata(
             )
 
     vacuumed = False
-    if any(deleted.values()):
+    from backend.core.metadata.pg_connection import is_postgres
+
+    # File-vacuum (auto_vacuum/incremental_vacuum/freelist_count) is a
+    # SQLite-file concept with no Postgres equivalent — Postgres reclaims
+    # space via its own autovacuum daemon, outside app control. Skip the
+    # whole branch under a Postgres metadata backend; the DELETE trim above
+    # already ran and is what actually matters there.
+    if any(deleted.values()) and not is_postgres():
         # A bare VACUUM rewrites the whole file under an exclusive lock —
         # measured at 9.5s on a populated metadata.db, during which every
         # other writer to the SAME file (slow_queries batched insert,

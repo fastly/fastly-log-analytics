@@ -1,6 +1,6 @@
 """Tests for :mod:`backend.cron.jobs.sync`.
 
-Pins the orchestration shape of ``_run_service_cron`` (per-tick FOS
+Pins the orchestration shape of ``_run_log_discovery_cron`` (per-tick FOS
 ingest) and ``_run_full_sweep`` (daily catch-net LIST). Both jobs are
 heavy wrappers around ``backend.core.ingest.ingest`` — these tests stub
 the ingest generator and assert the surrounding event/log/skip/error
@@ -17,11 +17,11 @@ actually performs. Module-level imports — ``_log_and_add_progress``,
 import time and the function body never re-resolves it.
 
 The ``_usage_log_phase`` inner helper defined inside
-``_run_service_cron`` cannot be intercepted at module level (it is a
+``_run_log_discovery_cron`` cannot be intercepted at module level (it is a
 local closure). Its body's source-module imports
 (``backfill_fastly_edge_writes``, ``reconcile_fastly_stats``,
 ``run_usage_log_cleanup``) ARE patchable on their source modules and we
-stub them out everywhere ``_run_service_cron`` is exercised so the
+stub them out everywhere ``_run_log_discovery_cron`` is exercised so the
 phase becomes a no-op that doesn't leak DB I/O.
 """
 
@@ -50,7 +50,7 @@ def stub_progress(monkeypatch) -> dict[str, MagicMock]:
 
     The progress helpers (``start_progress`` / ``end_progress`` /
     ``cleanup_progress_and_reap``) are imported lazily inside
-    ``_run_service_cron``; patch their source module so the late
+    ``_run_log_discovery_cron``; patch their source module so the late
     ``from backend.cron_progress import …`` resolves to the mocks.
 
     The display/event/log helpers are bound at module level on
@@ -144,7 +144,7 @@ def _make_ingest_events(events: list[dict]) -> Any:
     return _gen
 
 
-# ── _run_service_cron ────────────────────────────────────────────────────────
+# ── _run_log_discovery_cron ────────────────────────────────────────────────────────
 
 
 def test_returns_when_should_defer_cron_true(monkeypatch, stub_load_config):
@@ -157,7 +157,7 @@ def test_returns_when_should_defer_cron_true(monkeypatch, stub_load_config):
     get_src = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     ingest_mock.assert_not_called()
     # Config load never even runs — gate fires before.
@@ -175,7 +175,7 @@ def test_skips_when_config_missing(monkeypatch):
     get_src = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
 
-    sync_mod._run_service_cron.__wrapped__("ghost-svc")
+    sync_mod._run_log_discovery_cron.__wrapped__("ghost-svc")
 
     get_src.assert_not_called()
 
@@ -189,7 +189,7 @@ def test_skips_when_source_missing(monkeypatch, stub_load_config):
     start_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     start_cron.assert_not_called()
 
@@ -207,7 +207,7 @@ def test_read_only_skipped_without_force(monkeypatch, stub_load_config):
     start_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=False)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=False)
 
     start_cron.assert_not_called()
 
@@ -237,7 +237,7 @@ def test_read_only_runs_with_force(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
     # Ingest path ran: progress lifecycle + log_cron_run success.
     stub_progress["start_progress"].assert_called_once()
@@ -282,7 +282,7 @@ def test_sync_no_new_files_surfaces_reclaimed_count(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
     success_calls = [c for c in log_cron.call_args_list if c.args[3] == "success"]
     assert success_calls, "expected a success log_cron_run"
@@ -332,7 +332,7 @@ def test_sync_status_published_before_slow_refresh_config_status(
         return {"latest_log_at": "2026-01-01T00:00:00Z"}
 
     monkeypatch.setattr(
-        "backend.routers.admin.sync_status.compute_sync_status_cached",
+        "backend.sync_status_snapshot.compute_sync_status_cached",
         _fake_compute_snapshot,
     )
 
@@ -340,7 +340,7 @@ def test_sync_status_published_before_slow_refresh_config_status(
     fake_publisher.publish.side_effect = lambda *a, **k: calls.append("publish")
     monkeypatch.setattr("backend.sync_status_publisher.publisher", fake_publisher)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
     assert calls == ["compute_sync_status_cached", "publish", "refresh_config_status"], (
         f"sync-status must publish before the slow refresh_config_status rescan, got {calls}"
@@ -383,7 +383,7 @@ def test_manual_sync_all_clears_time_range(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1", run_id=42)
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=42)
 
     # save_config was called with time_range removed from provisioning.
     assert saved, "expected save_config to fire on manual sync-all"
@@ -419,7 +419,7 @@ def test_disk_space_failure_logs_error_and_returns(
     ingest_mock = MagicMock()
     monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     ingest_mock.assert_not_called()
     log_cron.assert_called_once()
@@ -458,7 +458,7 @@ def test_ingest_error_event_logs_cron_with_processed_files(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     error_calls = [c for c in log_cron.call_args_list if c.args[3] == "error"]
     assert error_calls, "expected an error log_cron_run"
@@ -508,7 +508,7 @@ def test_ingest_done_event_records_summary_and_recompute_rollups(
         ),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     success_calls = [c for c in log_cron.call_args_list if c.args[3] == "success"]
     assert success_calls, "expected log_cron_run success"
@@ -548,7 +548,7 @@ def test_ingest_exception_records_crashed(
 
     monkeypatch.setattr("backend.core.ingest.ingest", _boom)
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     error_calls = [c for c in log_cron.call_args_list if c.args[3] == "error"]
     assert error_calls
@@ -593,7 +593,7 @@ def test_ingest_without_terminal_done_event_finalizes_row(
         _make_ingest_events([{"type": "file_done", "current": 3, "total_inserted": 50, "total_corrupt": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     # No success/error status was logged (this is exactly the leak path) ...
     assert not [c for c in log_cron.call_args_list if c.args[3] in ("success", "error")], (
@@ -602,7 +602,7 @@ def test_ingest_without_terminal_done_event_finalizes_row(
     # ... so the finally backstop must have finalized the row instead.
     finalize.assert_called_once()
     args, kwargs = finalize.call_args
-    assert args[1] == "sync"
+    assert args[1] == "log_discovery"
     assert args[2] == 42
     stub_progress["end_progress"].assert_called_once()
 
@@ -632,7 +632,7 @@ def test_successful_done_does_not_double_finalize(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    sync_mod._run_service_cron.__wrapped__("svc-1")
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
     finalize.assert_called_once()
     assert finalize.call_args.args[2] == 42
@@ -794,10 +794,10 @@ def test_full_sweep_error_event_logs_with_processed_counts(
 # ── Cron → ingest → metadata_db cascade (real ingest, moto S3) ────────────
 
 
-def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
+def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     s3_mock, fos_source, monkeypatch, tmp_path, stub_progress, stub_usage_log_phase
 ):
-    """End-to-end integration: ``_run_service_cron`` calls the REAL
+    """End-to-end integration: ``_run_log_discovery_cron`` calls the REAL
     ``backend.core.ingest.ingest`` against a moto-backed FOS bucket
     seeded with two gzip log files, and we assert the full writer-side
     cascade actually fired.
@@ -878,7 +878,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
     # stubbed by stub_progress; no remaining usage-log helpers needed.
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
 
-    # Real ``_run_service_cron`` calls ``svcconfig.load_config`` to read
+    # Real ``_run_log_discovery_cron`` calls ``svcconfig.load_config`` to read
     # cron_sync.enabled + time_range; the lambda above returns a stub.
     # ``get_source_for_service`` must return our moto-bound source so
     # ingest can list the bucket. ``start_cron_run`` writes the
@@ -919,7 +919,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
     svc_name = fos_source["name"]
 
     # ── Drive the real cron — NO ingest stub ─────────────────────────────
-    sync_mod._run_service_cron.__wrapped__(svc_id, force=True)
+    sync_mod._run_log_discovery_cron.__wrapped__(svc_id, force=True)
 
     # ── Contract 1: every ingested file landed in metadata_db ────────────
     ingested = metadata_db.list_ingested_files(svc_name)
@@ -933,7 +933,7 @@ def test_run_service_cron_full_cascade_real_ingest_against_moto_s3(
         )
 
     # ── Contract 2: cron_runs transitioned started → completed ───────────
-    _total, runs = metadata_db.get_cron_runs(svc_name, task="sync", per_page=10)
+    _total, runs = metadata_db.get_cron_runs(svc_name, task="log_discovery", per_page=10)
     assert runs, "cron_runs has no rows — start_cron_run never fired"
     latest = runs[0]
     assert latest["status"] == "success", (

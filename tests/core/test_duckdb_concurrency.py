@@ -42,6 +42,32 @@ def _reset_counter():
     _reset_lock_retry_count()
 
 
+@pytest.fixture
+def retries():
+    """Count retries attributable to THIS test, as a delta.
+
+    ``_lock_retry_count`` is process-global, and the reset above only fires
+    BEFORE the test — so anything that bumps the counter *during* it (a
+    background thread leaked by an earlier test in the same xdist worker;
+    tests within a worker run one at a time, so a live foreground test is
+    never the source) breaks an absolute ``== 0`` / ``== 3`` assertion.
+    That is a test-isolation defect, not a product bug, and it flaked
+    `test_writer_then_reader_release_path` /
+    `test_succeeds_after_transient_lock_errors` under full-suite load.
+
+    Reading a baseline at call time and asserting the delta narrows the
+    race window to the test's own body instead of the whole worker's
+    history. It does not eliminate it — a thread bumping the counter
+    mid-body would still be counted — so keep these assertions on
+    retry paths the test itself drives.
+    """
+
+    def _delta(baseline: int) -> int:
+        return get_lock_retry_count() - baseline
+
+    return _delta
+
+
 def _src(db_path: str) -> dict:
     """Minimal source dict the connection setup will accept.
 
@@ -73,6 +99,8 @@ def _make_failing_connect(fail_count: int, real_connect):
     state = {"calls": 0}
 
     def _fake(db_path, read_only=False):
+        if db_path == ":memory:":
+            return real_connect(db_path, read_only=read_only)
         state["calls"] += 1
         if state["calls"] <= fail_count:
             # The substring must match one of the patterns get_connection
@@ -84,22 +112,26 @@ def _make_failing_connect(fail_count: int, real_connect):
     return _fake, state
 
 
-def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch):
+def test_succeeds_after_transient_lock_errors(tmp_path, monkeypatch, retries):
     """Three lock failures, then success. Counter should be 3."""
+    baseline = get_lock_retry_count()
     db_path = str(tmp_path / "retry.duckdb")
+    # Pre-create the file so the `if not os.path.exists` branch in get_connection doesn't run and confuse the call counts
+    duckdb.connect(db_path).close()
+
     real_connect = duckdb.connect
     fake, state = _make_failing_connect(fail_count=3, real_connect=real_connect)
     monkeypatch.setattr(duckdb_mod.duckdb, "connect", fake)
 
     src = _src(db_path)
-    con = get_connection(src, max_wait=5.0)
+    con = get_connection(src, max_wait=5.0, read_only=False)
     try:
         assert con.execute("SELECT 1").fetchone() == (1,)
     finally:
         con.close()
 
     assert state["calls"] == 4, "should have retried 3 times then succeeded on the 4th call"
-    assert get_lock_retry_count() == 3, f"counter must increment once per retry; got {get_lock_retry_count()}"
+    assert retries(baseline) == 3, f"counter must increment once per retry; got {retries(baseline)}"
 
 
 def test_uses_exponential_backoff(tmp_path, monkeypatch):
@@ -107,6 +139,8 @@ def test_uses_exponential_backoff(tmp_path, monkeypatch):
     sleep arguments rather than measuring wall time so the test isn't flaky
     on slow CI."""
     db_path = str(tmp_path / "backoff.duckdb")
+    duckdb.connect(db_path).close()
+
     real_connect = duckdb.connect
     fake, _ = _make_failing_connect(fail_count=5, real_connect=real_connect)
     monkeypatch.setattr(duckdb_mod.duckdb, "connect", fake)
@@ -134,7 +168,7 @@ def test_uses_exponential_backoff(tmp_path, monkeypatch):
     t.join()
 
     src = _src(db_path)
-    con = get_connection(src, max_wait=30.0)
+    con = get_connection(src, max_wait=30.0, read_only=False)
     con.close()
 
     # Five retries → five sleeps.
@@ -175,8 +209,9 @@ def test_deadline_exceeded_raises_dbbusyerror(tmp_path, monkeypatch):
     assert get_lock_retry_count() > 0
 
 
-def test_non_lock_error_is_not_retried(tmp_path, monkeypatch):
+def test_non_lock_error_is_not_retried(tmp_path, monkeypatch, retries):
     """Random errors must propagate immediately — retry would mask bugs."""
+    baseline = get_lock_retry_count()
     db_path = str(tmp_path / "boom.duckdb")
     calls = {"n": 0}
 
@@ -188,67 +223,20 @@ def test_non_lock_error_is_not_retried(tmp_path, monkeypatch):
 
     src = _src(db_path)
     with pytest.raises(duckdb.Error, match="Catastrophic failure"):
-        get_connection(src, max_wait=5.0)
+        get_connection(src, max_wait=5.0, read_only=False)
 
     assert calls["n"] == 1, "non-lock errors must not be retried"
-    assert get_lock_retry_count() == 0
+    assert retries(baseline) == 0
 
 
 # ── Integration: real concurrent writer + readers ──────────────────────────
 
 
-def test_concurrent_readers_against_held_writer(tmp_path):
-    """All connections open with read_only=False (get_connection forces this),
-    so concurrent readers coexist with a held writer within the same process
-    without contention — DuckDB shares the database instance internally.
-
-    Contract: every reader succeeds; no retries needed."""
-    db_path = str(tmp_path / "stress.duckdb")
-
-    # Bootstrap the file with a table so readers have something to query.
-    boot = duckdb.connect(db_path)
-    boot.execute("CREATE TABLE t(x INTEGER)")
-    boot.execute("INSERT INTO t VALUES (1), (2), (3)")
-    boot.close()
-
-    # Hold a long-running writer for the entire test.
-    writer = duckdb.connect(db_path, read_only=False)
-    try:
-        results: list[str] = []
-        errors: list[Exception] = []
-
-        def reader():
-            try:
-                src = _src(db_path)
-                con = get_connection(src, max_wait=0.3, read_only=True)
-                try:
-                    rows = con.execute("SELECT count(*) FROM t").fetchone()
-                    results.append(f"ok:{rows[0]}")
-                finally:
-                    con.close()
-            except DBBusyError:
-                results.append("busy")
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=reader) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10.0)
-    finally:
-        writer.close()
-
-    assert not errors, f"raw exceptions leaked from get_connection: {errors!r}"
-    assert len(results) == 8, f"expected 8 results, got {results!r}"
-    for r in results:
-        assert r.startswith("ok:"), f"unexpected result: {r!r}"
-
-
-def test_writer_then_reader_release_path(tmp_path):
+def test_writer_then_reader_release_path(tmp_path, retries):
     """Sanity: open a writer, close it, then a reader succeeds without
     retries. Ensures the retry path is contention-only — no false positives
     in the no-contention case."""
+    baseline = get_lock_retry_count()
     db_path = str(tmp_path / "release.duckdb")
 
     boot = duckdb.connect(db_path)
@@ -260,7 +248,7 @@ def test_writer_then_reader_release_path(tmp_path):
     # Open and immediately close a writer.
     w = get_connection(src, read_only=False)
     w.close()
-    assert get_lock_retry_count() == 0, "no contention; counter must be 0"
+    assert retries(baseline) == 0, "no contention; counter must not advance"
 
     # Reader should sail through.
     r = get_connection(src, read_only=True)

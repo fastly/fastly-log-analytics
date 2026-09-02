@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-09-02
+
+Scalable ingest architecture. The commit-path storage engine, the ingest data
+plane, and the metadata backend were all replaced to allow ingestion to scale
+horizontally across many worker processes.
+
+**Read before upgrading:** [ADR-14](docs/adr/14-ducklake-replacement.md)
+(DuckLake), [ADR-15](docs/adr/15-multi-writer-topology.md) (multi-writer
+topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
+[ADR-18](docs/adr/18-serving-tier-single-pod.md) (what does *not* scale yet).
+
+### Added
+
+- **DuckLake commit path** — DuckDB's DuckLake extension replaces Apache Iceberg/pyiceberg as the catalog and write path. The catalog is a local `.ducklake` file for single-node deployments or a Postgres DSN for multi-writer ones; committed parquet lands in Fastly Object Storage for cloud-backed sources.
+- **Distributed ingest (`INGEST_MODE=celery`)** — discovery and conversion fan out across Celery workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
+- **Batched commits** — a batch of objects costs one catalog transaction rather than one per file, keeping catalog snapshots proportional to batches instead of to file count. Tunable via `LEDGER_CONVERT_BATCH_SIZE` (default 50).
+- **Postgres metadata backend** — `METADATA_DSN` switches cron state, the ingest ledger, and ingested-file manifests from per-node SQLite to a shared Postgres database, which is what allows more than one ingest process to coordinate. Cron leases are acquired atomically via a partial unique index so two processes can never run the same job.
+- **RUM beacon ingest on the ledger** — client vitals and client errors ingest through the same ledger/worker path, writing both tables in one transaction.
+- **Observability** — OTLP metrics and traces export, per-route span names, and a local Grafana/Prometheus/Tempo stack for the multi-node topology.
+- **Deployment** — a multi-node Docker Compose topology and a Helm chart.
+
+### Changed
+
+- **Scheduled jobs are split by write target.** Jobs that only touch the ledger and object storage run on Celery workers via RedBeat; jobs that read or write node-local state stay on each node's in-process scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
+- Retention deletion, snapshot expiry, table info, and the snapshot calendar all read and write DuckLake rather than the previous catalog.
+
+### Breaking
+
+- **`INGEST_MODE=celery` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
+- **`scripts/setup_pg_schema.py` is a required deploy step** when using Postgres metadata. Nothing creates that schema at runtime — skip it and the stack boots cleanly, then fails every metadata query.
+- Deployments that set `DUCKLAKE_CATALOG` empty while running `INGEST_MODE=celery` (including the Helm chart's shipped defaults) will not start until it is configured.
+
+### Known limitations
+
+- **Only the ingest tier scales horizontally.** The tier that serves API requests remains single-node: the per-service DuckDB file is process-exclusive, and several scheduled jobs write node-local output under a cross-node lease. The Helm chart pins the backend to one replica for this reason. See [ADR-18](docs/adr/18-serving-tier-single-pod.md).
+- **Analyst "independent instance" (Path A) is unsupported against a DuckLake-backed service.** The previous catalog could be reconstructed from object-storage contents alone, which is what let an analyst run a self-sufficient copy with only read-only bucket credentials; a DuckLake catalog cannot. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md).
+- Under a shared catalog, snapshot retention and file cleanup are catalog-global rather than per-service, so one service's retention window applies to every service sharing that catalog.
+
 ## [2.4.1] - 2026-08-25
 
 ### Added
@@ -1474,6 +1512,7 @@ deleted.
   admin tunnel use case is no longer supported; production has always
   been direct-mode against the Fastly+Caddy public URL.
 
+[3.0.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0
 [2.3.0]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.3.0
 [2.2.2]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.2
 [2.2.1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v2.2.1

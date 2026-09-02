@@ -1089,7 +1089,9 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
     bucket = cfg["fos_bucket_name"]
     prefix = (cfg.get("fos_prefix") or "").strip("/")
     period = cfg["log_period"]
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
+    from backend.provision.log_paths import analytics_log_path
+
+    path = analytics_log_path(prefix)
 
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
     if status_cb:
@@ -1138,7 +1140,12 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
         custom_condition = (custom_condition or "").strip()
 
         scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
+        cond_parts = ["!segmented_caching.is_inner_req"]
+
+        rum_enabled = cfg.get("rum_enabled", False) or bool((cfg.get("rum") or {}).get("enabled", False))
+        if rum_enabled:
+            cond_parts.append('req.url.path != "/rum-beacon"')
+
         if edge_only:
             cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
         if sample_rate < 100:

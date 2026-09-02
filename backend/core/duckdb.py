@@ -912,14 +912,9 @@ def get_connection(
     handler, wrap with ``await asyncio.to_thread(get_connection, ...)``
     so the event loop is never blocked.
 
-    ``read_only`` is accepted for API compatibility but always overridden
-    to False.  Within a single process DuckDB shares the database instance
-    across connections, so mixing ``read_only=True`` (pool / API) with
-    ``read_only=False`` (cron writes) raises "different configuration".
-    Using False everywhere avoids the conflict; concurrent reads are still
-    safe because DuckDB serialises via its internal WAL.
+    ``read_only`` defaults to False.
     """
-    read_only = False
+
     src = source or _DEFAULT_SOURCE
 
     # Use per-source duckdb_path if present, fall back to global DUCKDB_PATH
@@ -940,6 +935,13 @@ def get_connection(
     _barrier_wait(db_path)
     while True:
         try:
+            if read_only and not os.path.exists(db_path):
+                # The database file must exist before we can attach it read-only.
+                # If it doesn't exist, connect read-write briefly to create it.
+                try:
+                    duckdb.connect(db_path, read_only=False).close()
+                except Exception:
+                    pass  # If this fails, let the connect below fail and trigger the retry loop
             con = duckdb.connect(db_path, read_only=read_only)
             _register_live_connection(con, db_path)
             break
@@ -1005,9 +1007,11 @@ def get_connection(
     # Configure DuckDB to read Iceberg tables from FOS
     try:
         from backend.core import iceberg
+        from backend.core.iceberg._ducklake import _ducklake_attach
 
         iceberg.configure_duckdb_s3(con)
         con.execute("SET unsafe_enable_version_guessing=true;")
+        _ducklake_attach(con, src, read_only=True)
     except Exception:
         pass
 

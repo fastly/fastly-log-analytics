@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC
 
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import (
@@ -34,8 +35,8 @@ logger = logging.getLogger("backend.scheduler")
 # ── _run_service_cron (per-tick ingest) ──────────────────────────────────────
 
 
-@cron_task("cron_sync")
-def _run_service_cron(
+@cron_task("cron_log_discovery", job_name="log_discovery")
+def _run_log_discovery_cron(
     service_id: str,
     force: bool = False,
     delete_after: bool | None = None,
@@ -73,7 +74,7 @@ def _run_service_cron(
     # are in flight — DuckDB pool slot + Fastly bandwidth contention. Bound
     # by a 30 s starvation guard so a sustained-traffic service still gets
     # ticks eventually.
-    if should_defer_cron("sync", service_id):
+    if should_defer_cron("log_discovery", service_id):
         return
 
     cfg = svcconfig.load_config(service_id)
@@ -134,20 +135,86 @@ def _run_service_cron(
 
         try:
             if run_id is None:
-                run_id = start_cron_run(src, "sync")
+                run_id = start_cron_run(src, "log_discovery")
         except RuntimeError as e:
             logger.info("[scheduler] %s: skipping sync — %s", service_id, str(e))
+            return
+
+        if svcconfig.INGEST_MODE == "celery":
+            # Celery/ledger data plane: run discovery INLINE (this job already
+            # executes on a worker via RedBeat in external mode) so the
+            # cron_runs row carries the real outcome — files discovered, real
+            # duration, real errors — instead of a fake instant "dispatched"
+            # success that blinds recent_cron_failures and deep health.
+            # Only per-file convert work fans out to q.ingest.
+            from datetime import datetime, timedelta
+
+            from backend.core.ingest import discover_prefix
+            from backend.provision.log_paths import minute_list_prefix
+
+            if not svcconfig.CELERY_BROKER_URL:
+                log_cron_run(
+                    src,
+                    "log_discovery",
+                    0.0,
+                    "error",
+                    run_id=run_id,
+                    error_message="INGEST_MODE=celery requires CELERY_BROKER_URL",
+                    summary="Celery ingest misconfigured: no broker URL",
+                )
+                return
+
+            discovery_started = time.time()
+            now = datetime.now(UTC)
+            try:
+                discovered = 0
+                for i in range(5):
+                    prefix = minute_list_prefix(src.get("prefix", ""), now - timedelta(minutes=i))
+                    discovered += discover_prefix(service_id, prefix_subpath=prefix)
+                log_cron_run(
+                    src,
+                    "log_discovery",
+                    time.time() - discovery_started,
+                    "success",
+                    run_id=run_id,
+                    files_downloaded=discovered,
+                    summary=(
+                        f"Discovered {discovered} new file(s); dispatched to ingest workers"
+                        if discovered
+                        else "No new files"
+                    ),
+                )
+                # NOTE: deliberately NOT calling refresh_config_status here —
+                # it opens the per-service .duckdb file, and a worker-side
+                # open fights the backend's readers for the single-writer
+                # file lock. Freshness for SSR comes from read-time overlays
+                # instead: bootstrap reads last_sync from the log_discovery
+                # cron row and compute_sync_status_cached overlays the newest
+                # committed ledger file. The cached blob's remaining fields
+                # (e.g. local_rows) refresh on backend restart / on-demand
+                # /api/sync-status calls.
+            except Exception as e:
+                log_cron_run(
+                    src,
+                    "log_discovery",
+                    time.time() - discovery_started,
+                    "error",
+                    run_id=run_id,
+                    error_message=str(e),
+                    summary="Log discovery failed",
+                )
+                logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
             return
 
         # Disk pre-check: refuse to start if free space is below the floor.
         # Avoids the "pull from FOS, write fails, repeat next tick" cost loop.
         from backend.core.duckdb import _cache_dir
 
-        ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "sync")
+        ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "log_discovery")
         if not ok:
             log_cron_run(
                 src,
-                "sync",
+                "log_discovery",
                 0.0,
                 "error",
                 run_id=run_id,
@@ -159,19 +226,19 @@ def _run_service_cron(
         from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
         cleanup_progress_and_reap()
-        start_progress(run_id, service_id=service_id, task="sync")
-        logger.info("▶️  \x1b[94m[sync]\x1b[0m %s: Sync job started.", _display)
+        start_progress(run_id, service_id=service_id, task="log_discovery")
+        logger.info("▶️  \x1b[94m[log_discovery]\x1b[0m %s: Log Discovery job started.", _display)
 
         start_time_exec = time.time()
 
         def elapsed() -> str:
             return _elapsed_since(start_time_exec)
 
-        msg = "Starting sync..."
+        msg = "Starting log discovery..."
         if start_time or end_time:
             msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
         _log_and_add_progress(
-            run_id, service_id, job_name="sync", event={"type": "status", "message": f"{elapsed()} {msg}"}
+            run_id, service_id, job_name="log_discovery", event={"type": "status", "message": f"{elapsed()} {msg}"}
         )
 
         done_event: dict = {}
@@ -189,7 +256,7 @@ def _run_service_cron(
                 end_time=end_time,
                 incremental_only=not is_manual,
             ):
-                _log_and_add_progress(run_id, service_id, job_name="sync", event=event)
+                _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=event)
 
                 if event.get("type") == "file_done":
                     processed_files = event.get("current", processed_files)
@@ -204,7 +271,7 @@ def _run_service_cron(
                     log_text = _extract_log_text(run_id)
                     log_cron_run(
                         src,
-                        "sync",
+                        "log_discovery",
                         time.time() - start_time_exec,
                         "error",
                         run_id=run_id,
@@ -216,7 +283,10 @@ def _run_service_cron(
                         log_output=log_text,
                     )
                     _log_and_add_progress(
-                        run_id, service_id, job_name="sync", event={"type": "error", "message": event.get("message")}
+                        run_id,
+                        service_id,
+                        job_name="log_discovery",
+                        event={"type": "error", "message": event.get("message")},
                     )
                     break
             else:
@@ -237,7 +307,7 @@ def _run_service_cron(
                             done_msg = f"{elapsed()} No new log files found in bucket."
                         log_cron_run(
                             src,
-                            "sync",
+                            "log_discovery",
                             time.time() - start_time_exec,
                             "success",
                             summary=summary,
@@ -248,7 +318,7 @@ def _run_service_cron(
                         _log_and_add_progress(
                             run_id,
                             service_id,
-                            job_name="sync",
+                            job_name="log_discovery",
                             event={"type": "done", "message": done_msg},
                         )
                     else:
@@ -267,7 +337,7 @@ def _run_service_cron(
 
                         log_cron_run(
                             src,
-                            "sync",
+                            "log_discovery",
                             time.time() - start_time_exec,
                             "success",
                             files_downloaded=done_event.get("new_files", 0),
@@ -306,7 +376,7 @@ def _run_service_cron(
                                 service_id,
                                 log_prefix=f"{elapsed()} ",
                                 progress_log=lambda ev: _log_and_add_progress(
-                                    run_id, service_id, job_name="sync", event=ev
+                                    run_id, service_id, job_name="log_discovery", event=ev
                                 ),
                             )
 
@@ -323,7 +393,7 @@ def _run_service_cron(
                                 _log_and_add_progress(
                                     run_id,
                                     service_id,
-                                    job_name="sync",
+                                    job_name="log_discovery",
                                     event={
                                         "type": "status",
                                         "message": f"{elapsed()} Rollups computed: {int((time.time() - _t_roll) * 1000)}ms",
@@ -354,7 +424,7 @@ def _run_service_cron(
                                     _log_and_add_progress(
                                         run_id,
                                         service_id,
-                                        job_name="sync",
+                                        job_name="log_discovery",
                                         event={
                                             "type": "status",
                                             "message": f"{elapsed()} Bot rollups: {_bn} hours in "
@@ -376,7 +446,7 @@ def _run_service_cron(
                 _log_and_add_progress(
                     run_id,
                     service_id,
-                    job_name="sync",
+                    job_name="log_discovery",
                     event={
                         "type": "status",
                         "message": f"Crash occurred. Successfully ingested {processed_files} files so far.",
@@ -384,7 +454,7 @@ def _run_service_cron(
                 )
             log_cron_run(
                 src,
-                "sync",
+                "log_discovery",
                 time.time() - start_time_exec,
                 "error",
                 files_downloaded=processed_files,
@@ -396,7 +466,9 @@ def _run_service_cron(
                 log_output=log_text,
             )
             logger.exception("[scheduler] %s: unexpected ingest error.", service_id)
-            _log_and_add_progress(run_id, service_id, job_name="sync", event={"type": "error", "message": str(e)})
+            _log_and_add_progress(
+                run_id, service_id, job_name="log_discovery", event={"type": "error", "message": str(e)}
+            )
         finally:
             end_progress(run_id)
             # Backstop: guarantee the cron_runs row never stays 'running'. The
@@ -408,7 +480,7 @@ def _run_service_cron(
             # 2026-06-19. Idempotent: no-op once the row is already terminal.
             finalize_cron_run_if_running(
                 src,
-                "sync",
+                "log_discovery",
                 run_id,
                 duration_s=time.time() - start_time_exec,
                 summary="Sync exited without recording a terminal status",
@@ -428,15 +500,6 @@ def _run_service_cron(
     # the React Query cache update is byte-compatible with a polled
     # response. Broad except so a publish failure NEVER breaks the
     # ingestion cron.
-    try:
-        from backend.routers.admin.sync_status import compute_sync_status_cached
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-
-        _snapshot = compute_sync_status_cached(service_id)
-        if _snapshot is not None:
-            _sync_status_publisher.publish(service_id, _snapshot)
-    except Exception:
-        logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
 
     # ── 2. Refresh cached status ──────────────────────────────────────────────
     # Single 60s window covers both the heavy refresh (top_values cache) and
@@ -448,12 +511,22 @@ def _run_service_cron(
         _log_and_add_progress(
             run_id,
             service_id,
-            job_name="sync",
+            job_name="log_discovery",
             event={
                 "type": "status",
                 "message": f"{elapsed()} Refreshing sync status {_msg_suffix}...",
             },
         )
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
+
+        _snapshot = compute_sync_status_cached(service_id)
+        if _snapshot is not None:
+            _sync_status_publisher.publish(service_id, _snapshot)
+    except Exception:
+        logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
+
     _t0 = time.time()
     try:
         refresh_config_status(service_id, include_top_values=do_heavy_refresh)
@@ -464,7 +537,7 @@ def _run_service_cron(
         _log_and_add_progress(
             run_id,
             service_id,
-            job_name="sync",
+            job_name="log_discovery",
             event={
                 "type": "status",
                 "message": f"{elapsed()} refresh_config_status{_heavy}: {int((time.time() - _t0) * 1000)}ms",
@@ -493,7 +566,7 @@ def _run_service_cron(
         _log_and_add_progress(
             run_id,
             service_id,
-            job_name="sync",
+            job_name="log_discovery",
             event={
                 "type": "status",
                 "message": f"{elapsed()} dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t0) * 1000)}ms",
@@ -508,7 +581,7 @@ def _run_service_cron(
         _log_and_add_progress(
             run_id,
             service_id,
-            job_name="sync",
+            job_name="log_discovery",
             event={
                 "type": "status",
                 "message": f"{elapsed()} Updating usage log (Fastly-edge writes, in-process calls, retention purge)...",
@@ -586,7 +659,7 @@ def _run_service_cron(
         _log_and_add_progress(
             run_id,
             service_id,
-            job_name="sync",
+            job_name="log_discovery",
             event={
                 "type": "status",
                 "message": f"{elapsed()} usage_log phase: {int((time.time() - _t0) * 1000)}ms",
@@ -609,8 +682,7 @@ def _run_service_cron(
             log_output=_extract_log_text(run_id) if run_id is not None else None,
             silent=False,
         )
-
-    logger.info("⏹️  \x1b[94m[sync]\x1b[0m %s: Sync job finished.", _display)
+    logger.info("⏹️  \x1b[94m[log_discovery]\x1b[0m %s: Log Discovery job finished.", _display)
 
 
 # ── _run_full_sweep (daily catch-net) ────────────────────────────────────────
@@ -625,7 +697,7 @@ _FULL_SWEEP_DEFAULT_MAX_FILES = 20_000
 _FULL_SWEEP_DEFAULT_MAX_SECONDS = 900
 
 
-@cron_task("full_sync")
+@cron_task("full_sync", job_name="full_sync")
 def _run_full_sweep(
     service_id: str,
     max_files: int = _FULL_SWEEP_DEFAULT_MAX_FILES,
@@ -671,6 +743,42 @@ def _run_full_sweep(
         run_id = start_cron_run(src, "full_sync")
     except RuntimeError as e:
         logger.info("⏭️  \x1b[95m[full_sync]\x1b[0m %s: skipping — %s", service_id, e)
+        return
+
+    if svcconfig.INGEST_MODE == "celery":
+        # Celery data plane: the catch-net is a full-prefix LIST diffed into
+        # the ingest_ledger (converts fan out from there). Running the v2
+        # file-based ingest here would open the per-service .duckdb from a
+        # worker — the cross-process single-writer lock hazard.
+        from backend.core.ingest import discover_prefix
+
+        sweep_started = time.time()
+        try:
+            discovered = discover_prefix(service_id)  # default prefix = full raw/
+            log_cron_run(
+                src,
+                "full_sync",
+                time.time() - sweep_started,
+                "success",
+                run_id=run_id,
+                files_downloaded=discovered,
+                summary=(
+                    f"Full-prefix sweep discovered {discovered} unseen file(s); dispatched to ingest workers"
+                    if discovered
+                    else "Full-prefix sweep: no unseen files"
+                ),
+            )
+        except Exception as e:
+            log_cron_run(
+                src,
+                "full_sync",
+                time.time() - sweep_started,
+                "error",
+                run_id=run_id,
+                error_message=str(e),
+                summary="Full-prefix ledger sweep failed",
+            )
+            logger.exception("[full_sync] %s: ledger sweep failed", service_id)
         return
 
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
@@ -865,7 +973,7 @@ def _mark_gap_heal_triggered(service_id: str) -> None:
     _GAP_HEAL_LAST_TRIGGER[service_id] = time.time()
 
 
-@cron_task("gap_heal")
+@cron_task("gap_heal", job_name="gap_heal")
 def _run_gap_heal(service_id: str) -> None:
     """Periodic gap detector that triggers a full_sweep when sustained loss
     is observed between Fastly's authoritative ``requests`` counts and
@@ -1004,6 +1112,58 @@ def _run_gap_heal(service_id: str) -> None:
         logger.exception("[gap_heal] %s: unexpected error", service_id)
     finally:
         end_progress(run_id)
+
+
+@cron_task("ledger_sweep", job_name="ledger_sweep")
+def _run_ledger_sweep(service_id: str) -> None:
+    """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
+    rows, and diff a lookback FOS LIST against the ledger. Registered by the
+    scheduler only when INGEST_MODE=celery."""
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.ingest import sweep_ledger_once
+
+    if svcconfig.INGEST_MODE != "celery":
+        return
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        return
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+
+    try:
+        run_id = start_cron_run(src, "ledger_sweep")
+    except RuntimeError as e:
+        logger.info("[ledger_sweep] %s: skipping — %s", service_id, str(e))
+        return
+
+    started = time.time()
+    try:
+        summary = sweep_ledger_once(service_id)
+        log_cron_run(
+            src,
+            "ledger_sweep",
+            time.time() - started,
+            "success",
+            run_id=run_id,
+            files_downloaded=summary.get("discovered", 0),
+            summary=(
+                f"reclaimed={summary['reclaimed']} redispatched={summary['redispatched']} "
+                f"discovered={summary['discovered']}"
+            ),
+        )
+    except Exception as e:
+        log_cron_run(
+            src,
+            "ledger_sweep",
+            time.time() - started,
+            "error",
+            run_id=run_id,
+            error_message=str(e),
+            summary="Ledger sweep failed",
+        )
+        logger.exception("[ledger_sweep] %s: sweep failed", service_id)
 
 
 # R-1: drain the gap-heal trigger timestamp dict between tests so an

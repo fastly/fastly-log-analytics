@@ -15,12 +15,12 @@ The system uses a layered storage architecture to optimize for real-time query s
 
 | Layer | Location / Connection | Purpose |
 |---|---|---|
-| **Raw Logs** | `s3://{bucket}/{prefix}/raw/**/*.gz` | Immutable gzipped JSON logs streamed directly from Fastly logging endpoints. |
+| **Raw Logs** | `s3://{bucket}/{prefix}/raw/**/*.gz` (RUM: `.../rum/raw/**/*.gz`) | Immutable gzipped JSON logs streamed directly from Fastly logging endpoints. |
 | **Local Buffer** | `cache/{bucket}/` | Transient Parquet files stored locally during active ingestion before commit. |
-| **Iceberg Table** | `s3://{bucket}/{prefix}/iceberg/` | Long-term, hourly partitioned storage powered by Apache Iceberg. |
-| **Admin State** | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | Replicated metadata: views, custom fields, audit logs, and log format history. |
+| **DuckLake Table** | Catalog: local `.ducklake` file (single-pod) or a Postgres DSN (multi-pod, required in Celery mode); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Long-term, transactional storage powered by DuckDB's DuckLake extension. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0 — see [ADR-14](adr/14-ducklake-replacement.md). |
+| **Admin State** | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | Replicated metadata: views, custom fields, audit logs, and log format history. (Path predates the DuckLake cutover; not moved, since it isn't part of the Iceberg/DuckLake commit-path catalog itself.) |
 | **DuckDB Engine** | `data/services/{service_id}.duckdb` | Per-service analytical query engine (compiles temporary tables and unified `logs` view). |
-| **Service Metadata** | `data/services/{service_id}.metadata.db` | Per-service SQLite (WAL mode): stores local alerts, views, crons, and ingested file manifests. |
+| **Service Metadata** | `data/services/{service_id}.metadata.db` (SQLite, WAL mode) or a shared Postgres database (`METADATA_DSN`, required for multi-pod) | Stores local alerts, views, crons, ingested-file manifests, and (celery mode) the ingest ledger. See [ADR-15](adr/15-multi-writer-topology.md). |
 | **NGWAF Bot Cache** | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite database caching known verified bots from Fastly's NGWAF API. |
 | **Live Share State** | `data/system/remote_share.db` | Central SQLite database managing invitations, active shared sessions, and audit records. |
 
@@ -28,39 +28,61 @@ The system uses a layered storage architecture to optimize for real-time query s
 
 Storage subsystems live as cohesive packages rather than monoliths:
 
-- **Iceberg engine** — [`backend/core/iceberg/`](../backend/core/iceberg/): `_core.py` holds the read/write/commit/optimize/expire paths; `fs.py` holds the `FosS3FileSystem` / `CachedS3FileSystem` filesystem subclasses.
-- **Per-service metadata** — [`backend/core/metadata/`](../backend/core/metadata/): one SQLite submodule per concern (`base`, `alerts`, `views`, `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `slow_queries`, `reconciliation`, `state`).
+- **Iceberg/DuckLake engine** — [`backend/core/iceberg/`](../backend/core/iceberg/): `_core.py` holds the read/write/commit/optimize/expire paths; `_ducklake.py` owns the DuckLake catalog attach contract (`_ducklake_attach`, `ducklake_table_name` — the per-tenant table-naming authority under a shared catalog); `manifest.py` holds table-info/calendar introspection (DuckLake-native as of v3.0.0 — `ducklake_table_info`/`ducklake_snapshots`); `fs.py` holds the `FosS3FileSystem` / `CachedS3FileSystem` filesystem subclasses (still used by the pyiceberg code paths that remain — `buffer.py`, `sync.py`).
+- **Celery/ledger ingest** — [`backend/core/ingest.py`](../backend/core/ingest.py): `discover_prefix`/`convert_batch_objects`/`convert_object`/`sweep_ledger_once`/`finalize_committed_raw`, the state-machine functions behind the `ingest_ledger` table. See [ADR-16](adr/16-ingest-ledger.md).
+- **Per-service metadata** — [`backend/core/metadata/`](../backend/core/metadata/): one submodule per concern (`base`, `alerts`, `views`, `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `slow_queries`, `reconciliation`, `state`), plus `pg_connection.py` for the Postgres backend (SQLite-shaped SQL rewritten to Postgres dialect at the query layer, so the rest of the metadata layer didn't need a parallel rewrite).
 
 Each package's `__init__.py` re-exports the full public surface for backward compatibility; the import-shim mechanics are documented in [AGENTS.md](../AGENTS.md) and [MONKEYPATCHES.md](../MONKEYPATCHES.md).
 
 ### The Unified Logs View
-To provide real-time query speed without waiting for Iceberg table commits, the DuckDB `logs` view dynamically stitches the committed Iceberg table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
+To provide real-time query speed without waiting for a commit, the DuckDB `logs` view dynamically stitches the committed DuckLake table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
 
 ---
 
 ## 2. Ingest Pipeline & Atomic Guarantees
 
-Ingestion is scheduled using APScheduler. It performs active sync, commit, optimization, and expiration cycles on a per-service level:
+There are two ingest data planes, selected by `INGEST_MODE`. Both write through the same DuckLake commit path and the same unified `logs` view — they differ in how work is scheduled and fanned out, not in where data ends up.
+
+### Default mode: per-service APScheduler
+
+The original model: one in-process `BackgroundScheduler` job per service performs sync, commit, compaction, optimization, and expiration on a fixed interval. This is the whole system for single-pod deployments and remains the default.
 
 ```mermaid
 graph TD
     A[Fastly Object Storage] -->|Gzipped Logs| B(Sync Cron Job)
     B -->|Convert & Stage| C[Local Parquet Buffer]
-    C -->|Commit Interval| D[Iceberg Hour-Partitioned Table]
+    C -->|Commit Interval| D[DuckLake Table]
     C & D -->|Stitched Logs View| E[DuckDB Analytical Engine]
 ```
 
-### Scheduler module layout
-
-The APScheduler lifecycle, watchdog wrapper, and per-job bodies live as cohesive submodules under [`backend/cron/`](../backend/cron/): `scheduler.py` owns the `BackgroundScheduler` lifecycle and `_sync_jobs()` reload, `decorators.py` owns the `@cron_task` decorator (telemetry context + usage-log flush + watchdog hard-cap), and `jobs/` holds one file per job family (`sync.py`, `commit.py`, `compaction.py`, `optimize.py`, `expire.py`, `metadata.py`).
-
-### Atomic Manifest & Crash Recovery
-To guarantee exactly-once processing and avoid duplicating data during interrupted log transfers, the system uses a write-ahead registry pattern:
+**Atomic Manifest & Crash Recovery** (write-ahead registry pattern, unchanged from earlier releases):
 
 1.  **In-Flight Recording:** Before writing any staged Parquet files, a per-service SQLite table `ingest_in_flight` records the source filename, unique hash, and row counts.
 2.  **Deterministic Buffering:** Staged Parquet files are named deterministically based on a SHA-256 hash of their sorted content (`batch_{sha256[:16]}.parquet`). If an ingest restarts or crashes mid-way, duplicate writes naturally overwrite the same file instead of creating redundant rows.
 3.  **Commit Promotion:** Once the Parquet buffer is written successfully, the database transfers the records into `ingested_files` and clears the `ingest_in_flight` table.
 4.  **Idempotent Auto-Recovery:** Upon any startup or tick cycle, the ingest system inspects left-over entries in the in-flight table. If the corresponding buffer exists, it is promoted; otherwise, it is dropped and queued for clean re-download on the next LIST tick.
+
+### `INGEST_MODE=celery`: the ledger data plane
+
+For horizontally-scaled ingestion (many Celery workers pulling from FOS concurrently — the 100k-1M RPS target), discovery and conversion fan out across worker processes instead of running in one pod's scheduler loop:
+
+```mermaid
+graph TD
+    A[Fastly Object Storage] -->|LIST| B(discover_prefix, RedBeat-scheduled)
+    B -->|INSERT discovered rows| L[(ingest_ledger)]
+    L -->|convert.delay per row| W1[Celery worker]
+    L -->|convert.delay per row| W2[Celery worker N]
+    W1 & W2 -->|claim, transform, commit| D[DuckLake Table]
+    W1 & W2 -->|mark committed| L
+    S(sweep_ledger_once, crash net) -.->|reclaim stuck claims,\nre-dispatch lost messages,\nFOS-diff catch-up| L
+    D -->|Stitched Logs View| E[DuckDB Analytical Engine]
+```
+
+`ingest_ledger` (one row per `service_id`+`object_key`, states `discovered → claimed → committed`, or `quarantined`/`dead_letter` on failure) is the shared source of truth every worker and the sweeper agree on without talking to each other directly. Convert is idempotent, so at-least-once redelivery (dead-worker reclaim, lost-message re-dispatch, Celery's own `acks_late` redelivery) is safe. Full design and the lost-message-queue-bloat incident it fixes: [ADR-16](adr/16-ingest-ledger.md).
+
+Not every scheduled job routes to Celery workers in this mode — jobs that read/write the pod-local DuckDB file or cache (rollups, local compaction, alerts) stay on the backend's own APScheduler even when celery mode is on, since routing them to a worker pool would fight the backend's own readers for that file's single-writer lock. See [ADR-15](adr/15-multi-writer-topology.md) for the full scheduler split and the Postgres multi-writer requirement it depends on.
+
+RUM beacon ingest (`client_vitals`/`client_errors`) has its own APScheduler job (`rum_sync_{id}`) mirroring the default-mode diagram above; porting it to the ledger data plane is tracked separately.
 
 ---
 

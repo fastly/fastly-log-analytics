@@ -8,9 +8,18 @@ from __future__ import annotations
 
 import datetime
 import json
+from unittest.mock import patch
 
 import duckdb
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def skip_view_update():
+    with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
+        yield mock
+
+
 from fastapi.testclient import TestClient
 
 from backend.main import app
@@ -72,6 +81,10 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
         "region": "mock",
     }
 
+    import backend.core.duckdb_pool as duckdb_pool
+
+    duckdb_pool.reset_pool_for_service("test_service")
+    duckdb_pool.reset_pool_for_service("test_service_rum")
     monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
 
     return temp_db_path

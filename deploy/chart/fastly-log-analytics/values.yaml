@@ -1,0 +1,136 @@
+# Default values for fastly-log-analytics.
+#
+# EXPERIMENTAL: this chart is not the supported deployment path (the
+# supported topology is the single-VM docker-compose.prod.yml). It exists to
+# exercise the multi-pod Celery/valkey split on Kubernetes.
+#
+# Applies to the STATELESS FRONTEND only. The backend Deployment is pinned to
+# replicas: 1 in the template and ignores this value, because the serving tier
+# is single-pod-only: the per-service `.duckdb` file is a read-write
+# single-file database and DuckDB takes a PROCESS-EXCLUSIVE lock on it, so a
+# second backend pod sharing the PVC fails every connection checkout with
+# `Could not set lock on file` and returns 503 on every data request. Two
+# further blockers (pod-local compacted parquet registered in shared Postgres,
+# and a fleet-wide cron lease on jobs whose output is pod-local) make it fail
+# silently rather than loudly. Do not "fix" this by editing a value — see
+# docs/adr/18-serving-tier-single-pod.md.
+#
+# Ingest DOES scale horizontally: raise workers.replicaCount (or enable
+# autoscaling below, which drives the worker KEDA ScaledObject).
+replicaCount: 1
+
+image:
+  repository: fastly-log-analytics
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  # DuckDB's httpfs extension writes $HOME on every pool acquire and the app
+  # writes /app/data + /app/cache, so the root filesystem cannot be
+  # read-only for the backend/worker images.
+  readOnlyRootFilesystem: false
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  hosts:
+    - host: fastly.analytics.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+  # limits:
+  #   cpu: "2"
+  #   memory: 6Gi
+  # requests:
+  #   cpu: 500m
+  #   memory: 2Gi
+
+# Scales the Celery workers (KEDA ScaledObject, queue-depth triggered) and the
+# stateless frontend. It does NOT scale the backend — there is no backend HPA;
+# see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+# Shared app state (configs + data + cache). ReadWriteOnce: every pod that
+# mounts it is pinned to the same node. Scaling past one node requires
+# METADATA_DSN/DUCKLAKE_CATALOG (Postgres) + shared object storage instead.
+persistence:
+  enabled: true
+  # Use an existing PVC instead of creating one.
+  existingClaim: ""
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+
+config:
+  ingestMode: celery
+  schedulerMode: external
+  sseBackplane: valkey
+  # Pin to the subnet your ingress/proxy pods actually egress from (pod CIDR
+  # or the RFC1918 ranges below). The backend REFUSES TO BOOT on `*` — a
+  # wildcard lets any direct client spoof X-Forwarded-For and be classified
+  # loopback-admin.
+  trustedProxyIps: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  duckdbMemoryLimit: "4GB"
+  ducklakeCatalog: ""
+  ducklakeDataPath: ""
+  hotS3Endpoint: ""
+
+# Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
+# does not take a redis:// URL). Keep in sync with secrets.celeryBrokerUrl.
+broker:
+  host: valkey-master
+  port: 6379
+  databaseIndex: "0"
+
+# Connection strings are wired into pods via a Secret, never as plain env in
+# the pod spec. For production, pre-create a Secret with keys
+# CELERY_BROKER_URL and (optionally) METADATA_DSN and set existingSecret —
+# values-provided strings land in the release manifest and stay readable to
+# anyone with helm access.
+secrets:
+  # Name of a pre-created Secret. When set, no Secret is templated and
+  # celeryBrokerUrl/metadataDsn below are ignored.
+  existingSecret: ""
+  celeryBrokerUrl: "redis://valkey-master:6379/0"
+  metadataDsn: ""
+
+workers:
+  # Same RWO-PVC caveat as replicaCount above.
+  replicaCount: 1
+
+beat:
+  enabled: true

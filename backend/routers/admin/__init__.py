@@ -39,6 +39,7 @@ from . import (  # noqa: F401
     _helpers,
     _router,
     bot_sources,
+    celery_status,
     compaction,
     debug_settings,
     downloads,

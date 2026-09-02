@@ -364,34 +364,26 @@ def get_sync_status(
             .replace("+00:00", "Z")
         )
 
-        busy_row = con.execute(
-            """
-            SELECT count(*) FROM _cron_run_log
-            WHERE status = 'running' AND started_at > ?
-        """,
-            [time_cutoff],
-        ).fetchone()
-        busy = (busy_row[0] > 0) if busy_row else False
+        from backend.core.metadata.cron_log import latest_cron_per_task
 
-        for row in con.execute(
-            """
-            SELECT task, started_at, duration_s, status, error_message, summary
-            FROM (
-                SELECT task, started_at, duration_s, status, error_message, summary,
-                       ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC) AS rn
-                FROM _cron_run_log
-                WHERE task IN ('sync', 'commit')
-            )
-            WHERE rn = 1
-            """,
-        ).fetchall():
-            cron_stats[row[0]] = {
-                "last_run": _safe_iso(row[1]),
-                "duration_s": row[2],
-                "status": row[3],
-                "error_message": row[4],
-                "summary": row[5],
+        service_id = str(src.get("name") or src.get("service_id") or "")
+        crons = latest_cron_per_task(service_id)
+
+        busy = False
+        for t, data in crons.items():
+            st = data.get("started_at")
+            if data.get("status") == "running" and st and str(st) > time_cutoff:
+                busy = True
+
+            # Format to what UI expects
+            cron_stats[t] = {
+                "last_run": _safe_iso(data.get("started_at")),
+                "duration_s": data.get("duration_s"),
+                "status": data.get("status"),
+                "error_message": data.get("error_message"),
+                "summary": data.get("summary"),
             }
+
     except Exception:
         busy = False
         cron_stats = {}
@@ -941,6 +933,8 @@ def get_schema(
             # SRE-22: Instant catalog schema reflection via DESCRIBE bypasses heavy data scans
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": r[0], "type": r[1]} for r in result]
+            if len(schema) == 1 and schema[0]["name"] == "timestamp":
+                schema = []
             _schema_cache[cache_key] = (now, schema)
             return schema
 
@@ -966,6 +960,9 @@ def get_schema(
                     "count": count,
                 }
             )
+
+        if len(schema) == 1 and schema[0]["name"] == "timestamp":
+            schema = []
 
         _schema_cache[cache_key] = (now, schema)
         return schema

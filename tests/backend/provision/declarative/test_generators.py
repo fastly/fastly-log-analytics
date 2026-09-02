@@ -214,7 +214,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         main = [e for e in endpoints if e.name == "Fastly Log Analytics"]
         assert len(main) == 1, "Should have exactly one main endpoint"
-        assert "analytics_log" in main[0].path
+        assert "year=%Y" in main[0].path
 
     def test_generator_endpoints_use_null_placement(self):
         """Verify that S3 logging endpoints use None/null placement for Format Version Default."""

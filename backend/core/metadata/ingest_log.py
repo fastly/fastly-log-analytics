@@ -563,8 +563,8 @@ def register_locally_compacted(service_id: str, file_names: list[str]) -> None:
         return
     con = get_con(service_id)
     con.executemany(
-        "INSERT OR IGNORE INTO local_compacted_files (file_name) VALUES (?)",
-        [(n,) for n in file_names],
+        "INSERT OR IGNORE INTO local_compacted_files (service_id, file_name) VALUES (?, ?)",
+        [(service_id, n) for n in file_names],
     )
     con.commit()
 
@@ -575,7 +575,12 @@ def get_locally_compacted_basenames(service_id: str) -> set[str]:
     Cached at the call site if used in a hot loop.
     """
     con = get_con(service_id)
-    return {row[0] for row in con.execute("SELECT file_name FROM local_compacted_files").fetchall()}
+    return {
+        row[0]
+        for row in con.execute(
+            "SELECT file_name FROM local_compacted_files WHERE service_id = ?", (service_id,)
+        ).fetchall()
+    }
 
 
 def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]], table_name: str = "logs") -> None:

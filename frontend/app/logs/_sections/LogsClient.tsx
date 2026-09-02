@@ -120,7 +120,7 @@ export default function LogsClient() {
               </TabsTrigger>
             )}
             <TabsTrigger value="iceberg" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <Archive className="h-4 w-4" /> Iceberg Storage
+              <Archive className="h-4 w-4" /> DuckLake Storage
             </TabsTrigger>
             {!s.isAnalyst && (
               <TabsTrigger value="metadata_storage" className="flex-1 flex items-center justify-center gap-2 text-xs">
@@ -150,6 +150,7 @@ export default function LogsClient() {
             statusFilter={s.statusFilter}
             setStatusFilter={s.setStatusFilter}
             isAnalyst={s.isAnalyst}
+            status={s.status}
             activeServiceId={s.activeServiceId}
             setDisplayedJobs={s.setDisplayedJobs}
             setSelectedConsoleJobId={s.setSelectedConsoleJobId}

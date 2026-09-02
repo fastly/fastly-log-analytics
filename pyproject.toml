@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "2.4.1"
+version = "3.0.0"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 # The codebase uses PEP 695 type-parameter syntax (``def foo[T]``) and
 # ``from datetime import UTC``, which require 3.12 and 3.11 respectively; the
@@ -100,6 +100,12 @@ dependencies = [
     "typer>=0.12",
     "authlib>=1.7.2",
     "joserfc>=1.7.1",
+    "psycopg[binary]>=3.3.4",
+    "psycopg-pool>=3.3.1",
+    "celery[redis]>=5.6.3",
+    "celery-redbeat>=2.4",
+    "redis>=6.4.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
 ]
 
 [dependency-groups]
@@ -467,18 +473,13 @@ ignore_imports = [
     # Session scoring's admin variant + user variant share helpers.
     "backend.routers.session_scoring -> backend.routers.session_scoring_admin",
     "backend.routers.session_scoring_admin -> backend.routers.session_scoring",
-    # Via backend.cron.jobs.sync, which
-    # legitimately imports from the admin router (the iceberg-commit +
-    # sync flushes share that admin path). Treating the cron job module
-    # as router-free is the next refactor; for now, allow the indirect
-    # coupling. import-linter matches edges by EXACT module name, so the
-    # bare-package edge (sync.py:853 `from backend.routers.admin import …`)
-    # and the submodule edge (sync.py:412 `from
-    # backend.routers.admin.sync_status import compute_sync_status_cached`)
-    # must each be listed — the package entry alone does not suppress the
-    # submodule import.
+    # backend.cron.jobs.sync's gap-heal detector reuses the admin router's
+    # compute_log_accounting (sync.py `from backend.routers.admin import
+    # compute_log_accounting`). Extracting log accounting out of the router
+    # package is the next refactor; for now, allow that single edge. (The
+    # sync-status snapshot edge that used to sit beside it moved to
+    # backend/sync_status_snapshot.py and needs no allowance.)
     "backend.cron.jobs.sync -> backend.routers.admin",
-    "backend.cron.jobs.sync -> backend.routers.admin.sync_status",
     # The system-metrics sampler reuses admin_queries' _ensure_enabled()
     # feature gate (system_metrics_sampler.py:71,81, lazy imports). The
     # sampler is a backend-only collector reached via the admin router;

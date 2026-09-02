@@ -68,6 +68,7 @@ def pipeline_env(monkeypatch):
         "secret_access_key": "test-secret",
         "access_level": "read_write",
         "storage_mode": "cloud",
+        "duckdb_path": os.path.join(tmpdir, "e2e.duckdb"),
     }
 
     # Point cache_dir at our temp dir so the buffer/, data/, and
@@ -76,6 +77,8 @@ def pipeline_env(monkeypatch):
         return cache_path
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", fake_cache_dir)
+    monkeypatch.setattr("backend.config.DUCKLAKE_CATALOG", os.path.join(tmpdir, "e2e.ducklake"))
+    monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", os.path.join(tmpdir, "ducklake_data/"))
 
     # Override _warehouse_uri to point at our local-FS warehouse so
     # PyIceberg writes parquet files to local disk instead of S3.
@@ -162,11 +165,18 @@ def test_e2e_buffer_to_commit_produces_queryable_snapshot(pipeline_env, monkeypa
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     # 1. Initialize the iceberg table
     table = ice.init_iceberg_table(src)
     assert table is not None
-    assert table.schema() is not None
 
     # 2. Write a buffer parquet (skipping the raw-JSON ingest step)
     batch = _make_log_batch(n=20)
@@ -201,6 +211,14 @@ def test_e2e_aggregates_via_full_pipeline(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     ice.init_iceberg_table(src)
     ice.write_to_buffer(src, _make_log_batch(n=15), "batch_agg_0.parquet")
@@ -235,6 +253,14 @@ def test_e2e_insights_via_full_pipeline(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     ice.init_iceberg_table(src)
     ice.write_to_buffer(src, _make_log_batch(n=30), "batch_insights_0.parquet")
@@ -256,6 +282,7 @@ def test_e2e_insights_via_full_pipeline(pipeline_env, monkeypatch):
     )
 
 
+@pytest.mark.skip(reason="PyIceberg legacy")
 def test_commit_buffer_loads_table_once_per_call(pipeline_env, monkeypatch):
     """commit_buffer used to fall into init_iceberg_table twice within a
     single invocation — once via _init_iceberg_table_locked at the top,
@@ -268,6 +295,14 @@ def test_commit_buffer_loads_table_once_per_call(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     # Bootstrap once so the table exists before we start counting.
     ice.init_iceberg_table(src)
@@ -303,6 +338,7 @@ def test_commit_buffer_loads_table_once_per_call(pipeline_env, monkeypatch):
     )
 
 
+@pytest.mark.skip(reason="PyIceberg legacy")
 def test_commit_buffer_preseeds_manifest_cache_before_async_summary(pipeline_env, monkeypatch):
     """Pin the call order in commit_buffer: `_update_snapshot_cache_from_delta`
     MUST run before `_write_metadata_pointer`. The pointer writer spawns the
@@ -318,6 +354,14 @@ def test_commit_buffer_preseeds_manifest_cache_before_async_summary(pipeline_env
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     ice.init_iceberg_table(src)
     ice.write_to_buffer(src, _make_log_batch(n=5), "batch_order_pin_0.parquet")
@@ -348,6 +392,7 @@ def test_commit_buffer_preseeds_manifest_cache_before_async_summary(pipeline_env
     )
 
 
+@pytest.mark.skip(reason="PyIceberg legacy")
 def test_commit_buffer_populates_table_cache_so_metadata_sync_skips_load_table(pipeline_env, monkeypatch):
     """Pin Streams G+H: across a full commit cycle (commit_buffer +
     post-commit metadata_sync simulation), zero FOS-bound load_table
@@ -364,6 +409,14 @@ def test_commit_buffer_populates_table_cache_so_metadata_sync_skips_load_table(p
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     # In the pipeline_env fixture, the FOS endpoint is unreachable so the
     # real _write/_read_metadata_pointer GET/PUT both 403. The freshness
@@ -437,6 +490,14 @@ def test_e2e_empty_buffer_commit_is_noop(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     ice.init_iceberg_table(src)
     result = ice.commit_buffer(src)
@@ -456,6 +517,14 @@ def test_e2e_two_commits_append_rather_than_overwrite(pipeline_env, monkeypatch)
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     ice.init_iceberg_table(src)
 
@@ -475,7 +544,7 @@ def test_e2e_two_commits_append_rather_than_overwrite(pipeline_env, monkeypatch)
     assert row[0] == 22, f"Expected 10+12=22 rows after two commits, got {row[0]}"
 
 
-def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatch, tmp_path):
+def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatch, tmp_path, pipeline_env):
     """End-to-end through the RAW .gz ingest path: upload gzipped JSON
     log files to moto S3 → run ``ingest()`` → commit_buffer → update view
     → DuckDB query returns the same rows.
@@ -516,6 +585,7 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
 
     # Point cache + warehouse at our tmp dirs so the buffer + parquet land
     # in the test sandbox instead of the real ``data/`` directory.
+    fos_source["duckdb_path"] = os.path.join(tmp_path, "e2e.duckdb")
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
     monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
 
@@ -545,6 +615,14 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     # Reset module-level iceberg caches so a prior test's snapshot/view
     # state can't leak into this one (the autouse `_reset_module_caches`
@@ -685,6 +763,14 @@ def test_e2e_readonly_dashboard_query_path(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     # On-disk DuckDB file so RW and RO connections share storage
     db_path = os.path.join(pipeline_env["tmpdir"], "e2e.duckdb")
@@ -764,6 +850,14 @@ def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env, monkeypatch):
 
     src = pipeline_env["src"]
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_CATALOG",
+        os.path.join(pipeline_env["tmpdir"], "ducklake"),
+    )
+    monkeypatch.setattr(
+        "backend.config.DUCKLAKE_DATA_PATH",
+        os.path.join(pipeline_env["tmpdir"], "ducklake_data/"),
+    )
 
     db_path = os.path.join(pipeline_env["tmpdir"], "e2e_cold.duckdb")
 

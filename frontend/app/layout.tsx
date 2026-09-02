@@ -161,11 +161,17 @@ export default async function RootLayout({
             gzip of bandwidth on every non-chart page (/share-login,
             /admin/*, /alerts, /usage, /logs). See P-1 / P-2 in the
             2026-06-15 audit. */}
-        <script
-          src="/js/rum.js"
-          nonce={nonce}
-          async
-        />
+        {/* RUM collector script only when the active service has RUM
+            enabled — an unconditional emit makes every page load proxy
+            /js/rum.js to the backend, which fails (ECONNRESET log spam)
+            or 404s on services without RUM. */}
+        {isRumEnabled && (
+          <script
+            src="/js/rum.js"
+            nonce={nonce}
+            async
+          />
+        )}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden

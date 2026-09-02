@@ -338,20 +338,22 @@ export function useLogsPageState() {
     // in API order. That means a freshly-registered backend cron shows
     // up on the grid automatically; only its position needs curating.
     const TASK_PRIORITY: Record<string, number> = {
-      sync: 1,
+      log_discovery: 1,
       rum_sync: 2,
       alerts: 3,
-      commit: 4,
+      log_ingest: 4,
       rum_commit: 5,
       optimize: 6,
       local_compact: 7,
       metadata_cleanup: 8,
-      expire: 9,
+      expire_snapshots: 9,
       full_sync: 10,
       gap_heal: 11,
       ngwaf_sync: 12,
       insights_prewarmer: 13,
-      metadata_sync: 14,
+      rollup_compact_daily: 14,
+      rollup_hour_heal: 15,
+      metadata_sync: 16,
     }
     // Analysts only see the read-only subset; nothing else is even
     // exposed via the analyst-facing /api/cron-schedule path.
@@ -364,9 +366,14 @@ export function useLogsPageState() {
     // tile both labelled "sync" once the whitelist was lifted.
     const adminExcluded = new Set(['metadata_sync'])
     const source = (cronSchedule?.schedules ?? []) as Array<{ task: string }>
+    const hasNgwaf = !!status?.ngwaf_workspace_id
     const filtered = isAnalyst
       ? source.filter((s) => analystAllowed.has(s.task))
-      : source.filter((s) => !adminExcluded.has(s.task))
+      : source.filter((s) => {
+          if (adminExcluded.has(s.task)) return false
+          if (s.task === 'ngwaf_sync' && !hasNgwaf) return false
+          return true
+        })
     const sorted = [...filtered].sort((a, b) => {
       const pa = TASK_PRIORITY[a.task] ?? 999
       const pb = TASK_PRIORITY[b.task] ?? 999
@@ -377,7 +384,7 @@ export function useLogsPageState() {
       activeJob: displayedJobs.find((j) => j.task === schedule.task && j.status === 'running'),
       schedule,
     }))
-  }, [cronSchedule?.schedules, displayedJobs, isAnalyst])
+  }, [cronSchedule?.schedules, displayedJobs, isAnalyst, status?.ngwaf_workspace_id])
 
   const { data: catalog } = useLogFieldsCatalog()
 

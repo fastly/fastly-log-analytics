@@ -223,7 +223,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
         logger.warning("Faro reconcile failed for %s", service_id, exc_info=True)
 
 
-@cron_task("cron_rum_sync")
+@cron_task("cron_rum_sync", job_name="rum_sync")
 def _run_rum_sync(service_id: str, **kwargs) -> None:
     """Sync RUM beacon logs from FOS raw/rum/ into local DuckDB tables.
 

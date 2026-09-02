@@ -1,0 +1,38 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-worker
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-worker
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  scaleTargetRef:
+    name: {{ include "fastly-log-analytics.fullname" . }}-worker
+  minReplicaCount: {{ .Values.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicas }}
+  triggers:
+    # One trigger per real Celery queue (task_routes in backend/celery_app.py:
+    # backend.core.ingest.* → q.ingest, backend.cron.jobs.* → q.control,
+    # everything else → the default `celery` list). The redis scaler takes a
+    # host:port address, not a redis:// URL.
+    - type: redis
+      metadata:
+        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
+        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
+        listName: q.ingest
+        listLength: "5"
+    - type: redis
+      metadata:
+        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
+        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
+        listName: q.control
+        listLength: "5"
+    - type: redis
+      metadata:
+        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
+        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
+        listName: celery
+        listLength: "5"
+{{- end }}

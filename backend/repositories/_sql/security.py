@@ -33,7 +33,7 @@ Python for arcjet bot classification.
 NGWAF_TOP_BOTS_JOIN = """
                     SELECT nb.bot_name, nb.category, count(*) AS cnt
                     FROM {temp_table} t
-                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                    INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id)
                     WHERE nb.bot_name IS NOT NULL
                     GROUP BY 1, 2
                     ORDER BY 3 DESC
@@ -57,7 +57,7 @@ NGWAF_TOP_BOTS_JOIN_DIRECT = """
                         SELECT waf_req_id FROM {table_name}
                         WHERE {where_clause} AND waf_req_id IS NOT NULL
                     ) t
-                    INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                    INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id)
                     WHERE nb.bot_name IS NOT NULL
                     GROUP BY 1, 2
                     ORDER BY 3 DESC
@@ -117,7 +117,7 @@ NGWAF_VERIFIED_BOTS = """
                     nb.category,
                     count(*) AS request_count
                 FROM {temp_table} t
-                INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
                 WHERE nb.bot_name IS NOT NULL
                 GROUP BY 1, 2, 3
                 ORDER BY 4 DESC
@@ -138,7 +138,7 @@ NGWAF_VERIFIED_BOTS_TS = """
                     nb.bot_name,
                     count(*) AS count
                 FROM {temp_table} t
-                INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
                 WHERE nb.bot_name IS NOT NULL
                 GROUP BY 1, 2
                 ORDER BY 1, 2

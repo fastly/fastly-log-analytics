@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-backend
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # Pinned to 1, NOT .Values.replicaCount: the per-service DuckDB file is
+  # process-exclusive, so a second backend pod 503s every data request.
+  # See docs/adr/18-serving-tier-single-pod.md.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "fastly-log-analytics.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: "{{ .Values.image.repository }}-backend:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
+            - name: SSE_BACKPLANE
+              value: {{ .Values.config.sseBackplane | quote }}
+            - name: DUCKDB_MEMORY_LIMIT
+              value: {{ .Values.config.duckdbMemoryLimit | quote }}
+            # Pinned proxy trust — the backend refuses to boot on `*`.
+            - name: TRUSTED_PROXY_IPS
+              value: {{ .Values.config.trustedProxyIps | quote }}
+            - name: UVICORN_FORWARDED_ALLOW_IPS
+              value: {{ .Values.config.trustedProxyIps | quote }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "fastly-log-analytics.dataVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "fastly-log-analytics.dataVolumes" . | nindent 8 }}

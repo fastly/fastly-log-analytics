@@ -93,7 +93,10 @@ def wizard(args) -> dict:
 
     safe_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
     safe_id = re.sub(r"-+", "-", safe_id).strip("-")
-    bucket_name = args.bucket or (f"fos-{safe_id}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id}-logs"))
+    safe_id_lower = safe_id.lower()
+    bucket_name = args.bucket or (
+        f"fos-{safe_id_lower}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id_lower}-logs")
+    )
     fos_prefix = (
         args.prefix if args.prefix is not None else ("" if args.yes else ask("Base log prefix inside bucket", ""))
     )
@@ -647,7 +650,20 @@ def cmd_provision(
         enable_field=enable_field,
         disable_field=disable_field,
     )
-    wizard(args)
+    cfg = wizard(args)
+    import sys
+
+    from backend.provision.orchestrator import provision
+
+    try:
+        for event in provision(cfg):
+            if event.get("type") == "status":
+                info(event.get("message", ""))
+            elif event.get("type") == "done":
+                ok(event.get("message", ""))
+    except Exception as e:
+        fail(f"Provisioning failed: {e}")
+        sys.exit(1)
 
 
 @app.command("teardown", help="Tear down a provisioned service.")

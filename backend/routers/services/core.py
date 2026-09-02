@@ -807,7 +807,9 @@ def api_service_update_logging_settings(
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
     prefix = prefix.strip("/")
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
+    from backend.provision.log_paths import analytics_log_path
+
+    path = analytics_log_path(prefix)
 
     def stream():
         try:

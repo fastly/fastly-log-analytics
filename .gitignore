@@ -120,3 +120,6 @@ compute/scorer/pkg/*
 # Separate Next.js dev cache for the Playwright dev server (port 13004)
 # so its lockfile doesn't collide with the dev shell on 13002.
 /frontend/.next-e2e/
+
+# editor/backup debris
+*.bak

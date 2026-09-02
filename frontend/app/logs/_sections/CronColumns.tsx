@@ -17,7 +17,7 @@ import {
 import { DateTimeCell } from '@/components/DataTable'
 import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
-import { CRON_EXPLANATIONS } from './CronExplanations'
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 import { LiveTimer } from './CronScheduleBox'
 
 export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
@@ -62,7 +62,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       meta: { label: 'Task' },
       header: 'Task',
       cell: ({ row }) => {
-        const isSync = row.original.task === 'sync' || row.original.task === 'metadata_sync'
+        const isSync = row.original.task === 'log_discovery' || row.original.task === 'metadata_sync'
         const exp = CRON_EXPLANATIONS[row.original.task] || 'Background job.'
         return (
           <div className="flex flex-col gap-1 py-1">
@@ -70,7 +70,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
                <Tooltip>
                  <TooltipTrigger render={
                    <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", isSync ? "bg-blue-500/10 text-blue-600 hover:bg-blue-500/20" : "bg-purple-500/10 text-purple-600 hover:bg-purple-500/20")}>
-                     {row.original.task === 'metadata_sync' ? 'sync' : row.original.task}
+                     {CRON_DISPLAY_NAMES[row.original.task] || row.original.task}
                    </Badge>
                  } />
                  <TooltipContent side="right" className="max-w-[250px] text-xs">
@@ -179,7 +179,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
 
         if (task === 'alerts') {
           label = count === 1 ? 'alert evaluated' : 'alerts evaluated';
-        } else if (task === 'commit' || task === 'rum_commit') {
+        } else if (task === 'log_ingest' || task === 'rum_commit') {
           if (!row.original.rows_ingested) return <span className="text-muted-foreground">—</span>
           // A commit task takes X local buffer files and turns them into 1 cloud file.
           // By eagerly pulling it, we cached that 1 new cloud file.
@@ -197,6 +197,8 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           label = 'raw RUM logs';
         } else if (task === 'ngwaf_sync') {
           label = count === 1 ? 'bot record' : 'bot records';
+        } else if (task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer') {
+          return <span className="text-muted-foreground">—</span>
         }
 
         return (
@@ -215,7 +217,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         }
 
         const task = row.original.task
-        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact') {
+        if (task === 'optimize' || task === 'log_ingest' || task === 'rum_commit' || task === 'local_compact' || task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer') {
           return <span className="text-muted-foreground">—</span>
         }
 
@@ -285,7 +287,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         accessorKey: 'files_deleted_fos',
         header: 'Log Files Deleted',
         cell: ({ row }: any) => {
-          if (row.original.status === 'running' || row.original.task !== 'sync') {
+          if (row.original.status === 'running' || row.original.task !== 'log_discovery') {
              return <span className="text-muted-foreground">—</span>
           }
           return (
@@ -304,7 +306,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           }
           // For commit tasks, rows_ingested holds the rows committed to Iceberg.
           // For sync tasks, this field holds rows written to the local buffer.
-          const val = row.original.task === 'commit' ? row.original.rows_ingested : null
+          const val = row.original.task === 'log_ingest' ? row.original.rows_ingested : null
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
               {val !== null ? val.toLocaleString() : <span className="text-muted-foreground">—</span>}

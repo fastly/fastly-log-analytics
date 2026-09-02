@@ -481,6 +481,155 @@ def inject_view_debug(debug_list: list, source: dict):
         )
 
 
+def _view_target_name(source: dict, target_table: str) -> str:
+    """The DuckDB view name both paths bind — repositories query this name
+    via ``_safe_table(src["name"])``, so fast path and slow path MUST agree
+    (the fast-path reconstruction previously bound the literal ``logs``)."""
+    from backend.core.duckdb import _safe_table_name
+
+    if target_table != "logs":
+        return target_table
+    return _safe_table_name(source.get("name") or source.get("service_id") or "default")
+
+
+def _ducklake_view_token(con) -> str | None:
+    """Staleness token for the cached view SQL, derived from the DuckLake
+    catalog's current snapshot id. A commit anywhere in the catalog bumps
+    it, forcing a rebuild; in the steady state (no commit since the last
+    build) the token matches and reads stay on the lock-free fast path.
+    Returns None when the token can't be derived (lake not attached) —
+    callers must treat None as "cannot verify freshness" and rebuild.
+    """
+    from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+    snap = ducklake_current_snapshot_id(con)
+    return None if snap is None else f"ducklake:{snap}"
+
+
+def _empty_schema_select(dynamic_arrow_schema) -> str:
+    """Zero-row SELECT carrying every schema column (typed NULLs) so a
+    service with no lake table and no buffer still binds a queryable view."""
+    cols = ", ".join(
+        'NULL::{} AS "{}"'.format(_core_mod._arrow_to_duckdb(f.type), f.name.replace('"', '""'))
+        for f in dynamic_arrow_schema
+    )
+    return f"SELECT {cols} WHERE false"
+
+
+def _existing_union_cols(con, committed_parts: list[str], buf_probe_path: str | None) -> set[str]:
+    """Column names present in the raw (lake ∪ buffer) union output.
+
+    Probes each committed part with ``LIMIT 0`` (catalog-only, no data
+    read) plus a SINGLE buffer parquet (all buffer files are aligned to
+    the same schema by ``write_to_buffer``, so one probe suffices — the
+    same trick the pre-v3 fast path used to avoid schema-binding every
+    buffer file).
+    """
+    cols: set[str] = set()
+    for part in committed_parts:
+        try:
+            desc = con.execute(f"SELECT * FROM ({part}) LIMIT 0").description or []
+            cols.update(d[0] for d in desc)
+        except Exception as e:
+            logger.info("[iceberg] view column probe failed for committed part: %s", e)
+    if buf_probe_path:
+        try:
+            desc = (
+                con.execute(
+                    f"SELECT * FROM read_parquet('{escape_sql_literal(buf_probe_path)}', hive_partitioning=false) LIMIT 0"
+                ).description
+                or []
+            )
+            cols.update(d[0] for d in desc)
+        except Exception as e:
+            logger.info("[iceberg] view column probe failed for buffer parquet %s: %s", buf_probe_path, e)
+    return cols
+
+
+def _finalize_view_sql(
+    union_sql: str,
+    source: dict,
+    target_table: str,
+    dynamic_schema_field_names: set[str],
+    existing_cols: set[str],
+) -> str:
+    """Shared projection + clamp applied to the raw (lake ∪ buffer) union.
+
+    Single source of truth for BOTH the lock-free fast-path reconstruction
+    and the locked slow-path rebuild, so the two can never drift. Restores
+    everything the pre-DuckLake view guaranteed downstream:
+
+    - ``timestamp_hour`` / ``dt`` computed columns (partition-pruning
+      WHEREs in alerts.py and the rollup readers depend on them);
+    - the ``c_speed`` / ``p_type`` / ``p_desc`` decode CASEs and the
+      ``ttl`` / ``age`` integer rounding (logs table only);
+    - the ``time_range`` WHERE clamp for ``read_only`` (analyst) sources
+      and cron-disabled manual imports — a DATA-SCOPING boundary, not an
+      optimization: an analyst share must never expose rows outside the
+      granted window.
+    """
+    sql = union_sql
+
+    # 1. Computed partition columns. Strip any real column of the same
+    #    name first (legacy hive-partition reads may carry one) so the
+    #    computed definition wins.
+    cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in existing_cols)
+    exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
+    sql = (
+        f"SELECT *{exclude_clause}, "
+        f"CAST(strftime(timestamp, '%Y-%m-%d-%H') AS VARCHAR) as timestamp_hour, "
+        f"CAST(strftime(timestamp, '%Y-%m-%d') AS VARCHAR) as dt "
+        f"FROM ({sql})"
+    )
+
+    # 2. Storage-code decodes + rounding (logs only).
+    if target_table == "logs":
+        from backend.utils import field_codes as fc
+
+        exclude_cols: list[str] = []
+        select_extras: list[str] = []
+        for col, encode_map in (
+            ("c_speed", fc.CONN_SPEED_ENCODE),
+            ("p_type", fc.PROXY_TYPE_ENCODE),
+            ("p_desc", fc.PROXY_DESC_ENCODE),
+        ):
+            if col in existing_cols:
+                exclude_cols.append(col)
+                select_extras.append(f"{fc.duckdb_decode_case(col, encode_map)} AS {col}")
+        if "ttl" in existing_cols and "ttl" in dynamic_schema_field_names:
+            exclude_cols.append("ttl")
+            select_extras.append('CAST(ROUND("ttl") AS INTEGER) AS ttl')
+        if "age" in existing_cols and "age" in dynamic_schema_field_names:
+            exclude_cols.append("age")
+            select_extras.append('CAST(ROUND("age") AS INTEGER) AS age')
+        if exclude_cols:
+            sql = f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({sql})"
+
+    # 3. Analyst / manual-import time clamp.
+    tr = source.get("time_range")
+    is_analyst = source.get("access_level") == "read_only"
+    if tr and (is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)):
+        import dateutil.parser as _dt
+
+        where_clauses = []
+        if tr.get("start"):
+            try:
+                start_iso = _dt.isoparse(str(tr["start"])).isoformat()
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"invalid time_range start: {e}") from e
+            where_clauses.append(f"timestamp >= '{escape_sql_literal(start_iso)}'::TIMESTAMPTZ")
+        if tr.get("end"):
+            try:
+                end_iso = _dt.isoparse(str(tr["end"])).isoformat()
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"invalid time_range end: {e}") from e
+            where_clauses.append(f"timestamp <= '{escape_sql_literal(end_iso)}'::TIMESTAMPTZ")
+        if where_clauses:
+            sql = f"SELECT * FROM ({sql}) WHERE {' AND '.join(where_clauses)}"
+
+    return sql
+
+
 def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     """Bind the per-service view from cache without acquiring the lock.
 
@@ -493,15 +642,9 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     source don't serialize on the per-service RLock that ingest also
     holds during buffer commits.
     """
-    import sqlite3
-
-    from backend.core.duckdb import _cache_dir
-
     t_start = time.time()
     source_key = source.get("name", "default")
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
-    cache_dir = _cache_dir(source)
-    catalog_db_path = os.path.join(cache_dir, "iceberg_catalog.db")
 
     configure_duckdb_s3(con)
 
@@ -511,18 +654,13 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         buf_files = _core_mod.buffer_files(source)
     buf_set = frozenset(buf_files)
 
-    metadata_loc = None
-    try:
-        if os.path.exists(catalog_db_path):
-            with sqlite3.connect(catalog_db_path, timeout=5.0) as cat_con:
-                row = cat_con.execute(
-                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = ?",
-                    [target_table],
-                ).fetchone()
-                if row:
-                    metadata_loc = row[0]
-    except Exception:
-        pass
+    # DuckLake-aware staleness token (was: the pyiceberg metadata_location
+    # from iceberg_catalog.db, which never matched the slow path's cached
+    # literal post-DuckLake — every read paid the RLock + full rebuild,
+    # the 12s+ page-load class regression this fast path exists to avoid).
+    metadata_loc = _ducklake_view_token(con)
+    if metadata_loc is None:
+        return False
 
     from backend import config as svcconfig
 
@@ -565,100 +703,37 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
     if only_buf_changed:
         assert cached is not None
         try:
-            # Reconstruct the view SQL with the new local buffer files instantly, completely
-            # bypassing PyIceberg plan_files() and S3 metadata catalog walks.
+            # Reconstruct the view SQL with the new local buffer files
+            # instantly — no lock, no catalog walk. cached[7] holds the RAW
+            # committed parts (the lake SELECT) written by the slow path;
+            # append a fresh raw buffer part and run the SAME finalize
+            # helper the slow path uses.
             committed_sql_parts = cached[7]
             new_parts = list(committed_sql_parts) if committed_sql_parts else []
-
-            def _strip_computed(read_parquet_expr: str, probe_path: str | None = None) -> str:
-                try:
-                    expr_to_probe = (
-                        f"read_parquet('{escape_sql_literal(probe_path)}', hive_partitioning=false)"
-                        if probe_path
-                        else read_parquet_expr
-                    )
-                    probe = con.execute(f"SELECT * FROM {expr_to_probe} LIMIT 0").description or []
-                    existing = {d[0] for d in probe}
-                except Exception:
-                    existing = set()
-                cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in existing)
-                exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-                return (
-                    f"SELECT *{exclude_clause}, "
-                    f"CAST(strftime(timestamp, '%Y-%m-%d-%H') AS VARCHAR) as timestamp_hour, "
-                    f"CAST(strftime(timestamp, '%Y-%m-%d') AS VARCHAR) as dt "
-                    f"FROM {read_parquet_expr}"
-                )
 
             # Recheck buffer files existence
             active_buf_files = [p for p in buf_files if os.path.isfile(p)]
             if active_buf_files:
                 paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_buf_files)
-                probe_p = active_buf_files[0] if active_buf_files else None
                 new_parts.append(
-                    _strip_computed(
-                        f"read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)",
-                        probe_path=probe_p,
-                    )
+                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
                 )
 
             if not new_parts:
-                cols = ", ".join(
-                    'NULL::{} AS "{}"'.format(_core_mod._arrow_to_duckdb(f.type), f.name.replace('"', '""'))
-                    for f in dynamic_arrow_schema
-                )
-                union_sql = f"SELECT {cols} WHERE false"
+                union_sql = _empty_schema_select(dynamic_arrow_schema)
+                existing_cols = set(dynamic_schema_field_names)
             else:
                 union_sql = " UNION ALL BY NAME ".join(new_parts)
+                existing_cols = _existing_union_cols(
+                    con,
+                    list(committed_sql_parts) if committed_sql_parts else [],
+                    active_buf_files[0] if active_buf_files else None,
+                )
 
-                if target_table == "logs":
-                    from backend.utils import field_codes as fc
-
-                    c_speed_case = fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE)
-                    p_type_case = fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE)
-                    p_desc_case = fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE)
-
-                    exclude_cols = ["c_speed", "p_type", "p_desc"]
-                    select_extras = [
-                        f"{c_speed_case} AS c_speed",
-                        f"{p_type_case} AS p_type",
-                        f"{p_desc_case} AS p_desc",
-                    ]
-                    if "ttl" in dynamic_schema_field_names:
-                        exclude_cols.append("ttl")
-                        select_extras.append('CAST(ROUND("ttl") AS INTEGER) AS ttl')
-                    if "age" in dynamic_schema_field_names:
-                        exclude_cols.append("age")
-                        select_extras.append('CAST(ROUND("age") AS INTEGER) AS age')
-
-                    union_sql = (
-                        f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({union_sql})"
-                    )
-
-                tr = source.get("time_range")
-                is_analyst = source.get("access_level") == "read_only"
-
-                if tr and (is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)):
-                    import dateutil.parser as _dt
-
-                    where_clauses = []
-                    if tr.get("start"):
-                        try:
-                            start_iso = _dt.isoparse(str(tr["start"])).isoformat()
-                        except (ValueError, TypeError) as e:
-                            raise ValueError(f"invalid time_range start: {e}") from e
-                        where_clauses.append(f"timestamp >= '{start_iso}'::TIMESTAMPTZ")
-                    if tr.get("end"):
-                        try:
-                            end_iso = _dt.isoparse(str(tr["end"])).isoformat()
-                        except (ValueError, TypeError) as e:
-                            raise ValueError(f"invalid time_range end: {e}") from e
-                        where_clauses.append(f"timestamp <= '{end_iso}'::TIMESTAMPTZ")
-                    if where_clauses:
-                        union_sql = f"SELECT * FROM ({union_sql}) WHERE {' AND '.join(where_clauses)}"
+            final_sql = _finalize_view_sql(union_sql, source, target_table, dynamic_schema_field_names, existing_cols)
 
             # Format the CREATE OR REPLACE VIEW statement
-            create_stmt = f"CREATE OR REPLACE VIEW {target_table} AS {union_sql}"
+            create_stmt = f"CREATE OR REPLACE VIEW {_view_target_name(source, target_table)} AS {final_sql}"
 
             # Update cache so the view_sql below matches our reconstructed version!
             _view_cache[cache_key] = (
@@ -678,6 +753,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
 
     assert cached is not None
     view_sql = cached[3]
+    committed_sql_parts = cached[7] if len(cached) > 7 else ()
     if view_sql:
         # Per-connection cache: if THIS connection has already bound the
         # same (metadata_loc, buf_set, schema_fp) on the fast path, skip
@@ -700,6 +776,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
                 round((t_end - t_start) * 1000, 2),
                 True,
                 variant_fp,
+                committed_sql_parts,
             )
             return True
 
@@ -726,6 +803,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
         round((t_end - t_start) * 1000, 2),
         True,
         variant_fp,
+        committed_sql_parts,
     )
     return True
 
@@ -865,607 +943,84 @@ def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bo
 
 
 def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", force: bool = False) -> None:
-    import sqlite3
-
-    from backend.core.duckdb import _cache_dir, _safe_table_name
-
-    # Re-check the fast path under the lock — state may have become
-    # cacheable while we waited (a concurrent slow-path writer just
-    # finished and primed _view_cache).
-    if _try_fast_path_view(con, source, target_table=target_table):
-        return
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 
     t_start = time.time()
-    table_name = (
-        target_table
-        if target_table != "logs"
-        else _safe_table_name(source.get("name") or source.get("service_id") or "default")
-    )
-    source_key = source.get("name", "default")
-    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
-    cache_dir = _cache_dir(source)
-    catalog_db_path = os.path.join(cache_dir, "iceberg_catalog.db")
+    view_name = _view_target_name(source, target_table)
 
-    configure_duckdb_s3(con)
+    _ducklake_attach(con, source, read_only=False)
 
     try:
         buf_files = _core_mod.buffer_files(source, table_name=target_table)
     except TypeError:
         buf_files = _core_mod.buffer_files(source)
-    buf_set = frozenset(buf_files)
-
-    metadata_loc = None
-    try:
-        if os.path.exists(catalog_db_path):
-            with sqlite3.connect(catalog_db_path, timeout=5.0) as cat_con:
-                row = cat_con.execute(
-                    "SELECT metadata_location FROM iceberg_tables WHERE table_namespace = 'default' AND table_name = ?",
-                    [target_table],
-                ).fetchone()
-                if row:
-                    metadata_loc = row[0]
-    except Exception:
-        pass
 
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
-
-    base_service_id = source_key.split("::")[0]
-    _svc_name = cfg.get("name", base_service_id) if cfg else base_service_id
-    _display_srv = f"{_svc_name} ({base_service_id})" if _svc_name != base_service_id else base_service_id
-    _display = f"{_display_srv}::{source_key.split('::', 1)[1]}" if "::" in source_key else _display_srv
-
     dynamic_arrow_schema = _core_mod.get_arrow_schema(log_fields_config, table_name=target_table)
     dynamic_schema_field_names = {f.name for f in dynamic_arrow_schema}
 
-    logger.info("▶️  %s %s (%s): View refresh started...", _core_mod._ICE_PLAIN, _display, target_table)
-
-    # Try to load from persistent cache if memory cache is empty
-    _load_persistent_cache(source)
-
-    iceberg_loc = None
-    local_iceberg_files: list[str] = []
-    # Set when plan_files() proves the CURRENT snapshot's manifest closure
-    # references a file that no longer exists in cloud storage (as opposed
-    # to a transient network/rate-limit blip) — see the FileNotFoundError
-    # check below. Gates the iceberg_scan() fallback further down: falling
-    # back to it here would just re-attempt the same doomed read via
-    # DuckDB's native iceberg extension instead of pyiceberg's, and that
-    # path throws an uncatchable duckdb::Exception on an internal worker
-    # thread that crashes the ENTIRE process, not just this request
-    # (2026-08-04 incident — a corrupted table took the whole backend, and
-    # every other service on it, down on every restart).
-    iceberg_unreadable = False
-
-    compacted_basenames: set[str] = set()
+    # Committed rows live in the per-service DuckLake table (NOT a bare
+    # lake.logs — under a shared catalog that would mix tenants).
+    lake_table = ducklake_table_name(source, target_table)
+    committed_parts: list[str] = []
     try:
-        from backend.core import metadata as _meta
+        res = con.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+            [lake_table],
+        ).fetchone()
+        if res:
+            committed_parts.append(f'SELECT * FROM lake."{lake_table}"')
+    except Exception as e:
+        logger.warning("[iceberg] %s: lake table probe failed for %s: %s", source.get("name"), lake_table, e)
 
-        sid_key = source.get("service_id") or source.get("name") or ""
-        compacted_basenames = _meta.get_locally_compacted_basenames(sid_key)
-        logger.info("[iceberg] Loaded %d compacted basenames for %s", len(compacted_basenames), sid_key)
-    except Exception as ex:
-        logger.warning(
-            "[iceberg] Failed to fetch compacted basenames for %s: %s",
-            source.get("service_id"),
-            ex,
-            exc_info=True,
-        )
-
-    # We can skip reading from S3 entirely if ONLY the buffer changed.
-    cached_files = _snapshot_files_cache.get(cache_key)
-    if cached_files and cached_files[0] == metadata_loc:
-        snapshot_id = cached_files[1]
-        iceberg_loc = cached_files[2]
-        raw_files = cached_files[3]
-        # Filter against compacted basenames in case they were compacted since the cache was built
-        local_iceberg_files = []
-        for p in raw_files:
-            if os.path.basename(p) in compacted_basenames:
-                continue
-            local_iceberg_files.append(p)
-    elif metadata_loc is None:
-        # Never-committed service: the local SQLite catalog has no metadata_location
-        # row for this table, so there is no Iceberg snapshot to fetch. Skipping
-        # the S3 round-trip here saves 6-14s on every cold dashboard query for
-        # services that haven't ingested anything (or whose init_iceberg_table
-        # call silently failed to write metadata.json to FOS — observed when
-        # fos_endpoint is unreachable, e.g. local dev / load-test services).
-        # The view will be built from buffer files only (if any) below, or
-        # downgraded to an empty WHERE-false view by the existing fall-through.
-        snapshot_id = None
-        tbl = None
-        snap = None
-    else:
-        # The table committed (new metadata_loc) or we had a full cache miss.
-        try:
-            catalog = _core_mod._get_catalog(source)
-            tbl = _core_mod._load_table_cached(
-                source, _core_mod._table_identifier(source, table_name=target_table), catalog
-            )
-            snap = tbl.current_snapshot()
-            snapshot_id = snap.snapshot_id if snap else None
-        except Exception:
-            snapshot_id = None
-            tbl = None
-            snap = None
-
-        if tbl is not None and snap is not None:
-            try:
-                iceberg_loc = tbl.location()
-                sub_dir = f"data_{target_table}" if target_table != "logs" else "data"
-                data_dir = os.path.join(cache_dir, sub_dir)
-
-                scan = tbl.scan()
-                tr = source.get("time_range")
-                if tr:
-                    import dateutil.parser
-
-                    if tr.get("start"):
-                        from backend.utils.iceberg_expr import gte
-
-                        st_dt = dateutil.parser.isoparse(tr["start"])
-                        if st_dt.tzinfo is None:
-                            st_dt = st_dt.replace(tzinfo=UTC)
-                        scan = scan.filter(gte("timestamp", st_dt.isoformat()))
-
-                    # For Analysts (read_only), we always honor end_time to bound their manual imports.
-                    # For Admins, we usually don't filter by end_time to allow new logs to stream in,
-                    # unless they have explicitly disabled cron sync.
-                    is_analyst = source.get("access_level") == "read_only"
-                    if tr.get("end") and (
-                        is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
-                    ):
-                        from backend.utils.iceberg_expr import lte
-
-                        et_dt = dateutil.parser.isoparse(tr["end"])
-                        if et_dt.tzinfo is None:
-                            et_dt = et_dt.replace(tzinfo=UTC)
-                        scan = scan.filter(lte("timestamp", et_dt.isoformat()))
-
-                existing_local_paths_set = set()
-                if os.path.isdir(data_dir):
-                    for root, _, filenames in os.walk(data_dir):
-                        for filename in filenames:
-                            existing_local_paths_set.add(os.path.abspath(os.path.join(root, filename)))
-
-                for f in scan.plan_files():
-                    uri = f.file.file_path
-                    if uri.startswith("file://"):
-                        # Local-only warehouse: the URI IS the local path.
-                        # Skip the FOS-style /data/ rewrite and just use it.
-                        local_path = uri[len("file://") :]
-                        if os.path.exists(local_path):
-                            local_iceberg_files.append(local_path)
-                        continue
-                    local_path = _core_mod._cloud_uri_to_local_path(uri, data_dir)
-                    if local_path is None:
-                        continue
-                    local_path_abs = os.path.abspath(local_path)
-                    if local_path_abs in existing_local_paths_set:
-                        local_iceberg_files.append(local_path)
-                    elif os.path.basename(local_path) in compacted_basenames:
-                        # File was compacted locally; skip to avoid forcing slow S3 fallback
-                        continue
-                    elif source.get("access_level") != "read_only":
-                        # Admins fall back to S3 so they can query immediately.
-                        # Analysts only query what they have explicitly synced to avoid massive S3 GET costs.
-                        local_iceberg_files.append(uri)
-
-                # Cache by metadata_loc instead of snapshot_id
-                _snapshot_files_cache[cache_key] = (metadata_loc, snapshot_id, iceberg_loc, local_iceberg_files)
-                _save_persistent_cache(source)
-            except Exception as e:
-                logger.warning("[iceberg] plan_files() failed for %s: %s", _display, e)
-                if isinstance(e, FileNotFoundError):
-                    # pyiceberg raises FileNotFoundError specifically when a
-                    # manifest/manifest-list referenced by the manifest
-                    # closure it just walked doesn't exist in cloud storage
-                    # — a genuine corruption, not the transient network/rate-
-                    # limit errors (ClientError, TimeoutError, ...) a blip
-                    # would raise. Skip the iceberg_scan() fallback below;
-                    # deliberately verified via a real corrupted table.
-                    iceberg_unreadable = True
-
-    if not iceberg_loc and not buf_files and not local_iceberg_files:
-        # All three "data source" channels are empty. There are two reasons
-        # this happens:
-        #   (a) genuinely fresh service — no data anywhere yet. Empty view
-        #       is correct.
-        #   (b) transient catalog-load failure (FOS rate limit / network
-        #       blip / lock contention). We previously HAD a working
-        #       snapshot, but the in-memory cache was wiped and the
-        #       re-fetch failed this attempt.
-        #
-        # In case (b) we must NOT downgrade — replacing a working view
-        # with "WHERE false" makes the dashboard show 0 logs and persists
-        # in _view_cache until a writer cron eventually rebuilds. Two
-        # signals tell us this is case (b):
-        #
-        # 1. _view_cache already has a non-empty entry. Cheapest check;
-        #    catches the steady-state recurrence.
-        # 2. The service's ingest sqlite metadata shows files with rows.
-        #    Catches the post-process-restart case where _view_cache is
-        #    empty even though we have real data on disk / in the table.
-        #    Without this, a transient FOS failure on the FIRST poll after
-        #    a restart poisons the persistent view to "WHERE false" and
-        #    no future poll can recover (the next "prior_was_empty" check
-        #    lets the same downgrade happen again).
-        prior = _view_cache.get(cache_key)
-        prior_sql = prior[3] if prior else None
-        prior_was_empty = (not prior_sql) or ("WHERE false" in prior_sql)
-        if not force and prior_sql and not prior_was_empty:
-            logger.info(
-                "[iceberg] %s: skipping empty-view downgrade (catalog re-fetch "
-                "returned no data but cached view is non-empty — likely transient)",
-                _display,
-            )
-            return
-
-        # Second signal: ingest metadata. We have rows recorded as ingested
-        # → refuse to overwrite with WHERE false. The data exists; this
-        # poll is just blind.
-        try:
-            from backend.core import metadata as _meta
-
-            base_service_id = source_key.split("::")[0]
-            try:
-                _summary = _meta.get_ingested_files_status_summary(base_service_id, table_name=target_table)
-            except TypeError:
-                _summary = _meta.get_ingested_files_status_summary(base_service_id)
-            ingested_rows = _summary["total_rows"]
-            ingested_files = _summary["file_count"]
-        except Exception:
-            ingested_rows = 0
-            ingested_files = 0
-
-        # The ingest rollup is retention-trimmed (~1 day, see
-        # ingested_files_days), so a service that hasn't ingested recently can
-        # read 0 here while the parquet lake still holds data. Cross-check the
-        # last-known-good persisted row count so a transient blind poll on such
-        # a service doesn't poison the view to "WHERE false". That value is the
-        # real parquet count maintained by _duckdb_status.get_sync_status.
-        last_good_rows = 0
-        if ingested_rows <= 0:
-            try:
-                from backend import config as svcconfig
-
-                last_good_rows = (svcconfig.get_status(source_key) or {}).get("local_rows") or 0
-            except Exception:
-                last_good_rows = 0
-
-        if not force and (ingested_rows > 0 or last_good_rows > 0):
-            logger.info(
-                "[iceberg] %s: skipping empty-view downgrade — have data "
-                "(ingest rollup %d rows / %d files, last-known-good %d rows); "
-                "catalog blind this poll, not a fresh service",
-                _display,
-                ingested_rows,
-                ingested_files,
-                last_good_rows,
-            )
-            return
-
-        is_read_only = False
-        try:
-            res = con.execute(
-                "SELECT readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp') LIMIT 1"
-            ).fetchone()
-            if res is not None and bool(res[0]):
-                is_read_only = True
-        except Exception:
-            pass
-
-        empty_sql: str | None = None
-        try:
-            cols = ", ".join(
-                'NULL::{} AS "{}"'.format(_core_mod._arrow_to_duckdb(f.type), f.name.replace('"', '""'))
-                for f in dynamic_arrow_schema
-            )
-            if is_read_only:
-                empty_sql = f"CREATE OR REPLACE TEMP VIEW {table_name} AS SELECT {cols} WHERE false"
-            else:
-                empty_sql = f"CREATE OR REPLACE VIEW {table_name} AS SELECT {cols} WHERE false"
-            con.execute(empty_sql)
-        except Exception:
-            empty_sql = None
-        t_end = time.time()
-        _view_cache[cache_key] = (
-            metadata_loc,
-            buf_set,
-            tuple(sorted(dynamic_schema_field_names)),
-            empty_sql,
-            round((t_end - t_start) * 1000, 2),
-            False,
-            _source_variant_fp(source),
-            [],  # Empty committed sql parts
-        )
-        return
-
-    parts: list[str] = []
-
-    local_paths = [p for p in local_iceberg_files if not p.startswith("s3://")]
-    s3_paths = [p for p in local_iceberg_files if p.startswith("s3://")]
-
-    # Belt-and-suspenders against costly S3 fallback: even if local_paths is
-    # empty (because plan_files happened to run before sync_data finished),
-    # check the local data_dir directly. If it has parquet files on disk, we
-    # MUST use them — otherwise dashboard queries route through iceberg_scan
-    # over S3 and rack up Class B reads on every poll.
-    #
-    # Local-only (file://) warehouse: Iceberg writes data files under
-    # warehouse/<namespace>/<table>/data/ rather than cache/{bucket}/data/.
-    # Point data_dir at the actual on-disk location so the glob below and the
-    # eventual read_parquet view SQL hit real files.
-    if _core_mod._is_local_only_source(source) and iceberg_loc and iceberg_loc.startswith("file://"):
-        data_dir = os.path.join(iceberg_loc[len("file://") :], "data")
-    else:
-        sub_dir = f"data_{target_table}" if target_table != "logs" else "data"
-        data_dir = os.path.join(cache_dir, sub_dir)
-    if not local_paths:
-        try:
-            import glob as _glob
-
-            disk_parquets = _glob.glob(os.path.join(data_dir, "**", "*.parquet"), recursive=True)
-            if disk_parquets:
-                # Synthesize a sentinel so the local-read branch fires below
-                local_paths = disk_parquets[:1]
-                s3_paths = []  # Clear S3 paths so we don't fall through to iceberg_scan
-                logger.info(
-                    "[iceberg] %s: plan_files returned 0 local paths but %s/ has %d parquets — "
-                    "using local glob anyway to avoid cloud reads",
-                    _display,
-                    sub_dir,
-                    len(disk_parquets),
-                )
-        except Exception:
-            pass
-
-    # Defensive: some parquet files may already include the computed
-    # timestamp_hour / dt columns (e.g., after a PyIceberg-routed compaction
-    # that preserves partition columns in the output file). If we then add
-    # `, ... AS timestamp_hour` in the outer SELECT, the resulting view
-    # branch has TWO columns named timestamp_hour and UNION ALL BY NAME
-    # fails with a Binder Error. EXCLUDE them defensively before re-adding.
-    def _strip_computed(read_parquet_expr: str, probe_path: str | None = None) -> str:
-        try:
-            expr_to_probe = (
-                f"read_parquet('{escape_sql_literal(probe_path)}', hive_partitioning=false)"
-                if probe_path
-                else read_parquet_expr
-            )
-            probe = con.execute(f"SELECT * FROM {expr_to_probe} LIMIT 0").description or []
-            existing = {d[0] for d in probe}
-        except Exception:
-            existing = set()
-        cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in existing)
-        exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-        return (
-            f"SELECT *{exclude_clause}, "
-            f"CAST(strftime(timestamp, '%Y-%m-%d-%H') AS VARCHAR) as timestamp_hour, "
-            f"CAST(strftime(timestamp, '%Y-%m-%d') AS VARCHAR) as dt "
-            f"FROM {read_parquet_expr}"
-        )
-
-    use_iceberg_scan = False
-    if (iceberg_loc or metadata_loc) and source.get("access_level") != "read_only" and not iceberg_unreadable:
-        # If there are S3 paths (or we are not local-only and have no local paths), we must scan from S3
-        if s3_paths or (not local_paths and not _core_mod._is_local_only_source(source)):
-            use_iceberg_scan = True
-
-    if use_iceberg_scan:
-        if metadata_loc:
-            # Pointing directly to the metadata JSON file avoids DuckDB's native iceberg version-guessing
-            # logic, which otherwise fails with: "Could not guess Iceberg table version".
-            # Note: Do NOT use allow_moved_paths=true here, as it treats the file path as a directory
-            # and appends /metadata/ to it.
-            parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(metadata_loc)}')"))
-        elif iceberg_loc:
-            parts.append(_strip_computed(f"iceberg_scan('{escape_sql_literal(iceberg_loc)}', allow_moved_paths=true)"))
-
-        logger.info(
-            "%s Using iceberg_scan for %s (s3_paths=%d, local_iceberg_files=%d).",
-            _core_mod._ICE,
-            _display,
-            len(s3_paths),
-            len(local_iceberg_files),
-        )
-    elif local_paths:
-        from backend.utils.sql_validator import escape_sql_literal as _esl
-
-        safe_data_dir = _esl(f"{data_dir}/**/*.parquet")
-        probe_p = local_paths[0] if local_paths else None
-        parts.append(
-            _strip_computed(
-                f"read_parquet('{safe_data_dir}', union_by_name=true, filename=true, hive_partitioning=false)",
-                probe_path=probe_p,
-            )
-        )
-    elif iceberg_unreadable:
-        logger.warning(
-            "%s %s: current snapshot's manifest closure references a missing cloud file — "
-            "serving an empty view instead of iceberg_scan (which would crash the process). "
-            "Run a Delete Data reset on this service to recover.",
-            _core_mod._ICE,
-            _display,
-        )
-    elif s3_paths:
-        # Demoted from INFO to DEBUG (2026-06-01): this fires on every
-        # view refresh whenever the local cache lags the iceberg manifest
-        # (very common during catch-up / right after a commit). Useful for
-        # debugging stale-view issues, not useful as a routine signal —
-        # was spamming the prod VM backend log every few seconds with no
-        # actionable content.
-        logger.debug(
-            "%s Skipping %d missing cloud files in view (local files present, CDN sync pending).",
-            _core_mod._ICE,
-            len(s3_paths),
-        )
-
-    committed_sql_parts = list(parts)
-
-    # Re-check existence: commit_buffer() may have deleted files during the metadata
-    # scan above (which can take seconds), causing an IO Error in CREATE VIEW.
-    buf_files = [p for p in buf_files if os.path.isfile(p)]
-
+    parts = list(committed_parts)
     if buf_files:
         paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in buf_files)
-        probe_p = buf_files[0] if buf_files else None
-        parts.append(
-            _strip_computed(
-                f"read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)",
-                probe_path=probe_p,
-            )
-        )
+        parts.append(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)")
 
     if not parts:
-        cols = ", ".join(
-            'NULL::{} AS "{}"'.format(_core_mod._arrow_to_duckdb(f.type), f.name.replace('"', '""'))
-            for f in dynamic_arrow_schema
-        )
-        union_sql = f"SELECT {cols} WHERE false"
+        union_sql = _empty_schema_select(dynamic_arrow_schema)
+        existing_cols = set(dynamic_schema_field_names)
     else:
         union_sql = " UNION ALL BY NAME ".join(parts)
+        existing_cols = _existing_union_cols(con, committed_parts, buf_files[0] if buf_files else None)
 
-        if target_table == "logs":
-            from backend.utils import field_codes as fc
+    final_sql = _finalize_view_sql(union_sql, source, target_table, dynamic_schema_field_names, existing_cols)
 
-            c_speed_case = fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE)
-            p_type_case = fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE)
-            p_desc_case = fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE)
-
-            # ttl/age are stored as FLOAT in iceberg (Fastly emits jittery
-            # microsecond-precision values, e.g. "3600.027s"), but they're integer
-            # seconds semantically. Surface them as INTEGER so Top-N GROUP BY
-            # buckets cleanly instead of fragmenting into ~10 sub-second values.
-            # Only EXCLUDE columns that exist in the schema — group B is optional.
-            exclude_cols = ["c_speed", "p_type", "p_desc"]
-            select_extras = [
-                f"{c_speed_case} AS c_speed",
-                f"{p_type_case} AS p_type",
-                f"{p_desc_case} AS p_desc",
-            ]
-            if "ttl" in dynamic_schema_field_names:
-                exclude_cols.append("ttl")
-                select_extras.append('CAST(ROUND("ttl") AS INTEGER) AS ttl')
-            if "age" in dynamic_schema_field_names:
-                exclude_cols.append("age")
-                select_extras.append('CAST(ROUND("age") AS INTEGER) AS age')
-
-            # Wrap the union to decode any previously ingested raw enum values
-            # and coerce float-stored integer fields to integer.
-            union_sql = f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({union_sql})"
-
-        # Apply strict time-bounding for analyst manual imports so they don't see
-        # the "ragged edges" of the underlying hourly files.
-        tr = source.get("time_range")
-        is_analyst = source.get("access_level") == "read_only"
-
-        if tr and (is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)):
-            # Security: validate via isoparse before interpolation. Without
-            # this, an attacker-controlled tr["start"] / tr["end"] dict value
-            # (these come from saved-view JSON which originates from the
-            # frontend) is interpolated raw into DuckDB SQL — a payload like
-            #   "2024-01-01'; ATTACH '/tmp/x.db' AS y; --"
-            # would execute multi-statement SQL against the connection.
-            # isoparse rejects anything that isn't a valid ISO-8601 timestamp;
-            # we then interpolate the canonical .isoformat() output, which
-            # contains only digits, ":", "-", "T", "+", and "Z".
-            import dateutil.parser as _dt
-
-            where_clauses = []
-            if tr.get("start"):
-                try:
-                    start_iso = _dt.isoparse(str(tr["start"])).isoformat()
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"invalid time_range start: {e}") from e
-                where_clauses.append(f"timestamp >= '{start_iso}'::TIMESTAMPTZ")
-            if tr.get("end"):
-                try:
-                    end_iso = _dt.isoparse(str(tr["end"])).isoformat()
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"invalid time_range end: {e}") from e
-                where_clauses.append(f"timestamp <= '{end_iso}'::TIMESTAMPTZ")
-            if where_clauses:
-                union_sql = f"SELECT * FROM ({union_sql}) WHERE {' AND '.join(where_clauses)}"
-
-    view_sql_created: str | None = None
+    is_read_only = False
     try:
-        # Detect read-only mode so we can switch to CREATE OR REPLACE TEMP VIEW
-        # (which works on RO connections — regular CREATE VIEW does not).
-        #
-        # The previous detection used `PRAGMA database_list` and checked
-        # `row[2] == "read-only"` — but row[2] is the FILE PATH, not a
-        # readonly flag (database_list returns (seq, name, file)). The check
-        # was always False, so RO connections always tried CREATE VIEW and
-        # surfaced "ERROR Failed to create view … Cannot execute statement
-        # of type CREATE on database … attached in read-only mode!" on every
-        # dashboard query. Result: the view was effectively never refreshed
-        # from any RO connection, and reads against the stale/empty view
-        # showed "No data available" on the dashboard.
-        #
-        # `duckdb_databases()` is the documented system function for this;
-        # it has a `readonly` boolean column.
-        is_read_only = False
-        try:
-            res = con.execute(
-                "SELECT readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp') LIMIT 1"
-            ).fetchone()
-            if res is not None and bool(res[0]):
-                is_read_only = True
-        except Exception:
-            pass
-
-        if is_read_only:
-            create_stmt = f"CREATE OR REPLACE TEMP VIEW {table_name} AS {union_sql}"
-        else:
-            create_stmt = f"CREATE OR REPLACE VIEW {table_name} AS {union_sql}"
-
-        con.execute(create_stmt)
-
-        view_sql_created = create_stmt
-        if not is_read_only:
-            # Clear the schema cache only when the column set actually
-            # changed. Previously this was unconditional, but the post-ingest
-            # view refresh runs on a writer connection every cron tick where
-            # rows_inserted > 0 (i.e. virtually every tick on a busy
-            # service), which blew away duckdb._schema_cache and made its
-            # 60 s TTL irrelevant. Result: the next heavy refresh_config_status
-            # paid the full ~800 ms SUMMARIZE every minute even though the
-            # underlying columns are stable across hundreds of ticks.
-            # Comparing tuple(sorted(field_names)) against the prior cache
-            # entry catches all column add/remove/rename cases (the only
-            # thing get_schema cares about); per-row data churn doesn't
-            # invalidate column metadata, so it's safe to keep the cache.
-            try:
-                new_columns = tuple(sorted(dynamic_schema_field_names))
-                prior = _view_cache.get(cache_key)
-                prior_columns = prior[2] if prior else None
-                if prior_columns != new_columns:
-                    from backend.core.duckdb import _clear_schema_cache
-
-                    _clear_schema_cache(source_key)
-            except Exception:
-                pass
+        res = con.execute(
+            "SELECT database_name, readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp','lake') LIMIT 1"
+        ).fetchone()
+        if res is not None and bool(res[1]):
+            is_read_only = True
     except Exception as e:
-        logger.error("[iceberg] Failed to create view %s: %s", table_name, e)
+        logger.error("[iceberg] duckdb_databases probe failed: %s", e)
 
-    t_end = time.time()
-    duration_ms = (t_end - t_start) * 1000
-    logger.info(
-        "⏹️  %s %s (%s): View refresh complete (%.0f ms).", _core_mod._ICE_PLAIN, _display, target_table, duration_ms
-    )
+    if is_read_only:
+        create_stmt = f"CREATE OR REPLACE TEMP VIEW {view_name} AS {final_sql}"
+    else:
+        create_stmt = f"CREATE OR REPLACE VIEW {view_name} AS {final_sql}"
+
+    try:
+        con.execute(create_stmt)
+    except Exception as e:
+        logger.error("[iceberg] Failed to create view %s: %s", view_name, e)
+
+    source_key = source.get("name", "default")
+    cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
     _view_cache[cache_key] = (
-        metadata_loc,
-        buf_set,
+        _ducklake_view_token(con),
+        frozenset(buf_files),
         tuple(sorted(dynamic_schema_field_names)),
-        view_sql_created,
-        round((t_end - t_start) * 1000, 2),
+        create_stmt,
+        round((time.time() - t_start) * 1000, 2),
         False,
         _source_variant_fp(source),
-        committed_sql_parts,  # Index 7
+        tuple(committed_parts),
     )
 
 

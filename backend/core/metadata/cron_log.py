@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from backend.core.metadata.base import _ORPHAN_THRESHOLD_MINS, _TASK_ORPHAN_THRESHOLD_MINS, get_con, get_con_readonly
+from backend.core.metadata.base import get_con, get_con_readonly
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # They are transient: roll back and retry the whole write unit a few times with
 # short backoff. A lock that survives every attempt re-raises (a real problem,
 # not contention). See [[colima-disk-full-stalls-ingestion]].
-_LOCKED_RETRY_ATTEMPTS = 4
+_LOCKED_RETRY_ATTEMPTS = 20
 _LOCKED_RETRY_BASE_SLEEP_S = 0.05
 
 
@@ -49,7 +49,11 @@ def _retry_on_locked[T](con: sqlite3.Connection, fn: Callable[[], T]) -> T:
         try:
             return fn()
         except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt == _LOCKED_RETRY_ATTEMPTS - 1:
+            if (
+                "locked" not in str(e).lower()
+                and "disk i/o error" not in str(e).lower()
+                or attempt == _LOCKED_RETRY_ATTEMPTS - 1
+            ):
                 raise
             try:
                 con.rollback()
@@ -58,45 +62,76 @@ def _retry_on_locked[T](con: sqlite3.Connection, fn: Callable[[], T]) -> T:
             logger.debug(
                 "[cron_log] transient DB lock (attempt %d/%d), retrying: %s", attempt + 1, _LOCKED_RETRY_ATTEMPTS, e
             )
-            time.sleep(_LOCKED_RETRY_BASE_SLEEP_S * (2**attempt))
+            time.sleep(min(1.0, _LOCKED_RETRY_BASE_SLEEP_S * (2**attempt)))
     # Unreachable: the loop either returns fn()'s value or re-raises on the
     # final attempt. Present so type-checkers see a terminal path.
     raise AssertionError("unreachable")  # pragma: no cover
 
 
 def start_cron_run(service_id: str, task: str) -> int:
-    """Create a 'running' cron run row, reaping orphans first.
+    import time
 
-    Raises RuntimeError if a run of the same task is already in progress
-    (within the orphan threshold). Returns the new row id.
-    """
     con = get_con(service_id)
     started_at = iso_z_now()
-    # Per-task orphan cutoff (sync is short — see _TASK_ORPHAN_THRESHOLD_MINS).
-    threshold_mins = _TASK_ORPHAN_THRESHOLD_MINS.get(task, _ORPHAN_THRESHOLD_MINS)
-    time_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=threshold_mins))
+    now = time.time()
 
     def _write() -> int:
-        # Reap orphans first (rows still 'running' but older than the threshold).
+        # Reap orphans based on heartbeat.
+        # Any cron_runs row that is 'running' but has no active lease is an
+        # orphan. Idempotent under concurrent callers (SQLite same-thread;
+        # Postgres multi-pod): a second UPDATE hitting the same rows after
+        # the first already flipped them just matches zero rows.
         con.execute(
-            "UPDATE cron_runs SET status = 'error', "
-            "error_message = COALESCE(error_message, 'Process interrupted') "
-            "WHERE task = ? AND status = 'running' AND started_at < ?",
-            (task, time_cutoff),
+            """UPDATE cron_runs SET status = 'error',
+               error_message = COALESCE(error_message, 'Process interrupted (heartbeat lost)')
+               WHERE service_id = ? AND task = ? AND status = 'running'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM job_runs
+                     WHERE service_id = cron_runs.service_id
+                       AND job_name = cron_runs.task
+                       AND status = 'running'
+                       AND (heartbeat_at + lease_ttl_s) >= ?
+                 )""",
+            (service_id, task, now),
         )
 
-        busy = con.execute(
-            "SELECT count(*) AS n FROM cron_runs WHERE task = ? AND status = 'running'",
-            (task,),
-        ).fetchone()
-        if busy and busy["n"] > 0:
+        # Also clean up expired job_runs — reaping an EXPIRED lease first is
+        # what makes the atomic insert below correct: by the time it runs,
+        # any row still literally status='running' is non-expired (had it
+        # expired, this statement would already have reaped it), so the
+        # unique-index conflict below means a genuinely active lease, not a
+        # stale one blocking a legitimate new run.
+        con.execute(
+            """UPDATE job_runs SET status = 'reaped'
+               WHERE service_id = ? AND job_name = ? AND status = 'running'
+                 AND (heartbeat_at + lease_ttl_s) < ?""",
+            (service_id, task, now),
+        )
+
+        # Acquire the lease atomically. idx_job_runs_running_lease (a unique
+        # index on (service_id, job_name) WHERE status='running') is the
+        # conflict target — ON CONFLICT DO NOTHING means at most one of any
+        # number of concurrent callers gets rowcount=1; everyone else gets
+        # rowcount=0 and must back off. This replaces a check-then-insert
+        # (SELECT count, then INSERT) that only stayed race-free because a
+        # single SQLite writer connection serializes both statements inside
+        # one transaction — a guarantee autocommit-mode Postgres does NOT
+        # give multiple pods racing the same (service_id, task).
+        lease_ttl_s = 60
+        lease_cur = con.execute(
+            "INSERT INTO job_runs (service_id, job_name, started_at, heartbeat_at, lease_ttl_s, status) "
+            "VALUES (?, ?, ?, ?, ?, 'running') "
+            "ON CONFLICT (service_id, job_name) WHERE status = 'running' DO NOTHING",
+            (service_id, task, now, now, lease_ttl_s),
+        )
+        if not lease_cur.rowcount:
             con.commit()
             raise RuntimeError(f"Task '{task}' is already running for this service.")
 
         cur = con.execute(
-            "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys) "
-            "VALUES (?, ?, 0.0, 'running', '[]')",
-            (task, started_at),
+            "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys) "
+            "VALUES (?, ?, ?, 0.0, 'running', '[]')",
+            (service_id, task, started_at),
         )
         con.commit()
         return int(cur.lastrowid or 0)
@@ -164,6 +199,13 @@ def log_cron_run(
     keys_json = json.dumps(parquet_keys or [])
 
     def _write() -> None:
+        import time
+
+        now = time.time()
+        con.execute(
+            "UPDATE job_runs SET status = ?, finished_at = ? WHERE service_id = ? AND job_name = ? AND status = 'running'",
+            (status, now, service_id, task),
+        )
         if run_id is not None:
             con.execute(
                 """UPDATE cron_runs SET
@@ -171,7 +213,7 @@ def log_cron_run(
                     files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
                     parquet_files_created = ?, parquet_files_optimized = ?,
                     parquet_keys = ?, summary = ?, log_output = ?
-                   WHERE id = ?""",
+                   WHERE id = ? AND service_id = ?""",
                 (
                     duration_s,
                     status,
@@ -186,15 +228,17 @@ def log_cron_run(
                     summary,
                     log_output,
                     run_id,
+                    service_id,
                 ),
             )
         else:
             con.execute(
-                """INSERT INTO cron_runs (task, started_at, duration_s, status, error_message,
+                """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
                     files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
                     parquet_files_created, parquet_files_optimized, parquet_keys, summary, log_output)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    service_id,
                     task,
                     started_at,
                     duration_s,
@@ -276,14 +320,16 @@ def finalize_cron_run_if_running(
     con = get_con(service_id)
 
     def _write() -> bool:
-        row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+        row = con.execute(
+            "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
+        ).fetchone()
         if not row or row["status"] != "running":
             return False
         cur = con.execute(
             "UPDATE cron_runs SET status = 'error', duration_s = ?, "
             "error_message = COALESCE(error_message, ?), summary = COALESCE(summary, ?) "
-            "WHERE id = ? AND status = 'running'",
-            (max(duration_s, 0.0), error_message, summary, run_id),
+            "WHERE id = ? AND service_id = ? AND status = 'running'",
+            (max(duration_s, 0.0), error_message, summary, run_id, service_id),
         )
         con.commit()
         return bool(cur.rowcount)
@@ -327,20 +373,20 @@ def update_cron_duration(
     con = get_con(service_id)
     if log_output is None:
         con.execute(
-            "UPDATE cron_runs SET duration_s = ? WHERE id = ?",
-            (duration_s, run_id),
+            "UPDATE cron_runs SET duration_s = ? WHERE id = ? AND service_id = ?",
+            (duration_s, run_id, service_id),
         )
     else:
         con.execute(
-            "UPDATE cron_runs SET duration_s = ?, log_output = ? WHERE id = ?",
-            (duration_s, log_output, run_id),
+            "UPDATE cron_runs SET duration_s = ?, log_output = ? WHERE id = ? AND service_id = ?",
+            (duration_s, log_output, run_id, service_id),
         )
     con.commit()
 
 
 def delete_cron_run(service_id: str, run_id: int) -> None:
     con = get_con(service_id)
-    con.execute("DELETE FROM cron_runs WHERE id = ?", (run_id,))
+    con.execute("DELETE FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id))
     con.commit()
 
 
@@ -351,8 +397,8 @@ def purge_cron_runs(
     days: int | None = None,
 ) -> None:
     con = get_con(service_id)
-    where: list[str] = []
-    params: list = []
+    where: list[str] = ["service_id = ?"]
+    params: list = [service_id]
     if task and task != "all":
         where.append("task = ?")
         params.append(task)
@@ -468,7 +514,9 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
 
     try:
         with contextlib.closing(get_con_readonly(service_id)) as con:
-            row = con.execute("SELECT status FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            row = con.execute(
+                "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
+            ).fetchone()
             return row["status"] if row else None
     except sqlite3.Error as e:
         logger.debug("[metadata_db] get_cron_run_status(%s, %s) failed: %s", service_id, run_id, e)
@@ -486,7 +534,10 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
 
     try:
         with contextlib.closing(get_con_readonly(service_id)) as con:
-            row = con.execute("SELECT status, log_output FROM cron_runs WHERE id = ?", (run_id,)).fetchone()
+            row = con.execute(
+                "SELECT status, log_output FROM cron_runs WHERE id = ? AND service_id = ?",
+                (run_id, service_id),
+            ).fetchone()
             if row is None:
                 return None
             return {"status": row["status"], "log_output": row["log_output"]}
@@ -519,8 +570,8 @@ def get_cron_runs(
     status != 'running'), it falls out of the response.
     """
     con = get_con(service_id)
-    where: list[str] = []
-    params: list = []
+    where: list[str] = ["service_id = ?"]
+    params: list = [service_id]
     if task and task != "all":
         where.append("task = ?")
         params.append(task)
@@ -606,10 +657,11 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
                        PARTITION BY task ORDER BY started_at DESC, id DESC
                    ) AS rn
             FROM cron_runs
-            WHERE status != 'running'
+            WHERE service_id = ? AND status != 'running'
         )
         WHERE rn = 1
-        """
+        """,
+        (service_id,),
     ).fetchall()
     return {
         r["task"]: {
@@ -654,8 +706,10 @@ def adaptive_stale_minutes(
     """
     try:
         rows = con.execute(
+            # 'sync' (pre-v3 name) kept so pre-upgrade history still feeds the
+            # percentile until enough log_discovery samples accumulate.
             "SELECT started_at FROM cron_runs "
-            "WHERE task = 'sync' AND status = 'success' "
+            "WHERE task IN ('sync', 'log_discovery') AND status = 'success' "
             "AND (files_downloaded > 0 OR rows_ingested > 0) "
             "ORDER BY started_at"
         ).fetchall()
@@ -671,41 +725,34 @@ def adaptive_stale_minutes(
 
 
 def reap_running_cron_runs(service_id: str, reason: str = "Process interrupted by server restart") -> int:
-    """Mark every ``running`` cron row as ``error``, regardless of age.
-
-    Called at backend startup: in-memory progress dicts (``backend.cron_progress``)
-    are wiped on every restart, so any row still marked ``running`` in SQLite is
-    by definition an orphan — its event stream is gone and the worker thread
-    that owned it died with the previous process. Without this reap, the run
-    sits in the DB until the next sync of the *same task* triggers
-    ``start_cron_run``'s 60-minute orphan cutoff — and in the meantime the UI
-    polls ``/api/cron-runs?status=running``, sees the stale row, and mounts a
-    ``CronLiveLog`` that hangs on "Loading logs..." until the SSE endpoint
-    times out 30 s later.
-
-    Returns the number of rows reaped (0 if none).
-    """
     con = get_con(service_id)
+    con.execute(
+        "UPDATE job_runs SET status = 'error', detail = ? WHERE service_id = ? AND status = 'running'",
+        (reason, service_id),
+    )
     cur = con.execute(
-        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) WHERE status = 'running'",
-        (reason,),
+        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) WHERE service_id = ? AND status = 'running'",
+        (reason, service_id),
     )
     con.commit()
     return int(cur.rowcount or 0)
 
 
 def cron_busy(service_id: str) -> bool:
-    """True if any cron run is currently 'running' within the orphan threshold."""
+    import time
+
     con = get_con(service_id)
-    time_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=_ORPHAN_THRESHOLD_MINS))
+    now = time.time()
     row = con.execute(
-        "SELECT count(*) AS n FROM cron_runs WHERE status = 'running' AND started_at > ?",
-        (time_cutoff,),
+        "SELECT count(*) AS n FROM job_runs WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) >= ?",
+        (service_id, now),
     ).fetchone()
     return bool(row and row["n"] > 0)
 
 
-def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("sync", "commit")) -> dict[str, dict]:
+def cron_summary_for_tasks(
+    service_id: str, tasks: tuple[str, ...] = ("log_discovery", "log_ingest")
+) -> dict[str, dict]:
     """For each named task, return the latest run's summary fields. Used by refresh_config_status."""
     if not tasks:
         return {}
@@ -718,11 +765,11 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("sync", "c
             SELECT task, started_at, duration_s, status, error_message, summary,
                    ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC) AS rn
             FROM cron_runs
-            WHERE task IN ({placeholders})
+            WHERE service_id = ? AND task IN ({placeholders})
         )
         WHERE rn = 1
         """,
-        tasks,
+        (service_id, *tasks),
     ).fetchall()
     return {
         row["task"]: {
@@ -734,3 +781,71 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("sync", "c
         }
         for row in rows
     }
+
+
+def heartbeat_cron_run(service_id: str, task: str) -> None:
+    import time
+
+    con = get_con(service_id)
+    now = time.time()
+    con.execute(
+        "UPDATE job_runs SET heartbeat_at = ? WHERE service_id = ? AND job_name = ? AND status = 'running'",
+        (now, service_id, task),
+    )
+    con.commit()
+
+
+def reap_stale_jobs(service_id: str) -> None:
+    import time
+
+    from backend.core.metadata.base import get_con
+
+    con = get_con(service_id)
+    now = time.time()
+
+    # Find all running jobs that have expired
+    stale_jobs = con.execute(
+        "SELECT id, job_name FROM job_runs WHERE service_id = ? AND status = 'running' AND (heartbeat_at + lease_ttl_s) < ?",
+        (service_id, now),
+    ).fetchall()
+
+    if not stale_jobs:
+        return
+
+    for row in stale_jobs:
+        job_id = row["id"]
+        job_name = row["job_name"]
+
+        con.execute(
+            "UPDATE job_runs SET status = 'reaped', detail = 'reaped due to lease expiry' WHERE id = ?", (job_id,)
+        )
+        # Scope by started_at: only rows that predate the lease expiry are the
+        # leaked ones — an unscoped UPDATE would also error a NEWER healthy run
+        # of the same task that started after the stale lease expired.
+        con.execute(
+            "UPDATE cron_runs SET status = 'error', error_message = 'Reaped due to lease expiry' "
+            "WHERE service_id = ? AND task = ? AND status = 'running' "
+            "AND started_at <= (SELECT strftime('%Y-%m-%dT%H:%M:%SZ', heartbeat_at + lease_ttl_s, 'unixepoch') "
+            "                   FROM job_runs WHERE id = ?)",
+            (service_id, job_name, job_id),
+        )
+
+    con.commit()
+
+    # Re-enqueue idempotent ingest jobs to prevent orphaned-sync-row ingestion
+    # stalls — only when a broker is actually configured (in-process mode has
+    # no worker; send_task would error against the default localhost broker).
+    # Commit the reap FIRST so a broker failure can't roll it back.
+    import os
+
+    if os.environ.get("CELERY_BROKER_URL"):
+        from backend.celery_app import app
+
+        for row in stale_jobs:
+            try:
+                if row["job_name"] == "log_discovery":
+                    app.send_task("backend.cron.jobs.sync._run_log_discovery_cron_celery", args=[service_id])
+                elif row["job_name"] == "log_ingest":
+                    app.send_task("backend.cron.jobs.commit._run_log_ingest_celery", args=[service_id])
+            except Exception as e:
+                logger.warning("[reap_stale_jobs] %s: re-enqueue of %s failed: %s", service_id, row["job_name"], e)

@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
 from backend.repositories.performance import get_performance_aggregates
 from tests.utils.mock_data import generate_mock_logs, insert_mock_logs
@@ -126,7 +127,11 @@ def test_get_performance_aggregates_ttl_dist_buckets_durations(in_memory_duckdb,
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
     result = get_performance_aggregates(
-        con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
     )
     buckets = {row["bucket"] for row in result["ttl_dist"]}
     # At least one of the expected labels should appear
@@ -196,7 +201,7 @@ def test_performance_aggregates_single_ttl_dist_emits_only_requested(in_memory_d
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         sections={"ttl_dist"},
     )
     present = _ALL_PERF_SECTIONS & result.keys()
@@ -223,7 +228,7 @@ def test_performance_aggregates_top_urls_keeps_top_asns_cte_shared(in_memory_duc
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         sections={"top_urls", "top_asns"},
     )
     present = _ALL_PERF_SECTIONS & result.keys()
@@ -280,7 +285,7 @@ def test_performance_aggregates_waterfall_emits_when_requested_alone(in_memory_d
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         sections={"waterfall", "scatter"},
     )
     present = _ALL_PERF_SECTIONS & result.keys()
@@ -352,7 +357,7 @@ def test_performance_aggregates_temp_narrowed_when_scatter_forces_temp(in_memory
             src=test_service_source,
             start_time="2026-01-01T00:00:00Z",
             end_time="2026-01-08T00:00:00Z",
-            filters={},
+            filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
             sections=None,
         )
 

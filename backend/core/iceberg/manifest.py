@@ -8,10 +8,13 @@ Contains:
   survive process restarts.
 - ``_load_manifest_metadata_cache`` / ``_save_manifest_metadata_cache``:
   persistence helpers.
-- ``_get_scan_lock`` + ``_get_cached_or_scan_metadata``: scan dedup
-  + caching layer used by table-info readers.
-- ``get_table_info`` + ``get_snapshot_calendar``: public-API surface
-  consumed by admin endpoints.
+- ``_get_scan_lock`` + ``_get_cached_or_scan_metadata``: pyiceberg-era scan
+  dedup + caching layer. No longer called by ``get_table_info`` /
+  ``get_snapshot_calendar`` (see below) post-v3, but left in place — see
+  the DuckLake-native section's comment for why.
+- ``get_table_info`` + ``get_snapshot_calendar`` + ``ducklake_table_exists``:
+  DuckLake-native (v3) public-API surface consumed by admin endpoints and
+  ``iceberg/lake_info.py``.
 - ``_align_to_schema`` / ``_arrow_to_duckdb`` / ``_prune_empty_dirs``:
   leaf utilities used during commit and view setup.
 
@@ -337,81 +340,259 @@ def _get_cached_or_scan_metadata(source: dict, table) -> tuple[int, int, dict, s
         return result
 
 
-def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
-    """Return snapshot count, data file count, total size, and latest snapshot time."""
+# ---------------------------------------------------------------------------
+# DuckLake-native table-info / calendar (v3 write-path cutover)
+#
+# The pyiceberg write path (above: `_get_cached_or_scan_metadata` and the
+# two functions that used to drive it) is no longer written to — every
+# commit goes through `backend.core.iceberg.buffer._commit_buffer_impl`'s
+# DuckLake attach instead (see `backend/core/iceberg/_ducklake.py` module
+# docstring). A pyiceberg `catalog.load_table()` for any service now
+# returns a real, permanently-frozen table object with `snapshots=0` from
+# before the cutover, so `get_table_info`/`get_snapshot_calendar` below
+# read DuckLake state directly. `_get_cached_or_scan_metadata` itself is
+# left in place: `iceberg/view.py`'s delta-cache pre-seed path still
+# writes into `_manifest_metadata_cache`, and it has direct test coverage
+# in test_iceberg_helpers.py — whether it's still load-bearing anywhere
+# else is a separate question for a separate task.
+
+_ducklake_table_metadata_cache: dict[tuple[str, str], tuple[int | None, tuple[int, str | None, str | None, dict]]] = {}
+_ducklake_table_metadata_cache_lock = threading.Lock()
+
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("iceberg._ducklake_table_metadata_cache", _ducklake_table_metadata_cache)
+
+
+def _lake_ident(lake_table: str) -> str:
+    return 'lake."{}"'.format(lake_table.replace('"', '""'))
+
+
+def _scan_ducklake_table_metadata(con, lake_table: str) -> tuple[int, str | None, str | None, dict]:
+    """Full scan of ``lake.<lake_table>`` for row count, min/max timestamp,
+    and a per-day row-count calendar.
+
+    DuckLake exposes no manifest/partition-value API at the SQL level the
+    way pyiceberg's manifests did, and small commits get "inlined" into the
+    catalog metadata rather than written as parquet files — so there are no
+    reliable per-file stats to read either way (see
+    ``backend/core/iceberg/_ducklake.py`` module docstring). A direct scan
+    is the only approach that stays correct in both cases. Callers should
+    go through ``_get_cached_or_scan_ducklake_metadata`` rather than call
+    this directly — it's O(table size) and this codebase treats "MANY
+    small files, cheap incremental reads" as the standing perf contract.
+    """
+    ident = _lake_ident(lake_table)
+    rows = con.execute(
+        f"SELECT date_trunc('day', timestamp)::DATE AS d, count(*) AS n, "
+        f"min(timestamp) AS mn, max(timestamp) AS mx "
+        f"FROM {ident} WHERE timestamp IS NOT NULL GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    calendar: dict[str, dict] = {}
+    total = 0
+    min_ts: datetime | None = None
+    max_ts: datetime | None = None
+    for d, n, mn, mx in rows:
+        n = int(n)
+        calendar[d.isoformat()] = {"data_files": n, "size_bytes": 0}
+        total += n
+        if mn is not None and (min_ts is None or mn < min_ts):
+            min_ts = mn
+        if mx is not None and (max_ts is None or mx > max_ts):
+            max_ts = mx
+    return (
+        total,
+        min_ts.isoformat() if min_ts else None,
+        max_ts.isoformat() if max_ts else None,
+        calendar,
+    )
+
+
+def _get_cached_or_scan_ducklake_metadata(
+    con, source: dict, lake_table: str
+) -> tuple[int, str | None, str | None, dict]:
+    """Cached wrapper around :func:`_scan_ducklake_table_metadata`.
+
+    Cached by the DuckLake catalog's current snapshot id (catalog-wide,
+    same conservative-but-never-stale token ``ducklake_current_snapshot_id``
+    documents) so a status poller calling ``get_table_info`` on a ~60s
+    cadence (see ``backend/core/_duckdb_status.py::refresh_config_status``)
+    only re-scans after a NEW commit, not on every tick.
+    """
+    from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+    source_key = source.get("service_id") or source.get("name") or "default"
+    cache_key = (str(source_key), lake_table)
+    snap_id = ducklake_current_snapshot_id(con)
+
+    with _ducklake_table_metadata_cache_lock:
+        cached = _ducklake_table_metadata_cache.get(cache_key)
+    if cached is not None and cached[0] == snap_id:
+        return cached[1]
+
+    result = _scan_ducklake_table_metadata(con, lake_table)
+    with _ducklake_table_metadata_cache_lock:
+        _ducklake_table_metadata_cache[cache_key] = (snap_id, result)
+    return result
+
+
+def ducklake_table_exists(source: dict, table_name: str = "logs") -> bool:
+    """Whether ``table_name``'s DuckLake table has been created for ``source``.
+
+    Existence means a row in ``ducklake_table_info`` — the table exists in
+    the catalog schema — regardless of whether it has any physical parquet
+    files yet. Small commits land "inlined" directly in the catalog
+    metadata with zero files (see ``_ducklake.py`` module docstring), so a
+    file-count-based check would wrongly report "not found" for a table
+    that genuinely has committed rows. Raises on a real attach failure
+    (bad credentials/config) rather than swallowing it, so callers can
+    distinguish "not found" from "couldn't check".
+    """
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+
+    con = get_connection(source, skip_view_update=True)
     try:
-        if table is None:
-            catalog = _core_mod._get_catalog(source)
-            identifier = _core_mod._table_identifier(source, table_name=table_name)
+        if not _ducklake_attach(con, source, read_only=True):
+            raise RuntimeError("failed to attach DuckLake catalog")
+        lake_table = ducklake_table_name(source, table_name)
+        row = con.execute("SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]).fetchone()
+        return row is not None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
-            # Ensure our local view of the table is up-to-date with FOS
-            _core_mod._refresh_local_catalog_metadata(catalog, source, identifier)
 
-            table = _core_mod._load_table_cached(source, identifier, catalog)
-    except Exception as e:
-        return {
-            "error": str(e),
-            "snapshots": 0,
-            "data_files": 0,
-            "size_bytes": 0,
-            "table_name": table_name,
-        }
+def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
+    """Return snapshot count, data file count, total size, and latest snapshot time.
 
-    snapshots = list(table.snapshots())
-    current = table.current_snapshot()
+    DuckLake-native (v3 write-path cutover). ``table`` is accepted only for
+    call-site backward compatibility — a pyiceberg ``Table`` object no
+    longer carries meaningful state, so it's ignored.
+    """
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import (
+        _default_data_path,
+        _ducklake_attach,
+        ducklake_table_name,
+    )
 
-    # Pre-populate total stats from snapshot summary if available (O(1) vs O(N) scan)
-    summary_data_files = 0
-    summary_size_bytes = 0
-    if current:
-        summary_data_files = int(current.summary.get("total-data-files", 0))
-        summary_size_bytes = int(current.summary.get("total-files-size", 0))
-
-    # Fetch (or scan) for calendar and min/max timestamps
-    data_files, size_bytes, _, min_ts, max_ts = _get_cached_or_scan_metadata(source, table)
-
-    # Use the more accurate summary stats if the scan was partial or failed
-    if summary_data_files > data_files:
-        data_files = summary_data_files
-        size_bytes = summary_size_bytes
-
-    latest_ts = None
-    if current:
-        latest_ts = datetime.fromtimestamp(current.timestamp_ms / 1000, tz=UTC).isoformat()
-
-    buf = _core_mod.buffer_files(source, table_name=table_name)
-    buf_size = sum(os.path.getsize(p) for p in buf if os.path.exists(p))
-
-    return {
+    zeroed = {
         "table_name": table_name,
-        "snapshots": len(snapshots),
-        "data_files": data_files,
-        "size_bytes": size_bytes,
-        "latest_snapshot_at": latest_ts,
-        "buffer_files": len(buf),
-        "buffer_size_bytes": buf_size,
-        "table_location": table.location() if snapshots else None,
+        "snapshots": 0,
+        "data_files": 0,
+        "size_bytes": 0,
+        "latest_snapshot_at": None,
+        "buffer_files": 0,
+        "buffer_size_bytes": 0,
+        "table_location": None,
         "region": source.get("region"),
-        "min_timestamp": min_ts,
-        "max_timestamp": max_ts,
+        "min_timestamp": None,
+        "max_timestamp": None,
     }
+
+    con = None
+    try:
+        con = get_connection(source, skip_view_update=True)
+        if not _ducklake_attach(con, source, read_only=True):
+            raise RuntimeError("failed to attach DuckLake catalog")
+
+        lake_table = ducklake_table_name(source, table_name)
+        info_row = con.execute(
+            "SELECT table_id, file_count, file_size_bytes FROM ducklake_table_info('lake') WHERE table_name = ?",
+            [lake_table],
+        ).fetchone()
+        if info_row is None:
+            return {**zeroed, "error": f"DuckLake table not found: {lake_table}"}
+
+        table_id, file_count, file_size_bytes = info_row
+        file_count = int(file_count or 0)
+        file_size_bytes = int(file_size_bytes or 0)
+
+        snap_row = con.execute(
+            "SELECT count(*), max(snapshot_time) FROM ducklake_snapshots('lake') "
+            "WHERE list_contains(flatten(map_values(changes)), ?)",
+            [str(table_id)],
+        ).fetchone()
+        snapshot_count = int(snap_row[0] or 0) if snap_row else 0
+        latest_ts = snap_row[1].isoformat() if snap_row and snap_row[1] is not None else None
+
+        row_count, min_ts, max_ts, _calendar = _get_cached_or_scan_ducklake_metadata(con, source, lake_table)
+
+        # Small inserts land "inlined" in the catalog metadata rather than
+        # as parquet files (see module-level comment above and
+        # `_ducklake.py`'s docstring). `ducklake_table_info` then reports
+        # file_count=0 for a table that genuinely has committed rows,
+        # which would otherwise show a misleading "0 files" until the next
+        # compaction flushes them — fall back to the scanned row count so
+        # the panel reflects reality in the meantime.
+        data_files = file_count if file_count > 0 else row_count
+
+        buf = _core_mod.buffer_files(source, table_name=table_name)
+        buf_size = sum(os.path.getsize(p) for p in buf if os.path.exists(p))
+
+        data_path = svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source)
+
+        return {
+            "table_name": table_name,
+            "snapshots": snapshot_count,
+            "data_files": data_files,
+            "size_bytes": file_size_bytes,
+            "latest_snapshot_at": latest_ts,
+            "buffer_files": len(buf),
+            "buffer_size_bytes": buf_size,
+            "table_location": data_path,
+            "region": source.get("region"),
+            "min_timestamp": min_ts,
+            "max_timestamp": max_ts,
+        }
+    except Exception as e:
+        return {**zeroed, "error": str(e)}
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") -> dict:
-    """Return per-date file counts derived from Iceberg partition metadata."""
+    """Return per-date row counts scanned directly from the DuckLake table.
+
+    DuckLake-native (v3 write-path cutover) — see ``get_table_info`` and the
+    module-level comment above. ``data_files`` in each day's entry is a row
+    count, not a physical file count: DuckLake exposes no per-file
+    manifest/partition-value API, and small commits may not have any
+    physical files yet (inlined). Accepted simplification — this no longer
+    silently returns stale pyiceberg partition data.
+    """
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+
+    con = None
     try:
-        if table is None:
-            catalog = _core_mod._get_catalog(source)
-            identifier = _core_mod._table_identifier(source, table_name=table_name)
+        con = get_connection(source, skip_view_update=True)
+        if not _ducklake_attach(con, source, read_only=True):
+            return {}
 
-            _core_mod._refresh_local_catalog_metadata(catalog, source, identifier)
+        lake_table = ducklake_table_name(source, table_name)
+        exists = con.execute("SELECT 1 FROM ducklake_table_info('lake') WHERE table_name = ?", [lake_table]).fetchone()
+        if exists is None:
+            return {}
 
-            table = _core_mod._load_table_cached(source, identifier, catalog)
+        _row_count, _min_ts, _max_ts, calendar = _get_cached_or_scan_ducklake_metadata(con, source, lake_table)
+        return calendar
     except Exception:
         return {}
-
-    _, _, calendar, _, _ = _get_cached_or_scan_metadata(source, table)
-    return calendar
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

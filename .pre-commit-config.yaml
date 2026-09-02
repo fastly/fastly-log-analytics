@@ -47,8 +47,10 @@ repos:
         # Docker Compose Override files use !reset / !override custom YAML
         # tags that PyYAML's default loader doesn't recognize. The compose
         # spec validates them at compose-time; the check-yaml hook would
-        # falsely flag them here.
-        exclude: '^docker-compose\.prod\.yml$'
+        # falsely flag them here. Helm templates are Go templates, not
+        # parseable YAML — `make deploy-validate` (helm lint/template)
+        # validates those.
+        exclude: '^(docker-compose\.prod\.yml|deploy/chart/.*/templates/.*)$'
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements

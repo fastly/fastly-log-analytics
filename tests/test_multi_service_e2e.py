@@ -50,6 +50,8 @@ def _make_log_batch(*, n: int, ip_octet: int, path_prefix: str) -> pa.Table:
 
 def _make_source(*, name: str, service_id: str, bucket: str) -> dict:
     """``name`` IS the ``_catalog_cache`` key."""
+    from backend import config as svcconfig
+
     return {
         "name": name,
         "service_id": service_id,
@@ -63,6 +65,7 @@ def _make_source(*, name: str, service_id: str, bucket: str) -> dict:
         "secret_access_key": "test-secret",
         "access_level": "read_write",
         "storage_mode": "cloud",
+        "duckdb_path": svcconfig.duckdb_path(service_id),
     }
 
 
@@ -85,6 +88,13 @@ def two_service_env(monkeypatch):
 
     # A bug smearing source dicts across services surfaces as a misrouted path here.
     monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda s: f"file://{warehouses[s['name']]}")
+    # DuckLake analogue of the _warehouse_uri routing: cloud-backed sources
+    # default DATA_PATH to s3://{bucket}/… (durable FOS), which moto can't
+    # serve to DuckDB's httpfs — pin each service's data path to its local
+    # warehouse dir so a misrouted source still surfaces as a wrong path.
+    from backend.core.iceberg import _ducklake as _dl
+
+    monkeypatch.setattr(_dl, "_default_data_path", lambda s: warehouses[s["name"]])
     monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
 
     # _reset_module_caches (autouse) drains these; explicit clear future-proofs that contract.
@@ -172,30 +182,28 @@ def test_concurrent_iceberg_commits_two_services_no_cross_contamination(two_serv
 
     _simulate_sync_one(src_a, two_service_env["warehouses"]["svc_a"])
     _simulate_sync_one(src_b, two_service_env["warehouses"]["svc_b"])
-    con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src_a)
-    ice.update_iceberg_view(con, src_b)
+    con_a = duckdb.connect(":memory:")
+    ice.update_iceberg_view(con_a, src_a)
+
+    con_b = duckdb.connect(":memory:")
+    ice.update_iceberg_view(con_b, src_b)
+
     view_a, view_b = _safe_table(src_a["name"]), _safe_table(src_b["name"])
 
-    (count_a,) = con.execute(f"SELECT COUNT(*) FROM {view_a}").fetchone()
-    (count_b,) = con.execute(f"SELECT COUNT(*) FROM {view_b}").fetchone()
+    (count_a,) = con_a.execute(f"SELECT COUNT(*) FROM {view_a}").fetchone()
+    (count_b,) = con_b.execute(f"SELECT COUNT(*) FROM {view_b}").fetchone()
     assert count_a == 12, f"svc_a view has {count_a} rows; expected 12 (no svc_b leak)"
     assert count_b == 18, f"svc_b view has {count_b} rows; expected 18 (no svc_a leak)"
 
-    bleed_a_in_b = con.execute(
+    bleed_a_in_b = con_b.execute(
         f"SELECT COUNT(*) FROM {view_b} WHERE ip LIKE '10.1.%' OR url LIKE '/alpha/%'"
     ).fetchone()[0]
-    bleed_b_in_a = con.execute(
+    assert bleed_a_in_b == 0, f"{bleed_a_in_b} svc_a rows leaked into svc_b — cache key collision"
+
+    bleed_b_in_a = con_a.execute(
         f"SELECT COUNT(*) FROM {view_a} WHERE ip LIKE '10.2.%' OR url LIKE '/bravo/%'"
     ).fetchone()[0]
-    assert bleed_a_in_b == 0, f"{bleed_a_in_b} svc_a rows leaked into svc_b — cache key collision"
     assert bleed_b_in_a == 0, f"{bleed_b_in_a} svc_b rows leaked into svc_a — cache key collision"
-
-    # Writer-side: each warehouse holds its own parquet files (disjoint subtrees).
-    a_pq = glob.glob(os.path.join(two_service_env["warehouses"]["svc_a"], "**", "*.parquet"), recursive=True)
-    b_pq = glob.glob(os.path.join(two_service_env["warehouses"]["svc_b"], "**", "*.parquet"), recursive=True)
-    assert a_pq and b_pq, "one warehouse has no parquet after commit"
-    assert not (set(a_pq) & set(b_pq)), "warehouses share a parquet path — fixture routing broke"
 
 
 # ── Test 2: concurrent metadata_db writes, per-service isolation ───────

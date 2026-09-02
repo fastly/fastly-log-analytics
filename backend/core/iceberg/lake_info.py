@@ -149,13 +149,27 @@ def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
 
 
 def _fetch_direct(source: dict, db_iceberg) -> dict:
-    try:
-        table = db_iceberg.init_iceberg_table(source, create=False)
-        if not table:
-            return {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
+    """DuckLake-native fallback (v3 write-path cutover).
 
-        info = db_iceberg.get_table_info(source, table=table)
-        calendar = db_iceberg.get_snapshot_calendar(source, table=table)
+    Existence is checked via ``ducklake_table_exists`` — a row in
+    ``ducklake_table_info`` — rather than a pyiceberg ``load_table``. A
+    file-count-based existence check would be wrong here: small commits
+    land "inlined" directly in the catalog metadata with zero physical
+    files (see ``iceberg/_ducklake.py`` module docstring), so a table with
+    real committed rows can legitimately have zero files.
+    """
+    try:
+        if not db_iceberg.ducklake_table_exists(source):
+            return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
+
+        info = db_iceberg.get_table_info(source)
+        if "error" in info:
+            # get_table_info never raises (see its docstring) — it reports
+            # attach/scan failures via this key instead, so surface them
+            # the same way an exception would have: ok=False, not a false
+            # "table not found".
+            return {"ok": False, "error": info["error"]}
+        calendar = db_iceberg.get_snapshot_calendar(source)
 
         return {
             "ok": True,
@@ -165,25 +179,28 @@ def _fetch_direct(source: dict, db_iceberg) -> dict:
             "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
         }
     except Exception as e:
-        err = str(e)
-        if "not found" in err.lower() or "does not exist" in err.lower() or "NoSuchTable" in err:
-            return {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
-        return {"ok": False, "error": err}
+        return {"ok": False, "error": str(e)}
 
 
 def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
+    """Same DuckLake-native fallback as :func:`_fetch_direct`, but scoped to
+    a throwaway ``_cache_dir_override`` and cleared via
+    ``clear_source_caches`` afterward — used for unregistered/pre-provision
+    sources so a failed provisioning attempt doesn't leak an in-memory
+    catalog cache entry."""
     import tempfile
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             src = {**source, "_cache_dir_override": tmp_dir}
             try:
-                table = db_iceberg.init_iceberg_table(src, create=False)
-                if not table:
-                    return {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
+                if not db_iceberg.ducklake_table_exists(src):
+                    return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
 
-                info = db_iceberg.get_table_info(src, table=table)
-                calendar = db_iceberg.get_snapshot_calendar(src, table=table)
+                info = db_iceberg.get_table_info(src)
+                if "error" in info:
+                    return {"ok": False, "error": info["error"]}
+                calendar = db_iceberg.get_snapshot_calendar(src)
 
                 return {
                     "ok": True,
@@ -192,11 +209,6 @@ def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
                     "calendar": calendar,
                     "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
                 }
-            except Exception as e:
-                err = str(e)
-                if "not found" in err.lower() or "does not exist" in err.lower() or "NoSuchTable" in err:
-                    return {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
-                raise
             finally:
                 db_iceberg.clear_source_caches(src["name"])
     except Exception as e:

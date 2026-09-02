@@ -278,7 +278,10 @@ def reset_service_logs(
         clear_source_caches(service_key)
         iceberg_core.init_iceberg_table(source, create=True)
         con2 = _db.get_connection(source)
-        update_iceberg_view(con2, source, force=True)
+        try:
+            update_iceberg_view(con2, source, force=True)
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,
@@ -452,8 +455,11 @@ def reset_service_rum(
 
         # Pre-warm/initialize views on a standard connection
         con2 = _db.get_connection(rum_source)
-        update_iceberg_view(con2, source, force=True, target_table="client_vitals")
-        update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        try:
+            update_iceberg_view(con2, source, force=True, target_table="client_vitals")
+            update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,

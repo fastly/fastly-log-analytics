@@ -6,7 +6,7 @@ but insufficient bar — the actual 2026-05-21 incident
 ([cron_watchdog_max_instances_trap](../memory/cron_watchdog_max_instances_trap.md))
 was about *APScheduler's* behavior:
 
-  - ``_run_service_cron`` is registered with ``max_instances=1``.
+  - ``_run_log_discovery_cron`` is registered with ``max_instances=1``.
   - When the body hung 10+ minutes, APScheduler's worker thread stayed
     blocked inside the call.
   - Every subsequent tick was logged ``skipped: maximum number of
@@ -110,7 +110,7 @@ def test_apscheduler_max_instances_1_keeps_firing_after_watchdog_kill(monkeypatc
 
 
 def test_usage_log_phase_30s_timeout_pattern_does_not_block_caller():
-    """Pins the per-phase pattern in _run_service_cron (backend/cron/jobs/sync.py).
+    """Pins the per-phase pattern in _run_log_discovery_cron (backend/cron/jobs/sync.py).
 
     The phase is wrapped in its own single-worker ThreadPoolExecutor with
     a 30s timeout. On timeout we MUST call ``shutdown(wait=False)`` — if

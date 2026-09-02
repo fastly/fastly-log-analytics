@@ -570,7 +570,7 @@
                   "gzip_level": 9,
                   "message_type": "blank",
                   "name": "Fastly Log Analytics",
-                  "path": "logs/raw/%Y/%m/%d/%H/analytics_log_%M.json.gz",
+                  "path": "logs/raw/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
                   "period": 60,
                   "response_condition": "Log Sampling - fastly_log_analysis",
                   "s3_access_key": "AKIATESTSTABLE",

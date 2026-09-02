@@ -25,14 +25,18 @@ Mechanism + thread-safety live in :class:`backend._in_process_publisher`.
 from __future__ import annotations
 
 from backend._in_process_publisher import _InProcessPublisher
+from backend.config import SSE_BACKPLANE
 
+publisher: ValkeyPublisher | _InProcessPublisher
 
-class CronRunsPublisher(_InProcessPublisher):
-    def __init__(self) -> None:
-        # Cron events are distinct lifecycle notifications. The React cache
-        # is seeded on mount, so we only need to stream live/future events;
-        # replaying stale events would trigger a storm of redundant query refetches.
-        super().__init__(replay_size=0)
+if SSE_BACKPLANE == "valkey":
+    from backend.utils.valkey_publisher import ValkeyPublisher
 
+    publisher = ValkeyPublisher("cron-runs")
+else:
 
-publisher = CronRunsPublisher()
+    class CronRunsPublisher(_InProcessPublisher):
+        def __init__(self) -> None:
+            super().__init__(replay_size=0)
+
+    publisher = CronRunsPublisher()

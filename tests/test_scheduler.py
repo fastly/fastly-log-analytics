@@ -1,6 +1,6 @@
 """Tests for ``backend.cron`` — APScheduler wrapper + small jobs.
 
-The big per-service jobs (``_run_service_cron``, ``_run_commit``,
+The big per-service jobs (``_run_log_discovery_cron``, ``_run_log_ingest``,
 ``_run_optimize``, ``_run_expire_snapshots``, ``_run_ngwaf_bot_sync``,
 ``_run_service_alerts_evaluation``, ``_run_metadata_sync``) are heavy
 orchestrators that exercise the full DuckDB+Iceberg+FOS stack; they're
@@ -272,8 +272,8 @@ def test_sync_jobs_registers_sync_commit_and_alerts_for_readwrite_service():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-1" in s._job_ids
-    assert "commit_svc-1" in s._job_ids
+    assert "log_discovery_svc-1" in s._job_ids
+    assert "log_ingest_svc-1" in s._job_ids
     assert "alerts_evaluation_svc-1" in s._job_ids
 
 
@@ -331,8 +331,8 @@ def test_sync_jobs_skips_alerts_cron_when_no_alerts_configured():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-noalert" in s._job_ids
-    assert "commit_svc-noalert" in s._job_ids
+    assert "log_discovery_svc-noalert" in s._job_ids
+    assert "log_ingest_svc-noalert" in s._job_ids
     # Alerts cron must not be registered until at least one alert exists.
     assert "alerts_evaluation_svc-noalert" not in s._job_ids
 
@@ -502,7 +502,7 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     real_add = s._sched.add_job
 
     def capturing_add_job(*args, **kwargs):
-        if kwargs.get("id", "").startswith("sync_svc-priority"):
+        if kwargs.get("id", "").startswith("log_discovery_svc-priority"):
             captured["seconds"] = kwargs.get("seconds")
         return real_add(*args, **kwargs)
 
@@ -1213,7 +1213,7 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
     assert cleared is not None
 
 
-# ── _run_commit (Iceberg snapshot commit) ────────────────────────────────
+# ── _run_log_ingest (Iceberg snapshot commit) ────────────────────────────────
 #
 # Each cron entry-point is wrapped in heavy try/finally guards so the
 # scheduler thread never dies. The tests below pin the **early-return
@@ -1224,43 +1224,43 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
 # and stop dispatching every other cron in the process.
 
 
-def test_run_commit_returns_silently_when_config_missing():
+def test_run_log_ingest_returns_silently_when_config_missing():
     """If `svcconfig.load_config` returns None → no-op. Pinned because
     deleted services can still have queued cron ticks; crashing here
     would take down the scheduler thread."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     with (
         patch("backend.config.load_config", return_value=None),
         patch("backend.core.duckdb.get_source_for_service") as mock_get,
     ):
-        _run_commit("ghost-svc")
+        _run_log_ingest("ghost-svc")
 
     mock_get.assert_not_called()
 
 
-def test_run_commit_returns_silently_when_source_missing():
+def test_run_log_ingest_returns_silently_when_source_missing():
     """`get_source_for_service` returns None → early return. Pinned
     because credentials can be revoked between config-load and
     source-build."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
         patch("backend.core.duckdb.start_cron_run") as mock_start,
     ):
-        _run_commit("svc")
+        _run_log_ingest("svc")
 
     mock_start.assert_not_called()
 
 
-def test_run_commit_skipped_on_read_only_source_without_force():
+def test_run_log_ingest_skipped_on_read_only_source_without_force():
     """`read_only` sources can't commit — early return UNLESS force=True.
     Pinned because committing on a viewer-only credential would surface
     a confusing iceberg permission error in the cron log instead of a
     clean skip."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc"}),
@@ -1270,17 +1270,17 @@ def test_run_commit_skipped_on_read_only_source_without_force():
         ),
         patch("backend.core.duckdb.start_cron_run") as mock_start,
     ):
-        _run_commit("svc", force=False)
+        _run_log_ingest("svc", force=False)
 
     mock_start.assert_not_called()
 
 
-def test_run_commit_skipped_when_sync_disabled():
+def test_run_log_ingest_skipped_when_sync_disabled():
     """If `provisioning.cron_sync.enabled` is False and force is False,
     return without starting a cron run. Pinned because the admin
     'pause sync' toggle relies on this — losing it would silently
     keep committing data after the toggle was flipped."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     with (
         patch(
@@ -1293,16 +1293,16 @@ def test_run_commit_skipped_when_sync_disabled():
         ),
         patch("backend.core.duckdb.start_cron_run") as mock_start,
     ):
-        _run_commit("svc", force=False)
+        _run_log_ingest("svc", force=False)
 
     mock_start.assert_not_called()
 
 
-def test_run_commit_skipped_when_start_cron_run_raises():
+def test_run_log_ingest_skipped_when_start_cron_run_raises():
     """`start_cron_run` raising RuntimeError (busy) → log info + return.
     Pinned because losing this would crash the scheduler thread when
     a commit is already in flight."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     with (
         patch(
@@ -1316,18 +1316,18 @@ def test_run_commit_skipped_when_start_cron_run_raises():
         patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("already running")),
         patch("backend.core.iceberg.commit_buffer") as mock_commit,
     ):
-        _run_commit("svc")
+        _run_log_ingest("svc")
 
     mock_commit.assert_not_called()
 
 
-def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
+def test_run_log_ingest_success_path_logs_files_committed_and_triggers_sync():
     """Happy path: `commit_buffer` returns ``files_committed > 0`` →
     `log_cron_run` records success with row counts AND `_run_metadata_sync`
     is invoked to refresh the local cache. Pinned because losing the
     auto-sync would leave the dashboard's "rows in lake" counter
     stale for up to a full sync interval."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     log_calls = []
     src = {"name": "svc", "service_id": "svc", "access_level": "read_write"}
@@ -1361,7 +1361,7 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
         patch("backend.core.duckdb.update_cron_duration"),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
-        _run_commit("svc")
+        _run_log_ingest("svc")
 
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
@@ -1371,12 +1371,12 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     mock_sync.assert_called_once()
 
 
-def test_run_commit_no_data_path_logs_success_without_triggering_sync():
+def test_run_log_ingest_no_data_path_logs_success_without_triggering_sync():
     """When `files_committed == 0`, log success with "No new data to
     commit" and do NOT invoke `_run_metadata_sync`. Pinned because
     triggering an empty sync would burn CDN bandwidth and shave the
     DuckDB cache for no reason."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     log_calls = []
 
@@ -1406,7 +1406,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
         patch("backend.core.duckdb.update_cron_duration"),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
-        _run_commit("svc")
+        _run_log_ingest("svc")
 
     assert len(log_calls) == 1
     _, kwargs = log_calls[0]
@@ -1414,12 +1414,12 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     mock_sync.assert_not_called()
 
 
-def test_run_commit_logs_error_when_commit_buffer_raises():
+def test_run_log_ingest_logs_error_when_commit_buffer_raises():
     """`commit_buffer` raising → `log_cron_run` records status="error"
     with the exception message. Pinned because losing this would
     leave the cron-runs admin panel blank on the most-important
     failure mode (catalog write rejected, S3 perms broken)."""
-    from backend.cron.jobs.commit import _run_commit
+    from backend.cron.jobs.commit import _run_log_ingest
 
     log_calls = []
 
@@ -1446,7 +1446,7 @@ def test_run_commit_logs_error_when_commit_buffer_raises():
         patch("backend.core.duckdb.update_cron_duration"),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
-        _run_commit("svc")
+        _run_log_ingest("svc")
 
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
@@ -2529,7 +2529,7 @@ def test_check_buffer_backlog_warns_when_oldest_age_exceeds_scaled_threshold():
 
 
 def test_check_buffer_backlog_never_raises_on_probe_failure():
-    """The backlog probe must not bubble exceptions back to _run_commit.
+    """The backlog probe must not bubble exceptions back to _run_log_ingest.
     A corrupt iceberg helper must yield "" not a stack trace."""
     from backend.cron.scheduler import _check_buffer_backlog
 

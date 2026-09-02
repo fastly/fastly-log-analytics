@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const isStaticExport = process.env.STATIC_EXPORT === '1'
-const apiProxyUrl = process.env.API_PROXY_URL || 'http://127.0.0.1:8000'
+const apiProxyUrl = process.env.API_PROXY_URL || process.env.NEXT_PUBLIC_API_PROXY_URL || 'http://caddy:80'
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -15,9 +15,6 @@ const nextConfig: NextConfig = {
   // on port 13002. NEXT_DIST_DIR is only set by the Playwright config;
   // in every other context the default `.next/` is used.
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
-  turbopack: {
-    root: path.join(__dirname, '../'),
-  },
   ...(!isStaticExport && {
     async rewrites() {
       return [

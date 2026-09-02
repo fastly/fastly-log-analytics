@@ -231,6 +231,7 @@ function DashboardBody({
       compareMode,
       compareStartTime,
       startTime,
+      endTime,
       trend,
       timezone,
       metric,
@@ -238,7 +239,7 @@ function DashboardBody({
       hiddenCategories,
       catalog,
     }),
-    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
+    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
 
   const [trafficData, setTrafficData] = React.useState<any[]>(() => buildTrafficData(trafficParams))

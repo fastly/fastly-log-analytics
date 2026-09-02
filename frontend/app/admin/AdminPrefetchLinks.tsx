@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buttonVariants } from '@/components/ui/button'
-import { UserPlus, ShieldCheck, Activity, TrendingUp } from 'lucide-react'
+import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers } from 'lucide-react'
 
 export function AdminPrefetchLinks() {
   const queryClient = useQueryClient()
@@ -99,6 +99,23 @@ export function AdminPrefetchLinks() {
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
       >
         <TrendingUp className="h-4 w-4 mr-1" /> Trends
+      </Link>
+      <Link
+        href={activeServiceId ? `/admin/queue?service=${activeServiceId}` : '/admin/queue'}
+        prefetch={false}
+        onMouseEnter={() => {
+          queryClient.prefetchQuery({
+            queryKey: ['admin', 'celery-status'],
+            queryFn: async ({ signal }) => {
+              const { data, response } = await client.GET('/api/admin/celery/status', { signal })
+              if (!response.ok) throw new Error(`status ${response.status}`)
+              return data
+            },
+          })
+        }}
+        className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+      >
+        <Layers className="h-4 w-4 mr-1" /> Queue
       </Link>
     </>
   )

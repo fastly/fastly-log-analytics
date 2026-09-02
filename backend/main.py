@@ -81,8 +81,11 @@ from concurrent.futures import ThreadPoolExecutor
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 from datetime import UTC, datetime
 
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 from backend import config as svcconfig
 from backend.core import duckdb as _db
+from backend.core import request_telemetry
 
 
 def _initialize_service(cfg: dict):
@@ -406,10 +409,33 @@ def _enforce_proxy_headers_configured() -> None:
     env-equivalent of the ``--forwarded-allow-ips`` CLI flag). If a future
     refactor passes the CLI flag without exporting our companion env var,
     uvicorn's variable lets us detect it.
+
+    A wildcard (``*``) in either variable is ALWAYS fatal, strict mode or
+    not: it makes uvicorn honor X-Forwarded-For from any TCP peer, so any
+    direct client can stamp ``X-Forwarded-For: 127.0.0.1`` and be classified
+    loopback-admin by the remote-access middleware. There is no deployment
+    where that is a safe configuration — pin the proxy's real source
+    IPs/subnet instead (e.g. the fixed compose-network subnet in
+    docker-compose.multipod.yml).
     """
     trusted = (os.environ.get("TRUSTED_PROXY_IPS") or "").strip()
     uvicorn_trusted = (os.environ.get("UVICORN_FORWARDED_ALLOW_IPS") or "").strip()
     require_strict = os.environ.get("REQUIRE_PROXY_HEADERS") == "1" or os.environ.get("STRICT_DATA_DIR_CHECK") == "1"
+    for var_name, var_value in (
+        ("TRUSTED_PROXY_IPS", trusted),
+        ("UVICORN_FORWARDED_ALLOW_IPS", uvicorn_trusted),
+    ):
+        if "*" in var_value:
+            wildcard_msg = (
+                f"FATAL: {var_name}={var_value!r} contains a wildcard. Trusting "
+                "X-Forwarded-For from every peer lets any direct client spoof "
+                "X-Forwarded-For: 127.0.0.1 and be classified loopback-admin. "
+                "Pin the reverse proxy's real IPs or subnet instead (e.g. "
+                "TRUSTED_PROXY_IPS=172.28.0.0/16 for the multipod compose "
+                "network). Refusing to start."
+            )
+            logging.critical(wildcard_msg)
+            raise RuntimeError(wildcard_msg)
     effective = trusted or uvicorn_trusted
     if effective:
         logging.info(
@@ -470,6 +496,12 @@ async def lifespan(app: FastAPI):
     # --forwarded-allow-ips flag). Without it, IP-based gates become
     # ineffective and the Host-spoof admin bypass returns.
     _enforce_proxy_headers_configured()
+
+    # Ingest-mode sanity: INGEST_MODE is the single gate for the Celery data
+    # plane (jobs must NOT key off CELERY_BROKER_URL truthiness — setting the
+    # broker URL for the SSE backplane alone must not reroute ingestion), and
+    # celery mode requires a multi-writer (Postgres) DuckLake catalog.
+    svcconfig.validate_ingest_mode()
 
     # Verify dependencies
     try:
@@ -593,13 +625,40 @@ def _bounded_scheduler_shutdown(scheduler, *, timeout_secs: float = 60.0) -> Non
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="2.4.1",
+    version="3.0.0",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
     ),
     lifespan=lifespan,
 )
+
+
+def _maybe_instrument_asgi(_app: FastAPI) -> None:
+    """Wrap the app in FastAPIInstrumentor, unless OTel is disabled.
+
+    Only the routers already migrated to build_request_context open an OTel
+    span today (RequestTelemetry.start_request). FastAPIInstrumentor covers
+    every route regardless of which dependency pattern it uses, so legacy
+    get_source/get_con routes (most of admin/*, bootstrap.py) get RED
+    metrics too instead of being invisible to any span-metrics processor.
+    Gated the same way _setup_sdk is — skip the middleware-wrapping cost
+    entirely when nothing will ever be exported (default: OTEL_EXPORTER=none,
+    or pytest). request_telemetry.start_request() reuses this span instead
+    of opening a second one for migrated routes, so a span-metrics
+    processor doesn't double-count them — see its docstring.
+    """
+    if not request_telemetry.asgi_instrumentation_enabled():
+        return
+    request_telemetry.ensure_initialized()
+    # exclude_spans: the ASGI receive/send child spans are pure transport
+    # plumbing, not a route — left in, a span-metrics processor buckets
+    # them as their own "{route} http send" series and pollutes every RED
+    # dashboard built from span_name.
+    FastAPIInstrumentor.instrument_app(_app, exclude_spans=["receive", "send"])
+
+
+_maybe_instrument_asgi(app)
 
 # ── Middleware stack ──────────────────────────────────────────────────────────
 #
@@ -979,7 +1038,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "2.4.1"
+    _APP_VERSION = "3.0.0"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -1077,11 +1136,49 @@ def health_check(
                 (sid,),
             ).fetchone()
             last_ingest = row["last_ingest"] if row else None
+
+            # Celery/ledger mode writes ingest_ledger, never ingested_files —
+            # without this branch a celery-mode service is either
+            # healthy-while-dead (fresh service: last_ingest NULL forever) or
+            # permanently degraded (migrated service: last_ingest frozen at
+            # cutover). Freshness = the newest ledger commit; a backlog of
+            # non-terminal rows older than the stale cutoff degrades even when
+            # discovery keeps succeeding (workers dead / queue wedged).
+            if os.environ.get("INGEST_MODE") == "celery":
+                try:
+                    lrow = con.execute(
+                        "SELECT max(committed_at) AS c FROM ingest_ledger WHERE service_id = ?",
+                        (sid,),
+                    ).fetchone()
+                    if lrow and lrow["c"]:
+                        ledger_ingest = iso_z(datetime.fromtimestamp(float(lrow["c"]), UTC))
+                        if not last_ingest or str(ledger_ingest).replace(" ", "T").rstrip("Z") > str(
+                            last_ingest
+                        ).replace(" ", "T").rstrip("Z"):
+                            last_ingest = ledger_ingest
+                    stalled = con.execute(
+                        "SELECT count(*) AS n, min(discovered_at) AS oldest FROM ingest_ledger "
+                        "WHERE service_id = ? AND status IN ('discovered', 'claimed') "
+                        "AND discovered_at IS NOT NULL AND discovered_at < ?",
+                        (sid, (datetime.now(UTC) - timedelta(minutes=stale_minutes)).timestamp()),
+                    ).fetchone()
+                    if stalled and stalled["n"]:
+                        svc_state["status"] = "degraded"
+                        oldest = iso_z(datetime.fromtimestamp(float(stalled["oldest"]), UTC))
+                        svc_state["reason"] = (
+                            f"{stalled['n']} discovered file(s) not converted since {oldest} — "
+                            "ingest workers stalled or queue wedged"
+                        )
+                except Exception:
+                    pass
+
             svc_state["last_ingest"] = last_ingest
 
+            # task IN (…): the ingest cron was renamed sync → log_discovery in
+            # v3.0.0; match both so pre-upgrade history still satisfies the probe.
             cron_row = con.execute(
                 "SELECT status, started_at, error_message FROM cron_runs "
-                "WHERE task = 'sync' AND status != 'running' "
+                "WHERE task IN ('sync', 'log_discovery') AND status != 'running' "
                 "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             if cron_row:
@@ -1104,7 +1201,7 @@ def health_check(
                 try:
                     stuck = con.execute(
                         "SELECT started_at FROM cron_runs "
-                        "WHERE task = 'sync' AND status = 'running' "
+                        "WHERE task IN ('sync', 'log_discovery') AND status = 'running' "
                         "ORDER BY started_at DESC LIMIT 1"
                     ).fetchone()
                     if stuck and stuck["started_at"]:
@@ -1129,12 +1226,29 @@ def health_check(
             # for the same reason as SRE-04 above.
             if svc_state["status"] == "ok":
                 try:
+                    # Recency window: only degrade on errors from the last 24h.
+                    # A per-task-latest scan with no window pins 'degraded'
+                    # FOREVER on a task that never runs again — e.g. a restart
+                    # reap errors the last metadata_sync row of a read_write
+                    # service (metadata_sync is scheduled only for read_only),
+                    # so nothing ever supersedes it. A live failing cron keeps
+                    # re-erroring inside the window, so real incidents still
+                    # degrade. Same reason 'commit' (pre-rename) is excluded.
+                    crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
                         "  SELECT task, status, error_message, "
                         "         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn "
-                        "  FROM cron_runs WHERE task IN ('commit', 'metadata_sync') AND status != 'running'"
-                        ") WHERE rn = 1 AND status = 'error' LIMIT 1"
+                        "  FROM cron_runs WHERE task IN ('log_ingest', 'metadata_sync') AND status != 'running'"
+                        "  AND started_at >= ?"
+                        # Boot-reap rows are lifecycle artifacts (the process
+                        # stopped mid-run), not failing crons — a task that is
+                        # never scheduled again (metadata_sync on a read_write
+                        # service) would otherwise hold 'degraded' for the whole
+                        # window on every restart.
+                        "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
+                        ") WHERE rn = 1 AND status = 'error' LIMIT 1",
+                        (crit_cutoff,),
                     ).fetchone()
                     if crit_row:
                         svc_state["status"] = "degraded"

@@ -19,6 +19,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -57,6 +58,57 @@ def test_otel_enabled_when_exporter_is_console(monkeypatch):
     monkeypatch.setenv("OTEL_ENABLED", "1")
     monkeypatch.setenv("OTEL_EXPORTER", "console")
     assert request_telemetry._otel_enabled() is True
+
+
+def test_otel_enabled_when_exporter_is_otlp(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    assert request_telemetry._otel_enabled() is True
+
+
+def test_asgi_instrumentation_enabled_mirrors_otel_enabled(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+    assert request_telemetry.asgi_instrumentation_enabled() is True
+
+    monkeypatch.setenv("OTEL_EXPORTER", "none")
+    assert request_telemetry.asgi_instrumentation_enabled() is False
+
+
+def test_ensure_initialized_runs_setup_sdk_once(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "console")
+
+    request_telemetry.ensure_initialized()
+    assert request_telemetry._initialised is True
+
+
+def test_setup_sdk_otlp_installs_otlp_exporters(monkeypatch):
+    """OTEL_EXPORTER=otlp must construct the OTLP span + metric exporters
+    (endpoints resolve from the standard OTEL_EXPORTER_OTLP_* env vars).
+    The global provider setters are stubbed so no SDK state leaks between
+    tests, and the exporter classes are mocked so nothing dials out."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OTEL_ENABLED", "1")
+    monkeypatch.setenv("OTEL_EXPORTER", "otlp")
+
+    with (
+        patch("opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter") as span_exporter,
+        patch("opentelemetry.exporter.otlp.proto.http.metric_exporter.OTLPMetricExporter") as metric_exporter,
+        patch("backend.core.request_telemetry.PeriodicExportingMetricReader") as metric_reader,
+        patch.object(request_telemetry.trace, "set_tracer_provider") as set_tracer,
+        patch.object(request_telemetry.metrics, "set_meter_provider") as set_meter,
+    ):
+        request_telemetry._setup_sdk()
+
+    span_exporter.assert_called_once_with()
+    metric_exporter.assert_called_once_with()
+    metric_reader.assert_called_once()
+    set_tracer.assert_called_once()
+    set_meter.assert_called_once()
 
 
 def test_otel_master_switch_off_overrides_exporter(monkeypatch):
@@ -159,6 +211,37 @@ def test_section_emits_real_span_when_sdk_enabled(monkeypatch):
     assert section_span.attributes is not None
     assert section_span.attributes.get("custom") == "x"
     assert "app.section.elapsed_ms" in section_span.attributes
+
+
+def test_start_request_reuses_ambient_span_instead_of_opening_a_second_one():
+    """When something upstream (FastAPIInstrumentor's ASGI middleware) has
+    already opened a recording span before start_request runs, reuse it
+    instead of opening a duplicate — otherwise a span-metrics processor
+    would count every such request twice. Only the span this instance
+    actually opened should ever get end()ed."""
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    ambient_tracer = provider.get_tracer("ambient")
+
+    ambient_span = ambient_tracer.start_span("GET /api/ambient-example")
+    with (
+        trace.use_span(ambient_span, end_on_exit=False),
+        patch("backend.core.request_telemetry.get_tracer") as mock_get_tracer,
+    ):
+        ctx = request_telemetry.RequestTelemetry("GET", "/api/ambient-example")
+        ctx.start_request()
+        ctx.end_request(status_code=200)
+
+    mock_get_tracer.assert_not_called()
+    assert exporter.get_finished_spans() == ()  # end_request must not have ended it
+
+    ambient_span.end()
+    (finished,) = exporter.get_finished_spans()
+    assert finished.name == "GET /api/ambient-example"
+    assert finished.attributes is not None
+    assert finished.attributes.get("http.status_code") == 200
+    assert finished.attributes.get("app.is_cached") is False
 
 
 # ── InMemoryMetricReader assertions on histogram observations (audit follow-up) ──

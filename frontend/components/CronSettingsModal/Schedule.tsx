@@ -92,6 +92,8 @@ interface LogSyncSectionProps {
   setDataRetention: (v: string) => void
   cacheRetention: string
   setCacheRetention: (v: string) => void
+  rollupRetention: string
+  setRollupRetention: (v: string) => void
   commitInterval: string
   setCommitInterval: (v: string) => void
   syncLogEnabled: boolean
@@ -120,6 +122,8 @@ export function LogSyncSection({
   setDataRetention,
   cacheRetention,
   setCacheRetention,
+  rollupRetention,
+  setRollupRetention,
   commitInterval,
   setCommitInterval,
   syncLogEnabled,
@@ -215,6 +219,22 @@ export function LogSyncSection({
               <SelectContent>
                 {RETENTION_OPTIONS.map(o => (
                   <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="rollup-retention" className="text-[11px] font-medium">Rollup Retention</Label>
+            <p className="text-[10px] text-muted-foreground leading-tight h-6">
+              Keep local monthly rollup files for this many months.
+            </p>
+            <Select value={rollupRetention} onValueChange={v => v && setRollupRetention(v)}>
+              <SelectTrigger id="rollup-retention" className="h-7 text-[11px]">
+                <SelectValue>{(val) => val + (val === '1' ? ' month' : ' months')}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {[1, 2, 3, 6, 12, 24, 36, 60, 120].map(v => (
+                  <SelectItem key={v} value={String(v)} className="text-[11px]">{v} month{v === 1 ? '' : 's'}</SelectItem>
                 ))}
               </SelectContent>
             </Select>

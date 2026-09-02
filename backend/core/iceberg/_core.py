@@ -87,7 +87,6 @@ logger = logging.getLogger(__name__)
 
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 from pyiceberg.schema import Schema
-from pyiceberg.table.name_mapping import create_mapping_from_schema
 from pyiceberg.types import (
     BooleanType,
     DoubleType,
@@ -552,9 +551,12 @@ def _write_table_summary_async(source: dict, table=None) -> None:
     This provides analysts with instant access to the table's range and calendar
     without needing to download and parse large Iceberg manifests.
 
-    Pass `table` from the caller (the just-committed Table object) to skip
-    the `catalog.load_table()` round-trip — that re-downloads the same
-    metadata.json (~850 KB) we wrote one second earlier.
+    ``table`` is accepted for caller backward-compatibility only (some
+    callers still pass the just-committed pyiceberg ``Table``, e.g. the
+    legacy retention/expire path in ``buffer.py``) and is otherwise
+    ignored: ``get_table_info``/``get_snapshot_calendar`` are DuckLake-
+    native (v3 write-path cutover) and read ``lake.*`` state directly, so
+    there's nothing left for a pyiceberg table object to short-circuit.
 
     Skips the PUT when the serialized payload matches the last write in this
     process — defensive against commits that don't shift the summary (schema-
@@ -568,16 +570,13 @@ def _write_table_summary_async(source: dict, table=None) -> None:
     def _run():
         try:
             identifier = _table_identifier(source)
-            # We don't want to use the global UI cache, we want fresh data.
-            # When the caller hands us the freshly-committed table, skip the
-            # catalog.load_table() — it would re-GET the just-written metadata.json.
-            local_table = table
-            if local_table is None:
-                catalog = _get_catalog(source)
-                local_table = catalog.load_table(identifier)
-
-            info = get_table_info(source, table=local_table)
-            calendar = get_snapshot_calendar(source, table=local_table)
+            # `get_table_info`/`get_snapshot_calendar` are DuckLake-native
+            # (v3 write-path cutover) and read `lake.*` state themselves —
+            # a pyiceberg `Table` object no longer carries anything they
+            # consult, so there's no longer a `catalog.load_table()`
+            # round-trip to skip by passing one in.
+            info = get_table_info(source)
+            calendar = get_snapshot_calendar(source)
 
             summary = {
                 "info": info,
@@ -876,6 +875,54 @@ def _newest_metadata_key(keys: list[str]) -> str | None:
     if not keys:
         return None
     return max(keys, key=lambda k: (metadata_version(k), k))
+
+
+def _sync_metadata_pointer_from_discovery(source: dict, table_name: str = "logs") -> None:
+    """Discover the latest metadata.json on FOS and write the pointer to S3.
+
+    Trap #28: a pointer written from a discovery listing MUST refuse to
+    regress. The listing here is paginated and version-ordered (defenses
+    1 and 2), and before writing we compare against the currently-known
+    pointer and reject anything older (defense 3 — the backstop that
+    would have prevented the 2026-08 41-day rollback on its own).
+    """
+    if _is_local_only_source(source):
+        return
+    try:
+        from backend.core.duckdb import _get_fos_client
+
+        s3 = _get_fos_client(source)
+        bucket = source["bucket"]
+        namespace, t_name = _table_identifier(source, table_name)
+        search_prefixes = _metadata_search_prefixes(source, namespace, t_name)
+        for search_prefix in search_prefixes:
+            metadata_files = _list_metadata_json_keys(s3, bucket, search_prefix)
+            latest_key = _newest_metadata_key(metadata_files)
+            if latest_key:
+                new_loc = f"s3://{bucket}/{latest_key}"
+                current_loc = None
+                try:
+                    current_loc = _read_metadata_pointer(source, (namespace, t_name))
+                except Exception as read_err:
+                    logger.warning(
+                        "[iceberg] could not read current metadata pointer before discovery sync: %s", read_err
+                    )
+                if current_loc and metadata_version(new_loc) < metadata_version(current_loc):
+                    logger.error(
+                        "[iceberg] REFUSING to regress metadata pointer for %s/%s: discovered %s (v%d) "
+                        "is older than known-good %s (v%d)",
+                        namespace,
+                        t_name,
+                        new_loc,
+                        metadata_version(new_loc),
+                        current_loc,
+                        metadata_version(current_loc),
+                    )
+                    return
+                _write_metadata_pointer(source, new_loc)
+                break
+    except Exception as e:
+        logger.error("[iceberg] Failed to sync metadata pointer from discovery: %s", e)
 
 
 def _write_metadata_pointer(source: dict, location: str, table=None) -> None:
@@ -1187,114 +1234,20 @@ def init_iceberg_table(source: dict, create: bool = True, table_name: str = "log
 
 
 def _init_iceberg_table_locked(source: dict, create: bool = True, table_name: str = "logs"):
-    """Create the Iceberg table in FOS if it does not exist; return the table.
+    from backend.core.duckdb import get_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach
 
-    Safe to call on every provision and on every scheduler tick — it is a
-    no-op when the table already exists.
-    """
-    from pyiceberg.exceptions import NoSuchTableError
-    from pyiceberg.partitioning import PartitionField, PartitionSpec
-    from pyiceberg.table.sorting import SortField, SortOrder
-    from pyiceberg.transforms import HourTransform, IdentityTransform
-
-    catalog = _get_catalog(source)
-    identifier = _table_identifier(source, table_name=table_name)
-    namespace = identifier[0]
-
-    # Ensure namespace exists
+    con = get_connection(source)
     try:
-        catalog.create_namespace(namespace)
-    except Exception:
-        pass  # already exists
-
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(source.get("service_id") or source.get("name"))
-    log_fields_config = cfg.get("log_fields", {}) if cfg else None
-    dynamic_iceberg_schema = get_iceberg_schema(log_fields_config, table_name=table_name)
-
-    try:
-        if not create:
-            _refresh_local_catalog_metadata(catalog, source, identifier)
-
-        table = _load_table_cached(source, identifier, catalog)
-        # Check for missing fields to support schema evolution
-        missing_fields = []
-        table_field_names = {f.name for f in table.schema().fields}
-        for field in dynamic_iceberg_schema.fields:
-            if field.name not in table_field_names:
-                missing_fields.append(field)
-
-        if missing_fields:
-            logger.info(
-                "🧬  \x1b[95m[commit]\x1b[0m %s: Evolving schema: adding %d fields.",
-                source.get("name"),
-                len(missing_fields),
-            )
-            try:
-                with table.update_schema() as update:
-                    for field in missing_fields:
-                        update.add_column(field.name, field.field_type)
-                # Schema evolution PUT a new metadata.json — refresh cache so the
-                # next caller doesn't reload the previous (stale) location.
-                _set_cached_table(source, identifier, table)
-                # Republish the FOS pointer so cross-process readers (analyst
-                # CLIs, any other process that hits _read_metadata_pointer) see
-                # the new schema. Without this, the pointer keeps pointing at
-                # the pre-evolution metadata.json until the next commit_buffer
-                # finally calls _write_metadata_pointer at line 1484 — newly
-                # added fields silently drop in the meantime.
-                _write_metadata_pointer(source, table.metadata_location, table=table)
-            except Exception as e:
-                logger.error(f"[iceberg] Failed to evolve schema: {e}")
-                _invalidate_cached_table(source, identifier)
-        return table
-    except NoSuchTableError:
-        if not create:
-            # Try to discover and register the table from FOS metadata.
-            # This handles a fresh analyst install whose local SQLite catalog is
-            # empty but the table already exists in the shared FOS bucket.
-            registered = _try_register_from_fos(catalog, source, identifier)
-            if registered is not None:
-                return registered
-            raise
-        pass
-
-    # Use natively defined Iceberg schema
-    iceberg_schema = dynamic_iceberg_schema
-
-    # Partition by hour(timestamp) — hidden partitioning, no dt= prefix in paths
-    partition_spec = PartitionSpec(
-        PartitionField(
-            source_id=iceberg_schema.find_field("timestamp").field_id,
-            field_id=1000,
-            transform=HourTransform(),
-            name="timestamp_hour",
-        )
-    )
-
-    # Sort by timestamp within each partition for efficient time-range pruning
-    sort_order = SortOrder(
-        SortField(
-            source_id=iceberg_schema.find_field("timestamp").field_id,
-            transform=IdentityTransform(),
-        )
-    )
-
-    table = catalog.create_table(
-        identifier=identifier,
-        schema=iceberg_schema,
-        partition_spec=partition_spec,
-        sort_order=sort_order,
-        properties={
-            "schema.name-mapping.default": create_mapping_from_schema(iceberg_schema).model_dump_json(),
-            "write.parquet.compression-codec": "zstd",
-            "write.parquet.compression-level": "3",
-            "write.target-file-size-bytes": str(128 * 1024 * 1024),  # 128 MB
-        },
-    )
-    logger.info("🏗️  \x1b[95m[commit]\x1b[0m %s: Created table at %s", source.get("name"), table.location())
-    return table
+        if _ducklake_attach(con, source):
+            if create:
+                # CREATE TABLE IF NOT EXISTS lake.logs ( ... )
+                # For now just let it be created from the first parquet file.
+                pass
+            return True
+        return None
+    finally:
+        con.close()
 
 
 def table_location(source: dict) -> str | None:
@@ -1346,6 +1299,7 @@ from backend.core.iceberg.manifest import (  # noqa: F401, E402
     _manifest_metadata_loaded_lock,
     _prune_empty_dirs,
     _save_manifest_metadata_cache,
+    ducklake_table_exists,
     get_snapshot_calendar,
     get_table_info,
 )

@@ -454,6 +454,7 @@ def backfill_missing_hour_bundles(
     # with uvicorn's RW connection on that file — backed by a fresh
     # in-memory DuckDB connection that holds no persistent state.
     con = _ddb.connect(":memory:")
+    con.execute("SET TimeZone='UTC'")
     from backend.core.duckdb import _configure_fos
 
     _configure_fos(con, source)

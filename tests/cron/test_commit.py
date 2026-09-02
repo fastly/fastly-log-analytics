@@ -1,6 +1,6 @@
 """Tests for :mod:`backend.cron.jobs.commit`.
 
-``_run_commit`` drains the local buffer to the shared Iceberg table.
+``_run_log_ingest`` drains the local buffer to the shared Iceberg table.
 It's a wrapper around ``iceberg.commit_buffer`` with config / disk /
 cron-run plumbing around it. Tests stub the heavy commit and pin
 the orchestration shape — same scaffold as test_sync_job /
@@ -71,7 +71,7 @@ def test_returns_when_config_missing(monkeypatch):
     monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
     get_src = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
-    commit._run_commit.__wrapped__("ghost-svc")
+    commit._run_log_ingest.__wrapped__("ghost-svc")
     get_src.assert_not_called()
 
 
@@ -79,7 +79,7 @@ def test_returns_when_source_missing(monkeypatch, stub_load_config):
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
     start = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
     start.assert_not_called()
 
 
@@ -92,7 +92,7 @@ def test_read_only_source_skipped_without_force(monkeypatch, stub_load_config):
     start = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
 
-    commit._run_commit.__wrapped__("svc-1")  # force defaults False
+    commit._run_log_ingest.__wrapped__("svc-1")  # force defaults False
 
     start.assert_not_called()
 
@@ -104,7 +104,7 @@ def test_disabled_sync_skipped_without_force(monkeypatch, stub_load_config, stub
     stub_load_config["cfg"]["provisioning"]["cron_sync"]["enabled"] = False
     start = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
     start.assert_not_called()
 
 
@@ -120,7 +120,7 @@ def test_disk_check_failure_logs_error_and_returns(monkeypatch, stub_load_config
     cb = MagicMock()
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
 
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
 
     cb.assert_not_called()
     args, kwargs = stub_cron_envelope["log"].call_args
@@ -140,7 +140,7 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
         MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
     )
 
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
     assert args[3] == "success"
@@ -164,7 +164,7 @@ def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_conf
         MagicMock(return_value={"files_committed": 0, "rows_committed": 0, "snapshot_id": None}),
     )
 
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
     assert args[3] == "success"
@@ -191,7 +191,7 @@ def test_quarantined_files_appear_in_summary(monkeypatch, stub_load_config, stub
         ),
     )
 
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
     assert args[3] == "success"
@@ -208,7 +208,7 @@ def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stu
         MagicMock(side_effect=RuntimeError("snapshot conflict")),
     )
 
-    commit._run_commit.__wrapped__("svc-1")
+    commit._run_log_ingest.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
     assert args[3] == "error"

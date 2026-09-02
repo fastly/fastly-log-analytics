@@ -54,9 +54,15 @@ def get_performance_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(
-            top_urls=[], top_asns=[], ttl_dist=[], scatter=[], section_timings=section_timings, **runner.telemetry()
-        )
+        return {
+            "top_urls": [],
+            "top_asns": [],
+            "ttl_dist": [],
+            "scatter": [],
+            "waterfall": {},
+            "section_timings": section_timings,
+            **runner.telemetry(),
+        }
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)

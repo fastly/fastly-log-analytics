@@ -210,7 +210,7 @@ export function AnalyticsCard({
         onOpenChange={setIsHelpOpen}
         title={helpTitle ?? title}
         icon={icon}
-        size="lg"
+        size="xl"
       >
         {helpContent}
       </HelpDialog>

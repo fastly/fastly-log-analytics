@@ -1,0 +1,245 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL-DEV TOPOLOGY ONLY — do not point real traffic at this file.
+#
+# Every published port below binds 127.0.0.1 on purpose: the multipod stack is
+# a workstation topology for exercising the Celery/valkey split locally. To
+# expose it for real you must, at minimum:
+#   1. Put a TLS-terminating, authenticated ingress in front (see
+#      docker-compose.prod.yml + Caddyfile for the production pattern).
+#   2. Keep TRUSTED_PROXY_IPS / UVICORN_FORWARDED_ALLOW_IPS pinned to the
+#      proxy's real source subnet — NEVER `*`. The backend refuses to boot on
+#      a wildcard (backend/main.py:_enforce_proxy_headers_configured).
+#   3. Keep valkey unpublished — pods reach it on the compose network; add a
+#      local compose override if you need host access for debugging.
+#
+# The app network uses a FIXED subnet (172.28.0.0/16) so the proxy-trust
+# envs below are pinned to the network Caddy actually egresses from rather
+# than a guess at Docker's default pool.
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  app-network:
+    driver: bridge
+    ipam:
+      config:
+      - subnet: 172.28.0.0/16
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      valkey:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      metadata-schema-init:
+        condition: service_completed_successfully
+    environment:
+    - PYTHONUNBUFFERED=1
+    - DUCKDB_MEMORY_LIMIT=4GB
+    - LOCAL_HOSTS=fastly.localhost,fastly.analytics
+    # Celery/multipod mode REQUIRES a transactional multi-writer DuckLake
+    # catalog: worker processes write while the backend reads, which a
+    # DuckDB-file catalog cannot do (single-process file lock; torn merges).
+    # The backend refuses to boot celery mode on a file catalog.
+    - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    # Trust XFF only from the pinned compose subnet (Caddy's egress network).
+    # A wildcard here lets any direct client spoof its IP and become
+    # loopback-admin — the backend hard-fails boot on `*`.
+    - TRUSTED_PROXY_IPS=172.28.0.0/16
+    - UVICORN_FORWARDED_ALLOW_IPS=172.28.0.0/16
+    # Admin trust for this containerized topology: nothing reaches the
+    # backend over loopback here (operator traffic lands as the docker
+    # gateway IP, SSR as the frontend container IP), so the isolated compose
+    # subnet is declared admin-trusted. Sound ONLY because the sole ingress
+    # is Caddy bound to 127.0.0.1 (see header comment) — never widen this
+    # beyond the compose network.
+    - LOCAL_ADMIN_CIDRS=172.28.0.0/16
+    - SSE_BACKPLANE=valkey
+    - CELERY_BROKER_URL=redis://valkey:6379/0
+    - SCHEDULER_MODE=external
+    - INGEST_MODE=celery
+    # Celery/multipod mode also REQUIRES shared metadata: per-service SQLite
+    # is a pod-local file, so the cron lease / ingest ledger / ingested-file
+    # manifest would each be private to one process. This stack only ever
+    # "worked" on SQLite because backend and worker share the ./data bind
+    # mount on one host — that is not a topology, it is a coincidence.
+    # validate_ingest_mode() now refuses to boot celery mode without it.
+    # Same Postgres instance and database as the DuckLake catalog above:
+    # separate table namespaces, one container to run locally. They are
+    # separate concerns and nothing in the code assumes they coincide.
+    - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    # Pass through DEBUG_RESPONSES from the host env (export it or set it in
+    # your gitignored .env) — without it the backend redacts the
+    # _debug_queries envelopes and the dashboard Debug Panel shows 0 queries.
+    - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+    - app-network
+    restart: unless-stopped
+    stop_grace_period: 75s
+    volumes:
+    - ./configs:/app/configs
+    - ./data:/app/data
+    - ./cache:/app/cache
+  caddy:
+    depends_on:
+    - backend
+    image: caddy:2-alpine
+    networks:
+    - app-network
+    ports:
+    # Loopback-only: local-dev topology (see header comment).
+    - 127.0.0.1:80:80
+    restart: unless-stopped
+    volumes:
+    - ./caddy/Caddyfile.multipod:/etc/caddy/Caddyfile:ro
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+    # SSR talks to the backend service directly — routing it through Caddy
+    # would classify server-side requests through the public proxy path.
+    - API_PROXY_URL=http://backend:8000
+    - NODE_OPTIONS=--max_old_space_size=1024
+    networks:
+    - app-network
+    restart: unless-stopped
+  postgres:
+    image: postgres:17-alpine
+    environment:
+    # Local-dev credentials only (see header comment) — override with
+    # DUCKLAKE_PG_PASSWORD for anything beyond a workstation.
+    - POSTGRES_USER=fla
+    - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
+    - POSTGRES_DB=ducklake
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+    - app-network
+    # No published ports on purpose: pods reach it on the compose network.
+    restart: unless-stopped
+    volumes:
+    - pgdata:/var/lib/postgresql/data
+
+  valkey:
+    image: valkey/valkey:8.0
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+    - app-network
+    # No published ports on purpose: pods reach valkey on the compose
+    # network. Add a local compose override if you need host access.
+    restart: unless-stopped
+
+  metadata-schema-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # One-shot: NOTHING creates the Postgres metadata schema at runtime.
+    # metadata/base.py wires _init_schema as the SQLite pool's schema_fn
+    # only, so SQLite self-initializes on first use and Postgres does not —
+    # without this step the stack boots clean and then fails every metadata
+    # query with `relation "cron_runs" does not exist`. Idempotent (every
+    # statement is CREATE ... IF NOT EXISTS and nothing is dropped), so it
+    # re-runs harmlessly on each `up` against a populated database.
+    command: ["python", "scripts/setup_pg_schema.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+    - PYTHONUNBUFFERED=1
+    # scripts/ is not a package and /app is not on sys.path in the image.
+    - PYTHONPATH=/app
+    - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    networks:
+    - app-network
+    restart: "no"
+    volumes:
+    # The runtime image only ships scripts/generate_openapi.py; mount the
+    # rest rather than growing the production image for a local-dev-only
+    # bootstrap step.
+    - ./scripts:/app/scripts:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # Prefork pool (celery's default) so task_time_limit is enforceable —
+    # the threads pool cannot deliver SIGTERM-based time limits. `celery` is
+    # included so tasks not matched by task_routes (default queue) are
+    # consumed too.
+    # Concurrency 6: per-file converts are I/O-bound (FOS GET + parquet PUT);
+    # 2 processes couldn't keep up with ~50 files/min of discovery inflow.
+    # Scale-out beyond one worker pod is the same lever (more replicas).
+    command: ["python", "-m", "celery", "-A", "backend.celery_app", "worker", "-l", "info", "-Q", "q.ingest,q.control,celery", "--concurrency=6"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      metadata-schema-init:
+        condition: service_completed_successfully
+    environment:
+    - PYTHONUNBUFFERED=1
+    - DUCKDB_MEMORY_LIMIT=4GB
+    - CELERY_BROKER_URL=redis://valkey:6379/0
+    # Cron/ingest bodies execute here and gate on INGEST_MODE; SSE progress
+    # events publish through the valkey backplane.
+    - INGEST_MODE=celery
+    - SSE_BACKPLANE=valkey
+    - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    # Shared metadata — same rationale as the backend service above.
+    - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    networks:
+    - app-network
+    restart: unless-stopped
+    volumes:
+    - ./configs:/app/configs
+    - ./data:/app/data
+    - ./cache:/app/cache
+
+  beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "celery", "-A", "backend.celery_app", "beat", "-S", "redbeat.RedBeatScheduler", "-l", "info"]
+    depends_on:
+      valkey:
+        condition: service_healthy
+    environment:
+    - PYTHONUNBUFFERED=1
+    - CELERY_BROKER_URL=redis://valkey:6379/0
+    - INGEST_MODE=celery
+    - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    # beat never calls validate_ingest_mode() (that fires in
+    # worker_process_init, and beat forks no worker children) and touches no
+    # metadata today — set here anyway so it can never quietly open a
+    # pod-local SQLite metadata file if that ever changes.
+    - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    networks:
+    - app-network
+    restart: unless-stopped
+    volumes:
+    - ./configs:/app/configs
+
+volumes:
+  pgdata:

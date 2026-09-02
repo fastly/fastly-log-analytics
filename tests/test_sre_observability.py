@@ -201,13 +201,15 @@ def test_deep_health_not_fooled_by_briefly_running_sync():
 
 
 def test_deep_health_degrades_on_commit_error():
-    # SRE-05: a commit cron erroring every run (buffer growing, nothing
-    # reaching Iceberg) is task='sync'-invisible — must degrade.
-    code, body = _deep_health([("sync", "success", 2, None), ("commit", "error", 1, "boom")])
+    # SRE-05: a commit (log_ingest) cron erroring every run (buffer growing,
+    # nothing reaching the lake) is discovery-invisible — must degrade.
+    # Pre-rename 'commit' rows are deliberately NOT matched: this scan is
+    # per-task-latest, so an old error row would degrade forever.
+    code, body = _deep_health([("sync", "success", 2, None), ("log_ingest", "error", 1, "boom")])
     assert code == 503
     svc = body["services"][0]
     assert svc["status"] == "degraded"
-    assert "commit cron errored" in svc["reason"]
+    assert "log_ingest cron errored" in svc["reason"]
 
 
 def test_deep_health_degrades_on_metadata_sync_error():

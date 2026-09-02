@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import (
     DASHBOARD_CACHE_TTL,
@@ -55,7 +56,7 @@ def test_get_aggregates_with_data(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -144,6 +145,21 @@ def test_self_heal_fires_once_and_returns_data_when_view_is_stale(in_memory_duck
         "backend.config.get_status",
         lambda _name: {"local_rows": 30, "earliest_log_at": start_time, "latest_log_at": latest},
     )
+
+    import os
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+
+    from backend.repositories._base import QueryRunner
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", lambda *a, **k: ([("url", "some_url", 10)], ["url"]))
 
     rebuild_calls = {"n": 0}
 
@@ -550,7 +566,7 @@ def test_get_aggregates_5xx_metric(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="5xx",
     )
@@ -574,7 +590,7 @@ def test_get_aggregates_hit_rate_metric(in_memory_duckdb, test_service_source):
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="hit_rate",
     )
@@ -598,7 +614,7 @@ def test_get_aggregates_debug_queries_populated(in_memory_duckdb, test_service_s
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -1076,7 +1092,7 @@ def test_get_aggregates_4xx_metric_returns_time_series(in_memory_duckdb, test_se
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="4xx",
     )
@@ -1098,7 +1114,7 @@ def test_get_aggregates_p95_latency_metric_uses_percentile_expression(in_memory_
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p95_latency",
     )
@@ -1119,7 +1135,7 @@ def test_get_aggregates_p50_latency_metric_uses_median_expression(in_memory_duck
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p50_latency",
     )
@@ -1140,7 +1156,7 @@ def test_get_aggregates_p99_latency_metric_uses_percentile_expression(in_memory_
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="p99_latency",
     )
@@ -1161,7 +1177,7 @@ def test_get_aggregates_throughput_metric_uses_throughput_formula(in_memory_duck
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="throughput",
     )
@@ -1182,7 +1198,7 @@ def test_get_aggregates_ttfb_metric_uses_ttfb_ms_expression(in_memory_duckdb, te
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="ttfb",
     )
@@ -1569,7 +1585,7 @@ def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
         src=test_service_source,
         start_time=st,
         end_time=et,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
     )
@@ -1604,6 +1620,10 @@ def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_s
         return [(f, f"{f}_val", 5) for f in fields], list(fields)
 
     monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n_rollups)
+
+    in_memory_duckdb.execute(
+        "CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ, status VARCHAR, host VARCHAR, req_bytes INTEGER, resp_bytes INTEGER)"
+    )
 
     dash.get_aggregates(
         con=in_memory_duckdb,
@@ -1645,7 +1665,7 @@ def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_s
         src=test_service_source,
         start_time=None,
         end_time=None,
-        filters={},
+        filters={"status": FilterSpec(mode="include", values=["200", "404", "500"])},
         chart_interval="1 minute",
         chart_metric="requests",
         fields_filter=["status", "req_bytes", "resp_bytes", "host"],

@@ -188,6 +188,7 @@ try:
         if "config_kwargs" not in kwargs:
             kwargs["config_kwargs"] = {}
         kwargs["config_kwargs"]["request_checksum_calculation"] = "when_required"
+        kwargs["config_kwargs"]["retries"] = {"max_attempts": 10, "mode": "standard"}
 
         from backend.utils import telemetry_proxy as _proxy
 

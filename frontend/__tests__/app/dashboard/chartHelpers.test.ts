@@ -7,6 +7,7 @@ const baseParams = {
   compareMode: false,
   compareStartTime: null,
   startTime: null,
+      endTime: null,
   trend: 'off',
   timezone: 'UTC',
   metric: 'requests',

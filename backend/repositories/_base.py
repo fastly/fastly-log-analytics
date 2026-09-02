@@ -393,14 +393,10 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         }
     )
     try:
-        con.execute(f"ATTACH ':memory:' AS {alias}")
-        con.from_arrow(tbl).create(f"{alias}.ngwaf_bots")
+        con.register(f"temp_arrow_{alias}", tbl)
+        con.execute(f"CREATE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
     except Exception as e:
-        _logger.warning("[ngwaf_bots] materializing %s.ngwaf_bots failed: %s", alias, e)
-        try:
-            con.execute(f"DETACH {alias}")
-        except Exception:
-            pass
+        _logger.warning("[ngwaf_bots] materializing %s_ngwaf_bots failed: %s", alias, e)
         return False
     return True
 
@@ -862,6 +858,8 @@ class QueryRunner:
             return cached
 
         actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
+        if actual_cols == ["timestamp"]:
+            actual_cols = []
         if not actual_cols:
             # The connection's bound view is stale — most likely the sync
             # cron deleted a buffer file the cached view SQL still references,
@@ -1090,12 +1088,35 @@ class QueryRunner:
             return out
 
         buffer_files = _list_parquets(buffer_dir, prune_mtime=True)
+        # Committed rows for the active hour live in the per-service
+        # DuckLake table (post-v3) — without this branch up to ~55 min of
+        # the live hour vanished from dashboards once a commit drained the
+        # buffer. DuckLake prunes the scan on file stats, so the timestamp
+        # WHERE below keeps this cheap. Tombstoned buffer parquets stay
+        # excluded above: their rows are ALREADY in the lake table and
+        # reading both double-counts (Trap #26).
+        lake_table = None
+        try:
+            from backend.core.iceberg._ducklake import ducklake_table_name
+
+            cand = ducklake_table_name(self.src)
+            row = self.con.execute(
+                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                [cand],
+            ).fetchone()
+            if row:
+                lake_table = cand
+        except Exception:
+            lake_table = None
         # Hourly-partition files are already scoped to the active hour —
         # no mtime pruning (compaction may rewrite them with fresh mtimes
-        # anyway), and tombstones only ever mark buffer files.
-        hourly_files = _list_parquets(hourly_dir, prune_mtime=False)
+        # anyway), and tombstones only ever mark buffer files. Legacy
+        # fallback for pre-DuckLake caches: skipped when the lake table
+        # exists, since migrated hourly files may be registered there too
+        # (reading both would double-count).
+        hourly_files = [] if lake_table else _list_parquets(hourly_dir, prune_mtime=False)
         self._last_active_direct_n_files = len(buffer_files) + len(hourly_files)
-        if not buffer_files and not hourly_files:
+        if not buffer_files and not hourly_files and not lake_table:
             # Nothing on disk for the active hour. Caller will report
             # empty live_res — semantically correct (no current-hour rows).
             return None
@@ -1113,6 +1134,9 @@ class QueryRunner:
                 branches.append(
                     f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
+            if lake_table:
+                lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
+                branches.append(f"SELECT {cols_sql} FROM {lake_ident} WHERE {where}")
             if hourly_files:
                 paths_sql = quote_path_list(hourly_files)
                 branches.append(
@@ -1236,8 +1260,6 @@ class QueryRunner:
 
         cache_dir = _cache_dir(self.src)
         rollup_dir = os.path.join(cache_dir, "rollups", "hour")
-        if not os.path.exists(rollup_dir):
-            return [], fields
 
         # Defense-in-depth: field names land in a SQL IN-list as quoted
         # literals AND the service name lands in the base-table identifier.
@@ -3983,7 +4005,7 @@ class QueryRunner:
                         live_q = (
                             f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "
                             f'FROM "{tmp}" t '
-                            f"INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id) "
+                            f"INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id) "
                             f"WHERE nb.bot_name IS NOT NULL "
                             f"GROUP BY 1, 2"
                         )

@@ -149,7 +149,7 @@ def _run_metadata_sync(
     start_progress(run_id, service_id=service_id, task="metadata_sync")
     _svc_name = cfg.get("name", service_id) if cfg else service_id
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("▶️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job started.", _display)
+    logger.info("🏎️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job started.", _display)
     _log_and_add_progress(
         run_id,
         service_id,
@@ -264,6 +264,10 @@ def _run_metadata_sync(
             job_name="metadata_sync",
             event={"type": "status", "message": "Updating DuckDB views..."},
         )
+        # read_only=False is load-bearing: a read-only connection makes the
+        # slow-path rebuild bind a TEMP view that dies with this connection
+        # moments later — the cron would pay the full rebuild cost for a
+        # no-op and the persistent per-service view would never refresh.
         con = get_connection(source=src, read_only=False)
         try:
             db_iceberg.update_iceberg_view(con, src)
@@ -321,13 +325,29 @@ def _run_metadata_sync(
 
     finalize_cron_duration(src, run_id, start_time_exec)
 
-    logger.info("⏹️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
+    logger.info("🏁  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
+
+
+# _run_metadata_sync can't take @cron_task (it doubles as a bootstrap helper
+# with extra kwargs), but external/Celery scheduling requires a registered
+# task — without this wrapper, RedBeat dispatches an unregistered name and
+# read-only (analyst) services silently stop refreshing.
+from backend.celery_app import app as _celery_app  # noqa: E402
+
+
+@_celery_app.task(name=f"{_run_metadata_sync.__module__}._run_metadata_sync_celery", bind=True)
+def _run_metadata_sync_celery(self, service_id: str, *args, **kwargs):
+    return _run_metadata_sync(service_id, *args, **kwargs)
+
+
+_run_metadata_sync.celery_task = _run_metadata_sync_celery  # type: ignore[attr-defined]
+_run_metadata_sync.delay = _run_metadata_sync_celery.delay  # type: ignore[attr-defined]
 
 
 # ── _run_ngwaf_bot_sync ──────────────────────────────────────────────────────
 
 
-@cron_task("sync_ngwaf_bots")
+@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
     """Fetch NGWAF VERIFIED-BOT records and upsert into the local SQLite cache.
 
@@ -371,7 +391,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         return
 
     svc_display = cfg.get("name", service_id)
-    logger.info("▶️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job started.", svc_display)
+    logger.info("🏎️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job started.", svc_display)
 
     prov = cfg.get("provisioning", {})
     retention_days = int(prov.get("cron_ngwaf", {}).get("log_retention_days", 30))
@@ -398,7 +418,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         )
         log_cron_run(src, "ngwaf_sync", 0.0, "success", summary=summary, run_id=run_id)
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
-        logger.info("⏹️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
+        logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
         return
 
     total_records = 0
@@ -465,7 +485,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "error", "message": str(e)})
         logger.exception("[ngwaf_sync] %s: sync failed: %s", svc_display, e)
 
-    logger.info("⏹️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
+    logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
 
 
 # ── _run_bot_data_refresh / _run_rdns_enrichment / _run_share_audit_purge ────
@@ -517,7 +537,7 @@ def _run_share_audit_purge() -> str:
 # ── _run_service_alerts_evaluation ───────────────────────────────────────────
 
 
-@cron_task("evaluate_alerts")
+@cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
     """Evaluate all enabled alerts for a specific service."""
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
@@ -532,7 +552,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 
     task_name = "alerts"
     _display = _display_label(src, service_id)
-    logger.info("▶️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
+    logger.info("🏎️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
 
     # Fetch alerts from per-service metadata SQLite (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)
@@ -543,7 +563,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     if not enabled_alerts:
         logger.info("🔔 \x1b[93m[alerts]\x1b[0m %s: No alerts configured, skipping.", _display)
         log_cron_run(src, task_name, time.monotonic() - start, "skipped", summary="No alerts configured")
-        logger.info("⏹️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
+        logger.info("🏁  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job finished.", _display)
         return
     # Past this point enabled_alerts is non-empty, so con_ro was opened
     # above — narrow for mypy.
@@ -704,7 +724,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 # ── _run_metadata_cleanup ────────────────────────────────────────────────────
 
 
-@cron_task("metadata_cleanup")
+@cron_task("metadata_cleanup", job_name="metadata_cleanup")
 def _run_metadata_cleanup(service_id: str) -> None:
     """Daily: trim usage_log + ingested_files + cron_runs per service retention cfg.
 
@@ -742,7 +762,7 @@ def _run_metadata_cleanup(service_id: str) -> None:
     _display = _display_label(src, service_id)
     color = JOB_COLORS.get("metadata_cleanup", "")
     label = f"{color}[metadata_cleanup]{RESET_COLOR}"
-    logger.info("▶️  %s %s: Starting metadata cleanup.", label, _display)
+    logger.info("🏎️  %s %s: Starting metadata cleanup.", label, _display)
 
     start_ts = time.time()
     run_id = start_cron_run(src, "metadata_cleanup")
@@ -783,7 +803,7 @@ def _run_metadata_cleanup(service_id: str) -> None:
             result["duration_s"],
         )
     else:
-        logger.info("⏹️  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
+        logger.info("🏁  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
 
     # Also trim the global system_metrics.db retention window. Idempotent
     # across per-service runs (the second call this day deletes 0 rows

@@ -1,0 +1,21 @@
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) -}}
+# Shared app state (configs/data/cache). ReadWriteOnce — every pod mounting
+# it is pinned to one node. See values.yaml for the >1-replica requirements.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fastly-log-analytics.pvcName" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  {{- if .Values.persistence.storageClassName }}
+  storageClassName: {{ .Values.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | quote }}
+{{- end }}
