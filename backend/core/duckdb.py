@@ -217,7 +217,7 @@ def _load_httpfs(con: duckdb.DuckDBPyConnection):
                 raise
 
 
-def _proxy_target_for(source: dict) -> str:
+def _proxy_target_for(source: dict, for_write: bool = False) -> str:
     """Where the telemetry proxy should forward DuckDB httpfs requests.
 
     Returns the CDN host (lowercased, scheme/path-stripped) when ``cdn_url``
@@ -226,6 +226,9 @@ def _proxy_target_for(source: dict) -> str:
     the native FOS endpoint as-is — moto-style ``http://host:port`` strings
     are honored by the proxy's scheme-aware branch (telemetry_proxy.py:239).
     """
+    if for_write:
+        return source.get("fos_native_endpoint") or source.get("endpoint") or ""
+
     cdn_url = (source.get("cdn_url") or "").strip()
     if cdn_url:
         return cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
@@ -250,7 +253,8 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     # doesn't see "http://http://...". USE_SSL=false in the SECRET
     # below tells httpfs to use http://.
     proxy_ep = telemetry_proxy.proxy_endpoint().replace("http://", "")
-    target_host = _proxy_target_for(source)
+    # Hardcode duckdb's proxy target to the native endpoint if the connection is for writing ducklake
+    target_host = _proxy_target_for(source, for_write=True)  # TEMPORARY FIX
     ctx = get_process_context() or ""
     headers: dict[str, str] = {
         "X-Fos-Target": target_host,

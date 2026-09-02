@@ -383,7 +383,13 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
     cdn_host = _cdn_host_for(cfg)
     # CDN routing uses ?key= auth — do NOT inject SigV4 there.
     if cdn_host and target_host == cdn_host:
+        if cfg.get("cdn_secret"):
+            headers["x-fastly-key"] = cfg["cdn_secret"]
         return headers
+
+    # For Native FOS writes, ALWAYS use cdn_secret to bypass rate limit
+    if cfg.get("cdn_secret"):
+        headers["x-fastly-key"] = cfg.get("cdn_secret")
 
     access_key = cfg.get("fos_access_key_id")
     secret_key = cfg.get("fos_secret_access_key")
@@ -404,6 +410,8 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
     # S3 requires for every signed request.
     S3SigV4Auth(credentials, "s3", region).add_auth(aws_req)
     headers.update(dict(aws_req.headers))
+    if cfg.get("cdn_secret"):
+        headers["x-fastly-key"] = cfg["cdn_secret"]
     return headers
 
 
@@ -456,6 +464,14 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
     target_host = request.headers.get("X-Fos-Target")
     if not target_host:
         return web.Response(status=400, text="Missing X-Fos-Target header")
+
+    service_id = request.headers.get("X-Telemetry-Service-Id")
+    if service_id and request.method in ("PUT", "POST", "DELETE"):
+        _cfg = _load_config_cached(service_id)
+        if _cfg:
+            _fos_native = (_cfg.get("fos_native_endpoint") or _cfg.get("fos_endpoint") or "").strip()
+            if _fos_native:
+                target_host = _fos_native.replace("https://", "").replace("http://", "").rstrip("/")
 
     # X-Fos-Target is normally a bare host (production: HTTPS implied).
     # Tests using moto run an http-only upstream on 127.0.0.1, so we
@@ -865,6 +881,8 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
                 request.headers["x-fastly-key"] = cdn_secret
         else:
             request.headers["X-Fos-Target"] = native_target
+            if cdn_secret:
+                request.headers["x-fastly-key"] = cdn_secret
 
         request.headers["X-Telemetry-Service-Id"] = service_id
         hint = _BOTO3_CALLER_HINT.get()

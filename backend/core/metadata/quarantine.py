@@ -110,20 +110,20 @@ def get_quarantine_summary(service_id: str) -> dict:
     con = get_con(service_id)
     row = con.execute(
         """
-        SELECT count(*),
-               coalesce(sum(corrupt_rows), 0),
-               min(quarantined_at),
-               max(quarantined_at)
+        SELECT count(*) AS total_files,
+               coalesce(sum(corrupt_rows), 0) AS total_corrupt_rows,
+               min(quarantined_at) AS oldest_at,
+               max(quarantined_at) AS newest_at
         FROM quarantined_files
         WHERE service_id = ?
         """,
         (service_id,),
     ).fetchone()
     return {
-        "total_files": row[0] if row else 0,
-        "total_corrupt_rows": row[1] if row else 0,
-        "oldest_at": row[2] if row else None,
-        "newest_at": row[3] if row else None,
+        "total_files": row.get("total_files", 0) if isinstance(row, dict) else (row[0] if row else 0),
+        "total_corrupt_rows": row.get("total_corrupt_rows", 0) if isinstance(row, dict) else (row[1] if row else 0),
+        "oldest_at": row.get("oldest_at") if isinstance(row, dict) else (row[2] if row else None),
+        "newest_at": row.get("newest_at") if isinstance(row, dict) else (row[3] if row else None),
     }
 
 
