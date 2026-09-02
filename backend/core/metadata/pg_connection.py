@@ -60,14 +60,51 @@ def is_postgres() -> bool:
     return bool(os.environ.get("METADATA_DSN"))
 
 
+class _CompatRow(dict):
+    """A row supporting BOTH ``row["col"]`` and ``row[0]``, like ``sqlite3.Row``.
+
+    The point of this module is that the existing body of SQLite-shaped
+    metadata SQL runs unchanged against Postgres. psycopg's plain
+    ``dict_row`` broke half of that contract: every ``.fetchone()[0]`` /
+    ``row[0]`` call site — and there are ~10 modules' worth, across cron
+    jobs, the ingest ledger, reconciliation and quarantine — raises
+    ``KeyError: 0``. The suite runs on SQLite, so none of it surfaced until
+    METADATA_DSN was actually set; observed live as the log_ingest cron
+    failing every tick with ``KeyError: 0`` from ``cron/jobs/commit.py``'s
+    ``.fetchone()[0]``, which pinned the service to "degraded".
+
+    ``sqlite3.Row`` allows both styles, so this mirrors it rather than
+    asking every call site to change. Integer/slice keys index the original
+    column order; anything else is a normal dict lookup.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, keys, values):
+        super().__init__(zip(keys, values, strict=False))
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int | slice):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+def _compat_row_factory(cursor):
+    """psycopg row factory producing :class:`_CompatRow`."""
+    desc = cursor.description
+    if desc is None:
+        return lambda values: values
+    keys = [d.name for d in desc]
+    return lambda values: _CompatRow(keys, values)
+
+
 def get_pg_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
         dsn = os.environ.get("METADATA_DSN")
         if not dsn:
             raise RuntimeError("METADATA_DSN is not set")
-        from psycopg.rows import dict_row
-
         # autocommit=True: every statement commits immediately, matching the
         # "one write unit per execute()+commit() pair" shape every SQLite
         # call site already assumes, without needing a real transaction
@@ -91,7 +128,7 @@ def get_pg_pool() -> ConnectionPool:
         min_size = min(int(os.environ.get("METADATA_PG_POOL_MIN", "2")), max_size)
         _pool = ConnectionPool(
             conninfo=dsn,
-            kwargs={"row_factory": dict_row, "autocommit": True},
+            kwargs={"row_factory": _compat_row_factory, "autocommit": True},
             min_size=min_size,
             max_size=max_size,
             timeout=float(os.environ.get("METADATA_PG_POOL_TIMEOUT", "30")),

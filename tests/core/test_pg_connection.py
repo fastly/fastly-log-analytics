@@ -322,3 +322,52 @@ def test_is_postgres_toggles_on_env(monkeypatch):
     assert pgc.is_postgres() is False
     monkeypatch.setenv("METADATA_DSN", "postgresql://x/y")
     assert pgc.is_postgres() is True
+
+
+def test_compat_row_supports_positional_and_named_access():
+    """The seam exists so SQLite-shaped metadata SQL runs unchanged against
+    Postgres. psycopg's plain ``dict_row`` broke half of that: ~10 modules
+    do ``.fetchone()[0]`` / ``row[0]``, and every one raised ``KeyError: 0``
+    under Postgres while passing on SQLite (where the suite runs). It
+    surfaced live as the log_ingest cron failing every tick from
+    ``cron/jobs/commit.py``'s ``.fetchone()[0]``, pinning the service to
+    "degraded". ``sqlite3.Row`` allows both styles; so must this.
+    """
+    row = pgc._CompatRow(["count", "name"], [7, "svc-a"])
+
+    # Positional — the access style that was broken.
+    assert row[0] == 7
+    assert row[1] == "svc-a"
+    assert row[0:2] == (7, "svc-a")
+
+    # Named — must keep working.
+    assert row["count"] == 7
+    assert row["name"] == "svc-a"
+    assert row.get("count") == 7
+    assert row.get("absent", "dflt") == "dflt"
+
+    # Still a real mapping for callers that treat it as one.
+    assert dict(row) == {"count": 7, "name": "svc-a"}
+    assert list(row.keys()) == ["count", "name"]
+
+    with pytest.raises(KeyError):
+        row["nope"]
+    with pytest.raises(IndexError):
+        row[9]
+
+
+def test_compat_row_factory_handles_no_description():
+    """A statement with no result set (INSERT/DDL) has ``description is
+    None``; the factory must not blow up building keys from it."""
+    from unittest.mock import MagicMock
+
+    cur = MagicMock()
+    cur.description = None
+    make = pgc._compat_row_factory(cur)
+    assert make((1, 2)) == (1, 2)
+
+    cur.description = [MagicMock(name="d1"), MagicMock(name="d2")]
+    cur.description[0].name = "a"
+    cur.description[1].name = "b"
+    made = pgc._compat_row_factory(cur)((10, 20))
+    assert made[0] == 10 and made["b"] == 20
