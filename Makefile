@@ -1,4 +1,4 @@
-.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e deploy-validate stray-file-gate
+.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -291,6 +291,54 @@ security-regression:
 # OTEL_EXPORTER=console spam mode (the 2026-06-10 prod-stdout-flood incident).
 otel-guard:
 	bash scripts/check_no_console_otel.sh
+
+# ── Local multipod stack ──────────────────────────────────────────────────────
+# The local stack is BOTH compose files; omitting the observability one drops
+# Grafana/Prometheus/Tempo and their exporters.
+COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
+# App services whose image bakes in the source tree. Only configs/, data/ and
+# cache/ are bind-mounted, so a .py edit is invisible until the image is
+# rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
+COMPOSE_APP := backend worker beat frontend
+
+# Rebuild the app images and recreate those containers. Use after ANY code
+# change. --force-recreate is what picks up new images and changed env.
+stack-restart:
+	docker compose $(COMPOSE_STACK) build $(COMPOSE_APP)
+	docker compose $(COMPOSE_STACK) up -d --force-recreate $(COMPOSE_APP)
+	@$(MAKE) --no-print-directory stack-health
+
+# Bring the stack up / apply compose or env changes. No rebuild, so code edits
+# are NOT picked up — use stack-restart for those.
+stack-up:
+	docker compose $(COMPOSE_STACK) up -d
+	@$(MAKE) --no-print-directory stack-health
+
+# Stop the containers, keeping volumes (never `down -v` — that drops Postgres,
+# which now holds both the metadata and the DuckLake catalog).
+stack-down:
+	docker compose $(COMPOSE_STACK) down
+
+stack-ps:
+	docker compose $(COMPOSE_STACK) ps
+
+stack-logs:
+	docker compose $(COMPOSE_STACK) logs -f --tail=100 $(COMPOSE_APP)
+
+# Wait for the API to answer, then print deep health. A `degraded` reading with
+# "Process interrupted by server restart" right after a recreate is just the
+# in-flight cron that got killed; it clears on the next successful tick.
+stack-health:
+	@printf 'waiting for the API'; \
+	for i in $$(seq 1 30); do \
+		if curl -fsS http://localhost/api/health >/dev/null 2>&1; then printf ' up\n'; break; fi; \
+		printf '.'; sleep 2; \
+	done
+	@# NOT -f here: deep health answers 503 when a service is degraded, and
+	@# -f would turn that meaningful body into "not answering".
+	@curl -sS 'http://localhost/api/health?deep=1' 2>/dev/null \
+		| python3 -m json.tool 2>/dev/null \
+		|| echo 'API not answering — try: make stack-logs'
 
 # Deploy-surface validation. `docker compose config -q` parses + validates the
 # multipod compose (no daemon needed); helm lint + template validate the chart

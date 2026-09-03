@@ -344,12 +344,156 @@
       "description": "The total disk space used by the Postgres database backing DuckLake metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
     },
     {
+      "id": 100,
+      "type": "row",
+      "title": "Triage & Latency Distribution",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 101,
+      "type": "heatmap",
+      "title": "Global Latency Heatmap",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(traces_spanmetrics_latency_bucket{span_name!=\"smoke-span\"}[1m])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges"
+        }
+      },
+      "description": "Visualizes the distribution of latencies over time. Bright spots indicate where most requests fall; isolated dots higher up reveal transient latency spikes."
+    },
+    {
+      "id": 102,
+      "type": "bargauge",
+      "title": "Top 5 Slowest Endpoints (p95)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(5, histogram_quantile(0.95, sum by (span_name, le) (rate(traces_spanmetrics_latency_bucket{span_name!=\"smoke-span\"}[5m]))))",
+          "legendFormat": "{{span_name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 8,
+        "h": 7
+      },
+      "description": "The current 5 slowest endpoints by 95th percentile latency."
+    },
+    {
+      "id": 103,
+      "type": "bargauge",
+      "title": "Top 5 Memory-Hungry Containers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(5, docker_container_memory_usage_bytes{name=~\".*-(backend|worker|beat|frontend|caddy|postgres|valkey)-[0-9]+$\"})",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 14,
+        "w": 8,
+        "h": 7
+      },
+      "description": "The top 5 containers consuming the most RAM right now."
+    },
+    {
+      "id": 104,
+      "type": "bargauge",
+      "title": "Top 5 Failing Background Tasks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(5, sum by (name) (rate(celery_task_failed_total[5m]))) > 0",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 14,
+        "w": 8,
+        "h": 7
+      },
+      "description": "Tasks failing most frequently. Empty if no failures."
+    },
+    {
       "type": "row",
       "title": "Application API (OTel spans \u2192 RED metrics)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 4,
+        "y": 21,
         "w": 24,
         "h": 1
       },
@@ -365,7 +509,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 22,
         "w": 8,
         "h": 9
       },
@@ -417,7 +561,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 5,
+        "y": 22,
         "w": 8,
         "h": 9
       },
@@ -469,7 +613,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 5,
+        "y": 22,
         "w": 8,
         "h": 9
       },
@@ -518,7 +662,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 31,
         "w": 24,
         "h": 1
       },
@@ -534,7 +678,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 32,
         "w": 8,
         "h": 9
       },
@@ -586,7 +730,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 15,
+        "y": 32,
         "w": 8,
         "h": 9
       },
@@ -638,7 +782,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 15,
+        "y": 32,
         "w": 8,
         "h": 9
       },
@@ -686,7 +830,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 41,
         "w": 24,
         "h": 1
       },
@@ -702,7 +846,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -754,7 +898,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 25,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -806,7 +950,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 25,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -869,7 +1013,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 25,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -917,7 +1061,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 51,
         "w": 24,
         "h": 1
       },
@@ -933,7 +1077,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -985,7 +1129,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 35,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1047,7 +1191,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 35,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1099,7 +1243,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 35,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1149,7 +1293,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 61,
         "w": 24,
         "h": 1
       },
@@ -1165,7 +1309,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 62,
         "w": 6,
         "h": 9
       },
@@ -1217,7 +1361,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 45,
+        "y": 62,
         "w": 6,
         "h": 9
       },
@@ -1269,7 +1413,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 45,
+        "y": 62,
         "w": 6,
         "h": 9
       },
@@ -1331,7 +1475,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 45,
+        "y": 62,
         "w": 6,
         "h": 9
       },
@@ -1388,6 +1532,36 @@
     "list": []
   },
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": true,
+        "expr": "changes(process_start_time_seconds[5m]) > 0",
+        "iconColor": "red",
+        "name": "Process Restarts",
+        "step": "15s",
+        "tagKeys": "job, instance",
+        "textFormat": "Restarted: {{job}} - {{instance}}",
+        "titleFormat": "Process Restart",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": false,
+        "expr": "vector(1)",
+        "iconColor": "green",
+        "name": "Deployments (Example)",
+        "step": "60s",
+        "textFormat": "Example Deployment Marker. Edit this annotation to query your CI/CD metrics.",
+        "titleFormat": "Deploy",
+        "type": "dashboard"
+      }
+    ]
   }
 }

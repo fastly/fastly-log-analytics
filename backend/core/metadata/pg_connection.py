@@ -121,10 +121,17 @@ def get_pg_pool() -> ConnectionPool:
         # metadata moved to Postgres: every metadata-touching route hung 30 s
         # and 503'd.
         #
+        # The default MUST exceed the process's thread ceiling or the excess
+        # threads block for `timeout` and then fail. Concretely, for the API
+        # process that ceiling is FastAPI/anyio's default threadpool of 40,
+        # plus the scheduler and RT-poller threads — measured at 36 live
+        # threads against a pool of 32, which is exactly how PoolTimeout came
+        # back after the first sizing pass. 64 clears 40 + slack.
+        #
         # Keep METADATA_PG_POOL_MAX * (backend + worker + beat processes) below
-        # the server's max_connections, and remember DuckLake's own catalog
-        # connections share that budget.
-        max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "32"))
+        # the server's max_connections (192 of 300 at this default), and
+        # remember DuckLake's own catalog connections share that budget.
+        max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "64"))
         min_size = min(int(os.environ.get("METADATA_PG_POOL_MIN", "2")), max_size)
         _pool = ConnectionPool(
             conninfo=dsn,
