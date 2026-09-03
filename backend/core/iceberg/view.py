@@ -948,7 +948,33 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
     t_start = time.time()
     view_name = _view_target_name(source, target_table)
 
-    _ducklake_attach(con, source, read_only=False)
+    # Determine the connection's actual read-only mode up front — this
+    # function also runs on read-only, POOLED request connections (the
+    # slow-path rebuild triggered when the fast-path view token can't be
+    # verified), not only on cron's dedicated read-write connections.
+    is_read_only = False
+    try:
+        res = con.execute(
+            "SELECT readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp','lake') LIMIT 1"
+        ).fetchone()
+        is_read_only = bool(res and res[0])
+    except Exception as e:
+        logger.error("[iceberg] duckdb_databases probe failed: %s", e)
+
+    # Only attach "lake" if it isn't already attached on this connection,
+    # and match the connection's real read-only mode when we do. Blindly
+    # re-attaching with read_only=False (the old behavior) on a connection
+    # where "lake" is already attached READ_ONLY throws "database with
+    # name 'lake' already exists" — caught below as a harmless no-op by
+    # _ducklake_attach's broad "already exists" match, but the mode-
+    # mismatched re-attach attempt itself corrupts the internal ducklake
+    # metadata catalog as a side effect, leaving every later
+    # ducklake_snapshots('lake') call on this (pooled, long-lived)
+    # connection failing with "Catalog __ducklake_metadata_lake does not
+    # exist" for the rest of its life. See AGENTS.md trap #33.
+    lake_attached = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
+    if not lake_attached:
+        _ducklake_attach(con, source, read_only=is_read_only)
 
     try:
         buf_files = _core_mod.buffer_files(source, table_name=target_table)
@@ -989,16 +1015,6 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         existing_cols = _existing_union_cols(con, committed_parts, buf_files[0] if buf_files else None)
 
     final_sql = _finalize_view_sql(union_sql, source, target_table, dynamic_schema_field_names, existing_cols)
-
-    is_read_only = False
-    try:
-        res = con.execute(
-            "SELECT database_name, readonly FROM duckdb_databases() WHERE database_name NOT IN ('system','temp','lake') LIMIT 1"
-        ).fetchone()
-        if res is not None and bool(res[1]):
-            is_read_only = True
-    except Exception as e:
-        logger.error("[iceberg] duckdb_databases probe failed: %s", e)
 
     if is_read_only:
         create_stmt = f"CREATE OR REPLACE TEMP VIEW {view_name} AS {final_sql}"

@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 
 from backend import config
 from backend.utils.sql_validator import escape_sql_literal
@@ -38,6 +39,24 @@ from backend.utils.sql_validator import escape_sql_literal
 logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Serializes ``ATTACH ... AS lake`` across every connection in this process.
+# Concurrent connections attaching a DuckLake catalog under the SAME alias
+# name ("lake") race and silently corrupt each other's local catalog
+# metadata — the ATTACH statement on EVERY racing connection reports
+# success (no exception), but ``ducklake_snapshots('lake')`` (and anything
+# else touching the catalog) then fails forever on that connection with
+# ``Catalog "__ducklake_metadata_lake" does not exist``. Verified
+# empirically: 6 threads each opening their own read-only connection to the
+# same on-disk .duckdb file and calling ``_ducklake_attach`` concurrently
+# reproduced the corruption on ALL 6 connections every time; serializing
+# the attach with this lock made all 6 succeed, every time. This is what
+# poisons pooled connections built during startup, when several requests
+# concurrently trigger fresh connection builds. A single-file DuckDB attach
+# to the same physical file is unaffected (that case is already
+# process-exclusive per ADR-18) — this is specifically about the ``lake``
+# alias/extension state, not the main database file.
+_attach_lock = threading.Lock()
 
 # Same knob the local tiered compaction honors (backend/core/local_compaction.py
 # _MAX_PARTITION_BYTES). Keeping the two caps on one env var means DuckLake
@@ -123,44 +142,51 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
 
     data_path = config.DUCKLAKE_DATA_PATH or _default_data_path(source)
 
-    try:
-        con.execute("INSTALL ducklake; LOAD ducklake;")
-    except Exception as e:
-        logger.warning("[ducklake] %s: failed to INSTALL/LOAD ducklake extension: %s", service_id, e)
-        return False
-
-    if read_only and (dsn.startswith("postgres:") or not os.path.exists(dsn)):
-        # A read-only attach of a not-yet-initialized catalog fails ("does
-        # not exist - and creating a new DuckLake is explicitly disabled") —
-        # for a local file we can cheaply detect that via os.path.exists;
-        # for a Postgres DSN we can't, so always pre-create idempotently.
-        # Create with a transient read-write attach so fresh services get a
-        # queryable (empty) lake immediately.
+    # Everything below — extension load included — races with any other
+    # connection in this process attaching the same "lake" alias
+    # concurrently; see _attach_lock's docstring. A hang was observed in
+    # testing when only the ATTACH statements were serialized and
+    # INSTALL/LOAD ducklake was left outside the lock, so the whole
+    # function body is covered.
+    with _attach_lock:
         try:
-            con.execute(
-                f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
-                f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
-            )
-            con.execute("DETACH __lake_init")
+            con.execute("INSTALL ducklake; LOAD ducklake;")
         except Exception as e:
-            if "already attached" not in str(e) and "already exists" not in str(e):
-                logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, e)
+            logger.warning("[ducklake] %s: failed to INSTALL/LOAD ducklake extension: %s", service_id, e)
+            return False
 
-    ro = ", READ_ONLY" if read_only else ""
-    attach_sql = (
-        f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
-        f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE);"
-    )
-    try:
-        con.execute(attach_sql)
-    except Exception as e:
-        msg = str(e)
-        if "already exists" in msg or "already attached" in msg:
-            return True
-        logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
-        return False
-    if not read_only:
-        _apply_target_file_size(con)
+        if read_only and (dsn.startswith("postgres:") or not os.path.exists(dsn)):
+            # A read-only attach of a not-yet-initialized catalog fails ("does
+            # not exist - and creating a new DuckLake is explicitly disabled") —
+            # for a local file we can cheaply detect that via os.path.exists;
+            # for a Postgres DSN we can't, so always pre-create idempotently.
+            # Create with a transient read-write attach so fresh services get a
+            # queryable (empty) lake immediately.
+            try:
+                con.execute(
+                    f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
+                    f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
+                )
+                con.execute("DETACH __lake_init")
+            except Exception as e:
+                if "already attached" not in str(e) and "already exists" not in str(e):
+                    logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, e)
+
+        ro = ", READ_ONLY" if read_only else ""
+        attach_sql = (
+            f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
+            f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE);"
+        )
+        try:
+            con.execute(attach_sql)
+        except Exception as e:
+            msg = str(e)
+            if "already exists" in msg or "already attached" in msg:
+                return True
+            logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
+            return False
+        if not read_only:
+            _apply_target_file_size(con)
     return True
 
 
