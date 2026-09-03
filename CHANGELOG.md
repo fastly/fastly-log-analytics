@@ -35,7 +35,7 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 
 - **`INGEST_MODE=celery` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
 - **`scripts/setup_pg_schema.py` is a required deploy step** when using Postgres metadata. Nothing creates that schema at runtime — skip it and the stack boots cleanly, then fails every metadata query.
-- Deployments that set `DUCKLAKE_CATALOG` empty while running `INGEST_MODE=celery` (including the Helm chart's shipped defaults) will not start until it is configured.
+- Deployments that set `DUCKLAKE_CATALOG` empty while running `INGEST_MODE=celery` will not start until it is configured. The Helm chart now defaults to `config.ingestMode: sync` (installable with no `--set` flags) and rejects a celery install that is missing the Postgres DSNs or the broker at `helm template` time.
 
 ### Known limitations
 

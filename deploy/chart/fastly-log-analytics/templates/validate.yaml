@@ -1,0 +1,57 @@
+{{/*
+Template-time coherence gates for the ingest topology. Renders NO manifest —
+it only fails.
+
+`backend/config.py::validate_ingest_mode()` refuses to boot a backend or a
+Celery worker whose `INGEST_MODE=celery` is not backed by a Postgres
+DuckLake catalog and a Postgres metadata database. That gate is correct, but
+on Kubernetes it surfaces only as CrashLoopBackOff on backend, worker AND
+beat simultaneously, and the operator has to shell out to pod logs to learn
+that two values were missing. These checks reproduce the same conditions at
+`helm install` / `helm template` time and name the value to set.
+
+The one condition that cannot be checked here is a pre-created
+`secrets.existingSecret` that is missing a key: the chart cannot read a
+Secret it did not create. That case is caught by the non-optional
+`secretKeyRef` in `fastly-log-analytics.sharedEnv`, which stops the pod at
+CreateContainerConfigError with "couldn't find key ... in Secret" rather
+than starting it and letting the boot gate kill it.
+*/}}
+{{- $mode := .Values.config.ingestMode | default "" -}}
+{{- if not (has $mode (list "sync" "celery")) -}}
+{{- fail (printf "config.ingestMode must be \"sync\" (single-pod ingest on the in-process scheduler, no external datastores) or \"celery\" (the multi-pod ingest fleet); got %q. The backend treats every unrecognised value as \"sync\", so a typo here would silently disable the Celery ingest fleet instead of failing." $mode) -}}
+{{- end -}}
+
+{{- if not (has (.Values.config.schedulerMode | default "") (list "inprocess" "external")) -}}
+{{- fail (printf "config.schedulerMode must be \"inprocess\" or \"external\"; got %q." (.Values.config.schedulerMode | default "")) -}}
+{{- end -}}
+
+{{- if not (has (.Values.config.sseBackplane | default "") (list "local" "valkey")) -}}
+{{- fail (printf "config.sseBackplane must be \"local\" or \"valkey\"; got %q." (.Values.config.sseBackplane | default "")) -}}
+{{- end -}}
+
+{{- if and (eq .Values.config.schedulerMode "external") (ne $mode "celery") -}}
+{{- fail (printf "config.schedulerMode=external requires config.ingestMode=celery. External mode routes the discovery/ingest job family to RedBeat in the Celery broker, and with config.ingestMode=%q there is no worker fleet consuming them — ingest would stop silently, with the scheduler reporting success. Set config.ingestMode=celery (and its two Postgres DSNs), or config.schedulerMode=inprocess." $mode) -}}
+{{- end -}}
+
+{{- $hasBroker := or .Values.secrets.existingSecret .Values.secrets.celeryBrokerUrl -}}
+{{- if and (eq .Values.config.sseBackplane "valkey") (not $hasBroker) -}}
+{{- fail "config.sseBackplane=valkey publishes SSE events through the Celery broker, so it needs a broker URL: set secrets.celeryBrokerUrl=redis://HOST:6379/0, or set secrets.existingSecret to a pre-created Secret carrying CELERY_BROKER_URL. Without one the publisher falls back to redis://localhost:6379/0 and every publish fails. Use config.sseBackplane=local for a single-pod install." -}}
+{{- end -}}
+
+{{- if eq $mode "celery" -}}
+
+{{- $catalog := required "config.ingestMode=celery requires config.ducklakeCatalog to be a Postgres DSN, e.g. postgresql://USER:PASSWORD@HOST:5432/DBNAME. Celery mode fans writes out across worker pods while the backend reads, and a DuckDB-file catalog is single-process — concurrent merges tear it. Postgres and valkey are bring-your-own (this chart declares no subchart dependencies); see the chart README. To install without them, use the default config.ingestMode=sync." .Values.config.ducklakeCatalog -}}
+{{- if not (or (hasPrefix "postgres://" $catalog) (hasPrefix "postgresql://" $catalog)) -}}
+{{- fail (printf "config.ducklakeCatalog must be a Postgres DSN (postgres:// or postgresql://) when config.ingestMode=celery; got %q. backend/config.py::validate_ingest_mode() rejects anything else at boot, because a file catalog cannot serve concurrent worker writers plus backend readers." $catalog) -}}
+{{- end -}}
+
+{{- if not .Values.secrets.existingSecret -}}
+{{- $dsn := required "config.ingestMode=celery requires a shared Postgres metadata database: set secrets.metadataDsn=postgresql://USER:PASSWORD@HOST:5432/DBNAME, or set secrets.existingSecret to the name of a pre-created Secret carrying the keys CELERY_BROKER_URL and METADATA_DSN. Per-pod SQLite metadata cannot serialize the cron lease, the ingest ledger or the ingested-file manifest across worker pods, so every worker would re-discover and re-convert the same objects. To install without Postgres, use the default config.ingestMode=sync." .Values.secrets.metadataDsn -}}
+{{- if not (or (hasPrefix "postgres://" $dsn) (hasPrefix "postgresql://" $dsn)) -}}
+{{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) when config.ingestMode=celery; got %q." $dsn) -}}
+{{- end -}}
+{{- $_ := required "config.ingestMode=celery requires a broker: set secrets.celeryBrokerUrl=redis://HOST:6379/0 (the valkey/redis instance the workers, beat and the KEDA scaler share), or set secrets.existingSecret to the name of a pre-created Secret carrying CELERY_BROKER_URL. Without it, discovery dispatches into nothing." .Values.secrets.celeryBrokerUrl -}}
+{{- end -}}
+
+{{- end -}}

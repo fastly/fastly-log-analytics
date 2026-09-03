@@ -4,6 +4,17 @@
 # supported topology is the single-VM docker-compose.prod.yml). It exists to
 # exercise the multi-pod Celery/valkey split on Kubernetes.
 #
+# PREREQUISITES. The defaults below install the single-node topology
+# (config.ingestMode: sync) and need NOTHING but a cluster with a
+# ReadWriteOnce StorageClass — `helm install` with no --set flags works.
+#
+# The scaled topology (config.ingestMode: celery) needs two datastores that
+# this chart does NOT ship: it declares no subchart dependencies, so Postgres
+# and valkey/redis are bring-your-own. See README.md for the value set, and
+# note that selecting celery mode without them fails at `helm template` time
+# with a message naming each missing value — it does not deploy pods that
+# then CrashLoop.
+#
 # Applies to the STATELESS FRONTEND only. The backend Deployment is pinned to
 # replicas: 1 in the template and ignores this value, because the serving tier
 # is single-pod-only: the per-service `.duckdb` file is a read-write
@@ -86,6 +97,11 @@ autoscaling:
 # Shared app state (configs + data + cache). ReadWriteOnce: every pod that
 # mounts it is pinned to the same node. Scaling past one node requires
 # METADATA_DSN/DUCKLAKE_CATALOG (Postgres) + shared object storage instead.
+#
+# enabled: false swaps the PVC for an emptyDir, which loses /app/configs on
+# every pod restart — that is where the service registry lives, so the
+# install forgets every configured service. Only turn it off for a
+# throwaway kick-the-tires install.
 persistence:
   enabled: true
   # Use an existing PVC instead of creating one.
@@ -96,21 +112,48 @@ persistence:
   size: 20Gi
 
 config:
-  ingestMode: celery
-  schedulerMode: external
-  sseBackplane: valkey
+  # "sync"   — single-node ingest on the backend pod's in-process APScheduler.
+  #            Needs no Postgres, no broker, no worker/beat pods. This is the
+  #            app's own default (backend/config.py: INGEST_MODE) and the only
+  #            mode that installs with no further values, so it is the chart
+  #            default too.
+  # "celery" — the horizontally-scaled ingest fleet (ADR-15/ADR-16). Renders
+  #            the worker + beat Deployments and the KEDA ScaledObject, and
+  #            REQUIRES all three of config.ducklakeCatalog,
+  #            secrets.metadataDsn and secrets.celeryBrokerUrl (or an
+  #            existingSecret carrying the latter two). Both DSNs must be
+  #            Postgres: a DuckDB-file catalog is single-process and per-pod
+  #            SQLite metadata cannot serialize the cron lease across pods.
+  #            backend/config.py::validate_ingest_mode() enforces the same
+  #            three conditions at boot; templates/validate.yaml enforces them
+  #            at template time so a misconfiguration is a `helm install`
+  #            error, not a CrashLoopBackOff.
+  #
+  # Note this scales INGEST only. The serving tier stays single-pod in both
+  # modes — see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
+  ingestMode: sync
+  # "external" hands the discovery/ingest job family to RedBeat in the broker,
+  # so it only makes sense with ingestMode: celery (enforced at template time).
+  schedulerMode: inprocess
+  # "valkey" fans SSE events out across pods via the Celery broker, so it
+  # needs secrets.celeryBrokerUrl. "local" is in-process.
+  sseBackplane: local
   # Pin to the subnet your ingress/proxy pods actually egress from (pod CIDR
   # or the RFC1918 ranges below). The backend REFUSES TO BOOT on `*` — a
   # wildcard lets any direct client spoof X-Forwarded-For and be classified
   # loopback-admin.
   trustedProxyIps: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   duckdbMemoryLimit: "4GB"
+  # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
+  # which is correct for ingestMode: sync and rejected for ingestMode: celery
+  # (which requires postgres:// or postgresql://).
   ducklakeCatalog: ""
   ducklakeDataPath: ""
   hotS3Endpoint: ""
 
 # Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
-# does not take a redis:// URL). Keep in sync with secrets.celeryBrokerUrl.
+# does not take a redis:// URL). Only read when autoscaling.enabled and
+# ingestMode: celery. Keep in sync with secrets.celeryBrokerUrl.
 broker:
   host: valkey-master
   port: 6379
@@ -121,13 +164,23 @@ broker:
 # CELERY_BROKER_URL and (optionally) METADATA_DSN and set existingSecret —
 # values-provided strings land in the release manifest and stay readable to
 # anyone with helm access.
+# Both are empty by default because the default (sync) install needs neither,
+# and an unused broker URL pointing at a valkey that may not exist is worse
+# than no default at all. In celery mode both are required — either here or,
+# preferred, via existingSecret.
 secrets:
   # Name of a pre-created Secret. When set, no Secret is templated and
-  # celeryBrokerUrl/metadataDsn below are ignored.
+  # celeryBrokerUrl/metadataDsn below are ignored. It must carry
+  # CELERY_BROKER_URL (and METADATA_DSN in celery mode) — the chart cannot
+  # read a Secret it did not create, so a missing key surfaces as the pod
+  # failing to start with "couldn't find key ... in Secret".
   existingSecret: ""
-  celeryBrokerUrl: "redis://valkey-master:6379/0"
+  # e.g. redis://valkey-master:6379/0
+  celeryBrokerUrl: ""
+  # e.g. postgresql://fla:PASSWORD@postgres:5432/ducklake
   metadataDsn: ""
 
+# Worker and beat Deployments are rendered only in ingestMode: celery.
 workers:
   # Same RWO-PVC caveat as replicaCount above.
   replicaCount: 1
