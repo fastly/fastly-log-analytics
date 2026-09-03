@@ -299,7 +299,12 @@ COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.
 # App services whose image bakes in the source tree. Only configs/, data/ and
 # cache/ are bind-mounted, so a .py edit is invisible until the image is
 # rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
-COMPOSE_APP := backend worker beat frontend
+#
+# metadata-schema-init belongs here even though it is a one-shot: it has its
+# own `build:` block, so compose gives it its OWN image rather than reusing
+# the backend's. Omitting it meant `up` started it from a stale image and it
+# died with ModuleNotFoundError on a module that had just been added.
+COMPOSE_APP := backend worker beat frontend metadata-schema-init
 
 # Rebuild the app images and recreate those containers. Use after ANY code
 # change. --force-recreate is what picks up new images and changed env.
