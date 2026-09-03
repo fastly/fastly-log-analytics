@@ -67,7 +67,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The total number of API requests per second handled by the application, excluding internal smoke tests. High sustained rates may require scaling the backend."
     },
     {
       "id": 2,
@@ -119,7 +120,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The number of analytical queries currently being processed by the backend. Spikes indicate high user concurrency or slow-running queries."
     },
     {
       "id": 3,
@@ -179,7 +181,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The number of log ingestion tasks waiting in the Celery queue. A growing queue indicates ingestion is falling behind, potentially delaying data visibility."
     },
     {
       "id": 4,
@@ -231,7 +234,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The maximum number of active Celery worker processes across all worker pods. Useful for verifying auto-scaling behavior."
     },
     {
       "id": 5,
@@ -283,7 +287,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The total memory currently consumed by backend containers. Continuous growth indicates a memory leak; sudden drops might suggest OOM kills."
     },
     {
       "id": 6,
@@ -335,7 +340,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The total disk space used by the Postgres database backing DuckLake metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
     },
     {
       "type": "row",
@@ -398,7 +404,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "API request rates broken down by individual endpoint. Helps identify which parts of the application are experiencing the most traffic."
     },
     {
       "id": 9,
@@ -449,7 +456,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The 95th percentile response time for each API endpoint. This highlights the tail latency experienced by the slowest 5% of users."
     },
     {
       "id": 10,
@@ -501,7 +509,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The rate of API requests returning HTTP error statuses (5xx/4xx), broken down by endpoint. A non-zero rate here usually requires investigation."
     },
     {
       "type": "row",
@@ -564,7 +573,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The number of DuckDB queries currently executing across the system. Correlates with user activity and complex dashboard loads."
     },
     {
       "id": 13,
@@ -615,7 +625,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The 95th percentile execution time for analytical DuckDB queries. Increases here will directly impact user dashboard load times."
     },
     {
       "id": 14,
@@ -666,7 +677,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The 95th percentile wait time for a thread to acquire a DuckDB connection from the pool. High wait times mean queries are queued waiting for connections, suggesting the connection pool might be exhausted or queries are too slow."
     },
     {
       "type": "row",
@@ -729,7 +741,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The number of tasks pending in each Celery queue. Helps identify bottlenecks in specific background processes."
     },
     {
       "id": 17,
@@ -780,7 +793,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The rate at which different background tasks are successfully completing. Validates that asynchronous work is progressing."
     },
     {
       "id": 18,
@@ -842,7 +856,8 @@
           "range": true,
           "refId": "B"
         }
-      ]
+      ],
+      "description": "A comparison of tasks entering the system versus tasks failing. A rising failure rate indicates systemic issues with background processing."
     },
     {
       "id": 19,
@@ -893,7 +908,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The 95th percentile execution time for background tasks. Identifying slow tasks can help optimize asynchronous workloads."
     },
     {
       "type": "row",
@@ -956,7 +972,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The rate of commands processed by the Valkey (Redis) instance. High throughput here is normal, but unexpected spikes might indicate cache thrashing."
     },
     {
       "id": 22,
@@ -1017,7 +1034,8 @@
           "range": true,
           "refId": "B"
         }
-      ]
+      ],
+      "description": "The rate of committed versus rolled-back transactions in the Postgres database. High rollbacks indicate application errors or contention."
     },
     {
       "id": 23,
@@ -1068,7 +1086,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The number of active client connections to Postgres. Must remain below the max_connections limit to prevent database connection failures."
     },
     {
       "id": 24,
@@ -1121,7 +1140,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "The percentage of database reads served from Postgres memory cache rather than disk. Should ideally be > 99%; lower values indicate memory pressure or inefficient queries."
     },
     {
       "type": "row",
@@ -1184,7 +1204,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "CPU utilization as a percentage for each infrastructure container. Use this to identify resource-constrained services."
     },
     {
       "id": 27,
@@ -1235,7 +1256,8 @@
           "range": true,
           "refId": "A"
         }
-      ]
+      ],
+      "description": "RAM utilization for each container in bytes. Correlate with 'Backend memory' to identify the specific container consuming excess memory."
     },
     {
       "id": 28,
@@ -1296,7 +1318,8 @@
           "range": true,
           "refId": "B"
         }
-      ]
+      ],
+      "description": "Network transmit (tx) and receive (rx) throughput for each container. Helps track data-heavy operations like log ingestion."
     },
     {
       "id": 29,
@@ -1357,7 +1380,8 @@
           "range": true,
           "refId": "B"
         }
-      ]
+      ],
+      "description": "Filesystem read and write throughput for each container. High I/O usually comes from the database or ingestion workers."
     }
   ],
   "templating": {
