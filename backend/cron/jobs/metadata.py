@@ -175,25 +175,40 @@ def _run_metadata_sync(
                 "message": f"{elapsed()}   ↳ Downloading and parsing the latest catalog metadata (this may take 5-10 seconds)...",
             },
         )
+        # "No data committed yet" is a normal state for a brand-new service and
+        # must be reported as a success, not an error — otherwise the very
+        # first sync writes a misleading failure to the system-jobs panel.
+        #
+        # Under v3 that condition is a FALSE return from
+        # ``ducklake_table_exists``, not an exception: pre-v3 this leaned on
+        # pyiceberg raising ``NoSuchTableError``, which the DuckLake-backed
+        # ``init_iceberg_table`` no longer does (it returns None on an attach
+        # failure and True otherwise), so the graceful branch had gone dead
+        # and a fresh service fell through into the data sync instead. The
+        # string-matching ``except`` is kept as a belt for any caller/patch
+        # that still raises the old shape.
+        table_present: bool
         try:
-            db_iceberg.init_iceberg_table(src, create=False)
+            if db_iceberg.init_iceberg_table(src, create=False) is None:
+                raise RuntimeError(f"could not attach the DuckLake catalog for {service_id}")
+            table_present = db_iceberg.ducklake_table_exists(src)
         except Exception as e:
-            # If the table doesn't exist yet, it's not an error we need to log as a failure.
-            # This happens for brand new services that haven't committed logs yet.
             err_str = str(e).lower()
             if "not found" in err_str or "does not exist" in err_str or "nosuchtable" in err_str:
-                msg = "Iceberg table not found, skipping sync until data is committed."
-                _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"message": msg})
-                _log_and_add_progress(
-                    run_id, service_id, job_name="metadata_sync", event={"type": "status", "message": msg}
-                )
-                log_cron_run(src, "metadata_sync", time.time() - start_time_exec, "success", summary=msg, run_id=run_id)
-                _log_and_add_progress(
-                    run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": msg}
-                )
-                end_progress(run_id)
-                return
-            raise
+                table_present = False
+            else:
+                raise
+
+        if not table_present:
+            msg = "Iceberg table not found, skipping sync until data is committed."
+            _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"message": msg})
+            _log_and_add_progress(
+                run_id, service_id, job_name="metadata_sync", event={"type": "status", "message": msg}
+            )
+            log_cron_run(src, "metadata_sync", time.time() - start_time_exec, "success", summary=msg, run_id=run_id)
+            _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": msg})
+            end_progress(run_id)
+            return
 
         # 2. Sync data files (Pull-to-Local caching)
         msg = "Scanning Iceberg table for new data files..."

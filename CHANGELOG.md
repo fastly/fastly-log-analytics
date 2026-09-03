@@ -34,8 +34,14 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 ### Breaking
 
 - **`INGEST_MODE=celery` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
-- **`scripts/setup_pg_schema.py` is a required deploy step** when using Postgres metadata. Nothing creates that schema at runtime — skip it and the stack boots cleanly, then fails every metadata query.
 - Deployments that set `DUCKLAKE_CATALOG` empty while running `INGEST_MODE=celery` will not start until it is configured. The Helm chart now defaults to `config.ingestMode: sync` (installable with no `--set` flags) and rejects a celery install that is missing the Postgres DSNs or the broker at `helm template` time.
+
+### Upgrading from 2.x
+
+Upgrading is code-and-restart: the app migrates itself.
+
+- **The Postgres metadata schema is created at startup** when `METADATA_DSN` is set — by the backend lifespan and by each Celery worker, idempotently and safe against several pods booting at once. `scripts/setup_pg_schema.py` still works and remains the explicit ops command for provisioning a database ahead of a deploy.
+- **Pre-3.0 log history is adopted into DuckLake on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred. Progress and outcome appear as `ducklake_adopt` rows in `cron_runs` (Cron UI). A failure is recorded there and never blocks startup; retry with `POST /api/admin/ducklake/migrate`, which also serves as the manual trigger. Set `FLA_SKIP_LEGACY_ADOPTION=1` to opt out and drive it by hand.
 
 ### Known limitations
 

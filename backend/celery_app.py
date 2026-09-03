@@ -91,3 +91,11 @@ def _worker_process_init(**_kwargs):
     from backend.config import validate_ingest_mode
 
     validate_ingest_mode()
+
+    # Workers issue metadata queries (ingest ledger, cron_runs) and may boot
+    # before — or without — the API pod, so they cannot rely on the backend
+    # lifespan having created the Postgres schema. Idempotent and
+    # race-tolerant; no-op when METADATA_DSN is unset.
+    from backend.core.metadata.pg_schema import ensure_pg_schema
+
+    ensure_pg_schema()

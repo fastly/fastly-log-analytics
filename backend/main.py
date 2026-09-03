@@ -261,6 +261,27 @@ def _ensure_scoring_matrix():
         logging.warning("[fastapi] _ensure_scoring_matrix failed: %s", e)
 
 
+def _start_legacy_adoption(configs: list[dict]) -> None:
+    """Adopt each service's pre-v3 pyiceberg parquet into DuckLake, once ever.
+
+    An operator upgrading 2.x → 3.0 should only have to restart: without
+    this, their pre-upgrade history stays stranded in an Iceberg table
+    nothing reads any more. Runs on its own background thread (adopting a
+    large table registers thousands of files), is guarded by a durable
+    ``cron_runs`` row so a restart never re-adopts — re-adding a path
+    duplicates its rows — and is non-fatal by construction. Observable as
+    ``ducklake_adopt`` rows in ``cron_runs``.
+    """
+    try:
+        from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
+
+        sids = [sid for cfg in configs if (sid := cfg.get("service_id") or cfg.get("name"))]
+        if start_legacy_adoption_sweep(sids) is not None:
+            logging.info("[fastapi] Legacy DuckLake adoption sweep started for %d service(s).", len(sids))
+    except Exception as e:
+        logging.error("[fastapi] Could not start the legacy DuckLake adoption sweep: %s", e, exc_info=True)
+
+
 _startup_complete = False
 
 
@@ -321,6 +342,8 @@ def _background_startup():
                         "[fastapi] Some services are taking longer to initialize; continuing startup in background."
                     )
                 executor.shutdown(wait=False)
+
+                _start_legacy_adoption(configs)
 
             except Exception as e:
                 logging.error("[fastapi] Background startup error: %s", e, exc_info=True)
@@ -496,6 +519,17 @@ async def lifespan(app: FastAPI):
     # --forwarded-allow-ips flag). Without it, IP-based gates become
     # ineffective and the Host-spoof admin bypass returns.
     _enforce_proxy_headers_configured()
+
+    # Ensure the Postgres metadata schema BEFORE anything issues a metadata
+    # query. SQLite self-initialises via the pool's schema_fn; Postgres had
+    # no equivalent, so a stack that skipped scripts/setup_pg_schema.py
+    # booted clean and then failed every metadata query with
+    # `relation "cron_runs" does not exist`. Idempotent, once per process,
+    # cheap no-op when METADATA_DSN is unset, and non-fatal on failure (it
+    # logs CRITICAL — see ensure_pg_schema).
+    from backend.core.metadata.pg_schema import ensure_pg_schema
+
+    ensure_pg_schema()
 
     # Ingest-mode sanity: INGEST_MODE is the single gate for the Celery data
     # plane (jobs must NOT key off CELERY_BROKER_URL truthiness — setting the

@@ -115,9 +115,12 @@ from backend.core.field_registry import LOG_FIELD_CATALOG
 # view (field ids are position-assigned). A catalog field left out of
 # _FIELD_ORDER silently never materializes as a column. The drift guard
 # tests/core/test_iceberg.py::test_field_order_covers_ingest_storage_fields
-# fails CI if that happens. Once a field is in _FIELD_ORDER, the schema
-# evolution code in _init_iceberg_table_locked adds it (by name) to existing
-# tables on the next tick.
+# fails CI if that happens. Once a field is in _FIELD_ORDER, the buffer
+# commit path adds it (by name) to the existing DuckLake table on the next
+# commit — see the ALTER TABLE ... ADD COLUMN loop in
+# backend/core/iceberg/buffer.py, which diffs the buffer parquet's columns
+# against the live table. (Pre-v3 that evolution lived in
+# _init_iceberg_table_locked; it does not any more.)
 # ---------------------------------------------------------------------------
 
 _DUCKDB_TO_ICEBERG = {
@@ -1234,16 +1237,28 @@ def init_iceberg_table(source: dict, create: bool = True, table_name: str = "log
 
 
 def _init_iceberg_table_locked(source: dict, create: bool = True, table_name: str = "logs"):
+    """Ensure the service's DuckLake catalog is attachable. True, or None on failure.
+
+    Safe to call on every provision and on every scheduler tick — it is a
+    no-op once the catalog exists.
+
+    ``create`` is retained for its five existing call sites but is inert
+    under DuckLake, deliberately: the per-service table is created from the
+    first buffer parquet's own schema in the commit path
+    (``buffer.py``'s ``CREATE TABLE IF NOT EXISTS ... AS SELECT * FROM
+    read_parquet(...) LIMIT 0``), which is also where column evolution
+    happens. Declaring the columns up front here would fork the schema
+    definition across two places for no gain. Callers that need to know
+    whether the table itself exists yet should use
+    :func:`ducklake_table_exists`, which distinguishes "not created yet"
+    from "could not check".
+    """
     from backend.core.duckdb import get_connection
     from backend.core.iceberg._ducklake import _ducklake_attach
 
     con = get_connection(source)
     try:
         if _ducklake_attach(con, source):
-            if create:
-                # CREATE TABLE IF NOT EXISTS lake.logs ( ... )
-                # For now just let it be created from the first parquet file.
-                pass
             return True
         return None
     finally:

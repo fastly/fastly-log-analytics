@@ -2372,13 +2372,16 @@ export interface paths {
         put?: never;
         /**
          * Ducklake Migrate Endpoint
-         * @description Adopt this service's legacy pyiceberg-era local parquet into DuckLake.
+         * @description Adopt this service's legacy pyiceberg-era parquet into DuckLake.
          *
-         *     Returns 202 Accepted — the adoption runs in a background thread
-         *     (registering thousands of files can take a while). Idempotent: files
-         *     already tracked by the DuckLake catalog are skipped, so re-running
-         *     after a partial failure is safe. Check backend logs for the summary
-         *     (adopted/skipped file counts and row totals).
+         *     The backend already runs this automatically on first boot under v3;
+         *     this endpoint is the explicit "run it now" button (and the retry path
+         *     after a failed sweep), so it bypasses the once-ever guard. Returns
+         *     202 Accepted — the adoption runs in a background thread (registering
+         *     thousands of files can take a while). Idempotent: files already
+         *     tracked by the DuckLake catalog are skipped, so re-running after a
+         *     partial failure is safe. The outcome lands as a ``ducklake_adopt``
+         *     row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
          */
         post: operations["ducklake_migrate_endpoint_api_admin_ducklake_migrate_post"];
         delete?: never;

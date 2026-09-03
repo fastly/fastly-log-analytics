@@ -1093,6 +1093,73 @@ def test_run_metadata_sync_handles_iceberg_table_not_found_gracefully():
     assert "Iceberg table not found" in summary or "skipping" in summary.lower()
 
 
+def test_run_metadata_sync_skips_when_the_ducklake_table_does_not_exist_yet():
+    """The v3 shape of "no data committed yet": ``init_iceberg_table``
+    succeeds (the catalog attaches) but the per-service table has not been
+    created, so ``ducklake_table_exists`` is False. Pinned because pre-v3
+    this condition arrived as a pyiceberg ``NoSuchTableError`` and the
+    graceful branch keyed off the exception text — which left a fresh
+    service falling through into the data sync instead of skipping."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=True),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=False),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert "success" in args or kwargs.get("status") == "success"
+    summary = kwargs.get("summary") or (args[4] if len(args) > 4 else "")
+    assert "skipping" in summary.lower()
+
+
+def test_run_metadata_sync_errors_when_the_ducklake_catalog_cannot_attach():
+    """A None return from ``init_iceberg_table`` is an attach failure —
+    bad credentials or config — not "no data yet". It must NOT be laundered
+    into a success row."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=None),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    # The job's own error handler records it — as an error, never a success.
+    statuses = [a for args, _ in log_calls for a in args if isinstance(a, str)]
+    assert "error" in statuses
+    assert "success" not in statuses
+
+
 def test_run_metadata_sync_propagates_non_not_found_iceberg_exception():
     """An iceberg init error that's NOT a "not found" variant
     (network failure, auth error) propagates up. Pinned because

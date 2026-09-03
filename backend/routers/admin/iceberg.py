@@ -128,23 +128,26 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
 
 @router.post("/admin/ducklake/migrate", status_code=202)
 def ducklake_migrate_endpoint(source: dict = Depends(get_source)):
-    """Adopt this service's legacy pyiceberg-era local parquet into DuckLake.
+    """Adopt this service's legacy pyiceberg-era parquet into DuckLake.
 
-    Returns 202 Accepted — the adoption runs in a background thread
-    (registering thousands of files can take a while). Idempotent: files
-    already tracked by the DuckLake catalog are skipped, so re-running
-    after a partial failure is safe. Check backend logs for the summary
-    (adopted/skipped file counts and row totals).
+    The backend already runs this automatically on first boot under v3;
+    this endpoint is the explicit "run it now" button (and the retry path
+    after a failed sweep), so it bypasses the once-ever guard. Returns
+    202 Accepted — the adoption runs in a background thread (registering
+    thousands of files can take a while). Idempotent: files already
+    tracked by the DuckLake catalog are skipped, so re-running after a
+    partial failure is safe. The outcome lands as a ``ducklake_adopt``
+    row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
     """
     import threading
 
-    from backend.core.iceberg._ducklake_migration import adopt_iceberg_to_ducklake
+    from backend.core.iceberg._ducklake_migration import run_legacy_adoption_once
 
     service_id = source["name"]
 
     def worker():
         try:
-            result = adopt_iceberg_to_ducklake(service_id)
+            result = run_legacy_adoption_once(service_id, force=True)
             logger.info("ducklake migrate %s finished: %s", service_id, result)
         except Exception:
             logger.exception("ducklake migrate %s failed", service_id)

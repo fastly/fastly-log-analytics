@@ -656,4 +656,3 @@ def _prune_empty_dirs(root: str) -> None:
                 os.rmdir(dirpath)
             except Exception:
                 pass
-    pass

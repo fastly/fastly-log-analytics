@@ -753,6 +753,17 @@ The retention one was the worst: it is the ONLY enforcement of `data_retention_d
 
 **When you migrate a storage backend, audit every caller of the OLD backend's read API before calling the cutover done — not just the write path.** A grep of the cron job file is not enough; read the function it calls. `optimize_{id}` and `expire_{id}` sit side by side, look identical from the scheduler, and only one of them had been migrated.
 
+### 34. `cache/.../data/` is a MIRROR — never adopt it alongside the FOS manifests
+The legacy-parquet adopter (`iceberg/_ducklake_migration.py`) has two candidate sources and they are **alternatives, not a union**. `sync_data` downloads the Iceberg table's FOS data files into `cache/{bucket}/data/` (see `_cloud_uri_to_local_path`), and local compaction rewrites subsets of that mirror into `compacted_*.parquet` / `daily/` / `weekly/` files holding the same rows again. Registering both would double-count every row inside the cache window — on default settings (`cache_retention_days` 90 ⊇ `data_retention_days` 30) that is the entire table. So the legacy Iceberg table wins whenever it yields ≥1 live data file, and the local tree is only the fallback for a service whose legacy table is genuinely absent.
+
+Adopting the local tree *alone* is the mirror-image bug and was the shipped behaviour: any operator keeping more history than their local cache (`data_retention_days: 365` against the default 90-day cache) migrated and silently lost visibility of everything older than the cache window. Trap #33's shape again — quiet, not loud.
+
+Two mechanical traps in the same code:
+- **`ducklake_add_data_files` is not idempotent** — re-adding a path duplicates its rows, for `s3://` URIs as much as for local paths. Callers MUST dedupe against `ducklake_list_files`.
+- **`ducklake_list_files` echoes an object-storage URI back verbatim.** `os.path.abspath("s3://b/k")` yields `/cwd/s3:/b/k`, so abspath-ing the registry makes the dedupe never match and every re-run duplicates the whole table. Normalise by scheme (`_normalize_data_path`).
+
+Boot-time adoption is guarded by a terminal `success` `cron_runs` row under task `ducklake_adopt` — durable under SQLite *and* shared Postgres, and the surface an operator already reads. `FLA_SKIP_LEGACY_ADOPTION=1` opts out; `POST /api/admin/ducklake/migrate` forces a run.
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.

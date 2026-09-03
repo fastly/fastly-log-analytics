@@ -21407,7 +21407,7 @@
           "admin"
         ],
         "summary": "Ducklake Migrate Endpoint",
-        "description": "Adopt this service's legacy pyiceberg-era local parquet into DuckLake.\n\nReturns 202 Accepted \u2014 the adoption runs in a background thread\n(registering thousands of files can take a while). Idempotent: files\nalready tracked by the DuckLake catalog are skipped, so re-running\nafter a partial failure is safe. Check backend logs for the summary\n(adopted/skipped file counts and row totals).",
+        "description": "Adopt this service's legacy pyiceberg-era parquet into DuckLake.\n\nThe backend already runs this automatically on first boot under v3;\nthis endpoint is the explicit \"run it now\" button (and the retry path\nafter a failed sweep), so it bypasses the once-ever guard. Returns\n202 Accepted \u2014 the adoption runs in a background thread (registering\nthousands of files can take a while). Idempotent: files already\ntracked by the DuckLake catalog are skipped, so re-running after a\npartial failure is safe. The outcome lands as a ``ducklake_adopt``\nrow in ``cron_runs`` (visible in the Cron UI) as well as in the logs.",
         "operationId": "ducklake_migrate_endpoint_api_admin_ducklake_migrate_post",
         "parameters": [
           {
