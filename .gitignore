@@ -48,6 +48,9 @@ node_modules/
 .swival/
 /audit-findings/
 
+# ChatGPT
+.codex/
+
 # Ad-hoc debug screenshots dropped at the repo root by browser-driven
 # verification sessions. Intentional docs/assets/*.png are tracked; these
 # root-level ones are throwaway.
