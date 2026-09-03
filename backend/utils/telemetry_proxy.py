@@ -387,10 +387,13 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
             headers["x-fastly-key"] = cfg["cdn_secret"]
         return headers
 
-    # For Native FOS writes, ALWAYS use cdn_secret to bypass rate limit
-    if cfg.get("cdn_secret"):
-        headers["x-fastly-key"] = cfg.get("cdn_secret")
-
+    # Deliberately NO cdn_secret below this line. The native FOS endpoint
+    # authenticates with SigV4 over the FOS access keys; it neither reads
+    # nor needs the CDN service's secret, so forwarding it would hand a
+    # credential to a host that has no use for it. It also does not lift
+    # FOS's own rate limits — those are a property of the storage account,
+    # not of the CDN in front of it. Pinned by the *_native tests in
+    # tests/utils/test_telemetry_proxy_phase2.py.
     access_key = cfg.get("fos_access_key_id")
     secret_key = cfg.get("fos_secret_access_key")
     region = cfg.get("fos_region", "us-east-1")
@@ -410,8 +413,6 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
     # S3 requires for every signed request.
     S3SigV4Auth(credentials, "s3", region).add_auth(aws_req)
     headers.update(dict(aws_req.headers))
-    if cfg.get("cdn_secret"):
-        headers["x-fastly-key"] = cfg["cdn_secret"]
     return headers
 
 
@@ -880,9 +881,9 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             if cdn_secret:
                 request.headers["x-fastly-key"] = cdn_secret
         else:
+            # Native FOS only: SigV4 authenticates these, so the CDN secret
+            # is not attached — see the note in _sign_request.
             request.headers["X-Fos-Target"] = native_target
-            if cdn_secret:
-                request.headers["x-fastly-key"] = cdn_secret
 
         request.headers["X-Telemetry-Service-Id"] = service_id
         hint = _BOTO3_CALLER_HINT.get()

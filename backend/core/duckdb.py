@@ -217,7 +217,7 @@ def _load_httpfs(con: duckdb.DuckDBPyConnection):
                 raise
 
 
-def _proxy_target_for(source: dict, for_write: bool = False) -> str:
+def _proxy_target_for(source: dict) -> str:
     """Where the telemetry proxy should forward DuckDB httpfs requests.
 
     Returns the CDN host (lowercased, scheme/path-stripped) when ``cdn_url``
@@ -225,10 +225,16 @@ def _proxy_target_for(source: dict, for_write: bool = False) -> str:
     classifier (_service_for_target) tags the row as CDN. Otherwise returns
     the native FOS endpoint as-is — moto-style ``http://host:port`` strings
     are honored by the proxy's scheme-aware branch (telemetry_proxy.py:239).
-    """
-    if for_write:
-        return source.get("fos_native_endpoint") or source.get("endpoint") or ""
 
+    This is READ-oriented on purpose, and it is the only choice available:
+    the httpfs SECRET below is per-connection, so one target has to serve
+    both reads and writes. Reads dominate and benefit from the CDN's cache,
+    so the secret points at the CDN; DuckLake's parquet WRITES are
+    redirected to the native endpoint (and SigV4-signed) by the proxy
+    itself, in ``_handle_request_inner``. Pointing this at the native
+    endpoint to "fix writes" therefore fixes nothing and sends every read
+    to origin instead — uncached, and against FOS's own rate limits.
+    """
     cdn_url = (source.get("cdn_url") or "").strip()
     if cdn_url:
         return cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
@@ -253,8 +259,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     # doesn't see "http://http://...". USE_SSL=false in the SECRET
     # below tells httpfs to use http://.
     proxy_ep = telemetry_proxy.proxy_endpoint().replace("http://", "")
-    # Hardcode duckdb's proxy target to the native endpoint if the connection is for writing ducklake
-    target_host = _proxy_target_for(source, for_write=True)  # TEMPORARY FIX
+    target_host = _proxy_target_for(source)
     ctx = get_process_context() or ""
     headers: dict[str, str] = {
         "X-Fos-Target": target_host,
