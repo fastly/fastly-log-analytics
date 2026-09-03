@@ -18,7 +18,7 @@ import atexit
 import threading
 from typing import Any
 
-from backend.core.metadata.base import get_con
+from backend.core.metadata.base import get_con, release_thread_connection
 
 _INSERT_SQL = """
     INSERT INTO slow_queries (
@@ -113,6 +113,8 @@ def _flush_all(*, only_service: str | None = None) -> None:
             con.commit()
         except Exception:
             pass
+        finally:
+            release_thread_connection()
 
 
 def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
