@@ -20,7 +20,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
 
 export const CRON_DISPLAY_NAMES: Record<string, string> = {
   log_discovery: 'Log Discovery',
-  log_ingest: 'Ingest Logs',
+  log_ingest: 'Commit',
   full_sync: 'Full Discovery Sweep',
   gap_heal: 'Gap Heal',
   local_compact: 'Local Compact',

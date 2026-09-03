@@ -48,6 +48,19 @@ def test_get_con_readonly_routes_to_postgres(postgres_mode):
     mock_get.assert_called_once_with()
 
 
+def test_release_thread_connection_routes_to_postgres(postgres_mode):
+    with patch.object(base.pg_connection, "release_pg_thread_connection") as mock_release:
+        base.release_thread_connection()
+    mock_release.assert_called_once_with()
+
+
+def test_release_thread_connection_noop_when_dsn_unset(monkeypatch):
+    monkeypatch.delenv("METADATA_DSN", raising=False)
+    with patch.object(base.pg_connection, "release_pg_thread_connection") as mock_release:
+        base.release_thread_connection()
+    mock_release.assert_not_called()
+
+
 def test_close_all_connections_routes_to_postgres(postgres_mode):
     with patch.object(base.pg_connection, "close_all_pg_connections") as mock_close:
         with patch.object(base._pool, "close_all") as mock_sqlite_close:

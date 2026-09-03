@@ -110,27 +110,40 @@ def cron_task(name: str, job_name: str | None = None):
             def heartbeat_loop(stop_event: threading.Event):
                 import time
 
-                from backend.core.metadata.base import get_con
+                from backend.core.metadata.base import get_con, release_thread_connection
 
-                while not stop_event.is_set():
-                    if stop_event.wait(10.0):
-                        break
-                    try:
-                        con = get_con(service_id)
-                        if job_name:
-                            con.execute(
-                                "UPDATE job_runs SET heartbeat_at = ? "
-                                "WHERE service_id = ? AND job_name = ? AND status = 'running'",
-                                (time.time(), service_id, job_name),
-                            )
-                        else:
-                            # No job_name declared: refresh nothing rather than
-                            # everything — an unscoped refresh keeps other jobs'
-                            # leaked leases alive forever (frozen-ingestion trap).
+                try:
+                    while not stop_event.is_set():
+                        if stop_event.wait(10.0):
+                            break
+                        try:
+                            con = get_con(service_id)
+                            if job_name:
+                                con.execute(
+                                    "UPDATE job_runs SET heartbeat_at = ? "
+                                    "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                                    (time.time(), service_id, job_name),
+                                )
+                            else:
+                                # No job_name declared: refresh nothing rather than
+                                # everything — an unscoped refresh keeps other jobs'
+                                # leaked leases alive forever (frozen-ingestion trap).
+                                pass
+                            con.commit()
+                        except Exception:
                             pass
-                        con.commit()
-                    except Exception:
-                        pass
+                finally:
+                    # This thread is a fresh, never-reused `threading.Thread`
+                    # per cron invocation, not a pooled executor worker — the
+                    # `get_con()` connection it opened above must be handed
+                    # back explicitly before it exits, or it permanently pins
+                    # one slot of the bounded Postgres metadata pool (see
+                    # release_thread_connection's docstring). At
+                    # METADATA_PG_POOL_MAX ticks (any mix of cron jobs across
+                    # the whole scheduler) every later get_con() call anywhere
+                    # in the process starts raising PoolTimeout — this was a
+                    # live incident (AGENTS.md, "cron heartbeat thread leak").
+                    release_thread_connection()
 
             def _body():
 

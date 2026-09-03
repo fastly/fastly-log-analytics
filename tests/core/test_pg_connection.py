@@ -295,6 +295,65 @@ def test_close_all_pg_connections_returns_and_clears(monkeypatch):
     assert pool.getconn.call_count == 2
 
 
+def test_release_pg_thread_connection_returns_and_clears(monkeypatch):
+    """The heartbeat-thread leak fix: a thread that will never be reused
+    must be able to hand its connection back WITHOUT disturbing any other
+    thread's connection (unlike close_all_pg_connections, which is
+    test-teardown-only and drains every thread)."""
+    pool = MagicMock()
+    fake = _FakeConn()
+    pool.getconn.side_effect = [fake]
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+
+    pgc.get_pg_thread_connection()
+    pgc.release_pg_thread_connection()
+    pool.putconn.assert_called_once_with(fake)
+
+    # A subsequent get_pg_thread_connection on the SAME thread must check
+    # out a fresh connection, not reuse the one just returned.
+    pool.getconn.side_effect = [_FakeConn()]
+    pgc.get_pg_thread_connection()
+    assert pool.getconn.call_count == 2
+
+
+def test_release_pg_thread_connection_noop_when_no_connection(monkeypatch):
+    pool = MagicMock()
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+    pgc.release_pg_thread_connection()  # must not raise
+    pool.putconn.assert_not_called()
+
+
+def test_release_pg_thread_connection_only_affects_calling_thread(monkeypatch):
+    """Two threads each hold their own connection; releasing thread A's
+    must not touch thread B's — the actual bug this fixes was a per-tick
+    heartbeat thread returning ALL threads' connections (or none)."""
+    import threading
+
+    pool = MagicMock()
+    conns = [_FakeConn(), _FakeConn()]
+    pool.getconn.side_effect = conns
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+
+    pgc.get_pg_thread_connection()  # this test's own thread: conns[0]
+
+    other_thread_wrapper = {}
+
+    def other_thread():
+        other_thread_wrapper["w"] = pgc.get_pg_thread_connection()
+
+    t = threading.Thread(target=other_thread)
+    t.start()
+    t.join()
+
+    pgc.release_pg_thread_connection()  # only this thread's (conns[0])
+    pool.putconn.assert_called_once_with(conns[0])
+
+    # This thread's own connection is gone; a re-fetch checks out fresh.
+    pool.getconn.side_effect = [_FakeConn()]
+    pgc.get_pg_thread_connection()
+    assert pool.getconn.call_count == 3
+
+
 def test_get_pg_readonly_connection_is_fresh_each_call(monkeypatch):
     pool = MagicMock()
     pool.getconn.side_effect = lambda: _FakeConn()

@@ -234,6 +234,22 @@ def get_con_readonly(service_id: str) -> sqlite3.Connection:
     return _pool.open_readonly(service_id)
 
 
+def release_thread_connection() -> None:
+    """Return the CALLING thread's ``get_con()`` connection, if any, so a
+    thread that will never be reused doesn't permanently pin capacity.
+
+    Under Postgres this returns the connection to the bounded
+    ``METADATA_PG_POOL_MAX``-sized pool (see
+    :func:`pg_connection.release_pg_thread_connection` for the full
+    rationale — this is what a per-cron-tick heartbeat thread must call
+    before exiting). No-op under SQLite: each thread's connection is a
+    private file handle with no shared pool capacity to leak, reclaimed by
+    the interpreter when the thread-local entry is garbage collected.
+    """
+    if pg_connection.is_postgres():
+        pg_connection.release_pg_thread_connection()
+
+
 def close_all_connections() -> None:
     """Close every connection opened by ``get_con`` in any thread.
 

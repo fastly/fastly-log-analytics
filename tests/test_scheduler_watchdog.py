@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from unittest.mock import patch
 
 
 def test_cron_task_returns_when_inner_function_exceeds_hard_cap(monkeypatch, caplog):
@@ -95,3 +96,28 @@ def test_cron_task_preserves_telemetry_context(monkeypatch):
         f"expected process_context='ctx-test' inside cron body; got {captured.get('ctx')!r}. "
         "If None, the process_context_scope is being applied in the wrong thread."
     )
+
+
+def test_cron_task_heartbeat_thread_releases_its_connection(monkeypatch):
+    """Live incident (2026-09-03): the per-invocation heartbeat thread
+    (a fresh ``threading.Thread``, never reused across ticks — unlike the
+    bounded watchdog executor) called ``get_con()`` but never gave the
+    connection back. Under Postgres that permanently pins one slot of the
+    bounded METADATA_PG_POOL_MAX pool per cron tick across the WHOLE
+    scheduler, and every metadata-touching request/cron eventually starts
+    raising PoolTimeout once the pool is exhausted. The heartbeat thread
+    must release its connection on exit, whether or not it ever actually
+    used one (job_name=None skips the UPDATE, but the finally must still
+    run and be a safe no-op)."""
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
+
+    @sched_mod.cron_task("release-test", job_name="release_test_job")
+    def _quick(service_id: str):
+        return None
+
+    with patch("backend.core.metadata.base.release_thread_connection") as mock_release:
+        _quick("svc-release")
+
+    mock_release.assert_called_once_with()

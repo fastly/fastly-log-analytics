@@ -209,7 +209,7 @@ export function CronTab({
                       {!isAnalyst && <SelectItem value="full_sync">Full Sync</SelectItem>}
                       {!isAnalyst && <SelectItem value="gap_heal">Gap Heal</SelectItem>}
                       <SelectItem value="alerts">Alerts</SelectItem>
-                      {!isAnalyst && <SelectItem value="log_ingest">Ingest Logs</SelectItem>}
+                      {!isAnalyst && <SelectItem value="log_ingest">Commit</SelectItem>}
                       {!isAnalyst && <SelectItem value="rum_commit">RUM Commit</SelectItem>}
                       {!isAnalyst && <SelectItem value="optimize">Optimize</SelectItem>}
                       {!isAnalyst && <SelectItem value="local_compact">Local Compact</SelectItem>}

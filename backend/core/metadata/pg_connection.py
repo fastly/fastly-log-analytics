@@ -175,6 +175,42 @@ def get_pg_thread_connection() -> PgConnectionWrapper:
     return wrapper
 
 
+def release_pg_thread_connection() -> None:
+    """Return the CALLING thread's long-lived connection to the pool, if it
+    has one, and clear it from thread-local storage.
+
+    Unlike :func:`close_all_pg_connections` (which drains every thread's
+    tracked connection — test-teardown only, never safe to call from a live
+    thread that isn't the sole owner of the process), this touches only the
+    current thread's own connection. Safe to call from a short-lived worker
+    thread that used ``get_con()``/``get_pg_thread_connection()`` and is
+    about to exit for good — e.g. a cron job's per-invocation heartbeat
+    thread (see ``backend.cron.decorators``). Without this, a thread that
+    is never reused (a fresh ``threading.Thread`` per cron tick, not a
+    pooled executor worker) permanently pins one pool slot on exit, since
+    nothing else ever calls ``putconn()`` for it — the pool's own bookkeeping
+    has no way to notice a thread died. At ``METADATA_PG_POOL_MAX`` ticks
+    (default 64) across ANY mix of such threads, every subsequent
+    ``get_con()`` call blocks for the full pool timeout and raises
+    ``PoolTimeout``, which is indistinguishable from real Postgres outage
+    to callers. No-op if the calling thread has no connection.
+    """
+    wrapper = getattr(_thread_local, "wrapper", None)
+    if wrapper is None:
+        return
+    conn = wrapper._conn
+    del _thread_local.wrapper
+    with _checked_out_lock:
+        try:
+            _checked_out.remove(conn)
+        except ValueError:
+            pass
+    try:
+        get_pg_pool().putconn(conn)
+    except Exception as e:
+        logger.warning("[pg_connection] failed to return thread connection to pool: %s", e)
+
+
 def get_pg_readonly_connection() -> PgConnectionWrapper:
     """Fresh checkout for ``get_con_readonly()`` callers. The returned
     wrapper's ``.close()`` returns the connection to the pool (callers use
