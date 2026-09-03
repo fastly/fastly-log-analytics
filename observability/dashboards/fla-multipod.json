@@ -522,7 +522,14 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": true
-          }
+          },
+          "links": [
+            {
+              "title": "View Traces in Tempo",
+              "url": "/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bname%3D%22%24%7B__field.labels.span_name%7D%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22%24%7B__from%7D%22%2C%22to%22%3A%22%24%7B__to%7D%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
         },
         "overrides": []
       },
@@ -574,7 +581,14 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": true
-          }
+          },
+          "links": [
+            {
+              "title": "View Traces in Tempo",
+              "url": "/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bname%3D%22%24%7B__field.labels.span_name%7D%22%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22%24%7B__from%7D%22%2C%22to%22%3A%22%24%7B__to%7D%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
         },
         "overrides": []
       },
@@ -627,7 +641,14 @@
             "showPoints": "never",
             "spanNulls": true
           },
-          "noValue": "0 \u2014 no errors"
+          "noValue": "0 \u2014 no errors",
+          "links": [
+            {
+              "title": "View Error Traces in Tempo",
+              "url": "/explore?left=%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7Bname%3D%22%24%7B__field.labels.span_name%7D%22%20%26%26%20status%3Derror%7D%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22%24%7B__from%7D%22%2C%22to%22%3A%22%24%7B__to%7D%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
         },
         "overrides": []
       },
