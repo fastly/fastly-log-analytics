@@ -124,11 +124,27 @@ class _ConnectionHolder:
         from backend.core import duckdb_pool
 
         use_pool = self._read_only and not self._skip_view_update and duckdb_pool._pool_enabled()
-        max_wait_env = os.getenv("DUCKDB_POOL_MAX_WAIT_S", "20.0")
+        # Default lowered from 20.0 (ADR-18 boot-lock investigation,
+        # 2026-09-03): a cron job (or another request) holding the
+        # process-exclusive DuckDB write lock (DBBusyError, "Database is
+        # locked by another process") and pool saturation (_PoolBusy) share
+        # this one budget, but the frontend's own busy-retry contract
+        # (QueryProvider: 3 retries, 1s/2s/4s backoff) assumes each attempt
+        # fails FAST — it was sized for sub-second requests, not a 20s
+        # blocking wait per try. A single lock-contention window could
+        # previously cost up to ~4 * 20s + backoff before the frontend gave
+        # up, most visible right after a restart while cron's first tick
+        # holds the lock. 3s keeps a legitimate single lock-hold (typically
+        # single-digit ms per the local-compact/rollup logs) comfortably
+        # covered while letting the frontend's own backoff do the spacing
+        # instead of one request eating the whole budget. Does not change
+        # the underlying single-pod constraint (ADR-18) — only how long one
+        # HTTP request waits before reporting it.
+        max_wait_env = os.getenv("DUCKDB_POOL_MAX_WAIT_S", "3.0")
         try:
             max_wait = max(1.0, float(max_wait_env))
         except (TypeError, ValueError):
-            max_wait = 20.0
+            max_wait = 3.0
 
         try:
             if use_pool:
