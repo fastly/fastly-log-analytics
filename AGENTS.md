@@ -99,9 +99,9 @@ The README explains the two collaboration modes for end users. Implementation po
 
 ## Ingest Pipeline
 
-Two data planes, selected by `INGEST_MODE` (`local` default vs `celery`) — see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design. Both commit to the same DuckLake table and the same unified `logs` view.
+Two data planes, selected by `INGEST_MODE` (`sync` default vs `celery`; there is no `local` value) — see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design. Both commit to the same DuckLake table and the same unified `logs` view.
 
-**Default (`local`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0 rework — grep history for the old names if you're reading pre-v3 code or logs:
+**Default (`sync`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0 rework — grep history for the old names if you're reading pre-v3 code or logs:
 
 | Job | Schedule | Function |
 |---|---|---|
