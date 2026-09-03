@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from unittest.mock import MagicMock
 
-from backend.core.metadata import usage_log_db
+from backend.core.metadata import slow_queries, usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
 from backend.core.sqlite_pool import open_small_cache_db
 
@@ -188,3 +190,70 @@ def test_clear_usage_log_wipes_both_tables(tmp_path, monkeypatch):
         assert con.execute("SELECT count(*) FROM usage_log_hourly_summary").fetchone()[0] == 0
     finally:
         usage_log_db.close_all_connections()
+
+
+def test_flush_releases_postgres_thread_connection_after_success(monkeypatch):
+    con = MagicMock()
+    monkeypatch.setattr(slow_queries, "get_con", lambda service_id: con)
+    release = MagicMock()
+    monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
+
+    with slow_queries._buffer_lock:
+        slow_queries._buffer["svc-flush"] = [{"query_id": "q1"}]
+
+    slow_queries._flush_all()
+
+    con.executemany.assert_called_once()
+    con.commit.assert_called_once_with()
+    release.assert_called_once_with()
+
+
+def test_flush_releases_connection_when_write_fails(monkeypatch):
+    con = MagicMock()
+    con.executemany.side_effect = RuntimeError("metadata unavailable")
+    monkeypatch.setattr(slow_queries, "get_con", lambda service_id: con)
+    release = MagicMock()
+    monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
+
+    with slow_queries._buffer_lock:
+        slow_queries._buffer["svc-flush-error"] = [{"query_id": "q1"}]
+
+    slow_queries._flush_all()
+
+    release.assert_called_once_with()
+
+
+def test_flush_releases_on_the_short_lived_worker_thread(monkeypatch):
+    con = MagicMock()
+    monkeypatch.setattr(slow_queries, "get_con", lambda service_id: con)
+    released_on = []
+
+    def release():
+        released_on.append(threading.current_thread())
+
+    monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
+    with slow_queries._buffer_lock:
+        slow_queries._buffer["svc-thread"] = [{"query_id": "q1"}]
+
+    worker = threading.Thread(target=slow_queries._flush_all)
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert released_on == [worker]
+
+
+def test_flush_without_connection_keeps_best_effort_behavior(monkeypatch):
+    monkeypatch.setattr(
+        slow_queries,
+        "get_con",
+        MagicMock(side_effect=RuntimeError("metadata unavailable")),
+    )
+    release = MagicMock()
+    monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
+    with slow_queries._buffer_lock:
+        slow_queries._buffer["svc-no-connection"] = [{"query_id": "q1"}]
+
+    slow_queries._flush_all()
+
+    release.assert_called_once_with()
