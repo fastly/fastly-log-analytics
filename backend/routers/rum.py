@@ -1529,7 +1529,7 @@ async def rum_live_events(
                 import hashlib
 
                 key = cid or req_id or path or "default"
-                idx = int(hashlib.md5(key.encode()).hexdigest(), 16) % len(fallback_profiles)
+                idx = int(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest(), 16) % len(fallback_profiles)
                 prof = fallback_profiles[idx]
                 city = city or prof["city"]
                 region = region or prof["region"]
