@@ -4,6 +4,11 @@ import React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -16,13 +21,14 @@ import { LabelWithInfo } from "@/components/ui/label-with-info";
 import {
   CheckCircle2,
   Database,
+  Info,
   Loader2,
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
 import { JsonImportSection } from "../JsonImportSection";
-import { REGION_LABELS } from "../types";
+import { ANALYST_PATH_A_UNSUPPORTED_REASON, REGION_LABELS } from "../types";
 
 // Lightweight per-field validators that fire on blur so wizard users see
 // errors as they tab through, not only when the validate-mutation rejects
@@ -56,6 +62,15 @@ function validateS3Uri(v: string): string | null {
 }
 
 export function JoinStep({ s }: { s: WizardState }) {
+  // Local per-field error state. Lives in JoinStep, not WizardState, since
+  // it's a UI affordance only — the backend validates authoritatively on
+  // submit. Map ties field-key to its blur-validation message.
+  const [fieldErrors, setFieldErrors] = React.useState<
+    Record<string, string | null>
+  >({})
+  const setError = (key: string, msg: string | null) =>
+    setFieldErrors((prev) => ({ ...prev, [key]: msg }))
+
   // Sub-phase: connecting / done show SSE progress
   if (s.joinPhase === "connecting" || s.joinPhase === "done") {
     return (
@@ -86,13 +101,8 @@ export function JoinStep({ s }: { s: WizardState }) {
 
   // form phase
   const { config, setConfig, mode } = s;
-
-  // Local per-field error state. Lives in JoinStep, not WizardState, since
-  // it's a UI affordance only — the backend validates authoritatively on
-  // submit. Map ties field-key to its blur-validation message.
-  const [fieldErrors, setFieldErrors] = React.useState<Record<string, string | null>>({})
-  const setError = (key: string, msg: string | null) =>
-    setFieldErrors((prev) => ({ ...prev, [key]: msg }))
+  const analystPathAReason =
+    s.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON;
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0">
@@ -109,6 +119,18 @@ export function JoinStep({ s }: { s: WizardState }) {
               ? "Enter the credentials for your existing Fastly Object Storage bucket and CDN proxy. We will use these to set up background ingestion."
               : "Enter the Fastly Object Storage credentials for the service you want to analyze, or paste the JSON config your admin shared with you."}
           </p>
+
+          {!s.analystPathASupported && mode === "join" && (
+            <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-950 dark:text-amber-100">
+              <Info className="h-4 w-4" />
+              <AlertTitle>Independent analyst join is unavailable</AlertTitle>
+              <AlertDescription className="text-amber-900 dark:text-amber-100/90">
+                {analystPathAReason} If you opened an old invite or entered
+                credentials manually, ask an admin to use live shared-instance
+                analyst access instead.
+              </AlertDescription>
+            </Alert>
+          )}
 
           <JsonImportSection
             onImport={(parsed) => {

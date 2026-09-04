@@ -9,6 +9,8 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     accessLevel: s.access_level ?? undefined,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
     rum_enabled: s.rum_enabled ?? undefined,
+    analystPathASupported: s.analyst_path_a_supported ?? true,
+    analystPathAReason: s.analyst_path_a_reason ?? null,
   }
 }
 

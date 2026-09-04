@@ -31,6 +31,9 @@ export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error"
 
 export type JoinPhase = "form" | "connecting" | "importing" | "done";
 
+export const ANALYST_PATH_A_UNSUPPORTED_REASON =
+  "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
+
 export interface TokenInfo {
   id: string;
   name: string;
@@ -265,6 +268,8 @@ export interface WizardState {
   ngwafDebugRaw: string;
 
   // Analyst Flow
+  analystPathASupported: boolean;
+  analystPathAReason: string | null;
   lakeInfo: any;
   isAnalyzing: boolean;
   importMode: "all" | "range";

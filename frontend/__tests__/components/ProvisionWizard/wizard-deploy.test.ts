@@ -306,6 +306,7 @@ describe('runJoin', () => {
   function makeArgs(overrides: Partial<Parameters<typeof runJoin>[0]> = {}) {
     return {
       config: FULL_CONFIG,
+      analystPathASupported: true,
       syncIntervalMins: '15',
       syncEnabled: true,
       icebergMetadataLocation: 's3://b/meta.json',
@@ -326,6 +327,16 @@ describe('runJoin', () => {
     })
     runJoin(args)
     expect(args.setIsDeploying).not.toHaveBeenCalled()
+    expect(args.start).not.toHaveBeenCalled()
+  })
+
+  it('skips unsupported independent analyst joins before starting SSE', () => {
+    const args = makeArgs({ analystPathASupported: false })
+    runJoin(args)
+    expect(args.setIsDeploying).not.toHaveBeenCalled()
+    expect(args.setJoinPhase).not.toHaveBeenCalled()
+    expect(args.setStep).not.toHaveBeenCalled()
+    expect(args.reset).not.toHaveBeenCalled()
     expect(args.start).not.toHaveBeenCalled()
   })
 

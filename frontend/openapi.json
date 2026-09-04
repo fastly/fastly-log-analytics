@@ -40831,6 +40831,22 @@
               }
             ],
             "title": "Rum Enabled"
+          },
+          "analyst_path_a_supported": {
+            "type": "boolean",
+            "title": "Analyst Path A Supported",
+            "default": true
+          },
+          "analyst_path_a_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Path A Reason"
           }
         },
         "additionalProperties": true,

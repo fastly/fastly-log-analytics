@@ -232,8 +232,9 @@ export function WizardFooter({ s }: { s: WizardState }) {
               className="h-9 px-6 font-bold"
               onClick={handleJoin}
               disabled={
-                importMode === "range" &&
-                (!importRange.start || !importRange.end)
+                !s.analystPathASupported ||
+                (importMode === "range" &&
+                  (!importRange.start || !importRange.end))
               }
             >
               Confirm & Connect

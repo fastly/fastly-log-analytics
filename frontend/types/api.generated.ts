@@ -5846,6 +5846,13 @@ export interface components {
             cmcd_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /**
+             * Analyst Path A Supported
+             * @default true
+             */
+            analyst_path_a_supported: boolean;
+            /** Analyst Path A Reason */
+            analyst_path_a_reason?: string | null;
         } & {
             [key: string]: unknown;
         };

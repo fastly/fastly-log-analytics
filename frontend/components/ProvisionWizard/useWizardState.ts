@@ -10,6 +10,7 @@ import { showToast } from "@/lib/toast";
 import {
   INITIAL_CONFIG,
   WIZARD_DRAFT_VERSION,
+  ANALYST_PATH_A_UNSUPPORTED_REASON,
   getStepsForMode,
   type DomainStatus,
   type FosStatus,
@@ -63,6 +64,7 @@ export function useWizardState(
   onOpenChange: (open: boolean) => void,
 ): WizardState {
   const setActiveServiceId = useServiceStore(s => s.setActiveServiceId)
+  const activeServiceId = useServiceStore(s => s.activeServiceId)
   const setServices = useServiceStore(s => s.setServices)
   const services = useServiceStore(s => s.services);
   const { timezone } = useTimezoneStore();
@@ -124,6 +126,18 @@ export function useWizardState(
     end: string;
   }>({ start: "", end: "" });
   const [syncEnabled, setSyncEnabled] = useState(true);
+  const capabilityService = React.useMemo(() => {
+    if (!services.length) return null;
+    if (!activeServiceId) return services[0] ?? null;
+    return services.find((service) => service.id === activeServiceId) ?? null;
+  }, [activeServiceId, services]);
+  const analystPathASupported =
+    capabilityService?.analystPathASupported ?? true;
+  const analystPathAReason =
+    analystPathASupported
+      ? null
+      : capabilityService?.analystPathAReason ??
+        ANALYST_PATH_A_UNSUPPORTED_REASON;
 
   const [pendingDraft, setPendingDraft] = useState<WizardDraft | null>(() =>
     open ? loadDraft() : null,
@@ -412,6 +426,7 @@ export function useWizardState(
   const handleJoin = () =>
     runJoin({
       config,
+      analystPathASupported,
       syncIntervalMins,
       syncEnabled,
       icebergMetadataLocation,
@@ -631,6 +646,8 @@ export function useWizardState(
     ngwafDebugRaw,
     lakeInfo,
     isAnalyzing,
+    analystPathASupported,
+    analystPathAReason,
     importMode,
     setImportMode,
     importRange,
