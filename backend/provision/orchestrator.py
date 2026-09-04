@@ -968,6 +968,15 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
     _sync_crontab()
 
 
+def analyst_path_a_supported() -> bool:
+    """Return whether independent FOS-only analyst invites are usable."""
+    from backend import config as svcconfig
+
+    # Celery workers commit through the shared DuckLake catalog. That catalog
+    # is not present in the FOS-only payload consumed by an independent copy.
+    return svcconfig.INGEST_MODE != "celery"
+
+
 def generate_analyst_invite(service_id: str) -> dict:
     from backend import config as svcconfig
 
@@ -976,6 +985,12 @@ def generate_analyst_invite(service_id: str) -> dict:
         raise RuntimeError(f"Service {service_id} not found")
     if cfg.get("access_level") != "read_write":
         raise RuntimeError("Invite generation requires a read_write service configuration")
+    if not analyst_path_a_supported():
+        raise RuntimeError(
+            "Independent analyst invites are unavailable when INGEST_MODE=celery: "
+            "the scalable DuckLake catalog is not included in the FOS-only invite. "
+            "Use live shared-instance analyst access (Path B) instead."
+        )
     api_token = cfg.get("fastly_api_key", "").strip()
     # Fail fast when the stored token is missing. Without this, the Fastly
     # API call below would go out with token="" and either time out or

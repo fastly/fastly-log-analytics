@@ -531,6 +531,19 @@ def test_generate_analyst_invite_rejects_read_only_service():
             orchestrator.generate_analyst_invite("svc")
 
 
+def test_generate_analyst_invite_rejects_celery_topology():
+    """Path A must not issue FOS-only credentials for the shared DuckLake catalog."""
+    with (
+        patch("backend.config.INGEST_MODE", "celery"),
+        patch(
+            "backend.config.load_config",
+            return_value={"access_level": "read_write", "fastly_api_key": "k"},
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="INGEST_MODE=celery"):
+            orchestrator.generate_analyst_invite("svc")
+
+
 def test_generate_analyst_invite_returns_payload_with_credentials():
     """Happy path: Fastly returns the new access key; we return a
     payload with access_key_id + secret_key + bucket + endpoint.

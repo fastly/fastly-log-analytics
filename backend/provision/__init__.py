@@ -26,6 +26,7 @@ from .fastly_api import (
 from .fos_setup import ensure_fos_access_key, find_fos_key
 from .orchestrator import (
     _sync_crontab,
+    analyst_path_a_supported,
     cleanup_local_data,
     generate_analyst_invite,
     perform_teardown,
@@ -64,6 +65,7 @@ __all__ = [
     "find_fos_key",
     # orchestrator
     "_sync_crontab",
+    "analyst_path_a_supported",
     "cleanup_local_data",
     "generate_analyst_invite",
     "perform_teardown",

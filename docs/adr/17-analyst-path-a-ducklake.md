@@ -1,6 +1,6 @@
 # ADR-17 — Analyst Path A Under DuckLake (Open Gap)
 
-**Status:** Proposed — not yet implemented or validated. This ADR documents a real gap opened by [ADR-14](14-ducklake-replacement.md), not a shipped decision.
+**Status:** Accepted — Path A is disabled for the scalable Celery topology pending a validated catalog export.
 **Decided by:** v3.0.0 scalability review, 2026-08-31/09-01
 
 ## Context
@@ -12,6 +12,25 @@ That self-sufficiency was a property of the pyiceberg catalog, not an accident. 
 DuckLake does not have this property. Its catalog metadata — schema, snapshot chain, file listing, and (per [ADR-14](14-ducklake-replacement.md)) inlined rows not yet flushed to parquet — lives in whichever backend `DUCKLAKE_CATALOG` points at: a local `.ducklake` file, or (required for multi-writer / celery mode, per [ADR-15](15-multi-writer-topology.md)) Postgres. Neither is discoverable from FOS bucket contents alone. **A Path-A analyst instance holding only read-only FOS credentials today has no way to discover DuckLake table or snapshot state at all.** This was verified by grep, not assumed: nothing in `backend/routers/services/core.py`, `backend/routers/provision.py`, or `backend/provision/*.py` references `DUCKLAKE_CATALOG` or DuckLake in any form — the join flow was never touched by the DuckLake migration.
 
 This is a genuine regression for any service running celery mode / DuckLake with an active Path-A analyst, not a cosmetic gap: an independent-instance analyst against such a service would see an empty or permanently-stale lake.
+
+## Decision
+
+Path A is explicitly rejected when `INGEST_MODE=celery`. The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
+
+Path A remains available for the synchronous topology for backward compatibility with existing FOS/metadata-pointer deployments. A future FOS-resident DuckLake catalog export may restore Path A for scalable deployments, but it requires the validation spike described above before changing this gate.
+
+Any future independent-join endpoint must reuse the same topology guard so copied or stale payloads cannot silently enter an unsupported flow.
+
+## Consequences
+
+- Scalable services now fail closed at invite creation instead of creating a misleading FOS-only invite.
+- The frontend can surface the backend error and direct operators to Path B.
+- Existing synchronous Path A deployments and live shared-instance Path B access are unchanged.
+
+## Out of scope
+
+- Implementing a FOS-resident DuckLake catalog export.
+- Removing or changing Path B.
 
 ## Options considered
 

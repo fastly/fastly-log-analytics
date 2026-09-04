@@ -941,6 +941,8 @@ def api_invite_analyst(service_id: str):
             raise HTTPException(status_code=404, detail={"error": msg})
         if "read_write" in msg.lower():
             raise HTTPException(status_code=403, detail={"error": msg})
+        if "independent analyst invites are unavailable" in msg.lower():
+            raise HTTPException(status_code=409, detail={"error": msg})
         raise HTTPException(status_code=400, detail={"error": msg})
 
     result["_debug_calls"] = get_tracked_calls()
