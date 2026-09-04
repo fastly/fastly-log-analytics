@@ -69,6 +69,39 @@ def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
     assert data["settings"]["mask_ips"] is False
 
 
+def test_bootstrap_projects_path_a_capability_for_sync_services(client, tmp_path, monkeypatch):
+    """Sync-mode services advertise independent analyst Path A as available."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setattr(config, "INGEST_MODE", "sync")
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    service = response.json()["services"][0]
+    assert service["analyst_path_a_supported"] is True
+    assert service["analyst_path_a_reason"] is None
+
+
+def test_bootstrap_projects_path_a_capability_for_celery_services(client, tmp_path, monkeypatch):
+    """Celery/DuckLake services advertise Path A as unavailable with the Path B remedy."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setattr(config, "INGEST_MODE", "celery")
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    service = response.json()["services"][0]
+    assert service["analyst_path_a_supported"] is False
+    assert service["analyst_path_a_reason"] == (
+        "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+        "Use live shared-instance analyst access (Path B)."
+    )
+
+
 def test_bootstrap_omits_admin_token_when_env_unset(client, tmp_path, monkeypatch):
     """ADMIN_SHARED_SECRET unset (the default) → ``settings.admin_token`` is
     null. Pinned because Phase Q's frontend interceptor MUST no-op in this

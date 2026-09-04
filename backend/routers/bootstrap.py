@@ -42,6 +42,10 @@ _bootstrap_inflight: dict[str, asyncio.Future] = {}
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
 _header_badge_cache: dict[str, tuple[float, dict | None, dict | None]] = {}
+_ANALYST_PATH_A_UNSUPPORTED_REASON = (
+    "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+    "Use live shared-instance analyst access (Path B)."
+)
 
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
@@ -216,6 +220,17 @@ def _bootstrap_sync(
         src = timer.call("get_source_for_service", lambda: _db.get_source_for_service(service_id))
 
     services = timer.call("get_enriched_services", lambda: get_enriched_services(service_id))
+
+    def _project_analyst_path_capability() -> None:
+        from backend.provision import analyst_path_a_supported
+
+        supported = analyst_path_a_supported()
+        reason = None if supported else _ANALYST_PATH_A_UNSUPPORTED_REASON
+        for service in services:
+            service["analyst_path_a_supported"] = supported
+            service["analyst_path_a_reason"] = reason
+
+    timer.call("analyst_path_a_capability", _project_analyst_path_capability)
 
     # Analyst path: filter services to those scoped on the invite and force
     # access_level=read_only regardless of what get_source_for_service returned.

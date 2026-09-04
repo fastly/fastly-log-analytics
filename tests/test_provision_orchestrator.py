@@ -513,6 +513,17 @@ def test_cleanup_local_data_removes_cache_directory_for_bucket(tmp_path, monkeyp
 # ── generate_analyst_invite ─────────────────────────────────────────────────
 
 
+def test_analyst_path_a_supported_only_for_non_celery(monkeypatch):
+    """The shared Path A topology predicate only blocks scalable Celery mode."""
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "INGEST_MODE", "sync")
+    assert orchestrator.analyst_path_a_supported() is True
+
+    monkeypatch.setattr(svcconfig, "INGEST_MODE", "celery")
+    assert orchestrator.analyst_path_a_supported() is False
+
+
 def test_generate_analyst_invite_raises_when_service_missing():
     """Unknown service → RuntimeError (caller maps to 404). Pinned
     because returning None would surface as a JSON-encode failure
