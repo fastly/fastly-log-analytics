@@ -72,8 +72,27 @@ class TestGetConnectionLockHandling:
             "backend.core.duckdb.duckdb.connect",
             side_effect=Exception("database is locked"),
         ):
-            with pytest.raises(DBBusyError, match="locked by another process"):
+            with pytest.raises(DBBusyError, match=r"locked by another process.*path=/tmp/_test\.duckdb"):
                 get_connection(source={"duckdb_path": "/tmp/_test.duckdb"}, max_wait=0.1)
+
+    def test_lock_timeout_logs_topology_context(self, caplog):
+        with patch(
+            "backend.core.duckdb.duckdb.connect",
+            side_effect=Exception("database is locked"),
+        ):
+            with caplog.at_level("ERROR", logger="backend.core.duckdb"):
+                with pytest.raises(DBBusyError):
+                    get_connection(
+                        source={"logging_service_id": "svc-1", "duckdb_path": "/tmp/_test.duckdb"},
+                        max_wait=0.1,
+                        read_only=True,
+                    )
+
+        record = next(r for r in caplog.records if r.getMessage().startswith("duckdb_connection_lock_timeout"))
+        assert record.args["service_id"] == "svc-1"
+        assert record.args["db_path"] == "/tmp/_test.duckdb"
+        assert record.args["read_only"] is True
+        assert record.args["ingest_mode"] == "sync"
 
     def test_conflict_error_retries_then_raises_db_busy(self):
         """``"conflict"`` in the message is the original lock signal —

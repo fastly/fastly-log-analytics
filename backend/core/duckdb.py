@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import re
+import socket
 import threading
 import time
 import weakref
@@ -626,6 +627,21 @@ class DBBusyError(Exception):
     """Raised when a DuckDB connection cannot be acquired within the timeout."""
 
 
+def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, object]:
+    """Return safe topology metadata for a DuckDB file-lock diagnostic."""
+    catalog = os.getenv("DUCKLAKE_CATALOG", "")
+    catalog_mode = "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file"
+    return {
+        "service_id": source.get("logging_service_id") or source.get("name") or "unknown",
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "db_path": db_path,
+        "read_only": read_only,
+        "ingest_mode": os.getenv("INGEST_MODE", "sync"),
+        "catalog_mode": catalog_mode,
+    }
+
+
 # ── Lock-contention observability (TESTING_PLAN_3 item 13) ───────────────────
 #
 # Every lock retry inside ``get_connection`` increments this counter.
@@ -986,8 +1002,13 @@ def get_connection(
             # so operational dashboards / tests can see contention.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                context = _lock_context(src, db_path, read_only)
+                logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
                 raise DBBusyError(
-                    "Database is locked by another process (cron job may be running). Try again in a few seconds."
+                    "Database is locked by another process "
+                    f"(path={db_path}, pid={os.getpid()}, read_only={read_only}, "
+                    f"ingest_mode={context['ingest_mode']}, catalog_mode={context['catalog_mode']}). "
+                    "Try again in a few seconds."
                 ) from e
             _record_lock_retry()
             time.sleep(min(delay, remaining))
