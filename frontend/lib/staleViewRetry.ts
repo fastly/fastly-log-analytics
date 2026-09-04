@@ -161,14 +161,16 @@ export const STALE_VIEW_POLL_MS = 5000
  *     error (other errors fail fast). Backoff is short — a mid-sync tick
  *     typically clears in well under a second.
  *   - `refetchInterval`: once the retries are exhausted and the query is
- *     parked on a stale-view error, keep polling slowly until the view is
- *     consistent. Returns false (no poll) for non-stale errors and for
- *     success, so this only affects the benign stale-view case.
+ *     parked on a stale-view error with no usable data, keep polling slowly
+ *     until the view is consistent. Queries that already have data stop
+ *     polling so a background recovery loop cannot flicker populated views.
  */
 export const STALE_VIEW_RETRY_OPTIONS = {
   retry: (failureCount: number, error: Error) =>
     isStaleDashboardViewError(error) && failureCount < 2,
   retryDelay: (attempt: number) => 400 * (attempt + 1),
-  refetchInterval: (query: { state: { error: unknown } }) =>
-    isStaleDashboardViewError(query.state.error) ? STALE_VIEW_POLL_MS : false,
+  refetchInterval: (query: { state: { error: unknown; data?: unknown } }) =>
+    isStaleDashboardViewError(query.state.error) && query.state.data == null
+      ? STALE_VIEW_POLL_MS
+      : false,
 } as const

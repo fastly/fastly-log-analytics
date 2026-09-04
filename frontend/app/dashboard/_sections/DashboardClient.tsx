@@ -173,8 +173,9 @@ function DashboardBody({
   // failure: no scary red banner, and keep the chart/cards on their
   // loading skeleton instead of flashing "No data available".
   const isStalePreparing = bundleQuery.isError && isStaleDashboardViewError(bundleQuery.error)
-  const isLoadingAggs = bundleQuery.isLoading || isStalePreparing
-  const isFetchingAggs = bundleQuery.isFetching
+  const hasDashboardData = Boolean(aggregates)
+  const isLoadingAggs = bundleQuery.isLoading || (isStalePreparing && !hasDashboardData)
+  const isFetchingAggs = bundleQuery.isFetching && !isStalePreparing
 
   const { data: compareAggregates, error: compareError, refetch: refetchCompare } = useQuery({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
