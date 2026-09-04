@@ -46,6 +46,7 @@ import logging
 import os
 import re
 import threading
+import weakref
 from typing import Any
 
 import psycopg
@@ -154,7 +155,18 @@ def reset_pg_pool_for_tests() -> None:
 # ── Thread-local long-lived connection (metadata.base.get_con) ──────────────
 
 _thread_local = threading.local()
-_checked_out: list[psycopg.Connection] = []
+# WEAK references, deliberately — a plain list here would itself keep every
+# wrapper alive forever, defeating PgConnectionWrapper's GC finalizer for
+# any thread that dies without calling release_pg_thread_connection() (e.g.
+# an anyio HTTP-threadpool worker anyio itself prunes after 10s idle: see
+# the finalizer's docstring). A live incident found _checked_out holding 27
+# wrappers while only 3 of their owning threads still existed — the
+# finalizer was correctly implemented but could never fire because this
+# list held a permanent strong reference regardless. A WeakSet drops an
+# entry automatically the instant nothing else references the wrapper, so
+# close_all_pg_connections() (test teardown) only ever sees genuinely-live
+# wrappers, and dead ones are free to finalize immediately.
+_checked_out: weakref.WeakSet[PgConnectionWrapper] = weakref.WeakSet()
 _checked_out_lock = threading.Lock()
 
 
@@ -171,7 +183,7 @@ def get_pg_thread_connection() -> PgConnectionWrapper:
     wrapper = PgConnectionWrapper(raw)
     _thread_local.wrapper = wrapper
     with _checked_out_lock:
-        _checked_out.append(raw)
+        _checked_out.add(wrapper)
     return wrapper
 
 
@@ -185,30 +197,22 @@ def release_pg_thread_connection() -> None:
     current thread's own connection. Safe to call from a short-lived worker
     thread that used ``get_con()``/``get_pg_thread_connection()`` and is
     about to exit for good — e.g. a cron job's per-invocation heartbeat
-    thread (see ``backend.cron.decorators``). Without this, a thread that
-    is never reused (a fresh ``threading.Thread`` per cron tick, not a
-    pooled executor worker) permanently pins one pool slot on exit, since
-    nothing else ever calls ``putconn()`` for it — the pool's own bookkeeping
-    has no way to notice a thread died. At ``METADATA_PG_POOL_MAX`` ticks
-    (default 64) across ANY mix of such threads, every subsequent
-    ``get_con()`` call blocks for the full pool timeout and raises
-    ``PoolTimeout``, which is indistinguishable from real Postgres outage
-    to callers. No-op if the calling thread has no connection.
+    thread (see ``backend.cron.decorators``). A prompt, deterministic
+    release: ``PgConnectionWrapper``'s GC finalizer is the backstop for
+    threads that die WITHOUT calling this (anyio's HTTP threadpool prunes
+    idle workers on its own schedule; nothing in application code observes
+    that), but relying on GC timing alone means a slot sits pinned until
+    the next collection happens to run. Call this explicitly wherever the
+    thread's end-of-life is known. No-op if the calling thread has no
+    connection.
     """
     wrapper = getattr(_thread_local, "wrapper", None)
     if wrapper is None:
         return
-    conn = wrapper._conn
     del _thread_local.wrapper
     with _checked_out_lock:
-        try:
-            _checked_out.remove(conn)
-        except ValueError:
-            pass
-    try:
-        get_pg_pool().putconn(conn)
-    except Exception as e:
-        logger.warning("[pg_connection] failed to return thread connection to pool: %s", e)
+        _checked_out.discard(wrapper)
+    _return_to_pool_once(wrapper._conn, wrapper._returned)
 
 
 def get_pg_readonly_connection() -> PgConnectionWrapper:
@@ -227,17 +231,11 @@ def close_all_pg_connections() -> None:
     connections (no query in flight) tolerate a cross-thread ``putconn``,
     unlike SQLite's ``check_same_thread`` handles.
     """
-    global _checked_out
     with _checked_out_lock:
-        conns, _checked_out = _checked_out, []
-    if not conns:
-        return
-    pool = get_pg_pool()
-    for conn in conns:
-        try:
-            pool.putconn(conn)
-        except Exception as e:
-            logger.warning("[pg_connection] failed to return connection to pool: %s", e)
+        wrappers = list(_checked_out)
+        _checked_out.clear()
+    for wrapper in wrappers:
+        _return_to_pool_once(wrapper._conn, wrapper._returned)
     if hasattr(_thread_local, "wrapper"):
         del _thread_local.wrapper
 
@@ -414,6 +412,24 @@ class PgCursorWrapper:
         return self._lastrowid
 
 
+def _return_to_pool_once(conn: psycopg.Connection, returned: list[bool]) -> None:
+    """Idempotent connection-return: whichever caller reaches this FIRST
+    (an explicit release/close, or the GC finalizer below) wins; the other
+    is a safe no-op. Required because a connection can legitimately be
+    returned through either path for the same wrapper, and calling
+    ``pool.putconn()`` twice on one connection would let two callers hold
+    the same live connection concurrently — silent, hard-to-diagnose query
+    interleaving corruption, not a raised error.
+    """
+    if returned[0]:
+        return
+    returned[0] = True
+    try:
+        get_pg_pool().putconn(conn)
+    except Exception as e:
+        logger.warning("[pg_connection] failed to return connection to pool: %s", e)
+
+
 class PgConnectionWrapper:
     def __init__(self, conn: psycopg.Connection, is_readonly: bool = False, return_to_pool_on_close: bool = False):
         self._conn = conn
@@ -429,6 +445,28 @@ class PgConnectionWrapper:
         # Named to match sqlite_profiler._live_register's getattr lookup so
         # both backends feed the same Live Query Monitor code path.
         self._service_id: str | None = None
+        # GC safety net for the long-lived thread-affinity connections
+        # (get_pg_thread_connection): if this wrapper is ever garbage
+        # collected without an explicit release, the pool would otherwise
+        # think the connection is checked out forever. This is not a
+        # theoretical concern — a live incident (2026-09-03) traced it to
+        # TWO independent sources: a cron heartbeat thread that never
+        # returned its connection, AND every ordinary sync HTTP route
+        # handler, because FastAPI runs those on anyio's threadpool, which
+        # PRUNES idle worker threads after 10s on its own schedule
+        # (anyio._backends._asyncio.WorkerThread.MAX_IDLE_TIME) — a normal
+        # part of anyio's lifecycle that no request-scoped
+        # dependency/middleware cleanup can reliably catch, since a
+        # request's dependencies and endpoint are not guaranteed to run on
+        # the same worker thread, and threads can be recycled between
+        # requests regardless of any single request's boundaries. A
+        # `weakref.finalize` (not `__del__`, which can resurrect the
+        # object and complicates subclassing) fires via refcounting the
+        # instant the owning thread's `threading.local()` slot is cleared
+        # — no reference cycle is involved, so CPython collects it
+        # immediately, not on some later gc.collect() cycle.
+        self._returned = [False]
+        self._finalizer = weakref.finalize(self, _return_to_pool_once, conn, self._returned)
 
     def execute(self, sql: str, params: Any = None):
         from backend.utils.sqlite_profiler import _live_deregister, _live_register
@@ -479,12 +517,11 @@ class PgConnectionWrapper:
 
     def close(self):
         if self._return_to_pool_on_close:
-            try:
-                get_pg_pool().putconn(self._conn)
-            except Exception as e:
-                logger.warning("[pg_connection] failed to return connection to pool on close: %s", e)
-        # Long-lived thread connections are NOT closed here — they live in
-        # _checked_out and are returned by close_all_pg_connections().
+            _return_to_pool_once(self._conn, self._returned)
+        # Long-lived thread connections are NOT actively returned here —
+        # they live in _checked_out and are returned by
+        # release_pg_thread_connection() / close_all_pg_connections(), or
+        # by the GC finalizer as a last resort if neither ever runs.
 
     def __enter__(self):
         return self

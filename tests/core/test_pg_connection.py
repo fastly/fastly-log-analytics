@@ -354,6 +354,101 @@ def test_release_pg_thread_connection_only_affects_calling_thread(monkeypatch):
     assert pool.getconn.call_count == 3
 
 
+def test_wrapper_finalizer_returns_connection_when_garbage_collected(monkeypatch):
+    """The GC safety net: a wrapper that is dropped WITHOUT any explicit
+    release/close must still return its connection to the pool. This is
+    what actually protects against the leak in cases release_thread_
+    connection() can't reach — a sync HTTP route handler running on an
+    anyio threadpool worker that gets pruned (anyio kills idle workers
+    after 10s on its own schedule; no request-scoped cleanup can
+    reliably catch that, since a request's dependencies/endpoint aren't
+    guaranteed to share one worker thread)."""
+    import gc
+
+    pool = MagicMock()
+    conn = _FakeConn()
+    pool.getconn.return_value = conn
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+
+    wrapper = pgc.PgConnectionWrapper(conn)
+    assert conn not in [c.args[0] for c in pool.putconn.call_args_list]
+
+    del wrapper
+    gc.collect()
+
+    # A stray finalizer from an unrelated, already-torn-down test can also
+    # fire during this gc.collect() (module-global _checked_out state is
+    # shared across tests in this file) and call the SAME patched
+    # get_pg_pool() with ITS OWN leftover connection — assert our specific
+    # conn was returned exactly once, not that it's the pool's only call.
+    our_calls = [c for c in pool.putconn.call_args_list if c.args[0] is conn]
+    assert len(our_calls) == 1, f"expected exactly one putconn(conn) call, got {pool.putconn.call_args_list}"
+
+
+def test_wrapper_finalizer_is_noop_after_explicit_close(monkeypatch):
+    """An explicitly-closed (return_to_pool_on_close) wrapper must not
+    ALSO return its connection a second time when later garbage
+    collected — that would let two callers hold the same live connection
+    concurrently."""
+    import gc
+
+    pool = MagicMock()
+    conn = _FakeConn()
+    pool.getconn.return_value = conn
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+
+    wrapper = pgc.PgConnectionWrapper(conn, return_to_pool_on_close=True)
+    wrapper.close()
+    our_calls = [c for c in pool.putconn.call_args_list if c.args[0] is conn]
+    assert len(our_calls) == 1
+
+    del wrapper
+    gc.collect()
+
+    # Still just the one call for OUR conn — the finalizer must not fire a
+    # second putconn() for the same connection after an explicit close().
+    our_calls = [c for c in pool.putconn.call_args_list if c.args[0] is conn]
+    assert len(our_calls) == 1, f"expected exactly one putconn(conn) call, got {pool.putconn.call_args_list}"
+
+
+def test_checked_out_drops_dead_threads_wrapper_without_explicit_release(monkeypatch):
+    """Live incident: _checked_out was a plain list, so it held a permanent
+    STRONG reference to every wrapper ever created — including threads that
+    died naturally without ever calling release_pg_thread_connection() (the
+    dominant case: anyio's HTTP threadpool prunes idle workers on its own
+    schedule, and nothing in application code observes that). That
+    permanent reference meant the wrapper's GC finalizer could never fire,
+    no matter how thoroughly it was implemented — a real, measured case had
+    27 wrappers in _checked_out while only 3 of their owning threads still
+    existed. _checked_out must be a WeakSet so a dead thread's wrapper can
+    actually be collected (and its connection returned) the moment nothing
+    else references it, with no explicit release call required."""
+    import gc
+    import threading
+
+    pool = MagicMock()
+    pool.getconn.side_effect = lambda: _FakeConn()
+    monkeypatch.setattr(pgc, "get_pg_pool", lambda: pool)
+
+    def dies_without_releasing():
+        pgc.get_pg_thread_connection()  # never calls release_pg_thread_connection()
+
+    t = threading.Thread(target=dies_without_releasing)
+    t.start()
+    t.join()
+
+    # CPython's refcounting drops the wrapper the instant the thread's
+    # threading.local() slot is cleared on thread exit — no reference
+    # cycle is involved here, so this doesn't even need a gc.collect() to
+    # observe; the call below is defensive insurance, not load-bearing.
+    gc.collect()
+
+    assert len(pgc._checked_out) == 0, (
+        "a WeakSet must drop the dead thread's wrapper once nothing else references it — "
+        "if this is 1, _checked_out is (again) holding a strong reference and the leak is back"
+    )
+
+
 def test_get_pg_readonly_connection_is_fresh_each_call(monkeypatch):
     pool = MagicMock()
     pool.getconn.side_effect = lambda: _FakeConn()
