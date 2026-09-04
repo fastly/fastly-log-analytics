@@ -750,9 +750,7 @@ def cron_busy(service_id: str) -> bool:
     return bool(row and row["n"] > 0)
 
 
-def cron_summary_for_tasks(
-    service_id: str, tasks: tuple[str, ...] = ("log_discovery", "log_ingest")
-) -> dict[str, dict]:
+def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("log_discovery", "commit")) -> dict[str, dict]:
     """For each named task, return the latest run's summary fields. Used by refresh_config_status."""
     if not tasks:
         return {}
@@ -845,7 +843,7 @@ def reap_stale_jobs(service_id: str) -> None:
             try:
                 if row["job_name"] == "log_discovery":
                     app.send_task("backend.cron.jobs.sync._run_log_discovery_cron_celery", args=[service_id])
-                elif row["job_name"] == "log_ingest":
-                    app.send_task("backend.cron.jobs.commit._run_log_ingest_celery", args=[service_id])
+                elif row["job_name"] == "commit":
+                    app.send_task("backend.cron.jobs.commit._run_commit_celery", args=[service_id])
             except Exception as e:
                 logger.warning("[reap_stale_jobs] %s: re-enqueue of %s failed: %s", service_id, row["job_name"], e)

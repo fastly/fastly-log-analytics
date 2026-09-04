@@ -59,8 +59,9 @@ cd "$REPO_ROOT/frontend"
 # actual baseline count after completely eliminating all 17 ESLint errors/warnings inside
 # the newly added RUM, Assets, and Security views (RumSettingsDialog, TeardownRemoteFrontendDialog,
 # PopHealthHeatmap, ThreatIntelPanel, and DeployRemoteFrontendDialog). 843 -> 842: ratchet down ceiling following successful routing and query telemetry fixes. 842 -> 839: adopt shared useMounted hook in all Client analytical views to remove manual effects. 839 -> 835: ratchet down ceiling following absolute type-safety refactor of DebugPanel.tsx (0 any, 0 array-index-keys).
+# 835 -> 834: net drop from the log_ingest -> commit cron rename (CronColumns.tsx task-string comparisons collapsed).
 # Drive toward zero.
-CEILING=835
+CEILING=834
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

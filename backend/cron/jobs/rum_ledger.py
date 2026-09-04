@@ -17,7 +17,7 @@ about each other).
 
 Raw-file deletion needs no RUM-specific counterpart here: the existing,
 unmodified ``finalize_committed_raw`` (called from ``backend.cron.jobs.commit``'s
-celery branch on every ``log_ingest_{id}`` tick) already gates deletion on
+celery branch on every ``commit_{id}`` tick) already gates deletion on
 ``ingest_ledger.status='committed'`` regardless of which prefix produced the
 commit — it deletes by exact object_key, which is destination-only and can't
 be misrouted the way a content-parsing dispatch could. Likewise DuckLake

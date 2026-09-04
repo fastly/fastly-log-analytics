@@ -58,8 +58,8 @@ def test_commit_job_misfire_grace_time_equals_interval():
     ):
         s._sync_jobs()
 
-    job = s._sched.get_job("log_ingest_svc-perf")
-    assert job is not None, "log_ingest job must be registered"
+    job = s._sched.get_job("commit_svc-perf")
+    assert job is not None, "commit job must be registered"
     assert job.misfire_grace_time == 5 * 60, (
         f"expected {5 * 60}s grace for 5-min interval, got {job.misfire_grace_time}"
     )
@@ -83,7 +83,7 @@ def test_commit_job_misfire_grace_time_scales_with_longer_interval():
     ):
         s._sync_jobs()
 
-    job = s._sched.get_job("log_ingest_svc-perf-10")
+    job = s._sched.get_job("commit_svc-perf-10")
     assert job is not None
     assert job.misfire_grace_time == 10 * 60
 

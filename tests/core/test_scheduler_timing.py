@@ -30,14 +30,14 @@ class TestRunServiceCronSignature:
 
 
 class TestRunCommitUsesLocalStartTime:
-    """_run_log_ingest uses a local `start_time = time.time()` variable (correct).
+    """_run_commit uses a local `start_time = time.time()` variable (correct).
 
     Verify it doesn't reference an outer scope start_time that could be str|None.
     """
 
-    def test_run_log_ingest_no_str_subtraction(self):
-        """_run_log_ingest should not raise TypeError even if called with no string start_time."""
-        from backend.cron.jobs.commit import _run_log_ingest
+    def test_run_commit_no_str_subtraction(self):
+        """_run_commit should not raise TypeError even if called with no string start_time."""
+        from backend.cron.jobs.commit import _run_commit
 
         mock_src = {
             "name": "test",
@@ -53,11 +53,9 @@ class TestRunCommitUsesLocalStartTime:
         ):
             # RuntimeError from start_cron_run causes early return — no TypeError expected
             try:
-                _run_log_ingest("test-service")
+                _run_commit("test-service")
             except TypeError as exc:
-                raise AssertionError(
-                    f"TypeError in _run_log_ingest — likely str used in float arithmetic: {exc}"
-                ) from exc
+                raise AssertionError(f"TypeError in _run_commit — likely str used in float arithmetic: {exc}") from exc
 
 
 class TestLogCronRunDurationIsFloat:

@@ -5,7 +5,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
   rum_commit: 'Aggregates RUM beacon buffer records and commits them as a snapshot to the local RUM beacons table for analytics.',
   gap_heal: 'Reconciles Fastly\'s authoritative log-line emission counts against ingested rows every 30 min. On sustained loss (>=2 consecutive hourly buckets >=5% gap), triggers a full_sweep — throttled to one heal per 4h.',
   alerts: 'Evaluates recent logs against configured alert thresholds.',
-  log_ingest: 'Finalizes ingested data: compacts small lake files, reports how many files the ingest workers landed since the last tick, and deletes raw .gz files whose rows are durably committed (when delete_after is on).',
+  commit: 'Finalizes ingested data: compacts small lake files, reports how many files the ingest workers landed since the last tick, and deletes raw .gz files whose rows are durably committed (when delete_after is on).',
   optimize: 'Compacts small Iceberg data files into larger ones (writes back to FOS — incurs 30-day-minimum cost on rewritten files).',
   local_compact: 'Merges small parquet files in the LOCAL CACHE every 2 min. Free vs FOS — speeds up dashboard scans without touching the cloud manifest.',
   expire_snapshots: 'Removes old snapshots and orphaned files to reclaim storage.',
@@ -20,7 +20,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
 
 export const CRON_DISPLAY_NAMES: Record<string, string> = {
   log_discovery: 'Log Discovery',
-  log_ingest: 'Commit',
+  commit: 'Commit',
   full_sync: 'Full Discovery Sweep',
   gap_heal: 'Gap Heal',
   local_compact: 'Local Compact',
@@ -41,7 +41,7 @@ export const CRON_DISPLAY_NAMES: Record<string, string> = {
 export const CRON_GROUPS = [
   {
     title: 'Ingestion Pipeline',
-    tasks: ['log_discovery', 'log_ingest', 'full_sync', 'gap_heal'],
+    tasks: ['log_discovery', 'commit', 'full_sync', 'gap_heal'],
   },
   {
     title: 'Storage Maintenance',

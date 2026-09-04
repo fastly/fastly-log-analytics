@@ -59,12 +59,12 @@ def iceberg_commit_endpoint(source: dict = Depends(get_source)):
     thread and the response body carries a ``run_id`` the caller can
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
-    from backend.cron.jobs.commit import _run_log_ingest as _run_commit
+    from backend.cron.jobs.commit import _run_commit
     from backend.utils.router_utils import start_or_resume_cron
 
     return start_or_resume_cron(
         source,
-        "log_ingest",
+        "commit",
         _run_commit,
         target_kwargs={"force": True},
         success_msg="Commit started.",

@@ -43,7 +43,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
         "rum_sync": "rum_sync",
         "full_sync": "full_sync",
         "gap_heal": "gap_heal",
-        "log_ingest": "log_ingest",
+        "commit": "commit",
         "rum_commit": "rum_commit",
         "optimize": "optimize",
         "local_compact": "local_compact",

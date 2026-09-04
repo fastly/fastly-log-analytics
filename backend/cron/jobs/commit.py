@@ -26,8 +26,8 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("cron_log_ingest", job_name="log_ingest")
-def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = None) -> None:
+@cron_task("cron_commit", job_name="commit")
+def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
     """Commit the local buffer to the shared Iceberg table in FOS.
 
     Runs on its own cadence (commit_interval_mins) — independent of how often
@@ -55,9 +55,9 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
 
     try:
         if run_id is None:
-            run_id = start_cron_run(src, "log_ingest")
+            run_id = start_cron_run(src, "commit")
     except RuntimeError as e:
-        logger.info("⏭️  \x1b[95m[log_ingest]\x1b[0m %s: skipping — %s", service_id, str(e))
+        logger.info("⏭️  \x1b[95m[commit]\x1b[0m %s: skipping — %s", service_id, str(e))
         return
 
     if svcconfig.INGEST_MODE == "celery":
@@ -76,11 +76,11 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
             merge_lake_files(service_id)
 
             # Honest per-run counts for the cron row: how many files the
-            # convert workers landed since the previous log_ingest tick, and
+            # convert workers landed since the previous commit tick, and
             # how many durable raw .gz files we deleted (delete_after).
             meta_con = get_con(service_id)
             prev = meta_con.execute(
-                "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'log_ingest' "
+                "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
                 "AND status != 'running' ORDER BY id DESC LIMIT 1",
                 (service_id,),
             ).fetchone()
@@ -105,7 +105,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
                 summary += "; raw deletion disabled (delete_after=false)"
             log_cron_run(
                 src,
-                "log_ingest",
+                "commit",
                 time.time() - merge_started,
                 "success",
                 run_id=run_id,
@@ -116,7 +116,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
         except Exception as e:
             log_cron_run(
                 src,
-                "log_ingest",
+                "commit",
                 time.time() - merge_started,
                 "error",
                 run_id=run_id,
@@ -131,11 +131,11 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
     # iceberg state midway, which is much worse than refusing to start.
     from backend.core.duckdb import _cache_dir as _commit_cache_dir
 
-    ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "log_ingest")
+    ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "commit")
     if not ok:
         log_cron_run(
             src,
-            "log_ingest",
+            "commit",
             0.0,
             "error",
             run_id=run_id,
@@ -147,14 +147,14 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
     cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="log_ingest")
+    start_progress(run_id, service_id=service_id, task="commit")
     _svc_name = cfg.get("name", service_id) if cfg else service_id
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("🏎️  \x1b[95m[log_ingest]\x1b[0m %s: Ingest Logs job started.", _display)
+    logger.info("🏎️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
     _log_and_add_progress(
         run_id,
         service_id,
-        job_name="log_ingest",
+        job_name="commit",
         event={"type": "status", "message": "Committing local buffer to Iceberg snapshot..."},
     )
 
@@ -163,7 +163,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
         from backend.core import iceberg as db_iceberg
 
         def _commit_progress(type, msg):
-            _log_and_add_progress(run_id, service_id, job_name="log_ingest", event={"type": type, "message": msg})
+            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": type, "message": msg})
 
         result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
         duration = time.time() - start_time
@@ -184,7 +184,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
             )
             log_cron_run(
                 src,
-                "log_ingest",
+                "commit",
                 duration,
                 "success",
                 run_id=run_id,
@@ -192,7 +192,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
                 summary=summary,
                 log_output=_extract_log_text(run_id),
             )
-            _log_and_add_progress(run_id, service_id, job_name="log_ingest", event={"type": "done", "message": summary})
+            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "done", "message": summary})
 
             # ── Post-commit view refresh + pool warm ──
             # commit_buffer drained the buffer (buf_set changed) and advanced
@@ -207,7 +207,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
                 src,
                 service_id,
                 log_prefix="",
-                progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="log_ingest", event=ev),
+                progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
             )
 
             # ── On-demand Sync ──
@@ -220,9 +220,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
 
                 _metadata_jobs._run_metadata_sync(service_id)
             except Exception as e:
-                _log_and_add_progress(
-                    run_id, service_id, job_name="log_ingest", event={"type": "warning", "message": e}
-                )
+                _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "warning", "message": e})
 
             # ── Compact-on-sync ──
             # New parquet files just landed in the local cache. Fire local
@@ -247,19 +245,19 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
             summary = "No new data to commit" + quarantine_suffix + backlog_suffix
             log_cron_run(
                 src,
-                "log_ingest",
+                "commit",
                 duration,
                 "success",
                 run_id=run_id,
                 summary=summary,
                 log_output=_extract_log_text(run_id),
             )
-            _log_and_add_progress(run_id, service_id, job_name="log_ingest", event={"type": "done", "message": summary})
+            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "done", "message": summary})
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(
             src,
-            "log_ingest",
+            "commit",
             duration,
             "error",
             run_id=run_id,
@@ -267,7 +265,7 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
             summary="Buffer commit failed",
             log_output=_extract_log_text(run_id),
         )
-        _log_and_add_progress(run_id, service_id, job_name="log_ingest", event={"type": "error", "message": str(e)})
+        _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
         logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
     finally:
         end_progress(run_id)
@@ -286,4 +284,4 @@ def _run_log_ingest(service_id: str, force: bool = False, run_id: int | None = N
     except Exception:
         logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
 
-    logger.info("🏁  \x1b[95m[log_ingest]\x1b[0m %s: Ingest Logs job finished.", _display)
+    logger.info("🏁  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)

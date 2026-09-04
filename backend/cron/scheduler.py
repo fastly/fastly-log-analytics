@@ -239,8 +239,6 @@ def _log_and_add_progress(
         display_job_name = job_name
         if display_job_name == "sync":
             display_job_name = "log_discovery"
-        elif display_job_name == "commit":
-            display_job_name = "log_ingest"
 
         prefix = f"{icon}{c}[{display_job_name}]{c_end}"
         # Read the logger from module globals at call time so tests that
@@ -376,7 +374,7 @@ class Scheduler:
     # unless explicitly promoted to the worker fleet.
     _REDBEAT_JOB_PREFIXES = (
         "log_discovery_",
-        "log_ingest_",
+        "commit_",
         "ledger_sweep_",
         "full_sync_",
         "gap_heal_",
@@ -661,7 +659,7 @@ class Scheduler:
         """Read all service configs and add/update scheduled jobs."""
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.cron.jobs.commit import _run_log_ingest as _run_commit
+        from backend.cron.jobs.commit import _run_commit
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.expire import _run_expire_snapshots
         from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
@@ -800,7 +798,7 @@ class Scheduler:
                 logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
 
             # ── Commit job (flush local buffer → Iceberg snapshot in FOS) ─────
-            commit_job_id = f"log_ingest_{service_id}"
+            commit_job_id = f"commit_{service_id}"
             seen_ids.add(commit_job_id)
 
             if commit_job_id in self._job_ids:
@@ -824,7 +822,7 @@ class Scheduler:
                 )
                 self._job_ids[commit_job_id] = commit_job_id
                 logger.info(
-                    "📦 [scheduler] Registered log_ingest job %s (every %dm).",
+                    "📦 [scheduler] Registered commit job %s (every %dm).",
                     commit_job_id,
                     commit_interval_mins,
                 )

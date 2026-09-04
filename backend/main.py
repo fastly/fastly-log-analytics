@@ -1267,13 +1267,13 @@ def health_check(
                     # service (metadata_sync is scheduled only for read_only),
                     # so nothing ever supersedes it. A live failing cron keeps
                     # re-erroring inside the window, so real incidents still
-                    # degrade. Same reason 'commit' (pre-rename) is excluded.
+                    # degrade.
                     crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
                         "  SELECT task, status, error_message, "
                         "         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn "
-                        "  FROM cron_runs WHERE task IN ('log_ingest', 'metadata_sync') AND status != 'running'"
+                        "  FROM cron_runs WHERE task IN ('commit', 'metadata_sync') AND status != 'running'"
                         "  AND started_at >= ?"
                         # Boot-reap rows are lifecycle artifacts (the process
                         # stopped mid-run), not failing crons — a task that is

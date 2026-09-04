@@ -341,7 +341,7 @@ export function useLogsPageState() {
       log_discovery: 1,
       rum_sync: 2,
       alerts: 3,
-      log_ingest: 4,
+      commit: 4,
       rum_commit: 5,
       optimize: 6,
       local_compact: 7,

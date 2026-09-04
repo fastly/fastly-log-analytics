@@ -471,7 +471,7 @@ def _migration_017_ingest_ledger_epoch_timestamps(con: sqlite3.Connection) -> No
 
 
 def _migration_018_ingest_ledger_raw_deleted_at(con: sqlite3.Connection) -> None:
-    """Track raw .gz deletion per ledger row so the celery-mode log_ingest
+    """Track raw .gz deletion per ledger row so the celery-mode commit
     cron can delete durable-committed raw files (delete_after) without a
     second bookkeeping table, and re-runs stay idempotent."""
     if _has_table(con, "ingest_ledger") and not _has_column(con, "ingest_ledger", "raw_deleted_at"):

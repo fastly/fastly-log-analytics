@@ -180,7 +180,7 @@ def test_commit_iceberg_starts_commit_thread_and_returns_run_id():
         with (
             patch("backend.core.duckdb.start_cron_run", return_value=55),
             patch("backend.cron_progress.start_progress"),
-            patch("backend.cron.jobs.commit._run_log_ingest"),
+            patch("backend.cron.jobs.commit._run_commit"),
             patch("threading.Thread") as mock_thread,
         ):
             mock_t = MagicMock()
@@ -202,7 +202,7 @@ def test_commit_iceberg_already_running_returns_existing_run_id():
     from backend.cron_progress import _run_metadata
 
     run_id = 88
-    _run_metadata[run_id] = {"service_id": "test_service", "task": "log_ingest"}
+    _run_metadata[run_id] = {"service_id": "test_service", "task": "commit"}
     try:
         app.dependency_overrides[get_source] = lambda: _TEST_SOURCE
 

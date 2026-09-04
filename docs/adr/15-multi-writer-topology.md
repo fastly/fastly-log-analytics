@@ -30,7 +30,7 @@ A naive multi-pod cutover would route every scheduled job through Celery/RedBeat
 
 ```python
 _REDBEAT_JOB_PREFIXES = (
-    "log_discovery_", "log_ingest_", "ledger_sweep_", "full_sync_", "gap_heal_",
+    "log_discovery_", "commit_", "ledger_sweep_", "full_sync_", "gap_heal_",
     "rum_discovery_", "ledger_rum_sweep_",   # added by 587d0b5f (RUM ledger port)
 )
 ```

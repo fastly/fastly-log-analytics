@@ -42,7 +42,7 @@ def test_start_cron_run_second_call_raises_already_running():
 def test_start_cron_run_different_task_same_service_both_succeed():
     sid = "svc-lease-different-task"
     a = start_cron_run(sid, "log_discovery")
-    b = start_cron_run(sid, "log_ingest")
+    b = start_cron_run(sid, "commit")
     assert a > 0 and b > 0 and a != b
 
 
