@@ -140,7 +140,6 @@ export function useDashboardBundle({
       return previousData
     },
     ...STALE_VIEW_RETRY_OPTIONS,
-    refetchInterval: isAutoRange ? 5000 : false,
     refetchIntervalInBackground: false,
   })
 }

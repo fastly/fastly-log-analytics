@@ -179,8 +179,9 @@ def get_pg_thread_connection() -> PgConnectionWrapper:
     wrapper = getattr(_thread_local, "wrapper", None)
     if wrapper is not None:
         return wrapper
-    raw = get_pg_pool().getconn()
-    wrapper = PgConnectionWrapper(raw)
+    pool = get_pg_pool()
+    raw = pool.getconn()
+    wrapper = PgConnectionWrapper(raw, pool=pool)
     _thread_local.wrapper = wrapper
     with _checked_out_lock:
         _checked_out.add(wrapper)
@@ -220,8 +221,9 @@ def get_pg_readonly_connection() -> PgConnectionWrapper:
     wrapper's ``.close()`` returns the connection to the pool (callers use
     ``contextlib.closing(...)``, never a bare ``.close()`` expecting the
     socket to die)."""
-    raw = get_pg_pool().getconn()
-    return PgConnectionWrapper(raw, return_to_pool_on_close=True)
+    pool = get_pg_pool()
+    raw = pool.getconn()
+    return PgConnectionWrapper(raw, pool=pool, return_to_pool_on_close=True)
 
 
 def close_all_pg_connections() -> None:
@@ -412,7 +414,7 @@ class PgCursorWrapper:
         return self._lastrowid
 
 
-def _return_to_pool_once(conn: psycopg.Connection, returned: list[bool]) -> None:
+def _return_to_pool_once(conn: psycopg.Connection, returned: list[bool], pool=None) -> None:
     """Idempotent connection-return: whichever caller reaches this FIRST
     (an explicit release/close, or the GC finalizer below) wins; the other
     is a safe no-op. Required because a connection can legitimately be
@@ -425,13 +427,19 @@ def _return_to_pool_once(conn: psycopg.Connection, returned: list[bool]) -> None
         return
     returned[0] = True
     try:
-        get_pg_pool().putconn(conn)
+        (pool or get_pg_pool()).putconn(conn)
     except Exception as e:
         logger.warning("[pg_connection] failed to return connection to pool: %s", e)
 
 
 class PgConnectionWrapper:
-    def __init__(self, conn: psycopg.Connection, is_readonly: bool = False, return_to_pool_on_close: bool = False):
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        is_readonly: bool = False,
+        return_to_pool_on_close: bool = False,
+        pool=None,
+    ):
         self._conn = conn
         self._is_readonly = is_readonly
         self._return_to_pool_on_close = return_to_pool_on_close
@@ -466,7 +474,8 @@ class PgConnectionWrapper:
         # — no reference cycle is involved, so CPython collects it
         # immediately, not on some later gc.collect() cycle.
         self._returned = [False]
-        self._finalizer = weakref.finalize(self, _return_to_pool_once, conn, self._returned)
+        self._pool = pool
+        self._finalizer = weakref.finalize(self, _return_to_pool_once, conn, self._returned, pool)
 
     def execute(self, sql: str, params: Any = None):
         from backend.utils.sqlite_profiler import _live_deregister, _live_register
@@ -517,7 +526,7 @@ class PgConnectionWrapper:
 
     def close(self):
         if self._return_to_pool_on_close:
-            _return_to_pool_once(self._conn, self._returned)
+            _return_to_pool_once(self._conn, self._returned, self._pool)
         # Long-lived thread connections are NOT actively returned here —
         # they live in _checked_out and are returned by
         # release_pg_thread_connection() / close_all_pg_connections(), or
