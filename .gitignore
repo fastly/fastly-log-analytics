@@ -19,6 +19,7 @@ dist/
 *.cron.lock
 /cache/*
 .claude/*
+.agents/
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
