@@ -1,9 +1,10 @@
 'use client'
 
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import { useRouter } from 'next/navigation'
 import { useCardVisibility } from '@/hooks/useCardVisibility'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useDashboardBundle, type DashboardSection } from '@/hooks/useDashboardBundle'
 import { client, extractApiError } from '@/lib/api'
 import type { ChartMetric } from '@/types/api'
@@ -11,7 +12,6 @@ import { STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewE
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveSnappedWindow, type LogExtents } from '@/lib/log-extents-snap'
 import { useIsDataReady } from '@/hooks/useIsDataReady'
 import { DashboardHeader } from '@/components/Dashboard/DashboardHeader'
 import { Button } from '@/components/ui/button'
@@ -459,10 +459,12 @@ function DashboardBody({
 
 // ── Client ───────────────────────────────────────────────────────────────────
 
-export default function DashboardClient() {
+export default function DashboardClient({ nowServerStr }: { nowServerStr?: string }) {
   // Persist filter state to URL so back-nav, refresh, and shared links
   // all round-trip the user's current dashboard view. Hydration happens
   // in AppLayout.
+
+  const mounted = useMounted()
 
   const allCards = useDashboardCards()
 
@@ -482,10 +484,7 @@ export default function DashboardClient() {
   // than silently falling back to the 24h default.
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const hasSyncedExtents = useFilterStore((s) => s.hasSyncedExtents)
   const storeEndTime = useFilterStore((s) => s.endTime)
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const queryClient = useQueryClient()
   // Anchor the keyed path to the SELECTED window's end (floored to the 60s
   // grid), not to mount time: every explicit range selection writes a fresh
   // endTime, so a preset clicked in a long-lived tab re-anchors at click time
@@ -496,32 +495,18 @@ export default function DashboardClient() {
   // store-init default (≈ mount now), so the SSR seed — which floors the SAME
   // way (quantizeAnchor ≡ backend quantize_anchor) — still byte-matches within
   // the quantum.
-  //
-  // Before FilterBar's extents-sync effect has run (isAutoRange && !hasSyncedExtents),
-  // prefer deriving the anchor from the service's real log extents — already
-  // warm in the cache (root layout seeds ['log-extents', sid] on every route) —
-  // via the SAME resolveSnappedWindow the SSR seed and FilterBar's autoSetRange
-  // both use. This makes the FIRST client render's key already match what SSR
-  // seeded (when the service's data is stale), instead of computing the naive
-  // "now" anchor and then flashing to the corrected one a moment later once
-  // autoSetRange fires. Once hasSyncedExtents flips true, autoSetRange has
-  // already written the identical value into storeEndTime, so the fallback
-  // branch below recomputes to the same anchor — no discontinuity.
   const anchor = React.useMemo(() => {
-    if (isAutoRange && !hasSyncedExtents && activeServiceId) {
-      const logExtents = queryClient.getQueryData(['log-extents', activeServiceId]) as LogExtents | undefined
-      const snapped = resolveSnappedWindow(logExtents, new Date())
-      if (snapped) return quantizeAnchor(snapped.end)
-    }
-    return quantizeAnchor(storeEndTime)
-  }, [isAutoRange, hasSyncedExtents, activeServiceId, storeEndTime, queryClient])
+    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout
       title="Dashboard"
       description="Drill down into traffic details and analyze request trends."
       icon={LayoutDashboard}
-      defaultInterval="1 minute"
+      defaultInterval="1 hour"
       headerActions={
         <DashboardHeader
           visibleCardsCount={visibleCards.size}

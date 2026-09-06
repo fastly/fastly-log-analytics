@@ -40,10 +40,10 @@ def test_heatmap_by_asn_bucket_renders_with_all_inputs():
     # joins back and groups by the top_cells alias columns.
     assert "GROUP BY tc.asn, tc.bucket, tc.reqs, tc.err_count" in rendered
     assert "LIMIT 6000" in rendered
-    # The bucket-ms value appears in two EPOCH_MS arithmetic blocks, each
-    # of which uses the value twice (numerator + multiplier) — once in
-    # the CTE and once in the outer JOIN. Total: 4 occurrences.
-    assert rendered.count("300000") == 4
+    # The bucket-ms value appears in one EPOCH_MS arithmetic block, which
+    # uses the value twice (numerator + multiplier) — once in
+    # the CTE. Total: 2 occurrences.
+    assert rendered.count("300000") == 2
 
 
 def test_heatmap_by_asn_bucket_renders_with_null_column_exprs():
@@ -63,15 +63,13 @@ def test_heatmap_by_asn_bucket_renders_with_null_column_exprs():
 
 
 def test_heatmap_by_asn_bucket_placeholders_pinned():
-    # 2-pass CTE shape: top_cells limits work, then the outer SELECT
-    # joins back to the same temp table. ``{bucket_ms}`` appears 4x
-    # (two EPOCH_MS blocks, each using numerator + multiplier),
-    # ``{table}`` 4x (CTE FROM, outer FROM, JOIN ON's two refs), and
-    # ``{where}`` 2x (CTE + outer).
+    # 2-pass CTE shape: precomputed CTE limits work, then the outer SELECT
+    # joins back to the precomputed CTE. ``{bucket_ms}`` appears 2x
+    # (one EPOCH_MS block, using numerator + multiplier),
+    # ``{table}`` 4x (precomputed FROM, outer FROM as {table}, JOIN ON's two refs), and
+    # ``{where}`` 2x (precomputed + top_cells).
     assert _placeholders(SQL.HEATMAP_BY_ASN_BUCKET) == sorted(
         [
-            "bucket_ms",
-            "bucket_ms",
             "bucket_ms",
             "bucket_ms",
             "rtt_min_expr",
@@ -107,7 +105,7 @@ def test_map_by_country_bucket_renders_with_all_inputs():
         table='"_tmp_x"',
         where="1=1",
     )
-    assert "APPROX_QUANTILE(tcp_rtt, 0.5)" in rendered
+    assert 'APPROX_QUANTILE("_tmp_x".tcp_rtt, 0.5)' in rendered
     assert "AVG(ploss)" in rendered
     assert 'FROM "_tmp_x"' in rendered
     # 2-pass CTE: outer SELECT joins back to top_cells and groups by
@@ -116,9 +114,9 @@ def test_map_by_country_bucket_renders_with_all_inputs():
     assert "GROUP BY tc.country, tc.city, tc.lat, tc.lon, tc.metro, tc.bucket, tc.reqs, tc.err_count" in rendered
     assert "LIMIT 5000" in rendered
     assert "ORDER BY bucket, reqs DESC" in rendered
-    # bucket_ms appears in two EPOCH_MS blocks (CTE + outer JOIN), each
-    # using numerator + multiplier → 4 occurrences total post-2-pass-CTE.
-    assert rendered.count("300000") == 4
+    # bucket_ms appears in one EPOCH_MS block (precomputed CTE),
+    # using numerator + multiplier → 2 occurrences total post-optimization.
+    assert rendered.count("300000") == 2
 
 
 def test_map_by_country_bucket_renders_with_extended_where_for_map_asn():
@@ -142,12 +140,12 @@ def test_map_by_country_bucket_renders_with_extended_where_for_map_asn():
 
 
 def test_map_by_country_bucket_placeholders_pinned():
-    # 2-pass CTE shape: top_cells projects bare column refs (city_col,
+    # 2-pass CTE shape: precomputed CTE projects bare column refs (city_col,
     # lat_col, lon_col, metro_col); the outer JOIN ON references the
     # same logical columns but qualified with the temp-table name to
     # disambiguate from top_cells' aliases — those are join_* siblings.
-    # ``{bucket_ms}`` 4x (two EPOCH_MS blocks × 2 uses each), ``{table}``
-    # 4x (CTE FROM, outer FROM, JOIN ON's two refs), ``{where}`` 2x.
+    # ``{bucket_ms}`` 2x (one EPOCH_MS block × 2 uses), ``{table}``
+    # 6x (precomputed FROM, outer FROM as {table}, JOIN ON and WHERE refs), ``{where}`` 2x.
     assert _placeholders(SQL.MAP_BY_COUNTRY_BUCKET) == sorted(
         [
             "city_col",
@@ -160,9 +158,10 @@ def test_map_by_country_bucket_placeholders_pinned():
             "join_metro_col",
             "bucket_ms",
             "bucket_ms",
-            "bucket_ms",
-            "bucket_ms",
             "ploss_expr",
+            "table",
+            "table",
+            "table",
             "table",
             "table",
             "table",

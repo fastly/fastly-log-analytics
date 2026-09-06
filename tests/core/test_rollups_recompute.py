@@ -516,6 +516,8 @@ def test_recompute_touched_hours_skips_active_hour():
 
 def test_recompute_touched_hours_malformed_hour_skipped(tmp_path):
     """Bad hour tokens are logged + dropped; only good hours proceed."""
+    from contextlib import ExitStack
+
     from backend.core.rollups import recompute
 
     h_good, _ = _past_hour(2)
@@ -524,25 +526,30 @@ def test_recompute_touched_hours_malformed_hour_skipped(tmp_path):
     def _capture(_sid, _src, _table, where_sql, _fields):
         captured.append(where_sql)
 
-    with (
-        patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"),
-        patch("backend.core.rollups.recompute._get_fields", return_value=["ip"]),
-        patch("backend.core.rollups.recompute._run_per_field_copy", side_effect=_capture),
-        patch("backend.core.rollups.recompute._run_ip_spread_per_field"),
-        patch("backend.core.rollups.recompute.bundle_hours", return_value=0),
-        patch("backend.core.rollups.recompute.build_time_series_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_session_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_slow_urls_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_origin_summary_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_network_rtt_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_network_speed_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_verified_bots_ts_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_perf_latency_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_origin_dims_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_origin_latency_ts_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_security_dims_bundles", return_value=0),
-        patch("backend.core.rollups.recompute.build_perf_dims_bundles", return_value=0),
-    ):
+    with ExitStack() as stack:
+        stack.enter_context(patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"))
+        stack.enter_context(patch("backend.core.rollups.recompute._get_fields", return_value=["ip"]))
+        stack.enter_context(patch("backend.core.rollups.recompute._run_per_field_copy", side_effect=_capture))
+        stack.enter_context(patch("backend.core.rollups.recompute._run_ip_spread_per_field"))
+        stack.enter_context(patch("backend.core.rollups.recompute.bundle_hours", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_time_series_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_session_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_slow_urls_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_origin_summary_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_network_rtt_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_network_speed_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_verified_bots_ts_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_perf_latency_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_origin_dims_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_origin_latency_ts_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_security_dims_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_perf_dims_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_network_heatmap_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_network_geo_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_ngwaf_bots_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_overview_bundles", return_value=0))
+        stack.enter_context(patch("backend.core.rollups.recompute.build_network_summary_bundles", return_value=0))
+
         recompute.recompute_touched_hours("svc", {"name": "svc"}, {h_good, "not-an-hour"})
 
     assert len(captured) == 1
@@ -582,67 +589,125 @@ def test_recompute_touched_hours_all_active_returns():
 def test_recompute_touched_hours_swallows_downstream_bundle_errors():
     """Bundle/time_series/sessions failures must NOT propagate — they're
     best-effort optimisations, the per-field rebuild already succeeded."""
+    from contextlib import ExitStack
+
     from backend.core.rollups import recompute
 
     h, _ = _past_hour(2)
-    with (
-        patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"),
-        patch("backend.core.rollups.recompute._get_fields", return_value=["ip"]),
-        patch("backend.core.rollups.recompute._run_per_field_copy"),
+    with ExitStack() as stack:
+        stack.enter_context(patch("backend.core.rollups.recompute._safe_table_for", return_value="logs_x"))
+        stack.enter_context(patch("backend.core.rollups.recompute._get_fields", return_value=["ip"]))
+        stack.enter_context(patch("backend.core.rollups.recompute._run_per_field_copy"))
         # The recompute now also fires _run_ip_spread_per_field for any
         # field whose IP-spread companion rollup exists; stub it so the
         # test doesn't try to acquire a real DuckDB connection.
-        patch("backend.core.rollups.recompute._run_ip_spread_per_field"),
-        patch("backend.core.rollups.recompute.bundle_hours", side_effect=RuntimeError("bundle-boom")),
-        patch(
-            "backend.core.rollups.recompute.build_time_series_bundles",
-            side_effect=RuntimeError("ts-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_session_bundles",
-            side_effect=RuntimeError("sess-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_slow_urls_bundles",
-            side_effect=RuntimeError("su-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_origin_summary_bundles",
-            side_effect=RuntimeError("os-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_network_rtt_bundles",
-            side_effect=RuntimeError("nr-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_network_speed_bundles",
-            side_effect=RuntimeError("ns-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_verified_bots_ts_bundles",
-            side_effect=RuntimeError("vbts-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_perf_latency_bundles",
-            side_effect=RuntimeError("pl-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_origin_dims_bundles",
-            side_effect=RuntimeError("od-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_origin_latency_ts_bundles",
-            side_effect=RuntimeError("olts-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_security_dims_bundles",
-            side_effect=RuntimeError("sd-boom"),
-        ),
-        patch(
-            "backend.core.rollups.recompute.build_perf_dims_bundles",
-            side_effect=RuntimeError("pd-boom"),
-        ),
-    ):
+        stack.enter_context(patch("backend.core.rollups.recompute._run_ip_spread_per_field"))
+        stack.enter_context(
+            patch("backend.core.rollups.recompute.bundle_hours", side_effect=RuntimeError("bundle-boom"))
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_time_series_bundles",
+                side_effect=RuntimeError("ts-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_session_bundles",
+                side_effect=RuntimeError("sess-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_slow_urls_bundles",
+                side_effect=RuntimeError("su-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_origin_summary_bundles",
+                side_effect=RuntimeError("os-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_network_rtt_bundles",
+                side_effect=RuntimeError("nr-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_network_speed_bundles",
+                side_effect=RuntimeError("ns-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_verified_bots_ts_bundles",
+                side_effect=RuntimeError("vbts-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_perf_latency_bundles",
+                side_effect=RuntimeError("pl-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_origin_dims_bundles",
+                side_effect=RuntimeError("od-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_origin_latency_ts_bundles",
+                side_effect=RuntimeError("olts-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_security_dims_bundles",
+                side_effect=RuntimeError("sd-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_perf_dims_bundles",
+                side_effect=RuntimeError("pd-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_network_heatmap_bundles",
+                side_effect=RuntimeError("nhm-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_network_geo_bundles",
+                side_effect=RuntimeError("geo-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_ngwaf_bots_bundles",
+                side_effect=RuntimeError("ngwaf-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_overview_bundles",
+                side_effect=RuntimeError("ov-boom"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "backend.core.rollups.recompute.build_network_summary_bundles",
+                side_effect=RuntimeError("net-sum-boom"),
+            )
+        )
+
         # Must not raise.
         recompute.recompute_touched_hours("svc", {"name": "svc"}, {h})
 
@@ -911,3 +976,31 @@ def test_get_fields_includes_safe_custom_fields_skips_unsafe():
     assert "bad-with-dash" not in fields
     assert "disabled_cf" not in fields
     assert "hidden_cf" not in fields
+
+
+# ── _build_copy_query and _build_copy_ip_query NULL filters ─────────────────
+
+
+def test_build_copy_query_filters_out_nulls_and_empty():
+    """Assert that _build_copy_query generates SQL that explicitly filters out
+    NULL and empty string values for the rollup field to prevent populating
+    the rollups cache with natural nulls of optional fields."""
+    from backend.core.rollups._common import _build_copy_query
+
+    sql = _build_copy_query("logs_svc", "cookie_session", "timestamp >= '2026-08-20T00:00:00'")
+
+    # Check that we have our new IS NOT NULL and NULLIF filters on cookie_session
+    assert 'AND "cookie_session" IS NOT NULL' in sql
+    assert "AND NULLIF(CAST(\"cookie_session\" AS VARCHAR), '') IS NOT NULL" in sql
+
+
+def test_build_copy_ip_query_filters_out_nulls_and_empty():
+    """Assert that _build_ip_spread_select_query generates SQL that explicitly filters out
+    NULL and empty string values for the rollup field, in addition to the standard ip filters."""
+    from backend.core.rollups._common import _build_ip_spread_select_query
+
+    sql = _build_ip_spread_select_query("logs_svc", "ja3", "timestamp >= '2026-08-20T00:00:00'")
+
+    assert 'AND "ip" IS NOT NULL' in sql
+    assert 'AND "ja3" IS NOT NULL' in sql
+    assert "AND NULLIF(CAST(\"ja3\" AS VARCHAR), '') IS NOT NULL" in sql

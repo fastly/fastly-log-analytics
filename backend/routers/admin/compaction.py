@@ -407,4 +407,4 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
             except _queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=15, headers=SSE_PASSTHROUGH_HEADERS)
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)

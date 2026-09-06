@@ -127,7 +127,7 @@ export function CustomFieldDrawer({ serviceId, field, open, onOpenChange, onSave
   // every keystroke and clobber the user's in-progress edits. We only want
   // to reset on the open/field transition; `saveMutation.reset()` is safe to
   // call against the current ref each time.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (open) {
       setFormData(field ? {

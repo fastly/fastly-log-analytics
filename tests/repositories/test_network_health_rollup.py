@@ -250,13 +250,13 @@ def heatmap_rollup_layout(tmp_path):
 
 class TestTryNetworkHeatmapFromRollup:
     def test_returns_none_when_window_too_short(self, heatmap_rollup_layout):
-        """Windows < 48h return None (raw scan is fast enough)."""
+        """Windows < 24h return None (raw scan is fast enough)."""
         _, src, _, _, _ = heatmap_rollup_layout
         con = duckdb.connect()
         try:
             runner = QueryRunner(con, src)
             now = datetime.now(UTC)
-            start = (now - timedelta(hours=24)).isoformat()
+            start = (now - timedelta(hours=12)).isoformat()
             end = now.isoformat()
             result = runner.try_network_heatmap_from_rollup(start, end, has_filters=False)
         finally:
@@ -357,13 +357,13 @@ def geo_rollup_layout(tmp_path):
 
 class TestTryNetworkGeoFromRollup:
     def test_returns_none_when_window_too_short(self, geo_rollup_layout):
-        """Windows < 48h return None."""
+        """Windows < 24h return None."""
         _, src, _, _, _ = geo_rollup_layout
         con = duckdb.connect()
         try:
             runner = QueryRunner(con, src)
             now = datetime.now(UTC)
-            start = (now - timedelta(hours=24)).isoformat()
+            start = (now - timedelta(hours=12)).isoformat()
             end = now.isoformat()
             result = runner.try_network_geo_from_rollup(start, end, has_filters=False)
         finally:

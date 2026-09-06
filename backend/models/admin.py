@@ -581,3 +581,13 @@ class MetadataStorageResponse(_AdminMaintRead):
     db_path: str | None = None
     retention: MetadataRetentionValues | None = None
     ingested_files_locked: bool | None = None
+
+
+class DebugSettingsResponse(_AdminMaintRead):
+    query_debug_visibility: str
+    api_call_debug_visibility: str
+
+
+class DebugSettingsUpdateBody(BaseModel):
+    query_debug_visibility: str | None = None
+    api_call_debug_visibility: str | None = None

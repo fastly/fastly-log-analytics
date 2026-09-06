@@ -94,3 +94,12 @@ export function calculateDelta(current: number, previous: number | undefined): n
   if (previous === undefined || previous === 0) return null;
   return ((current - previous) / previous) * 100;
 }
+
+/**
+ * Formats a percentage ratio (e.g. 0.1234 -> "12.3%").
+ * Expects a ratio between 0 and 1.
+ */
+export function formatPercent(ratio: number, options?: { decimals?: number }): string {
+  const decimals = options?.decimals ?? 1
+  return `${(ratio * 100).toFixed(decimals)}%`
+}

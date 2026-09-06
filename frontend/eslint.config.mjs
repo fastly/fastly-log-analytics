@@ -18,6 +18,7 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    "public/**",
     "next-env.d.ts",
     // Build / generated / report output a bare `eslint .` would otherwise
     // lint as if it were source — minified chunks under `.next-e2e/`

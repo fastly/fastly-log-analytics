@@ -54,6 +54,41 @@ def _post_alert_webhook(url: str, payload: dict) -> None:
         response.raise_for_status()
 
 
+@tenacity.retry(
+    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
+def _post_slack_notification(url: str, payload: dict) -> None:
+    response = httpx.post(url, json=payload, timeout=5)
+    if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
+        response.raise_for_status()
+
+
+@tenacity.retry(
+    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
+def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val: str, service_name: str) -> None:
+    payload = {
+        "event_action": "trigger",
+        "client": "Fastly Log Analytics Engine",
+        "payload": {
+            "summary": f"Alert {alert_name} triggered on {service_name}: {metric} {msg_val}",
+            "source": service_name,
+            "severity": "critical",
+            "class": "cdn metric",
+            "component": metric,
+        },
+    }
+    response = httpx.post(url, json=payload, timeout=5)
+    if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
+        response.raise_for_status()
+
+
 # ── _run_metadata_sync (no @cron_task — also called as a bootstrap helper) ────
 
 
@@ -406,7 +441,15 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             summary = f"Synced {total_records} bot record(s) (budget reached — will continue next run), cleaned {deleted} old row(s)."
         else:
             summary = f"Synced {total_records} bot record(s), cleaned {deleted} old row(s)."
-        log_cron_run(src, "ngwaf_sync", time.time() - start_time, "success", summary=summary, run_id=run_id)
+        log_cron_run(
+            src,
+            "ngwaf_sync",
+            time.time() - start_time,
+            "success",
+            files_downloaded=total_records,
+            summary=summary,
+            run_id=run_id,
+        )
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
     except Exception as e:
         log_cron_run(
@@ -414,6 +457,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             "ngwaf_sync",
             time.time() - start_time,
             "error",
+            files_downloaded=total_records if "total_records" in locals() else 0,
             error_message=str(e),
             summary="NGWAF sync failed",
             run_id=run_id,
@@ -516,8 +560,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     try:
         display_name = _display_label(src, service_id)
 
-        # (alert_id, webhook_url, payload, max_ts) for each alert that should fire
-        triggered_items: list[tuple[str, str | None, dict | None, str | None]] = []
+        # (alert, webhook_url, payload, max_ts) for each alert that should fire
+        triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
 
         for alert in enabled_alerts:
             try:
@@ -525,7 +569,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                     con_ro, src, alert, display_name=display_name, service_id=service_id
                 )
                 if fired:
-                    triggered_items.append((alert["id"], webhook_url, payload, max_ts))
+                    triggered_items.append((alert, webhook_url, payload, max_ts))
                     logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
             except Exception as e:
                 logger.error(
@@ -543,8 +587,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         # Second pass: write timestamps first, then dispatch webhooks so a crash
         # between the two doesn't cause duplicate notifications on the next run.
         if triggered_items:
-            for alert_id, _, _, max_ts in triggered_items:
-                alert_repo.update_last_triggered(service_id, alert_id, max_ts)
+            for alert, _, _, max_ts in triggered_items:
+                alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
 
             # Export updated state before sending webhooks so the quiet-period
             # timestamp is durable even if a webhook call hangs or fails.
@@ -552,7 +596,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 
             export_admin_state(service_id)
 
-            for alert_id, webhook_url, payload, _ in triggered_items:
+            for alert, webhook_url, payload, _ in triggered_items:
+                # 1. Post legacy webhook if configured
                 if webhook_url and payload:
                     try:
                         _post_alert_webhook(webhook_url, payload)
@@ -560,7 +605,53 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                         logger.error(
                             "%s Failed to send webhook for alert %s: %s",
                             JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
-                            alert_id,
+                            alert["id"],
+                            e,
+                        )
+
+                # 2. Post to modern alert channels if configured
+                channels = alert.get("channels") or []
+                for channel in channels:
+                    try:
+                        chan_type = channel.get("type")
+                        chan_url = channel.get("url")
+                        if not chan_url:
+                            continue
+                        if chan_type == "slack":
+                            slack_payload = {
+                                "blocks": [
+                                    {
+                                        "type": "section",
+                                        "text": {"type": "mrkdwn", "text": f"🚨 *Alert Triggered: {alert['name']}*"},
+                                    },
+                                    {
+                                        "type": "fields",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": f"*Service:* {display_name}"},
+                                            {"type": "mrkdwn", "text": f"*Metric:* {alert['metric']}"},
+                                            {"type": "mrkdwn", "text": f"*Operator:* {alert['operator']}"},
+                                            {"type": "mrkdwn", "text": f"*Threshold:* {alert['threshold']}"},
+                                        ],
+                                    },
+                                ]
+                            }
+                            _post_slack_notification(chan_url, slack_payload)
+                        elif chan_type == "pagerduty":
+                            _post_pagerduty_notification(
+                                chan_url,
+                                alert_name=alert["name"],
+                                metric=alert["metric"],
+                                msg_val=f"{alert['operator']} {alert['threshold']}",
+                                service_name=display_name,
+                            )
+                        elif chan_type == "webhook":
+                            _post_alert_webhook(chan_url, payload or {"alert": alert})
+                    except Exception as e:
+                        logger.error(
+                            "%s Failed to send notifications to channel %s for alert %s: %s",
+                            JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
+                            channel.get("type"),
+                            alert["id"],
                             e,
                         )
 

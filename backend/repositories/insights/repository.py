@@ -685,8 +685,8 @@ def get_insights(
     # are connection-scoped and invisible to ``con.cursor()`` shadow
     # connections; tables in an ATTACH'd :memory: DB are visible to every
     # cursor on the parent connection.
-    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
-    temp_created = runner.create_temp_table(create_q, [baseline_start_s, now_s])
+    create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ)"
+    temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
 

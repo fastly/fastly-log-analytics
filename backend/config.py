@@ -19,7 +19,6 @@ Config file schema:
     "cdn_service_id": "...",                    # The CDN VCL service fronting FOS
     "fastly_api_key": "...",                    # Account-wide Fastly API key
     "provisioning": {                           # Embedded provisioning state for teardown
-        "fos_key_id": "...",
         "endpoint_name": "Fastly Object Storage Logs",
         "temp_admin_key_id": null
     }
@@ -49,6 +48,8 @@ SYSTEM_DATA_DIR = DATA_DIR / "system"
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}
 _name_cache: dict = {}
 _name_cache_lock = threading.Lock()
+_name_refresh_in_flight: set[str] = set()
+_name_refresh_lock = threading.Lock()
 _NAME_CACHE_TTL = 300  # 5 minutes
 
 # Cache for parsed configs: {service_id: (mtime_ns, raw_bytes)}.
@@ -189,6 +190,10 @@ def save_config(service_id: str, cfg: dict):
     """Write a service config atomically. See :func:`_atomic_write_json`."""
     global _cdn_service_id_map
     _ensure_dirs()
+    if "created_at" not in cfg or not cfg["created_at"]:
+        import datetime as _dt
+
+        cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
     _atomic_write_json(config_path(service_id), cfg)
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
@@ -297,6 +302,16 @@ def config_to_source(cfg: dict) -> dict:
 
     prov = cfg.get("provisioning", {})
 
+    log_fields = cfg.get("log_fields") or {}
+    if log_fields and "format_hash" not in log_fields:
+        try:
+            from backend.core import log_fields as lf_module
+
+            log_fields = dict(log_fields)
+            log_fields["format_hash"] = lf_module.format_hash(log_fields)
+        except Exception:
+            pass
+
     return {
         "name": cfg.get("service_id", "default"),
         "service_id": cfg.get("service_id", "default"),
@@ -314,9 +329,12 @@ def config_to_source(cfg: dict) -> dict:
         "logging_service_id": cfg.get("service_id", ""),
         "duckdb_path": actual_db_path,
         "access_level": cfg.get("access_level", "read_write"),
+        "storage_mode": cfg.get("storage_mode", "cloud"),
         "log_period": int(cfg.get("log_period", 60)),
-        "log_fields": cfg.get("log_fields", {}),
+        "log_fields": log_fields,
         "provisioning": prov,
+        "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
+        "rum": cfg.get("rum", {}),
     }
 
 
@@ -378,13 +396,28 @@ def refresh_service_name(service_id: str, api_key: str | None = None) -> str:
     return service_id
 
 
-def refresh_all_service_names(configs: list[dict]) -> dict[str, str]:
-    """Refresh service names for all configs in parallel. Returns {service_id: name}.
+def _refresh_service_names_bg(misses_args: list[tuple[str, str | None]]) -> None:
+    try:
+        for sid, api_key in misses_args:
+            try:
+                refresh_service_name(sid, api_key)
+            except Exception:
+                pass
+    finally:
+        with _name_refresh_lock:
+            for sid, _ in misses_args:
+                _name_refresh_in_flight.discard(sid)
 
-    Fast path: if every service has a fresh in-memory cache entry, return
-    that map directly without spawning a ThreadPoolExecutor. Called from
-    get_enriched_services on every /bootstrap and /services hit, so the
-    pool-creation cost shows up on the steady-state dashboard refresh.
+
+def refresh_all_service_names(configs: list[dict], _sync: bool = False) -> dict[str, str]:
+    """Refresh service names for all configs. Returns {service_id: name}.
+
+    Stale-while-revalidate asynchronous refresh by default to completely avoid
+    blocking web requests or spawning a ThreadPoolExecutor on the request thread.
+    Returns the best available name (cached or from JSON config) immediately
+    and spins off a background thread to update the cache in the background.
+
+    For testing/synchronous usage, specify _sync=True.
     """
     now = time.time()
     name_map: dict[str, str] = {}
@@ -401,20 +434,53 @@ def refresh_all_service_names(configs: list[dict]) -> dict[str, str]:
     if not misses:
         return name_map
 
-    import concurrent.futures
+    if _sync:
+        import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(refresh_service_name, cfg.get("service_id", ""), cfg.get("fastly_api_key", "")): cfg
-            for cfg in misses
-        }
-        for future in concurrent.futures.as_completed(futures):
-            cfg = futures[future]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(refresh_service_name, cfg.get("service_id", ""), cfg.get("fastly_api_key", "")): cfg
+                for cfg in misses
+            }
+            for future in concurrent.futures.as_completed(futures):
+                cfg = futures[future]
+                sid = cfg.get("service_id", "")
+                try:
+                    name_map[sid] = future.result()
+                except Exception:
+                    name_map[sid] = cfg.get("name") or sid
+        return name_map
+
+    # Asynchronous stale-while-revalidate path
+    to_schedule = []
+    with _name_refresh_lock:
+        for cfg in misses:
             sid = cfg.get("service_id", "")
-            try:
-                name_map[sid] = future.result()
-            except Exception:
-                name_map[sid] = cfg.get("name") or sid
+            entry = _name_cache.get(sid)
+            best_effort = sid
+            if entry:
+                best_effort = entry["name"]
+            elif cfg.get("name"):
+                best_effort = cfg["name"]
+            name_map[sid] = best_effort
+
+            if sid not in _name_refresh_in_flight:
+                _name_refresh_in_flight.add(sid)
+                to_schedule.append((sid, cfg.get("fastly_api_key")))
+
+    if to_schedule:
+        try:
+            threading.Thread(
+                target=_refresh_service_names_bg,
+                args=(to_schedule,),
+                name="refresh-service-names-bg",
+                daemon=True,
+            ).start()
+        except Exception:
+            with _name_refresh_lock:
+                for sid, _ in to_schedule:
+                    _name_refresh_in_flight.discard(sid)
+
     return name_map
 
 
@@ -511,3 +577,9 @@ def is_usage_logging_enabled() -> bool:
     if "pytest" in sys.modules:
         return False
     return load_usage_logging_config().get("enabled", False)
+
+
+from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("config._name_cache", _name_cache)
+_CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)

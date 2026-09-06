@@ -245,63 +245,65 @@ export function BotsSection({
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <AnalyticsCard
-          title="Verified Bots (NGWAF)"
-          icon={<Bot className="h-4 w-4" />}
-          headerAction={intervalButtons}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          error={error as AnalyticsCardError | null}
-          className="h-[360px]"
-          contentClassName="p-2"
-          helpTitle={SECURITY_INFO.ngwaf_bots.title}
-          helpContent={SECURITY_INFO.ngwaf_bots.body}
-        >
-          {ngwafBotsData.length === 0 && !isLoading ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
-              {data?.ngwaf_configured
-                ? "No NGWAF bot detections in this time window."
-                : <>Set <code className="mx-1 text-xs bg-muted px-1 rounded">ngwaf_workspace_id</code> in service settings to enable NGWAF bot tracking.</>}
-            </div>
-          ) : (
-            <PlotlyChart
-              data={ngwafBotsData as any[]}
-              layout={{
-                ...commonTimeLayout,
-                barmode: 'stack',
-                showlegend: true,
-                yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' }
-              }}
-              height="100%"
-            />
-          )}
-        </AnalyticsCard>
+      {data?.ngwaf_configured !== false && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <AnalyticsCard
+            title="Verified Bots (NGWAF)"
+            icon={<Bot className="h-4 w-4" />}
+            headerAction={intervalButtons}
+            isLoading={isLoading}
+            isFetching={isFetching}
+            error={error as AnalyticsCardError | null}
+            className="h-[360px]"
+            contentClassName="p-2"
+            helpTitle={SECURITY_INFO.ngwaf_bots.title}
+            helpContent={SECURITY_INFO.ngwaf_bots.body}
+          >
+            {ngwafBotsData.length === 0 && !isLoading ? (
+              <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
+                {data?.ngwaf_configured
+                  ? "No NGWAF bot detections in this time window."
+                  : <>Set <code className="mx-1 text-xs bg-muted px-1 rounded">ngwaf_workspace_id</code> in service settings to enable NGWAF bot tracking.</>}
+              </div>
+            ) : (
+              <PlotlyChart
+                data={ngwafBotsData as any[]}
+                layout={{
+                  ...commonTimeLayout,
+                  barmode: 'stack',
+                  showlegend: true,
+                  yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' }
+                }}
+                height="100%"
+              />
+            )}
+          </AnalyticsCard>
 
-        <AnalyticsCard
-          title="Verified Bot Names (NGWAF)"
-          icon={<Bot className="h-4 w-4" />}
-          headerAction={
-            <ColumnVisibilityDropdown columns={labeledColumns(NGWAF_BOT_COLUMN_IDS)} visibility={ngwafBotVisibility} onChange={onNgwafBotVisChange} />
-          }
-          isLoading={isLoading}
-          isFetching={isFetching}
-          error={error as AnalyticsCardError | null}
-          className="min-h-[360px]"
-          contentClassName="p-0"
-          helpTitle={SECURITY_INFO.ngwaf_bots.title}
-          helpContent={SECURITY_INFO.ngwaf_bots.body}
-        >
-          <DataTable
-            columns={ngwafBotColumns}
-            data={data?.ngwaf_verified_bots || []}
-            emptyMessage={isLoading ? "" : (data?.ngwaf_configured ? "No NGWAF bot detections in this time window." : "Set ngwaf_workspace_id in service settings to enable NGWAF bot tracking.")}
-            hideToolbar
-            columnVisibility={ngwafBotVisibility}
-            onColumnVisibilityChange={setNgwafBotVisibility}
-          />
-        </AnalyticsCard>
-      </div>
+          <AnalyticsCard
+            title="Verified Bot Names (NGWAF)"
+            icon={<Bot className="h-4 w-4" />}
+            headerAction={
+              <ColumnVisibilityDropdown columns={labeledColumns(NGWAF_BOT_COLUMN_IDS)} visibility={ngwafBotVisibility} onChange={onNgwafBotVisChange} />
+            }
+            isLoading={isLoading}
+            isFetching={isFetching}
+            error={error as AnalyticsCardError | null}
+            className="min-h-[360px]"
+            contentClassName="p-0"
+            helpTitle={SECURITY_INFO.ngwaf_bots.title}
+            helpContent={SECURITY_INFO.ngwaf_bots.body}
+          >
+            <DataTable
+              columns={ngwafBotColumns}
+              data={data?.ngwaf_verified_bots || []}
+              emptyMessage={isLoading ? "" : (data?.ngwaf_configured ? "No NGWAF bot detections in this time window." : "Set ngwaf_workspace_id in service settings to enable NGWAF bot tracking.")}
+              hideToolbar
+              columnVisibility={ngwafBotVisibility}
+              onColumnVisibilityChange={setNgwafBotVisibility}
+            />
+          </AnalyticsCard>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard

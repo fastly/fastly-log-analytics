@@ -1040,11 +1040,8 @@ async def get_aggregates(
     materialization always runs because every live branch reads from it
     — that's the floor cost the composite exists to amortize.
     """
-    import asyncio
     import time as _time
     import uuid as _uuid
-
-    from backend.core.duckdb_pool import _PoolBusy, checkout_connection
 
     table_name = _safe_table(src["name"])
     runner = QueryRunner(con, src)
@@ -1349,112 +1346,19 @@ async def get_aggregates(
     extras_needed = sum(int(b) for b in (branch_slow_active, branch_ts_active, branch_pop_active))
 
     try:
-        # Acquire one extra pool conn per occupied non-primary branch so
-        # they run in parallel via asyncio.gather. ``max_wait=0.2`` absorbs
-        # brief contention but bails before the wait itself eats the
-        # parallel-execution savings. On _PoolBusy or any other acquire
-        # failure we roll back partial acquires and fall through to serial
-        # on ``runner``. Pool size defaults to 8 per service
-        # (DUCKDB_POOL_MAX_SIZE), so 2 concurrent origin requests fit
-        # before fallback kicks in for the third.
-        extra_cms: list = []
-        extra_runners: list[QueryRunner] = []
-        parallel = extras_needed > 0
-        if parallel:
-            try:
-                for _ in range(extras_needed):
-                    # skip_view_update=True: ctx.con was just validated by the
-                    # request's primary checkout; the per-service iceberg view
-                    # state can't rotate within this same-request window without
-                    # being caught by QueryRunner.execute's stale-view retry.
-                    # Saves ~200-400 ms × N extras on the rebind probe that
-                    # _prepare_checkout would otherwise run.
-                    cm = checkout_connection(src, max_wait=0.2, skip_view_update=True)
-                    extra_cms.append(cm)
-                    extra_runners.append(QueryRunner(cm.__enter__(), src))
-            except _PoolBusy:
-                parallel = False
-            except Exception:
-                parallel = False
-
-        if not parallel:
-            for cm in extra_cms:
-                try:
-                    cm.__exit__(None, None, None)
-                except Exception:
-                    pass
-            extra_cms = []
-            extra_runners = []
-
-        # ``merged`` already holds the hoisted rollup hits — the live branches
-        # below only ADD the missed sections (do NOT reinitialize it here, or
-        # the rollup hits for this same request would be dropped).
-        if parallel:
-            try:
-                # Build the gather list in the same order we consume
-                # extra_runners — branch 1 (summary) always uses the
-                # primary runner; other branches consume extras only when
-                # they have work to do.
-                tasks: list = [asyncio.to_thread(_branch_summary, runner)]
-                next_extra = 0
-                if branch_slow_active:
-                    tasks.append(asyncio.to_thread(_branch_slow_urls, extra_runners[next_extra]))
-                    next_extra += 1
-                if branch_ts_active:
-                    tasks.append(asyncio.to_thread(_branch_ts_status_path, extra_runners[next_extra]))
-                    next_extra += 1
-                if branch_pop_active:
-                    tasks.append(asyncio.to_thread(_branch_pop_ip, extra_runners[next_extra]))
-                    next_extra += 1
-                # return_exceptions=True forces gather() to wait for ALL
-                # to_thread workers to finish before returning, even if one
-                # branch raises or the client cancels mid-flight. Without
-                # it, a raising branch propagates immediately and the
-                # ``finally`` below returns the extra conns to the pool
-                # (errored=False) while the sibling branches' worker threads
-                # are still executing DuckDB queries against them — and
-                # DuckDB connections are not safe for concurrent use. A
-                # subsequent checkout of such a conn would deadlock on the
-                # internal mutex (leaked-active conns exhaust the pool → DoS)
-                # or corrupt in-process DuckDB state. Mirrors the F015 fix in
-                # backend/routers/dashboard.py (audit run 7ba15352).
-                _tasks = [asyncio.create_task(t) for t in tasks]
-                try:
-                    results = await asyncio.gather(*[asyncio.shield(t) for t in _tasks], return_exceptions=True)
-                    for part in results:
-                        if isinstance(part, BaseException):
-                            raise part
-                        merged.update(part)
-                except asyncio.CancelledError:
-                    # If gather itself is cancelled (e.g. client disconnect),
-                    # shield the wait so the workers still finish before we hit
-                    # the finally block and release the connections.
-                    await asyncio.shield(asyncio.gather(*_tasks, return_exceptions=True))
-                    raise
-                # Fold the extra runners' debug telemetry into the primary
-                # runner's so the response's ``_debug_queries`` /
-                # ``_debug_calls`` envelope still surfaces every query the
-                # harness needs to attribute. Without this fold the extra-
-                # runner queries would be invisible to the harness and the
-                # live-query monitor.
-                for r in extra_runners:
-                    runner.debug_queries.extend(r.debug_queries)
-                    runner.debug_calls.extend(r.debug_calls)
-                section_timings.append({"section": "origin:parallel", "time_ms": 0.0})
-            finally:
-                for cm in extra_cms:
-                    try:
-                        cm.__exit__(None, None, None)
-                    except Exception:
-                        pass
-        else:
-            merged.update(_branch_summary(runner))
-            if branch_slow_active:
-                merged.update(_branch_slow_urls(runner))
-            if branch_ts_active:
-                merged.update(_branch_ts_status_path(runner))
-            if branch_pop_active:
-                merged.update(_branch_pop_ip(runner))
+        # Since all branch queries read from the temporary table (which is connection-scoped
+        # in DuckDB and cannot be accessed across different pooled connections), we MUST execute
+        # them sequentially on the primary runner's connection. Spawning threads or checking
+        # out separate connections would raise CatalogException.
+        # Note: serial execution is also extremely fast because the temp table is already
+        # pre-filtered and localized in-memory.
+        merged.update(_branch_summary(runner))
+        if branch_slow_active:
+            merged.update(_branch_slow_urls(runner))
+        if branch_ts_active:
+            merged.update(_branch_ts_status_path(runner))
+        if branch_pop_active:
+            merged.update(_branch_pop_ip(runner))
 
         summary_card = merged.get("summary") or {}
         return {

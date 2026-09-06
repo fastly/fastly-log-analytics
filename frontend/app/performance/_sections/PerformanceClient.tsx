@@ -2,15 +2,14 @@
 
 import { SlowestUrlsHelp, SlowestNetworksHelp, CacheTtlHelp, OriginVsEdgeHelp } from "../help-content";
 import React from 'react'
+import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { useQueryClient } from '@tanstack/react-query'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveSnappedWindow, type LogExtents } from '@/lib/log-extents-snap'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
@@ -317,7 +316,7 @@ function PerformanceBody({
   )
 }
 
-export default function PerformanceClient() {
+export default function PerformanceClient({ nowServerStr }: { nowServerStr?: string }) {
   const getFieldLabel = useFieldLabel()
 
   const [urlVisibility, setUrlVisibility, onUrlVisChange] = useColumnVisibility()
@@ -328,12 +327,11 @@ export default function PerformanceClient() {
   // ("24h"), keeping the SSR seed key byte-matched. A custom absolute range
   // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
   // the latency tables/distributions reflect exactly the selected window.
+  const mounted = useMounted()
+
   const relativeRange = useFilterStore((s) => s.relativeRange)
   const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const hasSyncedExtents = useFilterStore((s) => s.hasSyncedExtents)
   const storeEndTime = useFilterStore((s) => s.endTime)
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const queryClient = useQueryClient()
   // Anchor the keyed path to the SELECTED window's end, not to mount time: a
   // preset clicked in a long-lived tab re-anchors at click time so the scan
   // matches the hard-clamped x-axis (a mount-pinned anchor could leave the
@@ -341,23 +339,11 @@ export default function PerformanceClient() {
   // so a re-render can't advance the key; cold-load endTime ≈ mount now, so the
   // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
   // byte-matches within the quantum.
-  //
-  // Before FilterBar's extents-sync effect runs (isAutoRange && !hasSyncedExtents),
-  // prefer the anchor implied by the service's real log extents — already warm
-  // in the cache (root layout seeds ['log-extents', sid] on every route) — via
-  // the SAME resolveSnappedWindow the SSR seed and FilterBar's autoSetRange both
-  // use. Feeds BOTH the core and distributions query keys below since they
-  // share this single anchor. Once hasSyncedExtents flips true, autoSetRange
-  // has already written the same value into storeEndTime, so the fallback
-  // branch recomputes identically.
   const anchor = React.useMemo(() => {
-    if (isAutoRange && !hasSyncedExtents && activeServiceId) {
-      const logExtents = queryClient.getQueryData(['log-extents', activeServiceId]) as LogExtents | undefined
-      const snapped = resolveSnappedWindow(logExtents, new Date())
-      if (snapped) return quantizeAnchor(snapped.end)
-    }
-    return quantizeAnchor(storeEndTime)
-  }, [isAutoRange, hasSyncedExtents, activeServiceId, storeEndTime, queryClient])
+    const baseVal = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
+    const baseStr = (baseVal as any) instanceof Date ? (baseVal as any).toISOString() : (baseVal || undefined)
+    return quantizeAnchor(baseStr)
+  }, [storeEndTime, nowServerStr, mounted])
 
   return (
     <ReportLayout

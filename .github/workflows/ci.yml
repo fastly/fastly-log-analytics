@@ -141,12 +141,26 @@ jobs:
           terraform_wrapper: false
 
       - name: Cache Terraform provider plugins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: cache/tf_provider_cache
           key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py', 'tests/utils/test_terraform_resource_graph.py') }}
           restore-keys: |
             ${{ runner.os }}-terraform-providers-
+
+      - name: Install tflint
+        run: |
+          TFLINT_VERSION=0.55.0
+          case "$(uname -m)" in
+            x86_64)  ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          sudo curl -sSfL "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_${ARCH}.zip" \
+            -o /tmp/tflint.zip
+          sudo unzip /tmp/tflint.zip -d /usr/local/bin tflint
+          sudo chmod +x /usr/local/bin/tflint
+          tflint --version
 
       - name: Verify falco is required and runnable
         env:
@@ -166,6 +180,7 @@ jobs:
         env:
           FALCO_REQUIRED: "1"
           TERRAFORM_VALIDATE: "1"
+          TFLINT_REQUIRED: "1"
         # Coverage gate convention: ratchet --cov-fail-under to current actual − 2pp.
         # The 2pp buffer absorbs CI-vs-local jitter so it can't force-fail a build;
         # raise it as backend coverage clears the next floor. `make ratchet` prints actual.

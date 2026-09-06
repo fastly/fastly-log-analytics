@@ -1,8 +1,9 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
-import maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import * as maplibregl from 'maplibre-gl'
+
+maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import {
   Dialog,
   DialogContent,
@@ -46,8 +47,9 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
         center: [(data.client_lon + data.pop_lon) / 2, (data.client_lat + data.pop_lat) / 2],
         zoom: 1,
         renderWorldCopies: false,
+        preserveDrawingBuffer: true,
         interactive: false
-      })
+      } as maplibregl.MapOptions)
 
       map.current.on('load', () => {
         if (!map.current || !data) return
@@ -121,7 +123,9 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
       })
       } catch (e) {
         map.current = null
-        setMapError('Map failed to initialize.')
+        requestAnimationFrame(() => {
+          setMapError('Map failed to initialize.')
+        })
       }
     } else {
       if (map.current.isStyleLoaded()) {
@@ -212,7 +216,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
     )
   }
 
-  return <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
+  return <div ref={mapContainer} className="absolute inset-0 w-full h-full min-h-[300px]" />
 }
 
 interface ImpossibleDistanceModalProps {

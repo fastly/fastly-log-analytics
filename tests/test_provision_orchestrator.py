@@ -23,6 +23,7 @@ through; a regression cascades into broken setup-wizard UX.
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -700,7 +701,7 @@ def test_provision_completes_all_8_steps_when_apis_succeed(tmp_path, monkeypatch
         patch("backend.provision.orchestrator.ensure_fos_bucket"),  # Step 3
         patch("backend.provision.orchestrator.delete_fos_access_key"),  # Step 5
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),  # Step 6
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=42),  # Step 7
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),  # Step 7
         patch("backend.provision.orchestrator.write_service_config"),
         # Step 8 — iceberg init in try/except
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
@@ -716,6 +717,326 @@ def test_provision_completes_all_8_steps_when_apis_succeed(tmp_path, monkeypatch
     # Terminal event
     assert events[-1]["type"] == "done"
     assert "complete" in events[-1]["message"].lower()
+
+
+def test_provision_uploads_faro_bundle_before_reconcile_when_rum_enabled(tmp_path, monkeypatch):
+    """F-2 audit finding: the wizard's provisioning path pins a faro_version
+    (routers/provision.py always resolves one — an explicit pick or
+    DEFAULT_FARO_VERSION) but, before this fix, never called
+    download_and_upload_faro at all. The reconciler would then activate VCL
+    routing GET /js/faro-sdk.js to an FOS object that was never uploaded —
+    a permanent 404 for every RUM visitor, since there is no CDN fallback.
+
+    Pins: the bundle upload happens, and happens strictly BEFORE the VCL
+    reconcile call — uploading after activation would mean browsers can hit
+    the route before the object exists behind it.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    call_order: list[str] = []
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        call_order.append(f"upload:{service_id}:{version}")
+        return {"version": version}
+
+    def fake_reconcile(state, token, status_cb=None):
+        call_order.append("reconcile")
+        return 42
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", side_effect=fake_reconcile),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+    assert call_order == ["upload:svc-prov-test:1.2.3", "reconcile"]
+
+
+def test_provision_resolves_default_faro_version_when_rum_enabled_and_unpinned(tmp_path, monkeypatch):
+    """F-2 audit finding: when a caller invokes provision() with rum_enabled
+    but no faro_version (e.g. a direct call bypassing the router's own
+    DEFAULT_FARO_VERSION fallback), provision() must resolve one itself
+    rather than uploading nothing / leaving faro_version unset for the
+    reconciler."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    uploaded_versions: list[str] = []
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        uploaded_versions.append(version)
+        return {"version": version}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True})))
+
+    assert exc is None
+    from backend.core.faro_versions import DEFAULT_FARO_VERSION
+
+    assert uploaded_versions == [DEFAULT_FARO_VERSION]
+
+
+def test_provision_skips_faro_upload_when_rum_disabled(tmp_path, monkeypatch):
+    """No RUM, no Faro bundle upload — the new step must be a strict no-op
+    for the majority (non-RUM) provisioning path."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync") as mock_upload,
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.write_service_config"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+
+    assert exc is None
+    mock_upload.assert_not_called()
+
+
+def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path, monkeypatch):
+    """Missing-invariant test (provisioning path): if
+    cfg["rum"]["faro_version"] is set, the generated VCL must contain a
+    /js/faro-sdk.js route AND the FOS object for that version must exist.
+    That single invariant would have caught F-2 (bundle never uploaded) —
+    this test exercises the REAL write_service_config + download_and_upload_
+    faro code paths (only FOS transport, npm/unpkg, and the Fastly-API-
+    specific provisioning steps are mocked) and checks both halves against
+    the actual on-disk artifacts, not mocks standing in for them."""
+    import json
+
+    import httpx
+
+    from backend import config as svcconfig
+    from backend.provision import rum_assets
+    from backend.provision.declarative.generators import generate_consolidated_snippet
+    from backend.provision.declarative.state import FeatureState
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    chosen_version = "2.8.5"
+    sample_bundle = (
+        b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+    )
+
+    async def fake_fetch(version: str) -> bytes:
+        return sample_bundle
+
+    monkeypatch.setattr(rum_assets, "fetch_faro_bundle", fake_fetch)
+
+    uploaded: dict[str, bytes] = {}
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT" and request.url.path.endswith(f"faro-web-sdk-v{chosen_version}.iife.js"):
+            uploaded["bundle"] = request.content
+            return httpx.Response(200)
+        raise AssertionError(f"unexpected FOS call: {request.method} {request.url}")
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(
+                _provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": chosen_version})
+            )
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+
+    # Half 1: the FOS object for the pinned version actually exists.
+    assert uploaded["bundle"] == sample_bundle
+
+    # Half 2: the config written to disk (real write_service_config call,
+    # not a mock) carries the pin, and the VCL generated from it contains
+    # the route.
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == chosen_version
+
+    state = FeatureState.from_config(written_cfg)
+    recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
+    assert '"/js/faro-sdk.js"' in recv_vcl
+
+
+def test_provision_faro_upload_failure_is_non_fatal_and_pin_persists(tmp_path, monkeypatch):
+    """#3 audit finding (DESTRUCTIVE): the Faro bundle upload used to sit
+    inside provision()'s try block, so an unpkg outage / transient FOS
+    error here fell straight into the except clause below, which runs
+    perform_teardown with remove_logging/remove_cdn/remove_bucket/
+    remove_fos_tokens all True — deleting the just-created CDN service, FOS
+    bucket, and FOS access keys over a third-party CDN hiccup.
+
+    Pins: an upload failure must NOT trigger perform_teardown, must NOT
+    raise out of provision(), the flow must still reach a 'done' event, AND
+    the faro_version pin (persisted at the Step 7 write, before this
+    upload) must survive on disk — exactly the "pinned, bundle missing"
+    state backend/cron/jobs/rum_sync.py's self-heal restore branch already
+    converges on its next tick.
+    """
+    from backend import config as svcconfig
+
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+    teardown_called: list[bool] = []
+
+    def fake_teardown(state, token, opts=None):
+        teardown_called.append(True)
+        yield {"type": "status", "message": "rollback step"}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch(
+            "backend.provision.orchestrator._upload_faro_bundle_sync",
+            side_effect=RuntimeError("unpkg.com: connection refused"),
+        ),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.provision.orchestrator.perform_teardown", side_effect=fake_teardown),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    # No exception escaped, and teardown was never invoked.
+    assert exc is None
+    assert teardown_called == []
+    assert events[-1]["type"] == "done"
+
+    # The failure is surfaced as a non-fatal warning status, not silently swallowed.
+    status_messages = [e["message"] for e in events if e["type"] == "status"]
+    assert any("Faro Web SDK upload failed" in m for m in status_messages)
+
+    # The pin persisted (Step 7's early write, before the failed upload).
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == "1.2.3"
+
+
+def test_provision_faro_upload_reads_back_persisted_hashes_not_pre_upload_snapshot(tmp_path, monkeypatch):
+    """#1 audit finding: provision() used to snapshot ``rum_state_cfg``
+    BEFORE calling the upload, then write that stale snapshot back
+    afterward — clobbering ``faro_content_hash`` / ``faro_fos_etag_md5``
+    that ``download_and_upload_faro`` had just persisted to disk in its own
+    ``save_config`` call. Consequence: every newly provisioned service had
+    no stored ETag, so the cron's cheap FOS integrity check
+    (``_faro_bundle_intact``) always returned False and re-did a redundant
+    unpkg download + FOS PUT + purge on its very first tick.
+
+    Pins: after a successful upload, the config persisted by provision()
+    still carries the hashes the upload wrote — not just a bare
+    ``{"faro_version": ...}`` dict.
+    """
+    from backend import config as svcconfig
+
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
+
+    temp_key = {"access_key": "TEMP_AK", "secret_key": "TEMP_SK", "id": "TEMP_ID"}
+    perm_key = {"access_key": "PERM_AK", "secret_key": "PERM_SK", "id": "PERM_ID"}
+    cdn_svc = {"id": "cdn-svc-id"}
+
+    def fake_upload(service_id, version, token, *, status_cb=None):
+        # Stand-in for the REAL download_and_upload_faro, which persists
+        # faro_version/faro_content_hash/faro_fos_etag_md5 to disk itself,
+        # independent of provision()'s in-memory `state["rum"]`.
+        cfg = svcconfig.load_config(service_id) or {}
+        cfg["rum"] = {
+            **(cfg.get("rum") or {}),
+            "faro_version": version,
+            "faro_content_hash": "sha256-fake-content-hash",
+            "faro_fos_etag_md5": "fake-etag-md5",
+        }
+        svcconfig.save_config(service_id, cfg)
+        return {"version": version}
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[temp_key, perm_key]),
+        patch("backend.provision.orchestrator.ensure_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.ensure_cdn_service", return_value=cdn_svc),
+        patch("backend.provision.orchestrator._upload_faro_bundle_sync", side_effect=fake_upload),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=42),
+        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+    ):
+        events, exc = _consume(
+            orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
+        )
+
+    assert exc is None
+    assert events[-1]["type"] == "done"
+
+    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    assert written_cfg["rum"]["faro_version"] == "1.2.3"
+    assert written_cfg["rum"]["faro_content_hash"] == "sha256-fake-content-hash"
+    assert written_cfg["rum"]["faro_fos_etag_md5"] == "fake-etag-md5"
 
 
 def test_provision_runs_teardown_rollback_on_mid_step_failure(tmp_path, monkeypatch):
@@ -810,7 +1131,7 @@ def test_provision_surfaces_warning_when_no_source_resolved(tmp_path, monkeypatc
         patch("backend.provision.orchestrator.ensure_fos_bucket"),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=1),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=1),
         patch("backend.provision.orchestrator.write_service_config"),
         patch("backend.core.duckdb.get_source_for_service", return_value=None),
         patch("backend.core.iceberg.init_iceberg_table") as mock_iceberg,
@@ -844,7 +1165,7 @@ def test_provision_surfaces_warning_when_iceberg_init_raises(tmp_path, monkeypat
         patch("backend.provision.orchestrator.ensure_fos_bucket"),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
         patch("backend.provision.orchestrator.ensure_cdn_service", return_value={"id": "cdn"}),
-        patch("backend.provision.orchestrator.ensure_logging_endpoint", return_value=1),
+        patch("backend.provision.orchestrator.ensure_logging_via_reconciler", return_value=1),
         patch("backend.provision.orchestrator.write_service_config"),
         patch(
             "backend.core.duckdb.get_source_for_service",
@@ -877,7 +1198,6 @@ def _teardown_state(**overrides):
         "logging_service_id": "svc-td-test",
         "fos_bucket_name": "test-bucket",
         "fos_region": "us-east-1",
-        "fos_key_id": "fos-key-id",
         "endpoint_name": "Test Endpoint",
         "cdn_service_id": "cdn-svc-id",
         "cdn_service_name": "CDN Name",
@@ -901,7 +1221,7 @@ def test_perform_teardown_calls_all_5_steps_with_default_opts():
     delete_cdn_called = []
     delete_fos_key_called = []
 
-    def fake_remove_logging(service_id, endpoint_name, token, status_cb=None):
+    def fake_remove_logging(service_id, endpoint_name, token, status_cb=None, **kwargs):
         remove_logging_called.append(True)
 
     def fake_delete_bucket(*args, **kwargs):
@@ -1008,9 +1328,14 @@ def test_perform_teardown_skips_scoring_when_remove_scoring_opt_false():
 
 
 def test_perform_teardown_swallows_scoring_exception_with_warning():
-    """If scoring teardown raises (Fastly 503), emit a warning and continue with
-    the rest of teardown — a scoring-cleanup failure must not orphan the
-    FOS/CDN cleanup. Mirrors the remove_logging swallow contract."""
+    """If scoring teardown raises, surface it loudly and continue with the rest
+    of teardown — a scoring-cleanup failure must not orphan the FOS/CDN cleanup.
+    Mirrors the remove_logging swallow contract.
+
+    The raise is now an intentional ABORT: teardown_scoring_resources refuses to
+    delete the Compute service when it couldn't strip the scoring VCL, because
+    that would leave the customer's active version routing to a deleted host.
+    The message must say so — an operator has to re-run teardown."""
     state = _teardown_state(scoring={"enabled": True, "scoring_service_id": "SCORESVC"})
     delete_cdn_called = []
 
@@ -1035,8 +1360,10 @@ def test_perform_teardown_swallows_scoring_exception_with_warning():
         events, exc = _consume(orchestrator.perform_teardown(state, "tok"))
 
     assert exc is None
-    # A warning was surfaced...
-    assert any(e["type"] == "status" and "scoring teardown failed" in e["message"].lower() for e in events)
+    # The abort was surfaced loudly, naming the deliberate non-deletion...
+    aborted = [e for e in events if e["type"] == "status" and "aborted" in e["message"].lower()]
+    assert aborted, f"no abort status surfaced; got {[e.get('message') for e in events]}"
+    assert "left in place" in aborted[0]["message"].lower()
     # ...and the rest of teardown still ran.
     assert delete_cdn_called == [True]
 
@@ -1158,6 +1485,7 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
         "service_id": "svc-test",
         "scoring": {
             "enabled": True,
+            "domain": "example.com",
             "scoring_service_id": "scorer-svc",
             "enabled_at": "2026-06-02T13:59:02+00:00",
         },
@@ -1188,11 +1516,20 @@ def test_write_service_config_preserves_scoring_block_when_state_omits_it(tmp_pa
     # User's custom_field survived
     custom_names = {cf["name"] for cf in cfg["log_fields"]["custom_fields"]}
     assert "my_field" in custom_names
-    # All scoring fields re-injected from code (canonical source of truth)
+    # System scoring fields are NOT persisted in the config file anymore
+    # (they're auto-injected on-demand by FeatureState.from_config()).
+    # The config should only contain user-defined custom fields.
     from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
     for name in _SCORING_FIELD_NAMES:
-        assert name in custom_names, f"scoring field {name!r} dropped on re-ingest"
+        assert name not in custom_names, f"system scoring field {name!r} should not be persisted in config"
+    # Verify FeatureState.from_config() auto-injects scoring fields when needed
+    from backend.provision.declarative.state import FeatureState
+
+    state = FeatureState.from_config(cfg)
+    all_field_names = {f["name"] for f in state.log_fields.custom_fields}
+    for name in _SCORING_FIELD_NAMES:
+        assert name in all_field_names, f"scoring field {name!r} should be auto-injected by FeatureState"
 
 
 def test_write_service_config_first_ever_ingest_has_no_existing_cfg(tmp_path):
@@ -1238,6 +1575,19 @@ def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
             return None
         return {}
 
+    def fake_delete_fos_tokens(service_id, token, status_cb=None):
+        # Simulate the list + delete behavior
+        resp = fake_fastly("GET", "/resources/object-storage/access-keys")
+        patterns = [
+            f"fos-log-analysis-{service_id}",
+            f"fos-log-analysis-temp-admin-{service_id}",
+            f"temp-teardown-{service_id}",
+        ]
+        for key in resp.get("data", []):
+            desc = key.get("description", "")
+            if any(desc.startswith(p) for p in patterns):
+                fake_fastly("DELETE", f"/resources/object-storage/access-keys/{key['access_key']}")
+
     with (
         patch("backend.provision.orchestrator.remove_logging_endpoint"),
         patch("backend.provision.orchestrator.delete_fos_bucket"),
@@ -1247,7 +1597,7 @@ def test_perform_teardown_filters_fastly_keys_by_managed_description_prefix():
             return_value={"access_key": "A", "secret_key": "S", "id": "I"},
         ),
         patch("backend.provision.orchestrator.delete_fos_access_key"),
-        patch("backend.provision.orchestrator.fastly", side_effect=fake_fastly),
+        patch("backend.provision.fos_setup.delete_fos_tokens_for_service", side_effect=fake_delete_fos_tokens),
     ):
         _consume(orchestrator.perform_teardown(_teardown_state(), "tok"))
 
@@ -1397,3 +1747,165 @@ def test_reject_unsafe_fos_component_prefix_allows_slash_rejects_traversal():
     for bad in ("../up", "a\\b", "..", "a\x00"):
         with pytest.raises(ValueError, match="illegal path token"):
             _reject_unsafe_fos_component("fos_prefix", bad, allow_slash=True)
+
+
+# ── Error-path coverage tests ───────────────────────────────────────────────
+
+
+def test_write_service_config_missing_service_id():
+    """write_service_config raises ValueError when both logging_service_id
+    and service_id are missing from state."""
+    with pytest.raises(ValueError, match="ingest state missing"):
+        orchestrator.write_service_config({})
+
+
+def test_write_service_config_rum_enabled_sets_enabled_at_timestamp(tmp_path):
+    """When rum_enabled=True and no existing rum config, the config
+    gets a rum block with enabled_at timestamp. Pinned because the
+    timestamp marks when RUM collection was first enabled."""
+    saved_cfgs = []
+    with (
+        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+        patch("backend.config.load_config", return_value=None),
+    ):
+        orchestrator.write_service_config(_make_state(rum_enabled=True))
+    _, cfg = saved_cfgs[0]
+    assert cfg.get("rum_enabled") is True
+    assert cfg.get("rum") is not None
+    assert cfg["rum"].get("enabled") is True
+    assert cfg["rum"].get("enabled_at") is not None
+
+
+def test_ensure_logging_via_reconciler_missing_logging_service_id():
+    """ensure_logging_via_reconciler raises ValueError when state lacks
+    logging_service_id."""
+    with pytest.raises(ValueError, match="state missing logging_service_id"):
+        # Consume the generator to trigger the error
+        gen = orchestrator.ensure_logging_via_reconciler({}, "tok")
+        next(gen)
+
+
+def test_ensure_logging_via_reconciler_invalid_feature_state(tmp_path):
+    """When FeatureState.from_config raises due to invalid config,
+    ensure_logging_via_reconciler wraps it as RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            side_effect=KeyError("missing_field"),
+        ),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    ):
+        with pytest.raises(RuntimeError, match="Invalid feature state configuration"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_ensure_logging_via_reconciler_reconciliation_failure():
+    """When reconcile_vcl_state raises an exception,
+    ensure_logging_via_reconciler wraps it as RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            side_effect=RuntimeError("VCL validation failed"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="VCL reconciliation failed"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_cleanup_local_data_rejects_bucket_with_path_traversal_tokens(tmp_path):
+    """cleanup_local_data rejects bucket names with path-shape characters
+    (/, \\, .., NUL) and skips the cache removal without crashing."""
+    cfg_file = tmp_path / "svc.json"
+    cfg_file.write_text("{}")
+    with (
+        patch("backend.config.config_path", return_value=str(cfg_file)),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        # Bucket with traversal token should be rejected silently
+        orchestrator.cleanup_local_data("svc", bucket="../../../tmp", remove_data=True)
+        # Bucket with forward slash should be rejected silently
+        orchestrator.cleanup_local_data("svc", bucket="a/b", remove_data=True)
+    # Should not raise and config should be gone
+    assert not cfg_file.exists()
+
+
+def test_cleanup_local_data_skips_cache_when_symlink_escapes(tmp_path, monkeypatch):
+    """When a symlink escape is detected (resolved path outside cache_root),
+    cleanup_local_data logs a warning and continues without removing cache."""
+    monkeypatch.chdir(tmp_path)
+    cfg_file = tmp_path / "svc.json"
+    cfg_file.write_text("{}")
+
+    # Create a symlink that will escape the cache root
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    symlink = cache_dir / "bucket_symlink"
+    symlink.symlink_to(external_dir)
+
+    with (
+        patch("backend.config.config_path", return_value=str(cfg_file)),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        # Should not crash even though symlink resolves outside cache_root
+        orchestrator.cleanup_local_data("svc", bucket="bucket_symlink", remove_data=True)
+    # Cache symlink should still exist (not deleted due to escape detection)
+    assert symlink.exists()
+
+
+def test_ensure_logging_via_reconciler_no_active_version():
+    """When get_active_version returns None (service has no active version),
+    ensure_logging_via_reconciler raises RuntimeError."""
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            return_value=type("Result", (), {"activated_version": None})(),
+        ),
+        patch(
+            "backend.core.fastly.service.get_active_version",
+            return_value=None,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="has no active version"):
+            gen = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+            next(gen)
+
+
+def test_ensure_logging_via_reconciler_no_changes_needed():
+    """When VCL reconciliation returns no changes (activated_version=None)
+    and service has an active version, return that version."""
+    active_ver = 42
+
+    class MockResult:
+        activated_version = None
+
+    with (
+        patch(
+            "backend.provision.declarative.state.FeatureState.from_config",
+            return_value=None,
+        ),
+        patch(
+            "backend.provision.orchestrator.reconcile_vcl_state",
+            return_value=MockResult(),
+        ),
+        patch(
+            "backend.core.fastly.service.get_active_version",
+            return_value=active_ver,
+        ),
+    ):
+        result = orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok")
+        assert result == active_ver

@@ -21,7 +21,6 @@ beforeEach(() => {
     endTime: '2026-05-08T00:00:00.000Z',
     filters: [],
     edgeOnly: false,
-    hasSyncedExtents: false,
     isAutoRange: true,
     compareMode: false,
     compareStartTime: null,
@@ -39,28 +38,12 @@ describe('setRange', () => {
   })
 })
 
-describe('autoSetRange', () => {
-  it('updates range only when isAutoRange is true', () => {
-    // Default (isAutoRange = true)
-    useFilterStore.getState().autoSetRange('2026-06-01T00:00:00Z', '2026-06-02T00:00:00Z')
-    expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
-    // After autoSetRange, isAutoRange remains true (to prevent URL-sync writing absolute timestamps)
-    expect(useFilterStore.getState().isAutoRange).toBe(true)
-
-    // If isAutoRange is false, autoSetRange should be a no-op
-    useFilterStore.setState({ isAutoRange: false })
-    useFilterStore.getState().autoSetRange('2099-01-01T00:00:00Z', '2099-01-02T00:00:00Z')
-    expect(useFilterStore.getState().startTime).toBe('2026-06-01T00:00:00Z')
-  })
-})
-
 describe('resetRange', () => {
-  it('re-enables auto-range and clears the synced flag', () => {
-    useFilterStore.setState({ isAutoRange: false, hasSyncedExtents: true })
+  it('re-enables auto-range', () => {
+    useFilterStore.setState({ isAutoRange: false })
     useFilterStore.getState().resetRange()
     const s = useFilterStore.getState()
     expect(s.isAutoRange).toBe(true)
-    expect(s.hasSyncedExtents).toBe(false)
   })
 })
 
@@ -199,13 +182,12 @@ describe('resetAll', () => {
     const { addFilter, toggleCompareMode } = useFilterStore.getState()
     addFilter('country', 'US', 'include')
     toggleCompareMode()
-    useFilterStore.setState({ isAutoRange: false, hasSyncedExtents: true })
+    useFilterStore.setState({ isAutoRange: false })
 
     useFilterStore.getState().resetAll()
     const s = useFilterStore.getState()
     expect(s.filters).toEqual([])
     expect(s.isAutoRange).toBe(true)
-    expect(s.hasSyncedExtents).toBe(false)
     expect(s.compareMode).toBe(false)
     expect(s.compareStartTime).toBeNull()
     expect(s.compareEndTime).toBeNull()
@@ -234,9 +216,7 @@ describe('resetAll', () => {
     expect(Math.abs(endMs - nowMs)).toBeLessThan(1000)
     // span ~= 24h (within 1s)
     expect(Math.abs((endMs - startMs) - 24 * 3600 * 1000)).toBeLessThan(1000)
-    // auto-range flipped back on so the snap effect can apply the stale-
-    // data branch when extents are old.
+    // auto-range flipped back on so the snap effect can apply when extents are old.
     expect(after.isAutoRange).toBe(true)
-    expect(after.hasSyncedExtents).toBe(false)
   })
 })

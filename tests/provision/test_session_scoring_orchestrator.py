@@ -246,6 +246,8 @@ def test_enable_scoring_heals_missing_request_secret_via_post(monkeypatch):
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.fastly_integration.fastly", fastly_mock),
+        patch("backend.core.fastly.client.fastly", fastly_mock),
     ):
         sso.enable_scoring(LOG_SVC, TOKEN)
 
@@ -281,6 +283,8 @@ def test_enable_scoring_heals_request_secret_via_patch_when_post_409s(monkeypatc
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", happy),
         patch("backend.core.fastly.service.fastly", happy),
+        patch("backend.provision.declarative.fastly_integration.fastly", happy),
+        patch("backend.core.fastly.client.fastly", happy),
     ):
         sso.enable_scoring(LOG_SVC, TOKEN)
 
@@ -336,6 +340,8 @@ def test_enable_scoring_status_cb_fires_on_each_stage():
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.provision.declarative.fastly_integration.fastly", fastly_mock),
+        patch("backend.core.fastly.client.fastly", fastly_mock),
     ):
         sso.enable_scoring(LOG_SVC, TOKEN, status_cb=cb)
 

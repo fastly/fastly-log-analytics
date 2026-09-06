@@ -103,7 +103,7 @@ export function ServicesTable() {
         {isError && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Couldn't load services</AlertTitle>
+            <AlertTitle>Couldn&apos;t load services</AlertTitle>
             <AlertDescription className="text-xs">
               {error instanceof Error ? error.message : 'The backend returned an error. The list below may be incomplete — investigate before provisioning new services.'}
             </AlertDescription>

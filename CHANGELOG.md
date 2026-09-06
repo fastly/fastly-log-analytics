@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-08-25
+
+### Added
+
+- **Diagnostic Tools**: Enhanced frontend `DebugPanel` with copy-to-clipboard actions (for DuckDB, SQLite, and FOS/API calls) fully formatted and annotated for copy-pasting to AI code assistants.
+- **Advanced Bot-Detection Insights**: Implemented 11 beautiful, highly descriptive help modals explaining what each insight measures, how it works, why it is valuable, and what actions to take. Also added security regression test suite for advanced bot metrics.
+- **Statically Served MapLibre Workers**: Served the MapLibre GL worker statically from the public directory, solving several layout and WebGL incompatibilities.
+
+### Changed
+
+- **RUM Analytics Performance**: Bypassed 6 sequential Parquet scans in favor of pre-filtering rows upfront into session-isolated `t_client_vitals` and `t_client_errors` memory tables, improving response times by over 74% (~219ms on production).
+- **Network Quality & CMCD Caching**: Implemented a response-memo caching mechanism with short-TTL for CMCD/streaming analytics and optimized network quality queries with pre-filtered memory tables.
+- **Strict Build Gates & Compile Guard**: Adopted the shared `useMounted` hook, reconciled explicit `any` violations, unescaped JSX characters, and ratcheted the ESLint ceiling down to 835.
+
+### Fixed
+
+- **Map Rendering viewport races**: Defer MapLibre layers until GeoJSON resolves and force resize on dataset change to solve 1x1 empty viewport layout collapse bug.
+- **Database Teardown Races**: Coordinated test database teardowns to prevent segment faults and stabilized timezone clock clamping.
+
+## [2.4.0] - 2026-08-20
+
+### Added
+
+- **Real User Monitoring (RUM) & Grafana Faro SDK Integration**: Added comprehensive real-user core web vitals tracking (LCP, FID, CLS, TTFB) with dedicated JSON beacon ingestion endpoints, parallel unpackers, and a self-hosted Faro SDK caching layer.
+- **Assets Shielding**: Built-in VCL and edge routing headers for Fastly Shielding optimizations, utilizing cryptographic edge-hop limits to scrub forged client-side edge IP headers.
+- **Declarative IaC Orchestration Engine**: Transactions-based cross-service reconciliation across Fastly KV Stores, Compute Scorer, and VCL targets.
+- **Remote Sharing Security**: Secure origin routing and SSL mapping for analyst login.
+
+### Changed
+
+- **Dashboard Query Performance**: Numeric and quantitative non-top-N fields are pruned from dashboard aggregates, avoiding heavy grouping overhead.
+- **Total Rows Count Optimization**: Global count query removes redundant IP checks when no explicit IP filter is set, leveraging fast metadata/index lookups to bypass full table scans.
+
+
 ## [2.3.0] - 2026-08-04
 
 ### Added

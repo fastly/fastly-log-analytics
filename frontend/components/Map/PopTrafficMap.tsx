@@ -1,8 +1,9 @@
 'use client'
 
 import React, { useEffect, useRef, useState, useMemo } from 'react'
-import maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import * as maplibregl from 'maplibre-gl'
+
+maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
@@ -30,7 +31,6 @@ function geoBbox(geometry: { coordinates: CoordTree[] }): [number, number, numbe
 
 const NORMALIZE_COUNTRY: Record<string, string> = {
   'United States': 'United States of America',
-  'United Kingdom': 'United Kingdom of Great Britain and Northern Ireland',
   'Russia': 'Russia',
   'South Korea': 'South Korea',
   'Vietnam': 'Vietnam',
@@ -133,6 +133,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         map.current = new maplibregl.Map({
           container: mapContainer.current,
           renderWorldCopies: false,
+          preserveDrawingBuffer: true,
           style: {
             version: 8,
             sources: {},
@@ -149,9 +150,13 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           dragRotate: false,
           touchZoomRotate: false,
           cooperativeGestures: true,
-        })
+        } as maplibregl.MapOptions)
 
         map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+
+        requestAnimationFrame(() => {
+          map.current?.resize()
+        })
 
         map.current.on('load', () => {
           if (!map.current) return
@@ -242,7 +247,16 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         src.setData(popGeoJson as GeoJSON.FeatureCollection)
       }
 
-      if (!map.current.getLayer('countries')) return
+      if (!map.current.getLayer('countries')) {
+        const onStyleData = () => {
+          if (map.current?.getLayer('countries')) {
+            map.current.off('styledata', onStyleData)
+            updateLayers()
+          }
+        }
+        map.current.on('styledata', onStyleData)
+        return
+      }
 
       const countryEntries = Object.entries(countryAgg)
       if (countryEntries.length === 0) {
@@ -268,14 +282,11 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
       }
 
       matchExpression.push(countryFill(theme === 'dark'))
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression as any)
     }
 
-    if (map.current.isStyleLoaded()) {
-      updateLayers()
-    } else {
-      map.current.once('load', updateLayers)
-    }
+    updateLayers()
   }, [popGeoJson, countryAgg, theme])
 
   useEffect(() => {
@@ -322,7 +333,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           Interactive map unavailable in this browser. See the PoP table below.
         </div>
       ) : (
-        <div ref={mapContainer} className="absolute inset-0 w-full h-full" aria-hidden="true" />
+        <div ref={mapContainer} className="absolute inset-0 w-full h-full min-h-[300px]" aria-hidden="true" />
       )}
 
       <table className="sr-only">

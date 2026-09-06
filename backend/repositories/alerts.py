@@ -96,7 +96,19 @@ def evaluate_alert(
         if not max_ts:
             return False, None, None, None
 
+        from datetime import datetime, timedelta
+
+        from backend.utils.date_utils import parse_iso_utc
+
         now_utc = datetime.now(UTC)
+
+        # Ensure max_ts is a timezone-aware datetime
+        max_ts_dt = max_ts
+        if isinstance(max_ts_dt, str):
+            max_ts_dt = parse_iso_utc(max_ts_dt)
+        if hasattr(max_ts_dt, "tzinfo") and max_ts_dt.tzinfo is None:
+            max_ts_dt = max_ts_dt.replace(tzinfo=UTC)
+
         if hasattr(max_ts, "replace"):
             max_ts_aware = max_ts.replace(tzinfo=UTC) if max_ts.tzinfo is None else max_ts
             if (now_utc - max_ts_aware) > timedelta(minutes=30):
@@ -107,12 +119,31 @@ def evaluate_alert(
         # max(timestamp) subquery (up to 6x per alert).
         max_ts_literal = f"'{max_ts}'::TIMESTAMPTZ"
 
+        # Safely query table columns to check for dt/timestamp_hour partition columns existence
+        try:
+            probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
+            existing_cols = {d[0] for d in probe}
+        except Exception:
+            existing_cols = set()
+
         def _window_offset(minutes_ago: float) -> str:
             return f"{max_ts_literal} - INTERVAL '{minutes_ago} minutes'"
 
-        def build_metric_query(window_start_expr: str, window_end_expr: str) -> str:
+        def build_metric_query(
+            window_start_expr: str, window_end_expr: str, start_dt: datetime, end_dt: datetime
+        ) -> str:
             agg_or_sel = get_metric_sql(metric, status_codes)
             where_clause = f"timestamp >= {window_start_expr} AND timestamp <= {window_end_expr}"
+
+            # Partition pruning via dt/timestamp_hour virtual columns (if present)
+            st_utc = start_dt.astimezone(UTC)
+            et_utc = end_dt.astimezone(UTC)
+            if "dt" in existing_cols:
+                where_clause += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+                where_clause += f" AND dt <= '{et_utc.strftime('%Y-%m-%d')}'"
+            if "timestamp_hour" in existing_cols:
+                where_clause += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
+                where_clause += f" AND timestamp_hour <= '{et_utc.strftime('%Y-%m-%d-%H')}'"
 
             if eval_scope == "edge":
                 where_clause += " AND edge = true"
@@ -125,31 +156,44 @@ def evaluate_alert(
                 return f"{agg_or_sel} WHERE {where_clause}"
             return f"SELECT {agg_or_sel} FROM {table_name} WHERE {where_clause}"
 
+        start_dt_current = max_ts_dt - timedelta(minutes=window)
+        end_dt_current = max_ts_dt
+
         current_start = _window_offset(window)
         current_end = max_ts_literal
-        q_current = build_metric_query(current_start, current_end)
+        q_current = build_metric_query(current_start, current_end, start_dt_current, end_dt_current)
 
         with track_query(con, q_current, [], "alerts") as cursor:
             val = cursor.fetchone()[0] or 0
 
-        if metric != "requests":
-            q_req = SQL.COUNT_REQUESTS_IN_WINDOW.format(
-                table=table_name,
-                window_start_expr=current_start,
-                window_end_expr=current_end,
-            )
-            with track_query(con, q_req, [], "alerts") as cursor:
-                req_count = cursor.fetchone()[0] or 0
-        else:
-            req_count = val
-
+        # Request count is only used for relative alerts to ensure minimum traffic floor
         if eval_type in ("relative_increase", "relative_decrease") and comp_period:
+            if metric != "requests":
+                q_req_where = f"timestamp >= {current_start} AND timestamp <= {current_end}"
+                st_utc = start_dt_current.astimezone(UTC)
+                et_utc = end_dt_current.astimezone(UTC)
+                if "dt" in existing_cols:
+                    q_req_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+                    q_req_where += f" AND dt <= '{et_utc.strftime('%Y-%m-%d')}'"
+                if "timestamp_hour" in existing_cols:
+                    q_req_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
+                    q_req_where += f" AND timestamp_hour <= '{et_utc.strftime('%Y-%m-%d-%H')}'"
+
+                q_req = f"SELECT count(*) FROM {table_name} WHERE {q_req_where}"
+                with track_query(con, q_req, [], "alerts") as cursor:
+                    req_count = cursor.fetchone()[0] or 0
+            else:
+                req_count = val
+
             if req_count < 10:
                 return False, None, None, None
 
+            start_dt_hist = max_ts_dt - timedelta(minutes=comp_period + window)
+            end_dt_hist = max_ts_dt - timedelta(minutes=comp_period)
+
             hist_start = _window_offset(comp_period + window)
             hist_end = _window_offset(comp_period)
-            q_hist = build_metric_query(hist_start, hist_end)
+            q_hist = build_metric_query(hist_start, hist_end, start_dt_hist, end_dt_hist)
 
             with track_query(con, q_hist, [], "alerts") as cursor:
                 hist_val = cursor.fetchone()[0] or 0
@@ -161,6 +205,64 @@ def evaluate_alert(
                 val = ((val - hist_val) / hist_val) * 100.0
             else:  # relative_decrease
                 val = ((hist_val - val) / hist_val) * 100.0
+        elif eval_type == "anomaly_zscore":
+            if metric != "requests":
+                q_req_where = f"timestamp >= {current_start} AND timestamp <= {current_end}"
+                st_utc = start_dt_current.astimezone(UTC)
+                et_utc = end_dt_current.astimezone(UTC)
+                if "dt" in existing_cols:
+                    q_req_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+                if "timestamp_hour" in existing_cols:
+                    q_req_where += f" AND timestamp_hour >= '{st_utc.strftime('%Y-%m-%d-%H')}'"
+
+                q_req = f"SELECT count(*) FROM {table_name} WHERE {q_req_where}"
+                with track_query(con, q_req, [], "alerts") as cursor:
+                    req_count = cursor.fetchone()[0] or 0
+            else:
+                req_count = val
+
+            days = alert.get("baseline_period_days") or 7
+            zscore_thresh = alert.get("zscore_threshold") or 3.0
+
+            baseline_start_dt = max_ts_dt - timedelta(days=days)
+            baseline_end_dt = max_ts_dt - timedelta(hours=1)  # Exclude the active hour
+
+            baseline_start_expr = f"{max_ts_literal} - INTERVAL '{days} days'"
+            baseline_end_expr = f"{max_ts_literal} - INTERVAL '1 hours'"
+
+            agg_or_sel = get_metric_sql(metric, status_codes)
+            where_clause = (
+                f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} "
+                f"AND EXTRACT(hour FROM timestamp) = EXTRACT(hour FROM {max_ts_literal})"
+            )
+
+            st_utc = baseline_start_dt.astimezone(UTC)
+            et_utc = baseline_end_dt.astimezone(UTC)
+            if "dt" in existing_cols:
+                where_clause += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+
+            if agg_or_sel.strip().lower().startswith("select"):
+                agg_expr = agg_or_sel.replace(f"FROM {table_name}", "").replace("SELECT", "").strip()
+                q_hist_series = f"SELECT {agg_expr} AS val FROM {table_name} WHERE {where_clause} GROUP BY date_trunc('hour', timestamp)"
+            else:
+                q_hist_series = f"SELECT {agg_or_sel} AS val FROM {table_name} WHERE {where_clause} GROUP BY date_trunc('hour', timestamp)"
+
+            q_stats = f"WITH series AS ({q_hist_series}) SELECT avg(val), stddev(val) FROM series"
+
+            with track_query(con, q_stats, [], "alerts") as cursor:
+                mean_val, stddev_val = cursor.fetchone()
+
+            if mean_val is None:
+                return False, None, None, None
+
+            stddev_val = stddev_val or 0.0001
+            zscore = (val - mean_val) / stddev_val
+
+            val = zscore
+            alert["operator"] = ">"  # Z-score alerts trigger when exceeding threshold stddev
+            alert["threshold"] = zscore_thresh
+        else:
+            req_count = val
 
     except Exception as e:
         import logging

@@ -19,13 +19,11 @@ _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)
 def compute_fingerprint(headers: dict[str, str]) -> str:
     """Narrowed SHA-256 over browser family + major version + OS family."""
     ua = headers.get("user-agent", "") or headers.get("User-Agent", "") or ""
-    ch_platform = headers.get("sec-ch-ua-platform", "") or ""
     browser_match = _UA_RE.search(ua)
     os_match = _OS_RE.search(ua)
     parts = [
         browser_match.group(1) if browser_match else "unknown-browser",
         browser_match.group(2) if browser_match else "0",
         os_match.group(1) if os_match else "unknown-os",
-        ch_platform.strip('"'),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()

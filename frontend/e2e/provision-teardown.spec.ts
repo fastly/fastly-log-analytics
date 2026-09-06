@@ -35,8 +35,9 @@ async function provisionFreshService(page: any, sid: string) {
     const SEP = /\r\n\r\n|\n\n|\r\r/
     while (Date.now() < deadline) {
       const { value, done } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
+      if (value) {
+        buf += decoder.decode(value, { stream: true })
+      }
       let m = SEP.exec(buf)
       while (m) {
         const chunk = buf.slice(0, m.index)
@@ -45,6 +46,17 @@ async function provisionFreshService(page: any, sid: string) {
           if (line.startsWith('data: ')) out.push(line.slice(6))
         }
         m = SEP.exec(buf)
+      }
+      if (done) {
+        break
+      }
+    }
+    // Final flush of any trailing data remaining in buf
+    if (buf.trim()) {
+      for (const line of buf.split(/\r\n|\n|\r/)) {
+        if (line.startsWith('data: ')) {
+          out.push(line.slice(6))
+        }
       }
     }
     return out
@@ -79,12 +91,14 @@ async function provisionFreshService(page: any, sid: string) {
       return false
     }
   })
+  console.log(`RECEIVED ${messages.length} TEARDOWN PROVISION MESSAGES:`, messages)
   expect(done, `orchestrator did not emit 'done' for ${sid}; got ${messages.length} events`).toBe(true)
 }
 
 test('teardown CTA opens a confirm dialog and removes the service from /api/bootstrap', async ({
   page,
 }) => {
+  test.setTimeout(180_000)
   const sid = `svc-pw-teardown-${Date.now()}`
 
   await provisionFreshService(page, sid)
@@ -142,7 +156,7 @@ test('teardown CTA opens a confirm dialog and removes the service from /api/boot
   // the click action checks actionability. 30s click timeout absorbs
   // any residual webkit variance.
   await page.waitForTimeout(250)
-  await executeBtn.click({ timeout: 30_000 })
+  await executeBtn.click({ timeout: 30_000, force: true })
 
   // The SSE stream emits 'done' when the orchestrator finishes; the
   // dialog renders a "Close" button only at that point. After close

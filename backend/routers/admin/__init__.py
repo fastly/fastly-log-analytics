@@ -40,6 +40,7 @@ from . import (  # noqa: F401
     _router,
     bot_sources,
     compaction,
+    debug_settings,
     downloads,
     events,
     health,

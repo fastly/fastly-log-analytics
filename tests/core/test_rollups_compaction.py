@@ -481,6 +481,26 @@ def test_compact_returns_zero_when_rollups_dir_missing(tmp_path):
 # ── _run_rollup_compact_daily — wrapper passes run_id ───────────────────
 
 
+def _mock_rollups(monkeypatch):
+    monkeypatch.setattr("backend.core.rollups.backfill_day_bundles", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles", lambda *a, **kw: {"missing": 0, "bundled": 0}
+    )
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_ip_spread", lambda *a, **kw: {"missing": 0, "rebuilt": 0}
+    )
+    monkeypatch.setattr("backend.core.rollups.compact_network_rtt_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_network_speed_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_ngwaf_bots_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_dims_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_latency_ts_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_origin_summary_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_overview_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_perf_latency_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_security_dims_closed_days_to_daily", lambda *a, **kw: 0)
+    monkeypatch.setattr("backend.core.rollups.compact_verified_bots_ts_closed_days_to_daily", lambda *a, **kw: 0)
+
+
 def test_run_rollup_compact_daily_passes_run_id_on_success(monkeypatch):
     """Success branch must pass ``run_id`` so log_cron_run UPDATEs the
     running row instead of inserting a fresh terminal row. Without
@@ -488,6 +508,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_success(monkeypatch):
     start_cron_run."""
     from backend.cron.jobs import compaction as sch
 
+    _mock_rollups(monkeypatch)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 4242)
     monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", lambda sid, src: 7)
@@ -497,7 +518,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_success(monkeypatch):
         lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
     )
 
-    sch._run_rollup_compact_daily("svc-run-ok")
+    sch._run_rollup_compact_daily.__wrapped__("svc-run-ok")
 
     assert len(log_calls) == 1
     call = log_calls[0]
@@ -517,6 +538,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_error(monkeypatch):
     exact prod incident in mind (cron_runs row 103760 on 2026-06-06)."""
     from backend.cron.jobs import compaction as sch
 
+    _mock_rollups(monkeypatch)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 9999)
 
@@ -530,7 +552,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_error(monkeypatch):
         lambda *a, **kw: log_calls.append({"args": a, "kwargs": kw}),
     )
 
-    sch._run_rollup_compact_daily("svc-run-err")
+    sch._run_rollup_compact_daily.__wrapped__("svc-run-err")
 
     assert len(log_calls) == 1
     call = log_calls[0]

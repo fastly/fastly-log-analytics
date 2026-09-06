@@ -454,6 +454,9 @@ def backfill_missing_hour_bundles(
     # with uvicorn's RW connection on that file — backed by a fresh
     # in-memory DuckDB connection that holds no persistent state.
     con = _ddb.connect(":memory:")
+    from backend.core.duckdb import _configure_fos
+
+    _configure_fos(con, source)
     try:
         update_iceberg_view(con, source)
         # The view's actual SQL identifier is set by update_iceberg_view

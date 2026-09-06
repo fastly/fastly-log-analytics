@@ -20,6 +20,7 @@ from typing import Any
 from pyiceberg.expressions import (
     GreaterThan,
     GreaterThanOrEqual,
+    IsNull,
     LessThan,
     LessThanOrEqual,
 )
@@ -39,3 +40,7 @@ def lt(term: str, value: Any) -> LessThan:
 
 def lte(term: str, value: Any) -> LessThanOrEqual:
     return LessThanOrEqual(term, value)  # type: ignore[misc,call-arg,arg-type]
+
+
+def is_null(term: str) -> IsNull:
+    return IsNull(term)  # type: ignore[misc,call-arg,arg-type]

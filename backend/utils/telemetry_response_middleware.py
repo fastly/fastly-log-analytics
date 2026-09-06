@@ -127,11 +127,24 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
         # and would re-inject. Honor the same is_remote flag the strip
         # uses so admin (loopback) keeps the debug panel and analyst gets
         # clean payloads.
-        if getattr(request.state, "is_remote", False):
-            return response
-
         if not _debug_responses_enabled():
             return response
+
+        is_remote = getattr(request.state, "is_remote", False)
+        if is_remote:
+            try:
+                from backend.core.share_db.settings import get_setting
+
+                q_vis = get_setting("query_debug_visibility", "disabled")
+                a_vis = get_setting("api_call_debug_visibility", "disabled")
+                analyst_query_enabled = q_vis in ("analysts", "both")
+                analyst_api_enabled = a_vis in ("analysts", "both")
+            except Exception:
+                analyst_query_enabled = False
+                analyst_api_enabled = False
+
+            if not (analyst_query_enabled or analyst_api_enabled):
+                return response
         if _is_streaming_content_type(response):
             return response
         if not _is_json_response(response):
@@ -210,17 +223,30 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             # manual injection). Never double-inject.
             return _reconstruct(response, body)
 
-        # Inject from the contextvar collectors. Errors here MUST NOT
-        # block the response — telemetry is observability, not data.
         try:
             from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
-            parsed["_debug_queries"] = get_queries()
-            # Snapshot-copy BEFORE get_tracked_calls(): that call may run a
-            # SQLite SELECT (usage_log iothread augmentation) which would
-            # otherwise append itself to the live list mid-injection.
-            parsed["_debug_sqlite"] = list(get_sqlite_queries())
-            parsed["_debug_calls"] = get_tracked_calls()
+            inject_queries = True
+            inject_api_calls = True
+
+            if is_remote:
+                try:
+                    from backend.core.share_db.settings import get_setting
+
+                    q_vis = get_setting("query_debug_visibility", "disabled")
+                    a_vis = get_setting("api_call_debug_visibility", "disabled")
+                    inject_queries = q_vis in ("analysts", "both")
+                    inject_api_calls = a_vis in ("analysts", "both")
+                except Exception:
+                    inject_queries = False
+                    inject_api_calls = False
+
+            if inject_queries:
+                parsed["_debug_queries"] = get_queries()
+                parsed["_debug_sqlite"] = list(get_sqlite_queries())
+            if inject_api_calls:
+                parsed["_debug_calls"] = get_tracked_calls()
+
             parsed.setdefault("_is_cached", False)
             new_body = json.dumps(parsed, default=str).encode("utf-8")
         except Exception as e:

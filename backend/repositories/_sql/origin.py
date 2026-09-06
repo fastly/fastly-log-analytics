@@ -294,13 +294,11 @@ AGGREGATES_CREATE_TEMP = (
 )
 """Materialise a per-request catalog table for the composite origin endpoint.
 
-A regular catalog table (not ``CREATE TEMP TABLE``) is required because
-the composite splits its post-materialization reads across multiple pool
-connections via ``asyncio.gather``, and DuckDB temp tables are
-connection-local — only the materializing connection would see them.
-The per-service .duckdb file ALWAYS opens with ``read_only=False``
-(see ``backend/core/duckdb.py:get_connection``), so pool connections
-can issue both the CREATE and the parallel SELECTs against the catalog.
+A regular catalog table is used (rather than explicit CREATE TEMP TABLE syntax)
+to conform with standard naming conventions, but must be accessed sequentially
+on the primary materializing connection. DuckDB temporary tables/views are
+connection-scoped, so all downstream reads must execute sequentially on the same
+primary pool connection to avoid CatalogExceptions.
 
 Cleanup hygiene is two-layered: the get_aggregates ``try/finally``
 DROPs the table on the normal exit path; the per-connection

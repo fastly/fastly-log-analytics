@@ -442,10 +442,16 @@ def test_refresh_all_sources_returns_metadata_for_each_enabled_source():
     """Walks ``BOT_SOURCES`` (filtering out disabled ones) and calls
     fetch_and_cache_source for each. Returns the list of metadata
     dicts the admin UI renders."""
-    with patch(
-        "backend.utils.bot_sources.fetch_and_cache_source",
-        return_value={"id": "well-known-bots", "name": "Well-Known", "entry_count": 50},
-    ) as mock_fetch:
+    fake_sources = [
+        {"id": "well-known-bots", "name": "Well-Known Bots (arcjet)", "url": "https://x", "enabled": True},
+    ]
+    with (
+        patch.object(bot_sources, "BOT_SOURCES", fake_sources),
+        patch(
+            "backend.utils.bot_sources.fetch_and_cache_source",
+            return_value={"id": "well-known-bots", "name": "Well-Known", "entry_count": 50},
+        ) as mock_fetch,
+    ):
         out = bot_sources.refresh_all_sources()
 
     assert mock_fetch.call_count == 1  # one enabled source
@@ -670,3 +676,104 @@ def test_pattern_set_version_changes_when_content_changes():
     v2 = bot_sources.get_pattern_set_version()
 
     assert v1 != v2, "changed source content must produce a different version"
+
+
+def test_enrich_bot_metadata_ip_match_only():
+    """Verify that an IP falling within an enabled IP-based feed (Tor/IPsum) is correctly labeled,
+    even when the User-Agent doesn't match any well-known bots."""
+    import pandas as pd
+
+    # Mock BOT_SOURCES with one IP source
+    fake_sources = [
+        {
+            "id": "tor-exit-nodes",
+            "name": "Tor Exit Nodes (Official)",
+            "url": "https://x",
+            "enabled": True,
+            "type": "ip",
+        },
+    ]
+    # Seed the cache with a fake Tor range
+    _seed_cache(
+        "tor-exit-nodes",
+        [
+            {
+                "id": "tor-exit-nodes",
+                "name": "Tor Exit Nodes (Official)",
+                "pattern": {"accepted": []},
+                "verification": {"domains": [], "cidrs": ["192.168.50.0/24"]},
+            }
+        ],
+    )
+
+    df = pd.DataFrame({"ua": ["Mozilla/5.0 (real browser)"], "ip": ["192.168.50.10"]})
+
+    with (
+        patch.object(bot_sources, "BOT_SOURCES", fake_sources),
+        patch("backend.utils.bot_sources._cache_mtime", return_value=123.45),
+    ):
+        # Force cache invalidation
+        bot_sources._compiled_ip_feeds.clear()
+        bot_sources.enrich_bot_metadata(df)
+
+    assert "_bot_name" in df.columns
+    assert df["_bot_name"][0] == "Tor Exit Nodes (Official) (IP-Match)"
+
+
+def test_enrich_bot_metadata_hybrid_ua_and_ip_match():
+    """Verify that if UA matches a well-known bot AND the IP matches an IP-based source,
+    the resulting _bot_name has both annotations combined correctly."""
+    import pandas as pd
+
+    # Mock BOT_SOURCES with one UA source and one IP source
+    fake_sources = [
+        {
+            "id": "well-known-bots",
+            "name": "Well-Known Bots (arcjet)",
+            "url": "https://x",
+            "enabled": True,
+            "type": "ua",
+        },
+        {"id": "aws-ip-ranges", "name": "AWS IP Ranges", "url": "https://y", "enabled": True, "type": "ip"},
+    ]
+    # Seed both caches
+    _seed_cache(
+        "well-known-bots",
+        [
+            {
+                "id": "googlebot",
+                "name": "Googlebot",
+                "pattern": {"accepted": ["Googlebot"]},
+                "verification": {"domains": ["google.com"], "cidrs": []},
+            }
+        ],
+    )
+    _seed_cache(
+        "aws-ip-ranges",
+        [
+            {
+                "id": "aws-ip-ranges",
+                "name": "AWS IP Ranges",
+                "pattern": {"accepted": []},
+                "verification": {"domains": [], "cidrs": ["10.0.0.0/8"]},
+            }
+        ],
+    )
+
+    df = pd.DataFrame({"ua": ["Googlebot/2.1"], "ip": ["10.80.0.5"]})
+
+    with (
+        patch.object(bot_sources, "BOT_SOURCES", fake_sources),
+        patch("backend.utils.bot_sources._cache_mtime", return_value=123.45),
+        patch(
+            "backend.utils.rdns_cache.get_hostnames", return_value={"10.80.0.5": ("crawl.google.com", "resolved", True)}
+        ),
+    ):
+        bot_sources._compiled_ip_feeds.clear()
+        bot_sources._source_cache.clear()
+        with bot_sources._matcher_lock:
+            bot_sources._matcher_cache.clear()
+        bot_sources.enrich_bot_metadata(df)
+
+    assert "_bot_name" in df.columns
+    assert df["_bot_name"][0] == "Googlebot (verified, AWS IP Ranges)"

@@ -545,13 +545,14 @@ def test_health_endpoint_deep(client):
             assert resp.status_code == 200
             assert resp.json()["status"] == "ok"
 
-            # 3. Stale ingest -> Degraded
+            # 3. Stale ingest -> OK overall but service status is 'stale'
             stale_str = (datetime.now(UTC) - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
             con.execute("DELETE FROM ingested_files")
             con.execute("INSERT INTO ingested_files VALUES (?, ?)", ("test-svc-1", stale_str))
             resp = client.get("/api/health?deep=1")
-            assert resp.status_code == 503
-            assert resp.json()["status"] == "degraded"
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ok"
+            assert resp.json()["services"][0]["status"] == "stale"
 
 
 # ── telemetry middleware: cdn_service_id resolution ────────────────────────

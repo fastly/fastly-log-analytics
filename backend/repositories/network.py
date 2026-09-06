@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any
 
 import duckdb
@@ -158,9 +159,7 @@ def _has_signal(payload: dict[str, Any]) -> bool:
     summary = payload.get("summary")
     if isinstance(summary, dict) and summary.get("total_reqs"):
         return True
-    return any(
-        payload.get(k) for k in ("heatmap", "map_buckets", "leaderboard", "metro_leaderboard", "cities", "buckets")
-    )
+    return any(payload.get(k) for k in ("heatmap", "map_buckets", "leaderboard", "metro_leaderboard", "cities"))
 
 
 def _avg_hs(buckets_data: dict, keys: list[str]) -> float | None:
@@ -316,6 +315,8 @@ def get_health(
     # passthrough for any caller already supplying a sane bucket.
     # Computed BEFORE the rollup hoist (readers don't need it, but
     # bucket_seconds is used in the payload below regardless of path).
+    _st0 = None
+    _et0 = None
     try:
         from backend.utils.date_utils import parse_iso_utc as _parse_iso_utc
 
@@ -367,12 +368,16 @@ def get_health(
     _hoist_net(
         "heatmap",
         _want_heatmap_query,
-        lambda: runner.try_network_heatmap_from_rollup(start_time, end_time, has_filters=bool(filters)),
+        lambda: runner.try_network_heatmap_from_rollup(
+            start_time, end_time, has_filters=bool(filters), bucket_seconds=bucket_seconds
+        ),
     )
     _hoist_net(
         "map_geo",
         _want_map_query or _want_metro_query,
-        lambda: runner.try_network_geo_from_rollup(start_time, end_time, map_asn=map_asn, has_filters=bool(filters)),
+        lambda: runner.try_network_geo_from_rollup(
+            start_time, end_time, map_asn=map_asn, has_filters=bool(filters), bucket_seconds=bucket_seconds
+        ),
     )
 
     if not _net_missed:
@@ -604,25 +609,50 @@ def get_health(
 
     try:
         # ── Derive top ASNs ────────────────────────────────────────────────
+        from datetime import datetime as _datetime
+
         all_asns_seen: dict[int, int] = {}
-        all_buckets_set: set[str] = set()
         for r in heatmap_rows:
             asn = int(r[0])
-            bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
             reqs = int(r[9])
             all_asns_seen[asn] = all_asns_seen.get(asn, 0) + reqs
-            all_buckets_set.add(bucket)
 
-        # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
-        # the heatmap query, but the map-bucket assembly still needs the
-        # sorted bucket axis for positional bucket_idx; pull bucket times
-        # from map_rows in that case so the per-bucket map cells survive.
-        if not heatmap_rows and map_rows:
-            for r in map_rows:
-                bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+        # Generate the complete sequence of buckets from start_time to end_time
+        # at bucket_seconds intervals so that there are no gaps in the animation playback.
+        all_buckets_list: list[str] = []
+        if _st0 is not None and _et0 is not None:
+            _st_epoch = int(_st0.timestamp())
+            _st_floored = (_st_epoch // bucket_seconds) * bucket_seconds
+            _et_epoch = int(_et0.timestamp())
+            _et_floored = (_et_epoch // bucket_seconds) * bucket_seconds
+
+            curr = _st_floored
+            # Generate up to _et_floored (inclusive of the last bucket within the window)
+            while curr <= _et_floored:
+                bucket_str = _datetime.fromtimestamp(curr, tz=UTC).replace(tzinfo=None).isoformat()
+                all_buckets_list.append(bucket_str)
+                curr += bucket_seconds
+
+        if not all_buckets_list:
+            # Fallback to sparse buckets present in the query results
+            all_buckets_set: set[str] = set()
+            for r in heatmap_rows:
+                bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
                 all_buckets_set.add(bucket)
 
-        all_buckets = sorted(all_buckets_set)
+            # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
+            # the heatmap query, but the map-bucket assembly still needs the
+            # sorted bucket axis for positional bucket_idx; pull bucket times
+            # from map_rows in that case so the per-bucket map cells survive.
+            if not heatmap_rows and map_rows:
+                for r in map_rows:
+                    bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                    all_buckets_set.add(bucket)
+
+            all_buckets = sorted(all_buckets_set)
+        else:
+            all_buckets = all_buckets_list
+
         bucket_idx = {b: i for i, b in enumerate(all_buckets)}
         top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
         top_asn_set = set(top_asns)
@@ -1056,7 +1086,6 @@ def get_quality(
         }
 
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
-    rtt_filter = f"{where_clause} AND tcp_rtt IS NOT NULL AND tcp_rtt > 0"
 
     try:
         runner.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
@@ -1073,72 +1102,115 @@ def get_quality(
             **runner.telemetry(),
         }
 
-    def run_bar(group_col: str, extra_where: str = "", extra_params: list | None = None) -> list[dict]:
-        sql = SQL.QUALITY_BAR_BY_GROUP.format(
-            group_col=group_col,
-            table=table_name,
-            rtt_filter=rtt_filter,
-            extra_where=extra_where,
+    # ── Temp table optimization ──────────────────────────────────────────
+    # Build a temp table containing only the required quality columns for
+    # matching rows. This completely avoids repeatedly scanning the heavy base
+    # table logs_view (which requires read_parquet) for each sub-query.
+    quality_cols = [
+        "country",
+        "asn",
+        "region",
+        "pop",
+        "tcp_rtt",
+        "ttfb",
+        "cache",
+    ]
+
+    _t0 = _time.perf_counter()
+    temp_table = runner.create_filtered_temp_table(quality_cols, actual_cols, table_name, where_clause, params)
+    timer.mark("temp_table_create", _t0)
+
+    if temp_table is not None:
+        # If temp table successfully created, hit it directly!
+        # The temp table already contains ONLY the filtered rows, so we don't
+        # need start_time / end_time / other filter parameters in the sub-queries.
+        query_table = temp_table
+        query_where = "1=1"
+        query_params = []
+    else:
+        # Fallback to the slow direct path on catalog exception or uuid collision (unlikely)
+        query_table = table_name
+        query_where = where_clause
+        query_params = params
+
+    rtt_filter = f"{query_where} AND tcp_rtt IS NOT NULL AND tcp_rtt > 0"
+
+    try:
+
+        def run_bar(group_col: str, extra_where: str = "", extra_params: list | None = None) -> list[dict]:
+            sql = SQL.QUALITY_BAR_BY_GROUP.format(
+                group_col=group_col,
+                table=query_table,
+                rtt_filter=rtt_filter,
+                extra_where=extra_where,
+            )
+            _t = _time.perf_counter()
+            rows = runner.execute(sql, query_params + (extra_params or [])).fetchall()
+            timer.mark(f"quality_bar:{group_col}", _t)
+            return [
+                {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])}
+                for r in rows
+            ]
+
+        countries_sql = SQL.QUALITY_COUNTRIES_DISTINCT.format(
+            table=query_table,
+            where_clause=query_where,
         )
         _t = _time.perf_counter()
-        rows = runner.execute(sql, params + (extra_params or [])).fetchall()
-        timer.mark(f"quality_bar:{group_col}", _t)
-        return [
-            {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])} for r in rows
-        ]
+        countries = [r[0] for r in runner.execute(countries_sql, query_params).fetchall()]
+        timer.mark("countries_distinct", _t)
 
-    countries_sql = SQL.QUALITY_COUNTRIES_DISTINCT.format(
-        table=table_name,
-        where_clause=where_clause,
-    )
-    _t = _time.perf_counter()
-    countries = [r[0] for r in runner.execute(countries_sql, params).fetchall()]
-    timer.mark("countries_distinct", _t)
-
-    by_country = run_bar("country")
-    by_asn = run_bar("asn") if "asn" in actual_cols else []
-    if by_asn:
-        # Mirror the ASN leaderboard / dashboard: display "Name (7922)" instead
-        # of the bare number, keeping `value` as the click-to-filter key.
-        try:
-            _db.enrich_asn_labels(by_asn, src["name"])
-        except Exception:
-            pass
-    by_region = (
-        run_bar("region", extra_where=" AND country = ?", extra_params=[region_country])
-        if "region" in actual_cols
-        else []
-    )
-    # by_pop rows stay as the bare PoP code (value == label); the frontend
-    # renders the city/region/country via the shared <PopLabel> component
-    # (fed by bootstrap's pop_geo map). See frontend/lib/pop.ts.
-    by_pop = run_bar("pop") if "pop" in actual_cols else []
-
-    scatter: list[dict] = []
-    if "ttfb" in actual_cols:
-        scatter_sql = SQL.QUALITY_SCATTER.format(
-            table=table_name,
-            rtt_filter=rtt_filter,
+        by_country = run_bar("country")
+        by_asn = run_bar("asn") if "asn" in actual_cols else []
+        if by_asn:
+            # Mirror the ASN leaderboard / dashboard: display "Name (7922)" instead
+            # of the bare number, keeping `value` as the click-to-filter key.
+            try:
+                _db.enrich_asn_labels(by_asn, src["name"])
+            except Exception:
+                pass
+        by_region = (
+            run_bar("region", extra_where=" AND country = ?", extra_params=[region_country])
+            if "region" in actual_cols
+            else []
         )
-        _t = _time.perf_counter()
-        scatter = [
-            {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
-            for r in runner.execute(scatter_sql, params).fetchall()
-        ]
-        timer.mark("scatter_query", _t)
+        # by_pop rows stay as the bare PoP code (value == label); the frontend
+        # renders the city/region/country via the shared <PopLabel> component
+        # (fed by bootstrap's pop_geo map). See frontend/lib/pop.ts.
+        by_pop = run_bar("pop") if "pop" in actual_cols else []
 
-    return {
-        "available": True,
-        "by_country": by_country,
-        "by_asn": by_asn,
-        "by_region": by_region,
-        "region_country": region_country,
-        "by_pop": by_pop,
-        "scatter": scatter,
-        "countries": countries,
-        "section_timings": section_timings,
-        **runner.telemetry(),
-    }
+        scatter: list[dict] = []
+        if "ttfb" in actual_cols:
+            scatter_sql = SQL.QUALITY_SCATTER.format(
+                table=query_table,
+                rtt_filter=rtt_filter,
+            )
+            _t = _time.perf_counter()
+            scatter = [
+                {"rtt_ms": round(float(r[0]), 2), "ttfb_ms": round(float(r[1]), 2), "cache": str(r[2])}
+                for r in runner.execute(scatter_sql, query_params).fetchall()
+            ]
+            timer.mark("scatter_query", _t)
+
+        return {
+            "available": True,
+            "by_country": by_country,
+            "by_asn": by_asn,
+            "by_region": by_region,
+            "region_country": region_country,
+            "by_pop": by_pop,
+            "scatter": scatter,
+            "countries": countries,
+            "section_timings": section_timings,
+            **runner.telemetry(),
+        }
+
+    finally:
+        if temp_table is not None:
+            try:
+                runner.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+            except Exception:
+                pass
 
 
 # A-3 (CacheRegistry): register the network response cache (also

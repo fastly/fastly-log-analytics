@@ -107,6 +107,40 @@ export function getCacheContent(id: string): InsightContent | null {
         )
       }
 
+    case 'cache_ttl_mismatch':
+      return {
+        title: 'Cache TTL Inefficiency',
+        icon: <Clock className="h-5 w-5 text-primary" />,
+        fields: ['ttl', 'hits', 'age', 'timestamp'],
+        description: (
+          <div className="space-y-4">
+            <p>
+              Identifies URLs configured with very high Cache TTL (Time To Live) but receiving extremely low hit counts, which can lead to inefficient cache allocation.
+            </p>
+            <ul className="space-y-3 list-none pl-0 text-sm text-muted-foreground">
+              <li className="flex gap-3">
+                <Database className="h-5 w-5 shrink-0 text-blue-500" />
+                <span>
+                  <strong>Inefficient Cache Retention:</strong> Objects with long TTLs but very few requests occupy high-value edge memory slots without providing equivalent cache-efficiency returns.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+                <span>
+                  <strong>Wasted Cache Slots:</strong> These items can push out hot, high-demand resources, contributing to overall cache pressure and premature evictions elsewhere.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <Clock className="h-5 w-5 shrink-0 text-red-500" />
+                <span>
+                  <strong>Actionable Mitigation:</strong> Consider reducing the TTL for low-traffic or cold resources using Cache-Control directives from the origin, or optimize cache key clustering in VCL.
+                </span>
+              </li>
+            </ul>
+          </div>
+        )
+      }
+
     default:
       return null
   }

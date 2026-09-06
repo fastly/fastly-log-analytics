@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from backend.models.alert_channels import AlertChannel
 from backend.models.common import BaseResponse
 
 
@@ -27,7 +28,7 @@ class Alert(BaseModel):
         "bandwidth",
         "ttfb",
     ]
-    evaluation_type: Literal["absolute", "relative_increase", "relative_decrease"] = "absolute"
+    evaluation_type: Literal["absolute", "relative_increase", "relative_decrease", "anomaly_zscore"] = "absolute"
     evaluation_scope: Literal["all", "edge", "origin"] = "all"
     operator: Literal[">", "<", ">=", "<="]
     threshold: float
@@ -35,6 +36,9 @@ class Alert(BaseModel):
     comparison_period_min: float | None = None
     status_codes: list[int] | None = None
     webhook_url: str | None = None
+    channels: list[AlertChannel] | None = None
+    zscore_threshold: float | None = None
+    baseline_period_days: int | None = None
     enabled: bool = True
     last_triggered_at: str | None = None
     created_at: str | None = None

@@ -70,6 +70,19 @@ export function useWizardState(
   const [step, setStep] = useState<Step>("mode");
   const [mode, setMode] = useState<WizardMode>(null);
   const [token, setToken] = useState("");
+  const [submittedToken, setSubmittedToken] = useState("");
+
+  // Clear the submitted token when the wizard closes. Derived during render
+  // (rather than in a useEffect) to avoid the extra setState-in-effect render
+  // pass — see https://react.dev/learn/you-might-not-need-an-effect.
+  const [prevOpenForToken, setPrevOpenForToken] = useState(open);
+  if (open !== prevOpenForToken) {
+    setPrevOpenForToken(open);
+    if (!open) {
+      setSubmittedToken("");
+    }
+  }
+
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
   const [search, setSearch] = useState("");
   const [selectedService, setSelectedService] =
@@ -156,17 +169,16 @@ export function useWizardState(
   const [domainStatus, setDomainStatus] = useState<DomainStatus>("idle");
   const [domainMessage, setDomainMessage] = useState("");
 
-  // ── Step 1: Token ──
   const {
     data: servicesData,
     error: servicesError,
     isLoading: isLoadingServices,
-    refetch: fetchServices,
   } = useQuery({
-    queryKey: ["provision-services"],
+    queryKey: ["provision-services", submittedToken],
     queryFn: async () => {
+      if (!submittedToken) return [];
       const { data, error } = await client.GET("/api/provision/services", {
-        params: { query: { token } },
+        params: { query: { token: submittedToken } },
       });
       // Surface backend errors (e.g. object_storage_not_enabled, invalid token)
       // as the query error so TokenStep renders the actionable message instead
@@ -180,9 +192,20 @@ export function useWizardState(
       }
       return data as any;
     },
-    enabled: false,
+    enabled: !!submittedToken,
     retry: false,
   });
+
+  // Advance to the service step once services arrive. Derived during render
+  // (rather than in a useEffect) to avoid the setState-in-effect cascade —
+  // see https://react.dev/learn/you-might-not-need-an-effect.
+  const [prevServicesData, setPrevServicesData] = useState(servicesData);
+  if (servicesData !== prevServicesData) {
+    setPrevServicesData(servicesData);
+    if (servicesData && Array.isArray(servicesData) && step === "token") {
+      setStep("service");
+    }
+  }
 
   // ── Step 4: Catalog ──
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({
@@ -244,9 +267,8 @@ export function useWizardState(
   }, [catalog, config.log_fields]);
 
   const handleTokenSubmit = async () => {
-    const res = await fetchServices();
-    if (res.data && Array.isArray(res.data)) {
-      setStep("service");
+    if (token) {
+      setSubmittedToken(token);
     }
   };
 
@@ -421,7 +443,7 @@ export function useWizardState(
     window.location.reload();
   };
 
-  const STEPS = getStepsForMode(mode);
+  const STEPS = getStepsForMode(mode, config);
 
   useWizardEffects({
     open,
@@ -486,10 +508,12 @@ export function useWizardState(
 
   useEffect(() => {
     if (!open) {
-      setPendingDraft(null);
       return;
     }
     setPendingDraft(loadDraft());
+    return () => {
+      setPendingDraft(null);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -560,8 +584,9 @@ export function useWizardState(
       clearDraft();
       draftIdRef.current = null;
       draftCreatedAtRef.current = null;
+      queryClient.invalidateQueries({ queryKey: ['services'] })
     }
-  }, [status, isDone]);
+  }, [status, isDone, queryClient]);
 
   const filteredServices = Array.isArray(servicesData)
     ? servicesData.filter(

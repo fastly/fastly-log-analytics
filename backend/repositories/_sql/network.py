@@ -18,18 +18,25 @@ from __future__ import annotations
 # ── Heatmap (ASN x bucket) ───────────────────────────────────────────────────
 
 HEATMAP_BY_ASN_BUCKET = """
-            WITH top_cells AS (
+            WITH precomputed AS (
                 SELECT
-                    asn,
+                    *,
                     EPOCH_MS(
                         CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                    )::TIMESTAMP AS bucket,
-                    COUNT(*) AS reqs,
-                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                    )::TIMESTAMP AS bucket
                 FROM {table}
                 WHERE {where}
-                  AND asn IS NOT NULL
                   AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+            ),
+            top_cells AS (
+                SELECT
+                    asn,
+                    bucket,
+                    COUNT(*) AS reqs,
+                    SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                FROM precomputed
+                WHERE {where}
+                  AND asn IS NOT NULL
                 GROUP BY 1, 2
                 ORDER BY reqs DESC
                 LIMIT {row_limit}
@@ -49,14 +56,10 @@ HEATMAP_BY_ASN_BUCKET = """
                 {rtt_var_expr}           AS rtt_jitter_us,
                 tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
                 tc.reqs
-            FROM {table}
+            FROM precomputed AS {table}
             INNER JOIN top_cells tc
                 ON {table}.asn = tc.asn
-               AND EPOCH_MS(
-                       CAST((EPOCH_MS({table}.timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                   )::TIMESTAMP = tc.bucket
-            WHERE {where}
-              AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+               AND {table}.bucket = tc.bucket
             GROUP BY tc.asn, tc.bucket, tc.reqs, tc.err_count
             ORDER BY tc.reqs DESC
         """
@@ -85,22 +88,33 @@ Output columns per row:
 # ── World map (country x city x bucket) ──────────────────────────────────────
 
 MAP_BY_COUNTRY_BUCKET = """
-                WITH top_cells AS (
+                WITH precomputed AS (
                     SELECT
-                        country,
+                        *,
                         {city_col} AS city,
                         {lat_col}  AS lat,
                         {lon_col}  AS lon,
                         {metro_col} AS metro,
                         EPOCH_MS(
                             CAST((EPOCH_MS(timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                        )::TIMESTAMP AS bucket,
-                        COUNT(*) AS reqs,
-                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                        )::TIMESTAMP AS bucket
                     FROM {table}
                     WHERE {where}
                       AND country IS NOT NULL AND country != ''
                       AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                ),
+                top_cells AS (
+                    SELECT
+                        country,
+                        city,
+                        lat,
+                        lon,
+                        metro,
+                        bucket,
+                        COUNT(*) AS reqs,
+                        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS err_count
+                    FROM precomputed
+                    WHERE {where}
                     GROUP BY 1, 2, 3, 4, 5, 6
                     ORDER BY reqs DESC
                     LIMIT 5000
@@ -113,22 +127,20 @@ MAP_BY_COUNTRY_BUCKET = """
                         tc.lon,
                         tc.metro,
                         tc.bucket,
-                        APPROX_QUANTILE(tcp_rtt, 0.5) AS rtt_med_us,
+                        APPROX_QUANTILE({table}.tcp_rtt, 0.5) AS rtt_med_us,
                         {ploss_expr}    AS avg_ploss,
                         tc.err_count * 100.0 / NULLIF(tc.reqs, 0) AS error_pct,
                         tc.reqs
-                    FROM {table}
+                    FROM precomputed AS {table}
                     INNER JOIN top_cells tc
                         ON {table}.country = tc.country
                        AND ({join_city_col})  IS NOT DISTINCT FROM tc.city
                        AND ({join_lat_col})   IS NOT DISTINCT FROM tc.lat
                        AND ({join_lon_col})   IS NOT DISTINCT FROM tc.lon
                        AND ({join_metro_col}) IS NOT DISTINCT FROM tc.metro
-                       AND EPOCH_MS(
-                               CAST((EPOCH_MS({table}.timestamp)::BIGINT // {bucket_ms}) * {bucket_ms} AS BIGINT)
-                           )::TIMESTAMP = tc.bucket
-                    WHERE {where}
-                      AND tcp_rtt IS NOT NULL AND tcp_rtt > 0
+                       AND {table}.bucket = tc.bucket
+                    WHERE 1=1
+                      AND {table}.tcp_rtt IS NOT NULL AND {table}.tcp_rtt > 0
                     GROUP BY tc.country, tc.city, tc.lat, tc.lon, tc.metro, tc.bucket, tc.reqs, tc.err_count
                 ) ranked
                 ORDER BY bucket, reqs DESC

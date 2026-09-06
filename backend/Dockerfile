@@ -18,6 +18,7 @@ WORKDIR /app
 # by BuildKit design, so uv can't hardlink between them. Explicit copy mode
 # silences the warning (behavior is already copy-fallback today).
 ENV UV_LINK_MODE=copy
+ENV UV_HTTP_TIMEOUT=300
 
 # Copy dependency files first
 COPY pyproject.toml uv.lock ./

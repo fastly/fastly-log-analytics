@@ -82,7 +82,7 @@ function isTick(t: unknown): t is MetricsTick {
 }
 
 function useRealtimeStream(): RealtimeStreamState {
-  const { lines, status, start, stop } = useSSE()
+  const { lines, status, start, reset } = useSSE()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({
     ticks: [],
@@ -110,9 +110,10 @@ function useRealtimeStream(): RealtimeStreamState {
     })()
     return () => {
       ac.abort()
-      stop()
+      reset()
+      setSeed({ ticks: [], timestamps: new Set() })
     }
-  }, [activeServiceId, start, stop])
+  }, [activeServiceId, start, reset])
 
   const allTicks = useMemo(() => {
     const sseTicks = lines

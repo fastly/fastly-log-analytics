@@ -1123,6 +1123,56 @@ def test_prefill_computes_estimated_bytes_per_line_from_log_fields(client, tmp_p
     assert body["estimated_bytes_per_line"] > 0
 
 
+def test_prefill_calculates_rum_beacons_per_day(client, tmp_path, monkeypatch):
+    """Verify that `/api/usage/prefill` calculates `rum_beacons_per_day`
+    based on client_vitals and client_errors ingested files in SQLite."""
+    from backend import config
+    from backend.deps import get_source
+    from backend.main import app
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    monkeypatch.setattr(config, "SYSTEM_DATA_DIR", tmp_path / "sys")
+    monkeypatch.setattr(config, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "sys" / "usage_logging.json")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    # Set up specific clean get_source override
+    source_name = "test_rum_svc"
+    app.dependency_overrides[get_source] = lambda: _complete_src(name=source_name)
+
+    # Initialize metadata DB with ingested_files table
+    from backend.core.metadata import get_con
+
+    db = get_con(source_name)
+
+    # Insert mock RUM file records
+    db.execute(
+        f"""
+        INSERT INTO ingested_files (source_name, table_name, file_name, file_date, row_count, file_size_bytes, ingested_at)
+        VALUES
+        ('{source_name}', 'client_vitals', 'vit1.parquet', '2026-08-10', 1000, 50000, '2026-08-10 12:00:00'),
+        ('{source_name}', 'client_errors', 'err1.parquet', '2026-08-10', 500, 25000, '2026-08-10 12:05:00'),
+        ('{source_name}', 'client_vitals', 'vit2.parquet', '2026-08-11', 2000, 100000, '2026-08-11 12:00:00')
+        """
+    )
+    db.commit()
+
+    fake_cfg = {
+        "service_id": MOCK_SERVICE_ID,
+        "fos_bucket": "b",
+        "name": source_name,
+    }
+
+    with patch("backend.config.load_config", return_value=fake_cfg):
+        resp = client.get("/api/usage/prefill", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # 2026-08-10 has 1000 + 500 = 1500 beacons
+    # 2026-08-11 has 2000 beacons
+    # Average should be (1500 + 2000) / 2 = 1750 beacons
+    assert body["rum_beacons_per_day"] == 1750
+
+
 # silence unused-imports
 _ = json
 _ = pytest

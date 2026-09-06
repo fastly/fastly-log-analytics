@@ -148,6 +148,7 @@ export function useServiceStream(
 
   useEffect(() => {
     if (!enabled || (gateOnService && !serviceId) || awaitingHydration) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setState('idle')
       return
     }

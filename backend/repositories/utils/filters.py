@@ -110,6 +110,7 @@ def build_where_clause(
     actual_cols: list[str] | None = None,
     inline_params: bool = False,
     partition_pruning: bool = False,
+    exclude_invalid_ips: bool = True,
 ) -> tuple[list[Any], str]:
     """Build a parameterised WHERE clause from date range + column filters.
 
@@ -124,6 +125,15 @@ def build_where_clause(
     """
     conditions: list[str] = []
     params: list[Any] = []
+
+    # Filter out empty or null client IP records (buffer leaks / empty ticks)
+    if exclude_invalid_ips and actual_cols is not None and "ip" in actual_cols:
+        conditions.append("ip IS NOT NULL AND ip != ''")
+
+    # Filter out synthetic RUM beacons from regular dashboard request logs
+    if exclude_invalid_ips and actual_cols is not None and "url" in actual_cols:
+        # Use chr(63) instead of a literal '?' so that SQL placeholder checks don't count it as a parameter slot
+        conditions.append("url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'")
 
     def _add_param(val: Any) -> str:
         if inline_params:
@@ -167,6 +177,7 @@ def build_where_clause(
         is_signals_individual = col == "waf_sig_ind"
         is_bot_name = col == "_bot_name"
         is_ngwaf_bot_name = col == "_ngwaf_bot_name"
+        is_tunnel_requests = col == "_tunnel_requests"
         real_col = "waf_sig" if is_signals_individual else clean_col
         sql_col = real_col
         sql_clean_col = clean_col
@@ -190,13 +201,7 @@ def build_where_clause(
         parts: list[str] = []
 
         if is_bot_name:
-            # Virtual filter: expand each bot_id to its UA regex patterns.
-            # Skipped gracefully when 'ua' is not present in the source schema.
-            if actual_cols is not None and "ua" not in actual_cols:
-                import logging
-
-                logging.getLogger(__name__).warning("[build_where_clause] _bot_name filter skipped: 'ua' not in schema")
-                continue
+            # Virtual filter: expand each bot_id to its UA regex patterns or IP CIDR ranges.
             try:
                 from backend.utils.bot_sources import get_bot_by_id
             except ImportError:
@@ -205,19 +210,67 @@ def build_where_clause(
                 bot = get_bot_by_id(str(bot_id))
                 if bot is None:
                     continue
-                raw_patterns = bot.get("pattern", {}).get("accepted", [])
-                if not raw_patterns:
-                    continue
 
-                # Combine all patterns for this bot into a single case-insensitive regex.
-                # Regex alternation in RE2 is significantly faster than multiple ILIKE checks.
-                combined_regex = "|".join(raw_patterns)
-                safe_regex = combined_regex.replace("'", "''")
+                if bot.get("type") == "ip" or "cidrs" in bot.get("verification", {}):
+                    # IP-based feed filtering
+                    if actual_cols is not None and "ip" not in actual_cols:
+                        continue
+                    cidrs = bot.get("verification", {}).get("cidrs", [])
+                    if not cidrs:
+                        continue
+                    # Convert each CIDR into standard boundary comparison checks in DuckDB:
+                    # using standard integer conversion
+                    cidr_conditions = []
+                    import ipaddress
 
-                if mode == "exclude":
-                    parts.append(f"NOT regexp_matches(ua, '(?i){safe_regex}')")
+                    for c in cidrs:
+                        try:
+                            net_obj = ipaddress.ip_network(c, strict=False)
+                            if isinstance(net_obj, ipaddress.IPv4Network):
+                                lower_int = int(net_obj.network_address)
+                                upper_int = int(net_obj.broadcast_address)
+                                ip_int_sql = (
+                                    "(CAST(string_split(ip, '.')[1] AS BIGINT) * 16777216 + "
+                                    "CAST(string_split(ip, '.')[2] AS BIGINT) * 65536 + "
+                                    "CAST(string_split(ip, '.')[3] AS BIGINT) * 256 + "
+                                    "CAST(string_split(ip, '.')[4] AS BIGINT))"
+                                )
+                                cidr_conditions.append(
+                                    f"(NOT (ip LIKE '%:%') AND len(string_split(ip, '.')) = 4 AND {ip_int_sql} >= {lower_int} AND {ip_int_sql} <= {upper_int})"
+                                )
+                            else:
+                                # For IPv6, fallback to standard start-of-string prefix match or skip
+                                pass
+                        except ValueError:
+                            continue
+                    if cidr_conditions:
+                        combined_cidr_sql = " OR ".join(cidr_conditions)
+                        if mode == "exclude":
+                            parts.append(f"NOT ({combined_cidr_sql})")
+                        else:
+                            parts.append(f"({combined_cidr_sql})")
                 else:
-                    parts.append(f"regexp_matches(ua, '(?i){safe_regex}')")
+                    # User-Agent-based bot matching
+                    if actual_cols is not None and "ua" not in actual_cols:
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "[build_where_clause] _bot_name filter skipped: 'ua' not in schema"
+                        )
+                        continue
+                    raw_patterns = bot.get("pattern", {}).get("accepted", [])
+                    if not raw_patterns:
+                        continue
+
+                    # Combine all patterns for this bot into a single case-insensitive regex.
+                    # Regex alternation in RE2 is significantly faster than multiple ILIKE checks.
+                    combined_regex = "|".join(raw_patterns)
+                    safe_regex = combined_regex.replace("'", "''")
+
+                    if mode == "exclude":
+                        parts.append(f"NOT regexp_matches(ua, '(?i){safe_regex}')")
+                    else:
+                        parts.append(f"regexp_matches(ua, '(?i){safe_regex}')")
         elif is_ngwaf_bot_name:
             # Virtual filter over the local NGWAF bot cache. Resolved via a
             # direct sqlite3 lookup (see _lookup_ngwaf_waf_req_ids) rather
@@ -253,6 +306,39 @@ def build_where_clause(
                         # IN-clause behavior this replaces). An exclude filter
                         # over an empty set is vacuously true, so no condition.
                         parts.append("FALSE")
+        elif is_tunnel_requests:
+            if actual_cols is not None and not all(
+                c in actual_cols for c in ["pop", "lat", "lon", "rtt_min", "tcp_rtt"]
+            ):
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[build_where_clause] _tunnel_requests filter skipped: required columns not in schema"
+                )
+                if mode == "exclude":
+                    parts.append("TRUE")
+                else:
+                    parts.append("FALSE")
+            else:
+                pop_distance_case = """
+                    CASE
+                        WHEN pop = 'SJC' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 37.3382) / 2), 2) + COS(RADIANS(37.3382)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -121.8863) / 2), 2)))
+                        WHEN pop = 'IAD' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.9531) / 2), 2) + COS(RADIANS(38.9531)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -77.4565) / 2), 2)))
+                        WHEN pop = 'NRT' THEN 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 35.7720) / 2), 2) + COS(RADIANS(35.7720)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - 140.3929) / 2), 2)))
+                        ELSE 6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(lat - 38.0) / 2), 2) + COS(RADIANS(38.0)) * COS(RADIANS(lat)) * POWER(SIN(RADIANS(lon - -97.0) / 2), 2)))
+                    END
+                """
+                cond = f"""
+                (
+                    ({pop_distance_case} > ((rtt_min / 1000.0) * 100.0 + 150.0))
+                    OR
+                    (tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1)
+                )
+                """
+                if mode == "exclude":
+                    parts.append(f"NOT ({cond})")
+                else:
+                    parts.append(cond)
         elif is_signals_individual:
             for v in non_none:
                 val_str = str(v).strip()
@@ -271,6 +357,11 @@ def build_where_clause(
                         exact_vals.append(v)
 
                 sub_parts = []
+                from backend.core import field_registry
+
+                field = field_registry.try_get(clean_col)
+                is_varchar = field is not None and field.duck_type == field_registry.DuckType.VARCHAR
+
                 if exact_vals:
                     # CAST(col AS VARCHAR) + stringify each param defensively
                     # so a non-numeric filter value on a numeric column
@@ -280,10 +371,18 @@ def build_where_clause(
                     # "Could not convert string ':' to INT32". The wildcard
                     # branch below already CASTs to VARCHAR for the same
                     # reason. Both surfaced via hypothesis property tests.
+                    #
+                    # For performance (SRE audit): If the field is already
+                    # VARCHAR in our registry (like ip, url, ua, referer etc.),
+                    # bypass the redundant CAST to avoid disabling index and
+                    # zone-map pruning in DuckDB.
                     str_vals = [str(v) for v in exact_vals]
                     placeholders = ", ".join(_add_param(v) for v in str_vals)
                     op = "NOT IN" if mode == "exclude" else "IN"
-                    sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} ({placeholders})")
+                    if is_varchar:
+                        sub_parts.append(f"{sql_clean_col} {op} ({placeholders})")
+                    else:
+                        sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} ({placeholders})")
 
                 for w in wildcard_vals:
                     w_like = w.replace("*", "%")
@@ -296,8 +395,11 @@ def build_where_clause(
                         # bytes can still match via the exact-IN path above.
                         # Discovered via hypothesis property tests.
                         w_like = "".join(ch for ch in w_like if 0x20 <= ord(ch) < 0x7F)
-                    op = "NOT LIKE" if mode == "exclude" else "LIKE"
-                    sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} {_add_param(w_like)}")
+                    op = "NOT ILIKE" if mode == "exclude" else "ILIKE"
+                    if is_varchar:
+                        sub_parts.append(f"{sql_clean_col} {op} {_add_param(w_like)}")
+                    else:
+                        sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} {_add_param(w_like)}")
 
                 if sub_parts:
                     if mode == "exclude":

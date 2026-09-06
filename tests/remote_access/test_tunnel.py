@@ -43,6 +43,15 @@ def test_fingerprint_changes_with_os():
     assert a != b
 
 
+def test_fingerprint_immune_to_client_hints():
+    """Absence or variance of sec-ch-ua-platform must NOT alter fingerprint."""
+    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Chrome/126.0.0.0 Safari/537.36"
+    a = tunnel.compute_fingerprint({"user-agent": ua, "sec-ch-ua-platform": '"macOS"'})
+    b = tunnel.compute_fingerprint({"user-agent": ua})
+    c = tunnel.compute_fingerprint({"user-agent": ua, "sec-ch-ua-platform": ""})
+    assert a == b == c
+
+
 # ── Rate limiter ────────────────────────────────────────────────────────────
 
 

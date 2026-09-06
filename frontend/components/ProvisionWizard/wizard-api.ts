@@ -53,7 +53,7 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
       }));
     }
     deps.setStep(
-      deps.mode === "join" || deps.mode === "ingest" ? "join" : "storage",
+      deps.mode === "join" || deps.mode === "ingest" ? "join" : "features",
     );
   };
 }

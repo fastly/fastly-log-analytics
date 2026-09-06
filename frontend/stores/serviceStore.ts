@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { setActiveServiceCookie } from '@/lib/active-service-cookie'
 
 export interface Service {
   id: string
   name: string
   accessLevel?: string
+  cmcdEnabled?: boolean
 }
 
 interface ServiceState {
@@ -22,7 +24,10 @@ export const useServiceStore = create<ServiceState>()(
       activeServiceId: null,
       services: [],
       isInitialized: false,
-      setActiveServiceId: (id) => set({ activeServiceId: id }),
+      setActiveServiceId: (id) => {
+        set({ activeServiceId: id })
+        setActiveServiceCookie(id)
+      },
       setServices: (services) => set({ services }),
       setInitialized: (initialized) => set({ isInitialized: initialized }),
     }),

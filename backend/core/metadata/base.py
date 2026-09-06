@@ -48,7 +48,7 @@ _initialized: set[str] = set()
 # it in sync. Unbounded reads (admin teardown / repair tools) bypass and
 # invalidate the cache. Eliminates the ~640 ms SQL fetchall on every ~5 s
 # sync tick for services with >1 M ingested_files.
-_ingested_filenames_cache: dict[str, set[str]] = {}
+_ingested_filenames_cache: dict[str | tuple[str, str], set[str]] = {}
 _ingested_filenames_cache_lock = threading.Lock()
 
 
@@ -58,6 +58,7 @@ _ingested_filenames_cache_lock = threading.Lock()
 # Matches the GLOB in _migration_002 / get_log_accounting_counts so legacy
 # and runtime parsing agree.
 _FILE_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})T")
+_RUM_FILE_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})/")
 
 
 def _parse_file_date(file_name: str) -> str | None:
@@ -70,7 +71,15 @@ def _parse_file_date(file_name: str) -> str | None:
     if not file_name:
         return None
     m = _FILE_DATE_RE.search(file_name)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m_rum = _RUM_FILE_DATE_RE.search(file_name)
+    if m_rum:
+        return f"{m_rum.group(1)}-{m_rum.group(2)}-{m_rum.group(3)}"
+    m_loose = re.search(r"(\d{4})-(\d{2})-(\d{2})", file_name)
+    if m_loose:
+        return f"{m_loose.group(1)}-{m_loose.group(2)}-{m_loose.group(3)}"
+    return None
 
 
 def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
@@ -84,6 +93,9 @@ def _clear_ingested_filenames_cache(service_id: str | None = None) -> None:
         if service_id is None:
             _ingested_filenames_cache.clear()
         else:
+            to_remove = [k for k in _ingested_filenames_cache if isinstance(k, tuple) and k[0] == service_id]
+            for k in to_remove:
+                _ingested_filenames_cache.pop(k, None)
             _ingested_filenames_cache.pop(service_id, None)
 
 
@@ -241,7 +253,8 @@ _SCHEMA = [
         file_size_bytes INTEGER,
         error_count INTEGER DEFAULT 0,
         file_date DATE,
-        PRIMARY KEY (file_name, source_name)
+        table_name TEXT NOT NULL DEFAULT 'logs',
+        PRIMARY KEY (file_name, source_name, table_name)
     )""",
     # Covers `/usage/prefill`'s source+range narrowing
     # (`WHERE source_name = ? AND ingested_at BETWEEN ? AND ?`) and the
@@ -292,10 +305,12 @@ _SCHEMA = [
     # this makes the ingest → buffer → metadata commit sequence crash-safe
     # without ever double-committing a row to Iceberg.
     """CREATE TABLE IF NOT EXISTS ingest_in_flight (
-        buffer_filename TEXT PRIMARY KEY,
+        buffer_filename TEXT NOT NULL,
         source_name TEXT NOT NULL,
         files_json TEXT NOT NULL,
-        started_at TEXT DEFAULT (datetime('now'))
+        started_at TEXT DEFAULT (datetime('now')),
+        table_name TEXT NOT NULL DEFAULT 'logs',
+        PRIMARY KEY (buffer_filename, table_name)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_in_flight_source ON ingest_in_flight(source_name)",
     """CREATE TABLE IF NOT EXISTS cron_runs (
@@ -318,7 +333,7 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_cron_task_started ON cron_runs(task, started_at)",
     # Covers the every-5s running-check hot path in start_cron_run
     # (`WHERE task = ? AND status = 'running'`).
-    "CREATE INDEX IF NOT EXISTS idx_cron_task_status ON cron_runs(task, status)",
+    "CREATE INDEX IF NOT EXISTS idx_cron_task_status ON cron_runs(task, status, started_at)",
     # Covers `/logs`'s unfiltered pagination
     # (`ORDER BY started_at DESC LIMIT ? OFFSET ?` with no `WHERE task`) and
     # `main.py`'s sync-status probe (`WHERE task='sync' AND status != 'running'
@@ -367,6 +382,9 @@ _SCHEMA = [
         comparison_period_min REAL,
         status_codes TEXT,
         webhook_url TEXT,
+        channels_json TEXT DEFAULT '[]',
+        zscore_threshold REAL DEFAULT 3.0,
+        baseline_period_days INTEGER DEFAULT 7,
         enabled INTEGER DEFAULT 1,
         last_triggered_at TEXT,
         created_at TEXT DEFAULT (datetime('now'))

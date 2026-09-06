@@ -57,6 +57,13 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/services/:service_id/ngwaf-sync',
   'PATCH /api/services/:service_id/custom-fields/:field_name',
   'DELETE /api/cron-runs/:log_id',
+  'POST /api/assets/aggregates',
+  'POST /api/sharing/deploy-frontend',
+  'POST /api/sharing/teardown-frontend',
+
+  // Newly introduced endpoints covered by Playwright E2E
+  'GET /api/network/pop-health',
+  'GET /api/security/threat-intel',
 
   // SSE streams — MSW's HTTP intercept does not model SSE well; tests
   // that exercise these set up their own custom EventSource shims.
@@ -68,6 +75,7 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/usage/operations',
   'GET /api/usage/bandwidth',
   'GET /api/usage/log-activity',
+  'GET /api/usage/rum-breakdown',
   'GET /api/admin/compaction-stats',
   'GET /api/admin/metric-history',
   'GET /api/admin/iceberg-tree',
@@ -79,11 +87,14 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/download-all',
 
   // Admin mutation endpoints — Playwright E2E coverage.
+  'GET /api/admin/vcl-health',
+  'POST /api/provision/reconcile',
   'POST /api/admin/optimize-now',
   'POST /api/admin/local-compact-now',
   'POST /api/admin/backfill-window',
   'POST /api/admin/backfill-bundle-rollups',
   'POST /api/admin/usage-logging',
+  'POST /api/admin/reset-rum',
   'POST /api/provision/teardown',
   'PATCH /api/provision/services/:service_id/ngwaf-workspace',
 
@@ -128,12 +139,36 @@ const ALLOWED_GAPS = new Set<string>([
   'PUT /api/services/:service_id/scoring/threshold',
   'GET /api/services/:service_id/scoring/evaluation/per-reason',
   'GET /api/services/:service_id/scoring/dashboard',
+  'GET /api/security/proxies/export',
+
+  // Real User Monitoring (RUM) analytics & live-events are covered by
+  // Playwright end-to-end tests or are polling endpoints.
+  'GET /api/services/:service_id/rum/analytics',
+  'GET /api/services/:service_id/rum/live-events',
 
   // CMCD admin — SSE-streamed enable/disable + status. Admin-only flows
   // covered by Playwright E2E; same pattern as scoring admin endpoints.
   'GET /api/services/:service_id/cmcd/status',
   'POST /api/services/:service_id/cmcd/enable',
   'POST /api/services/:service_id/cmcd/disable',
+
+  // RUM admin — SSE-streamed enable/disable + status. Admin-only provisioning
+  // flows covered by Playwright E2E; same pattern as scoring/cmcd endpoints.
+  // Health/vitals/errors are Phase 3 stubs; beacon-health validates setup
+  // (checks if beacons are arriving), exercised via admin tests.
+  'GET /api/services/:service_id/rum/status',
+  'POST /api/services/:service_id/rum/settings',
+  'POST /api/services/:service_id/rum/enable',
+  'POST /api/services/:service_id/rum/disable',
+  'GET /api/services/:service_id/rum/beacon-health',
+  'GET /api/services/:service_id/rum/health',
+  'GET /api/services/:service_id/rum/vitals',
+  'GET /api/services/:service_id/rum/errors',
+  // rum/versions has a real default handler (RumVersionPicker consumes it
+  // directly). rum/upgrade (RumFaroVersionCard's upgrade dialog) is
+  // SSE-streamed — same pattern as rum/enable / rum/disable above, tested
+  // via a mocked useSSE rather than a real MSW round-trip.
+  'POST /api/services/:service_id/rum/upgrade',
 
   // Control Room — Phase 0 stubs. Tab GET returns canned data, mutation
   // endpoints are 501 placeholders, SSE is a heartbeat. Covered by
@@ -162,6 +197,15 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/share/backup/import',
   'POST /api/admin/share/gdpr/erase',
   'PATCH /api/admin/share/settings',
+
+  // RUM scripts and beacons (served dynamically and parsed as non-rest assets)
+  'GET /js/rum.js',
+  'GET /js/faro-sdk.js',
+  'GET /rum-beacon',
+  'POST /rum-beacon',
+
+  // Debug-only page-level OTel telemetry
+  'GET /api/debug/page-telemetry',
 ])
 
 /** Normalise OpenAPI path templates (``{service_id}``) to MSW's ``:param`` shape. */
@@ -170,8 +214,8 @@ function openapiToMsw(p: string): string {
 }
 
 /** Pull the handler's METHOD and path out of an MSW RequestHandler. */
-function describeHandler(h: any): { method: string; pathname: string } | null {
-  const info = h?.info
+function describeHandler(h: unknown): { method: string; pathname: string } | null {
+  const info = (h as { info?: { method?: string; path?: string } })?.info
   if (!info) return null
   // RestHandler.info shape: { method: 'GET' | 'POST' | ..., path: string, ... }
   const method = String(info.method ?? '').toUpperCase()

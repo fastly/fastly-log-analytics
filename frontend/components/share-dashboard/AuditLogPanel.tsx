@@ -143,6 +143,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       timestamp: (r) => r.timestamp ?? null,
       event_type: (r) => r.event_type ?? '',
       email: (r) => (r.email ?? '').toLowerCase(),
+      ip_address: (r) => r.ip_address ?? '',
       details: (r) => r.details ?? '',
     }),
     [],
@@ -223,6 +224,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
               <SortableHead label="Time" sortKey="timestamp" activeKey={sortKey} dir={sortDir} onSort={toggle} className="w-[180px]" />
               <SortableHead label="Event" sortKey="event_type" activeKey={sortKey} dir={sortDir} onSort={toggle} />
               <SortableHead label="Email" sortKey="email" activeKey={sortKey} dir={sortDir} onSort={toggle} />
+              <SortableHead label="IP" sortKey="ip_address" activeKey={sortKey} dir={sortDir} onSort={toggle} />
               <SortableHead label="Details" sortKey="details" activeKey={sortKey} dir={sortDir} onSort={toggle} />
             </TableRow>
           </TableHeader>
@@ -238,6 +240,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
                   </Badge>
                 </TableCell>
                 <TableCell className="align-top">{row.email || '—'}</TableCell>
+                <TableCell className="align-top whitespace-nowrap">{row.ip_address || '—'}</TableCell>
                 <TableCell className="text-muted-foreground align-top whitespace-normal break-words max-w-[420px]">
                   {row.details}
                 </TableCell>
@@ -245,7 +248,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             ))}
             {!rows.length && (
               <TableRow>
-                <TableCell colSpan={4} className="text-center text-xs text-muted-foreground">
+                <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
                   No audit events yet.
                 </TableCell>
               </TableRow>

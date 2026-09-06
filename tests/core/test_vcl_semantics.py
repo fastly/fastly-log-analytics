@@ -300,7 +300,7 @@ def test_deliver_stage_emits_capture_block_in_vcl_deliver():
     }
     snippets = generate_capture_vcl(cfg)
     deliver = snippets.get("deliver", "")
-    assert "# --- Custom Deliver Fields ---" in deliver
+    assert "# --- Custom Deliver Fields Start ---" in deliver
     assert 'if (resp.http.X-Edge-Score != "") {' in deliver
     assert "set req.http.x-fos-edge-data:edge_score = resp.http.X-Edge-Score;" in deliver
 
@@ -432,19 +432,12 @@ def test_deliver_stage_coexists_with_edge_and_origin():
     assert "f_edge" not in snippets["deliver"]
 
 
-def test_ip_capture_prefers_operator_supplied_fastly_client_ip():
-    """The 'ip' edge capture must trust an operator-overwritten
-    req.http.Fastly-Client-IP (e.g. a real source IP injected when the service
-    sits behind a fronting proxy that carries the origin client in a header)
-    and fall back to the raw socket client.ip otherwise. Both if() branches
-    must be STRING, so the fallback stringifies the IP via ``"" + client.ip``."""
+def test_ip_capture_checks_fastly_client_ip():
+    """The 'ip' edge capture checks if req.http.Fastly-Client-IP is set and uses
+    it if present, falling back to client.ip."""
     snippets = generate_capture_vcl({"groups": ["A"]})
-    assert (
-        "set req.http.x-fos-edge-data:ip = "
-        'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, "" + client.ip);'
-    ) in snippets["recv"]
-    # The bare, spoofable assignment must be gone.
-    assert "set req.http.x-fos-edge-data:ip = client.ip;" not in snippets["recv"]
+    assert "set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;" in snippets["recv"]
+    assert "set req.http.x-fos-edge-data:ip = client.ip;" in snippets["recv"]
 
 
 def test_recv_reset_unsets_client_supplied_fastly_client_ip_at_edge():

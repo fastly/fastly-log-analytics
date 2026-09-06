@@ -10,6 +10,7 @@ export interface CalcState {
   sampleRate: number
   edgeOnly: boolean
   edgeReqDay: number
+  rumBeaconsDay: number
   // Config
   logPeriod: number
   commitMins: number
@@ -40,7 +41,7 @@ export type CalcAction =
   | { type: 'AUTO_NODES' }
 
 export const DEFAULTS: CalcState = {
-  reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000,
+  reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
   logPeriod: 60, commitMins: 5, bytesPerLine: 500, parquetMB: 20,
   logNodes: 1, userEditedNodes: false,
   cacheEnabled: true, queriesDay: 50, logsChecksPerDay: 2,
@@ -88,6 +89,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         edgeReqDay: edgeReq,
         logPeriod: lp,
         bytesPerLine: Math.max(10, Math.round(bpl)),
+        rumBeaconsDay: p.rum_beacons_per_day !== undefined && p.rum_beacons_per_day !== null ? p.rum_beacons_per_day : state.rumBeaconsDay,
         ...(p.commit_interval_mins !== undefined && p.commit_interval_mins !== null && { commitMins: p.commit_interval_mins }),
         ...(p.edge_only !== undefined && p.edge_only !== null && { edgeOnly: p.edge_only }),
         ...(p.delete_after !== undefined && p.delete_after !== null && { deleteLogs: p.delete_after }),
@@ -133,6 +135,9 @@ export interface CalcResults {
   storageTiers: { label: string; gbMonths: number; flagged: boolean }[]
   totalBytesPerMonth: number
   totalGzBytesPerMonth: number
+  rumBeaconsMonth: number
+  rumParquetGBMonths: number
+  costRum: number
 }
 
 export function calculate(s: CalcState): CalcResults {
@@ -198,12 +203,16 @@ export function calculate(s: CalcState): CalcResults {
   const classALogsPage = s.logsChecksPerDay * 30
   const stateSyncClassA = syncsPerDay * 30 // Admin writes state to FOS once per commit
 
+  // RUM Beacons generate Class A operations (1 per beacon write)
+  const rumBeaconsMonth = s.rumBeaconsDay * 30
+
   const classAPerMonth =
     logFilesPerMonth +
     parquetFilesPerMonth +
     listOpsClassA +
     classALogsPage +
     stateSyncClassA +
+    rumBeaconsMonth +
     (s.icebergOptimizeEnabled ? (30 + parquetFilesPerMonth) : 0) // monthly optimize + rewrites
 
   // Class B
@@ -233,11 +242,15 @@ export function calculate(s: CalcState): CalcResults {
 
   const metadataGBMonths = icebergMetadataFilesPerDay * 30 * (0.1 / 1024) * billedMetadataDays / 30 // Approx 100KB per metadata file
 
-  const totalGBStored = rawLogGBMonths + icebergDataGBMonths + metadataGBMonths
+  // RUM uncompressed line size is ~1 KB typical. Parquet compression is ~4:1.
+  const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
+
+  const totalGBStored = rawLogGBMonths + icebergDataGBMonths + metadataGBMonths + rumParquetGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
   if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
   if (icebergDataGBMonths > 0) storageTiers.push({ label: 'Iceberg data', gbMonths: icebergDataGBMonths, flagged: pqBilledH > pqActualH })
+  if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
   if (metadataGBMonths > 0) storageTiers.push({ label: 'Metadata', gbMonths: metadataGBMonths, flagged: false })
 
   // CDN egress
@@ -263,12 +276,14 @@ export function calculate(s: CalcState): CalcResults {
   const costEgress = cdnEgressGB * s.rateEgress
   const totalCost = costA + costB + costStorage + costEgress
 
+  const costRum = (rumBeaconsMonth / 1000) * s.rateA + (rumParquetGBMonths * s.rateStorage)
+
   return {
     classAPerMonth, classBPerMonth, totalGBStored, cdnEgressGB,
     costA, costB, costStorage, costEgress, totalCost,
     logFilesPerMonth, parquetFilesPerMonth, syncsPerMonth, logFilesPerSync,
     reqDayEffective, objectsPerDay, objectsBilled, classALogsPage, storageTiers,
-    totalBytesPerMonth, totalGzBytesPerMonth
+    totalBytesPerMonth, totalGzBytesPerMonth, rumBeaconsMonth, rumParquetGBMonths, costRum
   }
 }
 

@@ -39,14 +39,15 @@ export interface MockMapInstance {
   addLayer: (layer: any) => void
   removeLayer: () => void
   removeSource: () => void
-  getSource: () => any
-  getLayer: () => any
+  getSource: (id: string) => any
+  getLayer: (id: string) => any
   setFeatureState: () => void
   setPaintProperty: (...args: any[]) => void
   setLayoutProperty: () => void
   setFilter: () => void
   setStyle: () => void
   isStyleLoaded: () => boolean
+  getStyle: () => { layers: any[] }
   queryRenderedFeatures: () => any[]
   getCanvas: () => { style: Record<string, string> }
   remove: () => void
@@ -108,11 +109,20 @@ export function maplibreMockFactory() {
     }
     removeLayer() {}
     removeSource() {}
-    getSource() {
+    getSource(id: string) {
+      const src = this.sources[id]
+      if (src) {
+        return {
+          ...src,
+          setData: (data: any) => {
+            src.data = data
+          }
+        }
+      }
       return { setData: () => {} }
     }
-    getLayer() {
-      return undefined
+    getLayer(id: string) {
+      return this.layers.find((l) => l === id || l?.id === id)
     }
     setFeatureState() {}
     setPaintProperty() {}
@@ -121,6 +131,9 @@ export function maplibreMockFactory() {
     setStyle() {}
     isStyleLoaded() {
       return true
+    }
+    getStyle() {
+      return { layers: this.layers }
     }
     queryRenderedFeatures() {
       return []
@@ -149,10 +162,12 @@ export function maplibreMockFactory() {
       Map: MockMap,
       LngLatBounds: class {},
       NavigationControl: class {},
+      setWorkerUrl: () => {},
     },
     Map: MockMap,
     LngLatBounds: class {},
     NavigationControl: class {},
+    setWorkerUrl: () => {},
   }
 }
 

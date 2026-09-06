@@ -186,7 +186,7 @@ def handle_teardown(args):
                 "fos_access_key": svc_cfg.get("fos_access_key_id", ""),
                 "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
                 "fos_key_id": prov_cfg.get("fos_key_id", ""),
-                "endpoint_name": prov_cfg.get("endpoint_name", "Fastly Object Storage Logs"),
+                "endpoint_name": prov_cfg.get("endpoint_name", "Fastly Log Analytics"),
                 "cdn_service_id": prov_cfg.get("cdn_service_id", ""),
                 "cdn_service_name": svc_cfg.get("name", service_id),
                 "cdn_url": prov_cfg.get("cdn_url", ""),
@@ -205,7 +205,7 @@ def handle_teardown(args):
             "logging_service_id": getattr(args, "service_id", None),
             "fos_bucket_name": args.bucket,
             "fos_region": getattr(args, "region", None) or "us-east-1",
-            "endpoint_name": getattr(args, "endpoint_name", None) or "Fastly Object Storage Logs",
+            "endpoint_name": getattr(args, "endpoint_name", None) or "Fastly Log Analytics",
             "cdn_service_id": None,
             "fos_key_id": None,
         }
@@ -349,6 +349,10 @@ def handle_invite_analyst(args):
 def handle_update_logs(args):
     banner("Fastly Log Analysis — Update Logs")
     from backend import config as svcconfig
+    from backend.provision.system_fields import (
+        reconcile_system_custom_fields,
+        system_feature_flags,
+    )
 
     service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
     if not service_id:
@@ -371,18 +375,19 @@ def handle_update_logs(args):
     # 2026-06-02 incident): _build_log_fields_config(args) returns
     # {schema_version, preset, groups, field_overrides} — it has NO
     # custom_fields key. Assigning the result wholesale to
-    # cfg["log_fields"] would strip the 6 scoring custom_fields the
-    # orchestrator injected, the user's own custom_fields, and any
+    # cfg["log_fields"] would strip the scoring/CMCD custom_fields the
+    # orchestrators injected, the user's own custom_fields, and any
     # format_hash/updated_at metadata. Preserve custom_fields from the
-    # on-disk cfg, then if scoring is enabled re-inject the canonical
-    # _SCORING_CUSTOM_FIELDS from code as the source of truth.
+    # on-disk cfg, then re-inject the canonical system entries from code
+    # for whichever features are enabled — code is the source of truth.
     existing_lf = cfg.get("log_fields") or {}
     existing_custom = list(existing_lf.get("custom_fields") or [])
-    if cfg.get("scoring", {}).get("enabled"):
-        from backend.provision.session_scoring_orchestrator import merge_scoring_custom_fields
-
-        existing_custom = merge_scoring_custom_fields(existing_custom)
-    new_lf_config["custom_fields"] = existing_custom
+    scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+    new_lf_config["custom_fields"] = reconcile_system_custom_fields(
+        existing_custom,
+        scoring_enabled=scoring_enabled,
+        cmcd_enabled=cmcd_enabled,
+    )
 
     if getattr(args, "dry_run", False):
         print(lf.generate_log_format(new_lf_config))

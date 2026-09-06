@@ -112,8 +112,10 @@ concatenation in the repository — both consumers reference the
 
 SESSIONS_PAGE_SELECT = """
     {cte_prefix}
-    SELECT *, ({flag_expr}) AS flagged
-    FROM sessions_agg
+    SELECT * FROM (
+        SELECT *, ({flag_expr}) AS flagged
+        FROM sessions_agg
+    ) sub
     {flagged_filter}
     ORDER BY {sort_by} {sort_dir}
     LIMIT {limit} OFFSET {offset}

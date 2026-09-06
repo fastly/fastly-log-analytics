@@ -126,10 +126,12 @@ export function CronTab({
                     <SelectContent>
                       <SelectItem value="all">All tasks</SelectItem>
                       <SelectItem value={isAnalyst ? 'metadata_sync' : 'sync'}>Sync</SelectItem>
+                      {!isAnalyst && <SelectItem value="rum_sync">RUM Sync</SelectItem>}
                       {!isAnalyst && <SelectItem value="full_sync">Full Sync</SelectItem>}
                       {!isAnalyst && <SelectItem value="gap_heal">Gap Heal</SelectItem>}
                       <SelectItem value="alerts">Alerts</SelectItem>
                       {!isAnalyst && <SelectItem value="commit">Commit</SelectItem>}
+                      {!isAnalyst && <SelectItem value="rum_commit">RUM Commit</SelectItem>}
                       {!isAnalyst && <SelectItem value="optimize">Optimize</SelectItem>}
                       {!isAnalyst && <SelectItem value="local_compact">Local Compact</SelectItem>}
                       {!isAnalyst && <SelectItem value="expire">Expire</SelectItem>}

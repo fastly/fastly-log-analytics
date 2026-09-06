@@ -93,28 +93,74 @@ docker compose up -d --build
 ```
 
 The repeat-deploy flow is the existing `~/restart.sh` pattern (canonicalized
-here so it works on every platform):
+here so it works on every platform).
+
+**Do not use a bare `docker compose up -d --build` for a redeploy.** It takes
+the whole stack down, including Caddy — and Caddy is both the sole ingress and
+the thing that serves the styled auto-refreshing "updating" page (see
+`handle_errors` in the `Caddyfile`). With Caddy down, visitors get the
+browser's connection-refused error for the length of the deploy instead of
+that page. Three specifics make the difference between ~45 s of downtime and
+~1 s:
+
+- **Build before stopping anything.** The build is the slow part; the old
+  containers serve throughout it.
+- **`--no-deps`, and never rebuild Caddy.** Caddy carries
+  `depends_on: frontend`, so a plain `up -d` recreates it every deploy even
+  though its image is unchanged. Worse, `compose build` with no service list
+  rebuilds it too, and `caddy/Dockerfile` runs `xcaddy build`, which
+  recompiles and yields a **new image id every time** — so compose then
+  recreates it on principle. Build only `backend frontend`. A `Caddyfile`
+  edit only needs `caddy reload` (zero downtime); a `caddy/` edit is the one
+  case that justifies a rebuild.
+- **Recreate backend and frontend as two separate commands.** The base
+  compose has `frontend depends_on backend: condition: service_healthy`, so
+  naming both in one `up` makes compose hold the frontend until the backend
+  healthcheck passes — roughly 40 s of extra downtime on its own.
 
 ```sh
 #!/usr/bin/env bash
 # ~/restart.sh on the VM
-set -euo pipefail
+set -uo pipefail
 cd /mnt/app-data/fastly-log-analytics
-git pull
-docker compose up -d --build
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 
-# Poll the SAME readiness signal as the Docker healthcheck in
-# docker-compose.prod.yml — NOT the old `sleep 10; curl .../api/health`,
-# which reported "ready" within seconds because plain /api/health (and even
-# ?deep=1) return HTTP 200 unconditionally while the backend is still
-# `initializing`. The per-service warm-up loop
-# (backend/main.py:_background_startup) can take 15-20 min on this VM, so
-# check the response BODY for the top-level "status":"ok", not just the
-# HTTP status code, and budget the wait accordingly.
-echo "waiting for backend to report real readiness (can take 15-20 min)..."
+BEFORE="$(git rev-parse HEAD)"
+# Attempt pull, but if it fails (e.g. after a history squash/force-push),
+# fall back to git fetch + git reset --hard to match origin exactly.
+if ! git pull; then
+  echo "git pull failed (likely due to force-push/diverged history); resetting to origin..."
+  git fetch origin && git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD)" || exit 1
+fi
+CHANGED="$(git diff --name-only "$BEFORE" HEAD)"
+
+
+# 1. Build the app images while the current stack keeps serving.
+"${COMPOSE[@]}" build backend frontend || {
+  echo "build failed — nothing stopped, old stack still serving"; exit 1; }
+
+# 2. Swap the app containers. Separate commands so compose can't serialize
+#    the frontend behind the backend healthcheck.
+"${COMPOSE[@]}" up -d --no-deps backend
+"${COMPOSE[@]}" up -d --no-deps frontend
+
+# 3. Touch Caddy only if it actually changed.
+if echo "$CHANGED" | grep -q '^caddy/'; then
+  "${COMPOSE[@]}" build caddy && "${COMPOSE[@]}" up -d --no-deps caddy
+elif echo "$CHANGED" | grep -q '^Caddyfile$'; then
+  docker exec app-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || "${COMPOSE[@]}" up -d --no-deps caddy
+fi
+
+# 4. Poll the SAME readiness signal as the Docker healthcheck in
+# docker-compose.prod.yml — NOT `curl .../api/health`, which returns 200 the
+# moment the HTTP server binds and so reports "ready" within seconds while the
+# per-service warm-up loop (backend/main.py:_background_startup) still has
+# 15-20 min to run. Check the response BODY for the top-level "status":"ok".
+echo "site is serving; waiting for warm-up (can take 15-20 min, safe to Ctrl-C)..."
 for i in $(seq 1 100); do  # 100 * 15s = 25 min budget, matches compose start_period
   if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
-    echo "backend ready after $((i * 15))s"
+    echo "backend warm after $((i * 15))s"
     exit 0
   fi
   sleep 15
@@ -122,6 +168,11 @@ done
 echo "backend did not report ready within 25 min — check: curl -s 'http://localhost:8000/api/health?deep=1'" >&2
 exit 1
 ```
+
+An already-loaded browser tab doesn't do a full navigation, so it never sees
+Caddy's page — its in-flight XHR just fails. `useBootstrap` therefore polls
+while (and only while) the bootstrap query is errored, so an open tab
+reconnects on its own once the backend is back.
 
 **After a force-push** to the deploy branch:
 
@@ -211,3 +262,68 @@ ssh -L 8443:127.0.0.1:8443 <user>@<instance-external-ip>
 
 The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
 connection (which presents a loopback IP) and serves `/admin`.
+
+## 8. RUM: pin the self-hosted Faro Web SDK version
+
+Before self-hosting, the RUM tracker loaded the Faro Web SDK from jsDelivr
+with a floating `@^1` range — which resolved to `1.19.0` as of that writing.
+That CDN load no longer exists in any form: the generated tracker JS
+(`backend/provision/rum_assets.py::generate_rum_tracker_js`) unconditionally
+loads the Faro SDK from `/js/faro-sdk.js` — a relative, first-party path on
+the service's own domain, served from FOS via the RUM asset-fetch VCL. There
+is no CDN fallback and no code path that can produce one.
+
+Because of that, RUM can no longer be enabled without a self-hosted bundle
+behind `/js/faro-sdk.js`. `enable_rum()` pins an explicit version
+(`cfg["rum"]["faro_version"]`) when given one, and otherwise defaults to
+`backend.core.faro_versions.DEFAULT_FARO_VERSION` (currently `2.10.0`,
+npm's `dist-tags.latest` as of this task) — enabling RUM always downloads,
+integrity-verifies, and uploads a bundle to the service's FOS bucket.
+A service that was enabled *before* this default existed and still has no
+`faro_version` self-heals on its next RUM sync cron tick: the cron adopts
+`DEFAULT_FARO_VERSION`, uploads the bundle, persists the pin, AND
+reconciles the service's deployed VCL so the `/js/faro-sdk.js` route
+(previously absent — that service's VCL was generated with
+`faro_version=None`) actually goes live. All of that happens automatically;
+it never depends on this script being run manually.
+
+**What this script is for**: pin a service to a *specific* version instead
+of the default — a known-good version that won't move when the default
+changes, or rolling back to an older one.
+
+**When to run it**: any time you want to move a service to a specific
+version outside of the admin UI's upgrade flow. You do not need to run it
+just to "turn on" self-hosting — enabling RUM already does that
+automatically.
+
+```sh
+# Pins to 2.10.0 (current npm dist-tags.latest) by default:
+scripts/pin-rum-faro-version.sh <service_id>
+
+# Pin to an explicit version instead:
+scripts/pin-rum-faro-version.sh <service_id> 2.10.0
+scripts/pin-rum-faro-version.sh <service_id> 1.19.0
+```
+
+Replace `<service_id>` with the real Fastly logging service ID — never
+commit that ID into this repo (it's public). The script is idempotent (a
+repeat run against an already-correct pin is a no-op), writes atomically,
+refuses to run if the config is missing or not valid JSON, and never
+touches sibling keys under `cfg["rum"]` — `faro_content_hash` and
+`faro_fos_etag_md5` are owned by the reconcile cron, and clobbering them
+would make the cron think the bundle it already uploaded is stale and
+re-upload it on every tick.
+
+Pinning only updates the config value. To actually fetch and upload the
+bundle for the new version, either:
+
+- wait for the RUM reconcile cron's next tick, which detects the version
+  mismatch and uploads the pinned version automatically, or
+- use the admin RUM page's upgrade flow (`/admin/rum`) to trigger it
+  immediately and watch progress live via its SSE log stream.
+
+**Moving between versions later**: the admin RUM page is the normal path —
+it shows the currently deployed version, lets you pick a target from the
+available versions list, and streams upload/reconcile progress. Use this
+script only when you need to set the pin from outside that UI (e.g.
+scripting a fresh-VM bring-up, or recovering a config by hand).

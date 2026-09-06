@@ -546,3 +546,69 @@ def test_bundle_gather_uses_return_exceptions_true():
         "gather(return_exceptions=True) must be paired with explicit "
         "BaseException re-raises so failures still propagate to the caller."
     )
+
+
+# ── Parallel execution & Fallback scenarios ─────────────────────────────
+
+
+def test_bundle_parallel_success(client, stub_aggregates, stub_top_bots):
+    from unittest.mock import MagicMock, patch
+
+    mock_con = MagicMock()
+    mock_cm = MagicMock()
+    mock_cm.__enter__.return_value = mock_con
+
+    # We patch checkout_connection to return our mock context manager
+    with patch("backend.core.duckdb_pool.checkout_connection", return_value=mock_cm) as mock_checkout:
+        resp = client.post(
+            "/api/dashboard/bundle",
+            json={
+                "start_time": "2026-06-12T00:00:00Z",
+                "end_time": "2026-06-12T01:00:00Z",
+                "filters": {},
+                "chart_metric": "requests",
+                "chart_interval": "minute",
+            },
+        )
+        assert resp.status_code == 200
+        mock_checkout.assert_called_once()
+        mock_cm.__enter__.assert_called_once()
+        mock_cm.__exit__.assert_called_once()
+
+
+def test_bundle_parallel_pool_busy_fallback(client, stub_aggregates, stub_top_bots):
+    from unittest.mock import patch
+
+    from backend.core.duckdb_pool import _PoolBusy
+
+    with patch("backend.core.duckdb_pool.checkout_connection", side_effect=_PoolBusy("busy")) as mock_checkout:
+        resp = client.post(
+            "/api/dashboard/bundle",
+            json={
+                "start_time": "2026-06-12T00:00:00Z",
+                "end_time": "2026-06-12T01:00:00Z",
+                "filters": {},
+                "chart_metric": "requests",
+                "chart_interval": "minute",
+            },
+        )
+        assert resp.status_code == 200
+        mock_checkout.assert_called_once()
+
+
+def test_bundle_parallel_generic_exception_fallback(client, stub_aggregates, stub_top_bots):
+    from unittest.mock import patch
+
+    with patch("backend.core.duckdb_pool.checkout_connection", side_effect=RuntimeError("err")) as mock_checkout:
+        resp = client.post(
+            "/api/dashboard/bundle",
+            json={
+                "start_time": "2026-06-12T00:00:00Z",
+                "end_time": "2026-06-12T01:00:00Z",
+                "filters": {},
+                "chart_metric": "requests",
+                "chart_interval": "minute",
+            },
+        )
+        assert resp.status_code == 200
+        mock_checkout.assert_called_once()

@@ -20,17 +20,17 @@ def _placeholders(template: str) -> list[str]:
 
 
 def test_top_uas_by_count_renders_with_temp_table():
-    rendered = SQL.TOP_UAS_BY_COUNT.format(temp_table="t_filtered_xyz")
+    rendered = SQL.TOP_UAS_BY_COUNT.format(temp_table="t_filtered_xyz", limit=2000)
     assert "SELECT ua, count(*) AS cnt" in rendered
     assert "FROM t_filtered_xyz" in rendered
     assert "WHERE ua IS NOT NULL" in rendered
     assert "GROUP BY ua" in rendered
     assert "ORDER BY cnt DESC" in rendered
-    assert "LIMIT 50000" in rendered
+    assert "LIMIT 2000" in rendered
 
 
 def test_top_uas_by_count_pins_placeholders():
-    assert _placeholders(SQL.TOP_UAS_BY_COUNT) == ["temp_table"]
+    assert _placeholders(SQL.TOP_UAS_BY_COUNT) == ["limit", "temp_table"]
 
 
 # ── NGWAF_TOP_BOTS_JOIN ───────────────────────────────────────────────────────

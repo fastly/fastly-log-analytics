@@ -35,6 +35,9 @@ import PerformanceClient from './_sections/PerformanceClient'
 // next/headers. Failure path: fetchPerformanceServerSide returns null (any
 // sub-fetch fails / fail-closed transport gate) → key unseeded → clean
 // client fetch for both cards.
+import { Suspense } from 'react'
+import PerformanceLoading from './loading'
+
 export const dynamic = 'force-dynamic'
 
 export default async function PerformancePage({
@@ -50,6 +53,20 @@ export default async function PerformancePage({
     undefined
   const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
 
+  return (
+    <Suspense fallback={<PerformanceLoading />}>
+      <PerformancePageContent serviceId={serviceId} logExtents={logExtents} />
+    </Suspense>
+  )
+}
+
+async function PerformancePageContent({
+  serviceId,
+  logExtents,
+}: {
+  serviceId: string | undefined
+  logExtents: unknown
+}) {
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolvePerformanceDefaultKey + fetchPerformanceServerSide floor it).
   const now = new Date()
@@ -72,7 +89,7 @@ export default async function PerformancePage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <PerformanceClient />
+      <PerformanceClient nowServerStr={now.toISOString()} />
     </HydrationBoundary>
   )
 }

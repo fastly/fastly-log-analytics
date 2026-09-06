@@ -118,6 +118,21 @@ def configure_structlog() -> None:
         else structlog.dev.ConsoleRenderer(
             colors=sys.stderr.isatty(),
             sort_keys=True,
+            # structlog's default exception_formatter renders via
+            # rich.traceback with show_locals=True. Every `logger.warning(...,
+            # exc_info=True)` call in this codebase (there are many, e.g. the
+            # RUM Faro-sync cron) runs through this renderer, and several of
+            # those call sites hold live secrets in scope when they raise
+            # (FOS access key/secret, Fastly API tokens) — show_locals=True
+            # dumps the full contents of every frame's local variables,
+            # including those secrets, straight into container logs on any
+            # exception. Disabling it here is a single global choke point
+            # rather than auditing/redacting every current and future
+            # exc_info=True call site individually.
+            exception_formatter=structlog.dev.RichTracebackFormatter(
+                color_system="truecolor" if sys.stderr.isatty() else None,
+                show_locals=False,
+            ),
         )
     )
 

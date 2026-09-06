@@ -15,7 +15,8 @@ import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Play, Search, AlertCircle, Database } from 'lucide-react'
+import { Play, Search, AlertCircle, Database, Terminal, Activity, Bug } from 'lucide-react'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { NoServiceSelected } from '@/components/NoServiceSelected'
 import { PageHeader } from '@/components/ui/page-header'
 import { downloadAsCsv } from '@/lib/utils'
@@ -30,6 +31,7 @@ import { ResultsTable } from './_sections/ResultsTable'
 import { QueryToolbar } from './_sections/QueryToolbar'
 
 const HISTORY_KEY = 'fastly_qe_history'
+const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
   const router = useRouter()
@@ -133,7 +135,44 @@ function QueryPageInner() {
   }, [hasHydratedFromUrl, addFilter, clearFilters, setRange])
 
   // ── SQL editor + run controls ─────────────────────────────────────────────
+  type Dataset = 'logs' | 'client_vitals' | 'client_errors'
+  const [dataset, setDataset] = useState<Dataset>('logs')
+
+  const RUM_SCHEMAS = useMemo<Record<string, { name: string; type: string }[]>>(() => ({
+    client_vitals: [
+      { name: 'timestamp', type: 'timestamp' },
+      { name: 'metric_name', type: 'string' },
+      { name: 'metric_value', type: 'double' },
+      { name: 'metric_rating', type: 'string' },
+      { name: 'pathname', type: 'string' },
+      { name: 'browser', type: 'string' },
+      { name: 'os', type: 'string' },
+      { name: 'device', type: 'string' },
+      { name: 'cid', type: 'string' },
+      { name: 'req_id', type: 'string' },
+    ],
+    client_errors: [
+      { name: 'timestamp', type: 'timestamp' },
+      { name: 'error_message', type: 'string' },
+      { name: 'error_file', type: 'string' },
+      { name: 'error_line', type: 'integer' },
+      { name: 'error_col', type: 'integer' },
+      { name: 'pathname', type: 'string' },
+      { name: 'browser', type: 'string' },
+      { name: 'os', type: 'string' },
+      { name: 'device', type: 'string' },
+      { name: 'cid', type: 'string' },
+      { name: 'req_id', type: 'string' },
+    ],
+  }), [])
+
   const [rawSql, setRawSql] = useState('SELECT * FROM logs LIMIT 100')
+
+  const handleDatasetChange = useCallback((nextDataset: Dataset) => {
+    setDataset(nextDataset)
+    setRawSql(`SELECT * FROM ${nextDataset} LIMIT 100`)
+  }, [])
+
   // Default maxRows 100, not 10000. The previous default forced the page
   // to fetch up to 19 MB of JSON on cold load (analyst-30d clocked 17.9 s
   // p50 + occasional Fastly 503 on the synthesized timeout), and the
@@ -161,28 +200,6 @@ function QueryPageInner() {
     } catch { /* ignore */ }
   }, [])
 
-  // fieldTypes drives unquoted IN-list literals for numeric columns
-  // (so `edge_score IN (50)` instead of `IN ('50')`). Sourced from the
-  // catalog's per-field duckdb_type. Missing catalog → falls back to
-  // all-quoted, which still works via DuckDB's implicit cast.
-  const { data: catalog } = useLogFieldsCatalog()
-  const fieldTypes = useMemo<Record<string, string>>(() => {
-    const out: Record<string, string> = {}
-    for (const f of catalog?.fields ?? []) {
-      if (f.id && f.duckdb_type) out[f.id] = f.duckdb_type
-    }
-    return out
-  }, [catalog])
-
-  // The Structured-mode SQL preview/payload — recomputed whenever filter state
-  // or sort changes. Raw mode ignores this entirely.
-  const structuredSql = useMemo(
-    () => buildStructuredSql(filterPayload, startTime, endTime, structuredSorting, maxRows, fieldTypes),
-    [filterPayload, startTime, endTime, structuredSorting, maxRows, fieldTypes],
-  )
-
-  const effectiveSql = mode === 'structured' ? structuredSql : rawSql
-
   const { data: schemaData } = useQuery({
     queryKey: ['admin', 'schema', activeServiceId],
     queryFn: async ({ signal }) => {
@@ -195,6 +212,47 @@ function QueryPageInner() {
     // 10-s cold-cache tail variance) from every cross-page navigation.
     staleTime: 5 * 60_000,
   })
+
+  // fieldTypes drives unquoted IN-list literals for numeric columns
+  // (so `edge_score IN (50)` instead of `IN ('50')`). Sourced from the
+  // catalog's per-field duckdb_type. Missing catalog → falls back to
+  // all-quoted, which still works via DuckDB's implicit cast.
+  const { data: catalog } = useLogFieldsCatalog()
+  const activeFieldTypes = useMemo<Record<string, string>>(() => {
+    const out: Record<string, string> = {}
+    if (dataset === 'logs') {
+      for (const f of catalog?.fields ?? []) {
+        if (f.id && f.duckdb_type) out[f.id] = f.duckdb_type
+      }
+    } else {
+      const fields = RUM_SCHEMAS[dataset] || []
+      for (const f of fields) {
+        out[f.name] = f.type
+      }
+    }
+    return out
+  }, [dataset, catalog, RUM_SCHEMAS])
+
+  const activeSchema = useMemo(() => {
+    if (dataset === 'client_vitals') return RUM_SCHEMAS.client_vitals
+    if (dataset === 'client_errors') return RUM_SCHEMAS.client_errors
+    return schemaData?.schema
+  }, [dataset, schemaData, RUM_SCHEMAS])
+
+  const activeTableName = useMemo(() => {
+    if (dataset === 'client_vitals') return 'client_vitals'
+    if (dataset === 'client_errors') return 'client_errors'
+    return schemaData?.table_name || 'logs'
+  }, [dataset, schemaData])
+
+  // The Structured-mode SQL preview/payload — recomputed whenever filter state
+  // or sort changes. Raw mode ignores this entirely.
+  const structuredSql = useMemo(
+    () => buildStructuredSql(filterPayload, startTime, endTime, structuredSorting, maxRows, activeFieldTypes, activeTableName),
+    [filterPayload, startTime, endTime, structuredSorting, maxRows, activeFieldTypes, activeTableName],
+  )
+
+  const effectiveSql = mode === 'structured' ? structuredSql : rawSql
 
   const { data: presets } = useQuery({
     queryKey: ['query', 'presets', activeServiceId],
@@ -210,8 +268,8 @@ function QueryPageInner() {
   })
 
   const queryMutation = useMutation({
-    mutationFn: async (params: { sql: string; max_rows: number; explain: boolean }) => {
-      const { data, error } = await client.POST('/api/query', { body: params, parseAs: 'text' })
+    mutationFn: async (params: { sql: string; max_rows: number; explain: boolean; dataset?: Dataset }) => {
+      const { data, error } = await client.POST('/api/query', { body: params as any, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
           try {
@@ -249,8 +307,8 @@ function QueryPageInner() {
     // once.
     setHasUserRun(true)
     pushHistory(sqlToRun)
-    queryMutation.mutate({ sql: sqlToRun, max_rows: maxRows, explain })
-  }, [effectiveSql, maxRows, explain, pushHistory, queryMutation])
+    queryMutation.mutate({ sql: sqlToRun, max_rows: maxRows, explain, dataset })
+  }, [effectiveSql, maxRows, explain, dataset, pushHistory, queryMutation])
 
   // In Structured Mode, re-run whenever the generated SQL changes (filter,
   // sort, range, row-cap edits) so the result table tracks the FilterBar
@@ -264,11 +322,11 @@ function QueryPageInner() {
     if (!hasHydratedFromUrl) return
     if (!hasUserRun) return
     pushHistory(structuredSql)
-    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain })
+    queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
     // queryMutation/pushHistory are stable from useMutation/useCallback; we
     // only want to re-fire when the generated SQL or run-time inputs change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, hasUserRun, maxRows, explain])
+  }, [structuredSql, mode, activeServiceId, hasHydratedFromUrl, hasUserRun, maxRows, explain, dataset])
 
   const handleExportCSV = useCallback(() => {
     if (!queryMutation.data?.data?.length) return
@@ -369,7 +427,10 @@ function QueryPageInner() {
         </Button>
       </PageHeader>
 
-      <ModeToggle mode={mode} onModeChange={handleModeChange} />
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <ModeToggle mode={mode} onModeChange={handleModeChange} />
+        <DatasetToggle dataset={dataset} onDatasetChange={handleDatasetChange} />
+      </div>
 
       <div className="border rounded-lg bg-card shadow-sm">
         <QueryToolbar
@@ -393,8 +454,8 @@ function QueryPageInner() {
           <RawSqlMode
             rawSql={rawSql}
             onRawSqlChange={setRawSql}
-            schema={schemaData?.schema}
-            tableName={schemaData?.table_name}
+            schema={activeSchema}
+            tableName={activeTableName}
           />
         )}
       </div>
@@ -420,26 +481,39 @@ function QueryPageInner() {
         </Alert>
       )}
 
+      {/* Empty results initial placeholder */}
+      {!queryMutation.data && !queryMutation.isPending && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10">
+          <div className="mx-auto flex max-w-[420px] flex-col items-center justify-center text-center">
+            <Terminal className="h-10 w-10 text-muted-foreground/60 mb-4" />
+            <h3 className="text-lg font-semibold">No query results yet</h3>
+            <p className="mb-4 mt-2 text-sm text-muted-foreground">
+              Configure filters or write custom SQL above and click &quot;Run Query&quot; to fetch logs.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* First-run loading state: backend returns ``elapsed_ms`` BUT the
           browser still pays JSON parse + ColumnDef rebuild + first render
           (perceptible on 10k-row responses). Without this skeleton the
           results region is empty between the click and the table paint,
           and the only loading hint is the button's spinner. */}
       {queryMutation.isPending && !queryMutation.data && (
-        <div className="space-y-3">
+        <div className="space-y-3 min-h-[380px]">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Database className="h-3 w-3 animate-spin" />
             <span>Running query…</span>
           </div>
           <Skeleton className="h-9 w-full rounded-md" />
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={`skeleton-row-${i}`} className="h-8 w-full rounded-md opacity-60" />
+          {SKELETON_ROWS.map((k) => (
+            <Skeleton key={k} className="h-8 w-full rounded-md opacity-60" />
           ))}
         </div>
       )}
 
       {queryMutation.data && (
-        <div className="relative">
+        <div className="relative min-h-[380px]">
           {/* Re-run overlay: keeps the prior data visible (preserves scroll
               + sort context) while indicating that fresh results are on
               the way. Pointer-events-none so the user can still scroll. */}
@@ -462,6 +536,32 @@ function QueryPageInner() {
         </div>
       )}
     </div>
+  )
+}
+
+interface DatasetToggleProps {
+  dataset: 'logs' | 'client_vitals' | 'client_errors'
+  onDatasetChange: (next: 'logs' | 'client_vitals' | 'client_errors') => void
+}
+
+export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
+  return (
+    <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as any)}>
+      <TabsList className="grid w-full grid-cols-3 max-w-[480px]">
+        <TabsTrigger value="logs" className="flex items-center gap-1.5">
+          <Terminal className="h-3.5 w-3.5" />
+          <span className="truncate">CDN Request Logs</span>
+        </TabsTrigger>
+        <TabsTrigger value="client_vitals" className="flex items-center gap-1.5">
+          <Activity className="h-3.5 w-3.5" />
+          <span className="truncate">RUM Web Vitals</span>
+        </TabsTrigger>
+        <TabsTrigger value="client_errors" className="flex items-center gap-1.5">
+          <Bug className="h-3.5 w-3.5" />
+          <span className="truncate">RUM JS Errors</span>
+        </TabsTrigger>
+      </TabsList>
+    </Tabs>
   )
 }
 

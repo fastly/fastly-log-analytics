@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, MutableRefObject } from 'react'
-import maplibregl from 'maplibre-gl'
+import * as maplibregl from 'maplibre-gl'
 import countryMapData from '@/lib/country-codes.json'
 import type { TooltipInfo } from './OverlayLayer'
 
@@ -103,11 +103,15 @@ export function useMapInit({
 }: UseMapInitArgs) {
   useEffect(() => {
     if (!mapContainer.current) return
+    let resizeObserver: ResizeObserver | null = null
+
     if (!map.current) {
       try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       map.current = new maplibregl.Map({
         container: mapContainer.current,
         renderWorldCopies: false,
+        preserveDrawingBuffer: true,
         style: {
           version: 8,
           sources: {},
@@ -126,8 +130,22 @@ export function useMapInit({
         // ⌘/Ctrl + wheel (or pinch / the +/- buttons) zooms the map. The map
         // sits mid-page, so bare-wheel zoom traps the scroll. (cooperative gestures)
         cooperativeGestures: true,
-      })
+      } as any)
       map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
+
+      map.current.on('error', (e) => {
+        console.error("[NetworkMap:map] MapLibre error event:", e)
+      })
+
+      resizeObserver = new ResizeObserver(() => {
+        map.current?.resize()
+      })
+      resizeObserver.observe(mapContainer.current)
+
+      if (typeof window !== 'undefined') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).map = map.current
+      }
 
       map.current.on('load', () => {
         if (!map.current) return
@@ -238,6 +256,7 @@ export function useMapInit({
     }
     return () => {
       setTooltip(null)
+      resizeObserver?.disconnect()
       map.current?.remove()
       map.current = null
     }
@@ -269,46 +288,52 @@ export function useMapData({
   setTooltip,
 }: UseMapDataArgs) {
   useEffect(() => {
-    if (!map.current || !map.current.isStyleLoaded() || !data?.map_buckets) return
+    if (!map.current || !data?.map_buckets) return
 
-    setTooltip(null)
+    const updateMap = () => {
+      if (!map.current) return
 
-    const bucketData = data.map_buckets[bucketIdx]
-    if (!bucketData || !bucketData.cities) return
-
-    // City lookup lives in the top-level data.cities array; each cell
-    // references its city by integer city_idx. Interning the names cut the
-    // wire payload ~90%; hoisting lat/lon into the same record cuts another
-    // ~40-60% off the remainder (each non-DMA cell no longer repeats
-    // coordinates that depend only on the city). Tolerate three shapes
-    // during deploy rollover: legacy per-cell ``c.city`` string, name-only
-    // intern (``cities[idx]`` is a string), and the current ``{name, lat,
-    // lon}`` record.
-    type CityRec = { name: string; lat: number | null; lon: number | null }
-    const cityEntries: any[] = (data as any).cities ?? []
-    const resolveCity = (c: any): CityRec => {
-      if (typeof c?.city === 'string') {
-        return { name: c.city, lat: c?.lat ?? null, lon: c?.lon ?? null }
-      }
-      const idx = c?.city_idx
-      if (typeof idx === 'number' && idx >= 0 && idx < cityEntries.length) {
-        const entry = cityEntries[idx]
-        if (typeof entry === 'string') {
-          return { name: entry, lat: c?.lat ?? null, lon: c?.lon ?? null }
+      if (!map.current.getLayer('countries') || !map.current.getSource('heatmap')) {
+        const onStyleData = () => {
+          if (map.current?.getLayer('countries') && map.current?.getSource('heatmap')) {
+            map.current.off('styledata', onStyleData)
+            updateMap()
+          }
         }
-        return {
-          name: entry?.name ?? '',
-          lat: entry?.lat ?? c?.lat ?? null,
-          lon: entry?.lon ?? c?.lon ?? null,
-        }
+        map.current.on('styledata', onStyleData)
+        return
       }
-      return { name: '', lat: c?.lat ?? null, lon: c?.lon ?? null }
-    }
 
-    const features: any[] = []
-    const dmaColors: Record<number, string> = {}
-    const countryScores: Record<string, { sum: number, count: number }> = {}
-    const nextDmaData: Record<number, any> = {}
+      setTooltip(null)
+
+      const bucketData = data.map_buckets[bucketIdx]
+      if (!bucketData || !bucketData.cities) return
+
+      type CityRec = { name: string; lat: number | null; lon: number | null }
+      const cityEntries: any[] = (data as any).cities ?? []
+      const resolveCity = (c: any): CityRec => {
+        if (typeof c?.city === 'string') {
+          return { name: c.city, lat: c?.lat ?? null, lon: c?.lon ?? null }
+        }
+        const idx = c?.city_idx
+        if (typeof idx === 'number' && idx >= 0 && idx < cityEntries.length) {
+          const entry = cityEntries[idx]
+          if (typeof entry === 'string') {
+            return { name: entry, lat: c?.lat ?? null, lon: c?.lon ?? null }
+          }
+          return {
+            name: entry?.name ?? '',
+            lat: entry?.lat ?? c?.lat ?? null,
+            lon: entry?.lon ?? c?.lon ?? null,
+          }
+        }
+        return { name: '', lat: c?.lat ?? null, lon: c?.lon ?? null }
+      }
+
+      const features: any[] = []
+      const dmaColors: Record<number, string> = {}
+      const countryScores: Record<string, { sum: number, count: number }> = {}
+      const nextDmaData: Record<number, any> = {}
 
     bucketData.cities.forEach((c: any) => {
       const val = metric === 'health_score' ? c.health_score : c[metric]
@@ -354,33 +379,41 @@ export function useMapData({
 
     dmaDataRef.current = nextDmaData
 
-    const matchCountry: any[] = ['match', ['id']]
+    const matchCountry: any[] = ['match', ['to-string', ['id']]]
     Object.entries(countryScores).forEach(([a3, stats]) => {
       matchCountry.push(a3)
       matchCountry.push(getScoreColor(stats.sum / stats.count, metric))
     })
     matchCountry.push(countryFill(isDark))
 
+    /* eslint-disable @typescript-eslint/no-explicit-any */
     map.current.setPaintProperty(
       'countries',
       'fill-color',
-      Object.keys(countryScores).length > 0 ? matchCountry : (countryFill(isDark))
+      (Object.keys(countryScores).length > 0 ? matchCountry : countryFill(isDark)) as any
     )
+    /* eslint-enable @typescript-eslint/no-explicit-any */
 
     const source = map.current.getSource('heatmap') as maplibregl.GeoJSONSource
     source?.setData({ type: 'FeatureCollection', features })
 
-    if (map.current.getLayer('dma-fill')) {
-      const dmaEntries = Object.entries(dmaColors)
-      if (dmaEntries.length > 0) {
-        const matchDma: any[] = ['match', ['get', 'dma_code']]
-        dmaEntries.forEach(([code, color]) => { matchDma.push(Number(code)); matchDma.push(color) })
-        matchDma.push('transparent')
-        map.current.setPaintProperty('dma-fill', 'fill-color', matchDma)
-      } else {
-        map.current.setPaintProperty('dma-fill', 'fill-color', 'transparent')
+      if (map.current.getLayer('dma-fill')) {
+        const dmaEntries = Object.entries(dmaColors)
+        if (dmaEntries.length > 0) {
+          const matchDma: any[] = ['match', ['get', 'dma_code']]
+          dmaEntries.forEach(([code, color]) => { matchDma.push(Number(code)); matchDma.push(color) })
+          matchDma.push('transparent')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          map.current.setPaintProperty('dma-fill', 'fill-color', matchDma as any)
+        } else {
+          map.current.setPaintProperty('dma-fill', 'fill-color', 'transparent')
+        }
+      }
+      if (typeof map.current.resize === 'function') {
+        map.current.resize()
       }
     }
 
-  }, [bucketIdx, data, metric, isDark])
+    updateMap()
+  }, [bucketIdx, data, metric, isDark, dmaDataRef, map, setTooltip])
 }

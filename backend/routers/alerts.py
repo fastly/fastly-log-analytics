@@ -185,9 +185,83 @@ def preview_alert(
         times = [safe_iso(r[0]) for r in rows]
         values = [float(r[1] or 0) for r in rows]
 
-        res = {"times": times, "values": values, "type": "absolute"}
+        res = {
+            "times": times,
+            "values": values,
+            "type": "anomaly_zscore" if eval_type == "anomaly_zscore" else "absolute",
+        }
+
+        if eval_type == "anomaly_zscore":
+            days = getattr(alert, "baseline_period_days", 7) or 7
+            zscore_thresh = getattr(alert, "zscore_threshold", 3.0) or 3.0
+
+            try:
+                probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
+                existing_cols = {d[0] for d in probe}
+            except Exception:
+                existing_cols = set()
+
+            baseline_start_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '{days} days'"
+            baseline_end_expr = f"(SELECT max(timestamp) FROM {table_name}) - INTERVAL '1 hours'"
+
+            baseline_where = f"timestamp >= {baseline_start_expr} AND timestamp <= {baseline_end_expr} {scope_filter}"
+
+            try:
+                with track_query(
+                    con, f"SELECT max(timestamp) FROM {table_name}", [], "alerts_preview_max_ts"
+                ) as cursor:
+                    max_ts_row = cursor.fetchone()
+                    max_ts_dt = max_ts_row[0] if max_ts_row else None
+            except Exception:
+                max_ts_dt = None
+
+            if max_ts_dt:
+                st_dt = max_ts_dt - datetime.timedelta(days=days)
+                st_utc = st_dt.astimezone(datetime.UTC)
+                if "dt" in existing_cols:
+                    baseline_where += f" AND dt >= '{st_utc.strftime('%Y-%m-%d')}'"
+
+            q_baseline = f"""
+                SELECT
+                    EXTRACT(hour FROM ts) AS hr,
+                    avg(val) AS mean_val,
+                    stddev(val) AS stddev_val
+                FROM (
+                    SELECT date_trunc('hour', timestamp) AS ts, {agg_sql} AS val
+                    FROM {table_name}
+                    WHERE {baseline_where}
+                    GROUP BY 1
+                )
+                GROUP BY 1
+            """
+
+            try:
+                with track_query(con, q_baseline, [], "alerts_preview_baseline") as cursor:
+                    baseline_rows = cursor.fetchall()
+                baseline_map = {int(r[0]): (float(r[1] or 0), float(r[2] or 0)) for r in baseline_rows}
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).error(f"Baseline fetch failed: {e}")
+                baseline_map = {}
+
+            baseline_means = []
+            baseline_thresholds = []
+
+            for r in rows:
+                dt = r[0]
+                hr = dt.hour if (dt and hasattr(dt, "hour")) else 0
+                mean_val, stddev_val = baseline_map.get(hr, (0.0, 0.0))
+                stddev_val = stddev_val or 0.0001
+
+                baseline_means.append(mean_val)
+                baseline_thresholds.append(mean_val + zscore_thresh * stddev_val)
+
+            res["hist_values"] = baseline_means
+            res["threshold_values"] = baseline_thresholds
 
         if eval_type in ("relative_increase", "relative_decrease") and comp_period:
+            res["type"] = "relative"
             q_hist = f"""
                  SELECT {group_sql} as ts, {agg_sql} as val
                  FROM {table_name}
@@ -207,9 +281,7 @@ def preview_alert(
                     hist_map[shifted.isoformat()] = float(r[1] or 0)
 
             hist_values = [hist_map.get(t, 0) for t in times]
-
             res["hist_values"] = hist_values
-            res["type"] = "relative"
 
         return AlertPreviewResponse.with_telemetry(data=res)
     except Exception as e:

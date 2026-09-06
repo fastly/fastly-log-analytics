@@ -45,7 +45,7 @@ export function useCardVisibility(
       const stored = localStorage.getItem(storageKey)
       if (!stored) return defaultVisible
 
-      let set = new Set<string>(JSON.parse(stored))
+      const set = new Set<string>(JSON.parse(stored))
 
       if (migrationVersion !== undefined) {
         const storedVersion = Number(localStorage.getItem(migrationKey) ?? 0)
@@ -83,6 +83,7 @@ export function useCardVisibility(
   // The first render's initializer above handles the cold-mount case
   // synchronously; this useEffect handles subsequent changes.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setVisibleCards(load())
   }, [load])
 

@@ -155,3 +155,41 @@ class TestExecuteWithStaleViewRetry:
 
         assert result == "ok"
         mock_clear.assert_called_once_with("default", keep_snapshot_cache=True)
+
+    def test_load_table_cached_heals_missing_metadata_file(self, tmp_path) -> None:
+        """When _load_table_cached receives a FileNotFoundError, it removes the table from the local SQL catalog."""
+        import sqlite3
+
+        from pyiceberg.exceptions import NoSuchTableError
+
+        from backend.core.iceberg._core import _load_table_cached
+
+        src = {"name": "svc-heal"}
+        identifier = ("default", "logs")
+
+        # Set up a mock sqlite database simulating the catalog db path
+        cat_db = tmp_path / "iceberg_catalog.db"
+        with sqlite3.connect(cat_db) as conn:
+            conn.execute("CREATE TABLE iceberg_tables (table_namespace TEXT, table_name TEXT, metadata_location TEXT)")
+            conn.execute("INSERT INTO iceberg_tables VALUES ('default', 'logs', 's3://some/stale.json')")
+            conn.commit()
+
+        # Mock load_table to raise FileNotFoundError
+        mock_catalog = MagicMock()
+        mock_catalog.load_table.side_effect = FileNotFoundError("[Errno 2] No such file or directory")
+
+        with (
+            patch("backend.core.iceberg._core._catalog_db_path", return_value=str(cat_db)),
+            patch("backend.core.iceberg._core._read_metadata_pointer", return_value=None),
+            patch("backend.core.iceberg._core._get_cached_table", return_value=None),
+            patch("backend.core.iceberg._core._invalidate_cached_table") as mock_invalidate,
+        ):
+            with pytest.raises(NoSuchTableError, match="metadata is missing from S3"):
+                _load_table_cached(src, identifier, mock_catalog)
+
+        # Verify entry was deleted from local SQLite catalog
+        with sqlite3.connect(cat_db) as conn:
+            rows = conn.execute("SELECT * FROM iceberg_tables").fetchall()
+            assert len(rows) == 0
+
+        mock_invalidate.assert_called_once_with(src, identifier)

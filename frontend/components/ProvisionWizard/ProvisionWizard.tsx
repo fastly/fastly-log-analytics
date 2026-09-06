@@ -15,6 +15,7 @@ import { ModeStep } from "./steps/ModeStep";
 import { TokenStep } from "./steps/TokenStep";
 import { ServiceStep } from "./steps/ServiceStep";
 import { StorageStep } from "./steps/StorageStep";
+import { FeaturesStep } from "./steps/FeaturesStep";
 import { JoinStep } from "./steps/JoinStep";
 import { AnalyzeStep } from "./steps/AnalyzeStep";
 import { SettingsStep } from "./steps/SettingsStep";
@@ -53,6 +54,7 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
           {s.step === "token" && <TokenStep s={s} />}
           {s.step === "service" && <ServiceStep s={s} />}
           {s.step === "storage" && <StorageStep s={s} />}
+          {s.step === "features" && <FeaturesStep s={s} />}
           {s.step === "join" && <JoinStep s={s} />}
           {s.step === "analyze" && <AnalyzeStep s={s} />}
           {s.step === "settings" && <SettingsStep s={s} />}

@@ -1,8 +1,9 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
-import maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import * as maplibregl from 'maplibre-gl'
+
+maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
@@ -23,13 +24,13 @@ interface ChoroplethMapProps {
 
 const NORMALIZE_COUNTRY: Record<string, string> = {
   'United States': 'United States of America',
-  'United Kingdom': 'United Kingdom of Great Britain and Northern Ireland',
   'Russia': 'Russia',
   'South Korea': 'South Korea',
   'Vietnam': 'Vietnam',
   'Taiwan': 'Taiwan',
   // Fastly usually returns plain names like 'United States',
-  // GeoJSON from johan/world.geo.json uses full names for some.
+  // GeoJSON uses full names for some (e.g. 'United States of America').
+  // Note: 'United Kingdom' is already 'United Kingdom' in the topojson.
 }
 
 interface TooltipState {
@@ -79,6 +80,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current = new maplibregl.Map({
         container: mapContainer.current,
         renderWorldCopies: false,
+        preserveDrawingBuffer: true,
         style: {
           version: 8,
           sources: {},
@@ -97,9 +99,16 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
         // ⌘/Ctrl + wheel (or the +/- buttons) zooms the map. (cooperative gestures)
         cooperativeGestures: true,
-      })
+      } as maplibregl.MapOptions)
 
       map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+      if (typeof window !== 'undefined') {
+        (window as unknown as { map: maplibregl.Map }).map = map.current;
+      }
+
+      requestAnimationFrame(() => {
+        map.current?.resize();
+      });
 
       map.current.on('load', () => {
         if (!map.current) return
@@ -195,6 +204,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
         const onStyleData = () => {
           if (map.current?.getLayer('countries')) {
             map.current.off('styledata', onStyleData)
+            map.current.resize()
             updateData()
           }
         }
@@ -204,11 +214,12 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
       if (!data.length) {
         map.current.setPaintProperty('countries', 'fill-color', countryFill(theme === 'dark'))
+        map.current.resize()
         return
       }
 
       const max = Math.max(...data.map(d => d.count))
-      const matchExpression: any[] = ['match', ['get', 'name']]
+      const matchExpression: unknown[] = ['match', ['get', 'name']]
 
       data.forEach(d => {
         const intensity = 0.2 + (d.count / max) * 0.8
@@ -219,14 +230,11 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       })
 
       matchExpression.push(countryFill(theme === 'dark'))
-      map.current.setPaintProperty('countries', 'fill-color', matchExpression)
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression as unknown as maplibregl.ExpressionSpecification)
+      map.current.resize()
     }
 
-    if (map.current.isStyleLoaded()) {
-      updateData()
-    } else {
-      map.current.once('load', updateData)
-    }
+    updateData()
 
   }, [data, theme])
 
@@ -343,7 +351,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
           Interactive map unavailable in this browser. See the country list below.
         </div>
       ) : (
-        <div ref={mapContainer} className="absolute inset-0 w-full h-full" aria-hidden="true" />
+        <div ref={mapContainer} className="absolute inset-0 w-full h-full min-h-[300px]" aria-hidden="true" />
       )}
 
       {/* Screen-reader-only data table. The MapLibre canvas exposes nothing

@@ -3,7 +3,12 @@ import type { Service } from '@/stores/serviceStore'
 
 /** Map a raw BootstrapService (snake_case from backend) to the internal Service shape. */
 export function toService(s: components['schemas']['BootstrapService']): Service {
-  return { id: s.service_id, name: s.name || s.service_id, accessLevel: s.access_level ?? undefined }
+  return {
+    id: s.service_id,
+    name: s.name || s.service_id,
+    accessLevel: s.access_level ?? undefined,
+    cmcdEnabled: s.cmcd_enabled ?? undefined,
+  }
 }
 
 /**

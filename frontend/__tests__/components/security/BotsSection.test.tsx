@@ -133,7 +133,7 @@ describe('BotsSection', () => {
     expect(screen.getAllByTestId('data-table-0').length).toBeGreaterThanOrEqual(3)
   })
 
-  it('routes NGWAF "not configured" empty message when ngwaf_configured=false', () => {
+  it('hides NGWAF cards entirely when ngwaf_configured=false', () => {
     render(
       <BotsSection
         {...baseProps({
@@ -147,8 +147,8 @@ describe('BotsSection', () => {
         })}
       />
     )
-    // Same chart-vs-table duplication as the ngwaf_configured=true branch.
-    expect(screen.getAllByText(/ngwaf_workspace_id/i).length).toBe(2)
+    expect(screen.queryByText(/Verified Bots \(NGWAF\)/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Verified Bot Names \(NGWAF\)/i)).not.toBeInTheDocument()
   })
 
   it('routes the TLS-fingerprint empty copy on field-active state', () => {

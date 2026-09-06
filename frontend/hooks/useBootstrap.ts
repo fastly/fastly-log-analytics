@@ -5,6 +5,8 @@ import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { usePopGeoStore } from '@/stores/popGeoStore'
+import { useDebugStore } from '@/stores/debugStore'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { PopGeo } from '@/lib/pop'
 import { useEffect } from 'react'
 import { toService } from '@/types/api'
@@ -133,6 +135,20 @@ export function useBootstrap() {
       if (status !== undefined && status >= 400 && status < 500) return false
       return failureCount < 1
     },
+    // Once that single retry is spent the query parks in `error` forever, and
+    // AppLayout renders a dead-end "Can't reach the server" card that only
+    // recovers if the user clicks Retry. A deploy takes the backend away for a
+    // few seconds, so an open tab burns its one retry and strands the user on
+    // that card long after the server is back.
+    //
+    // Poll — but ONLY while errored, which is what keeps the 2026-06-23
+    // bootstrap-storm guard intact. This is a flat one-request-per-interval
+    // per stranded client, not the exponential fan-out that caused the storm,
+    // and it stops the instant a fetch succeeds. Jittered so a fleet of tabs
+    // orphaned by the same restart doesn't rendezvous into a thundering herd.
+    // refetchIntervalInBackground stays default-false: hidden tabs don't poll.
+    refetchInterval: query =>
+      query.state.status === 'error' ? 5000 + Math.floor(Math.random() * 2000) : false,
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)
@@ -179,6 +195,26 @@ export function useBootstrap() {
     useSessionRoleStore.getState().setIsRemoteAnalyst(
       query.data?.settings?.is_remote_analyst === true,
     )
+
+    // Synchronize client-side debugStore with the backend-defined debug settings
+    const isAnalyst = query.data?.settings?.is_remote_analyst === true
+    const queryVis = (query.data as any)?.debug_state?.query_debug_visibility ?? 'disabled'
+    const apiVis = (query.data as any)?.debug_state?.api_call_debug_visibility ?? 'disabled'
+
+    const queryDebugEnabled = isAnalyst
+      ? (queryVis === 'analysts' || queryVis === 'both')
+      : (queryVis === 'admins' || queryVis === 'both')
+
+    const apiCallsDebugEnabled = isAnalyst
+      ? (apiVis === 'analysts' || apiVis === 'both')
+      : (apiVis === 'admins' || apiVis === 'both')
+
+    const debugStore = useDebugStore.getState()
+    if (debugStore.enabled !== queryDebugEnabled || debugStore.apiCallsEnabled !== apiCallsDebugEnabled) {
+      useDebugStore.setState({ enabled: queryDebugEnabled, apiCallsEnabled: apiCallsDebugEnabled })
+      const shouldAttach = queryDebugEnabled || apiCallsDebugEnabled
+      document.cookie = `${DEBUG_RESPONSES_COOKIE}=${shouldAttach ? '1' : '0'}; path=/; max-age=31536000; samesite=lax`
+    }
 
     // Note: views + log-fields-catalog cache seeding now happens
     // inside the queryFn (synchronously after the fetch resolves) so

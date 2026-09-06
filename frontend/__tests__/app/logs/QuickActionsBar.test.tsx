@@ -34,7 +34,6 @@ function renderBar() {
     setSseDescription: vi.fn(),
     setIsSSEModalOpen: vi.fn(),
     setIsSyncModalOpen: vi.fn(),
-    setHasSyncedExtents: vi.fn(),
     reset: vi.fn(),
     start,
     setDisplayedJobs: vi.fn(),

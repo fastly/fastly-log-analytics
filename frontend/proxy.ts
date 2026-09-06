@@ -1,4 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server'
+import { ACTIVE_SERVICE_COOKIE } from './lib/active-service-cookie'
 
 // Two responsibilities live here:
 //
@@ -32,7 +33,7 @@ const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 // a stray Content-Security-Policy header on every chunk download is
 // just wire noise. The matcher below also excludes them; the
 // early-return here is belt-and-braces.
-const STATIC_PATH_RE = /^\/(_next\/static|_next\/image|favicon\.ico|geo\/|public\/)/
+const STATIC_PATH_RE = /^\/(_next\/static|_next\/image|favicon\.ico|geo\/|public\/|maplibre-gl-worker\.mjs|maplibre-gl-shared\.mjs)/
 
 // Dev-only CSP escape hatches:
 //   1. WebSocket: Turbopack (and webpack-mode) HMR connects to the dev
@@ -107,11 +108,28 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const nonce = Buffer.from(crypto.randomUUID()).toString('base64')
+  const nonce = btoa(crypto.randomUUID())
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
 
+  const serviceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
+  const serviceCookie = request.cookies?.get ? (request.cookies.get(ACTIVE_SERVICE_COOKIE)?.value || null) : null
+  const serviceId = serviceParam || serviceCookie
+
+  if (serviceId) {
+    requestHeaders.set('x-service-id', serviceId)
+  }
+
   const response = NextResponse.next({ request: { headers: requestHeaders } })
+
+  if (serviceParam && serviceParam !== serviceCookie && response.cookies) {
+    response.cookies.set(ACTIVE_SERVICE_COOKIE, serviceParam, {
+      path: '/',
+      maxAge: 31536000,
+      sameSite: 'lax',
+    })
+  }
+
   response.headers.set('Content-Security-Policy', buildCsp(nonce))
   response.headers.set('x-nonce', nonce)
   return response
@@ -127,7 +145,7 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: '/((?!_next/static|_next/image|favicon.ico|geo/|public/).*)',
+      source: '/((?!_next/static|_next/image|favicon.ico|geo/|public/|maplibre-gl-worker\\.mjs|maplibre-gl-shared\\.mjs).*)',
     },
     {
       source: '/:path*',

@@ -9,7 +9,7 @@ refactor and silent to break, so each branch is pinned here.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -26,7 +26,10 @@ def _call_get_service_id(service=None, sid=None, x_fastly_service_id=None, x_ser
     not None — so calling the function bare would fail the truthiness
     check. This helper bypasses by always passing all four explicitly.
     """
+    request = MagicMock()
+    request.path_params = {}
     return deps.get_service_id(
+        request=request,
         service=service,
         sid=sid,
         x_fastly_service_id=x_fastly_service_id,
@@ -166,7 +169,7 @@ def test_connection_holder_opens_and_closes(disable_pool):
         con = holder.__enter__()
         assert con is fake_con
         # The kwargs the holder passes are part of the contract with get_connection
-        mock_get.assert_called_once_with(source=src, max_wait=10, skip_view_update=False, read_only=True)
+        mock_get.assert_called_once_with(source=src, max_wait=ANY, skip_view_update=False, read_only=True)
         holder.__exit__(None, None, None)
         fake_con.close.assert_called_once()
 

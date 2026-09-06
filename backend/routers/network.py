@@ -1,20 +1,22 @@
-"""Network router — health heatmap and quality metrics."""
-
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import FilteredRequest, Limit100, Seconds14400
+from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
 from backend.repositories import network as repo
+from backend.repositories._base import _safe_table
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.telemetry import track_query
 from backend.utils.time_window import (
     invite_clamp_fingerprint,
     is_valid_range_token,
@@ -185,3 +187,64 @@ def network_quality(
         region_country=req.region_country,
     )
     return NetworkQualityResponse.with_telemetry(**res)
+
+
+class PopHealthItem(BaseModel):
+    pop: str
+    requests: int
+    errors: int
+    error_rate: float
+    p50_rtt_us: float | None
+    p95_ttfb_ms: float | None
+    cache_hit_rate: float
+    bandwidth_bytes: int
+
+
+class PopHealthListResponse(BaseResponse):
+    data: list[PopHealthItem]
+
+
+@router.get("/network/pop-health", response_model=PopHealthListResponse)
+def get_pop_health(
+    ctx: RequestContext = Depends(build_request_context),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+):
+    """Aggregate edge-routing and cache metrics across Fastly POP locations."""
+    table_name = _safe_table(ctx.source["name"])
+    time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
+    params = [start_time or (datetime.now(UTC) - timedelta(hours=24)), end_time or datetime.now(UTC)]
+
+    query = f"""
+        SELECT
+            pop,
+            COUNT(*) AS requests,
+            COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
+            ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
+            approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
+            approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
+            ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
+            SUM(resp_bytes) AS bandwidth_bytes
+        FROM {table_name}
+        {time_filter} AND pop IS NOT NULL AND pop != ''
+        GROUP BY pop
+        ORDER BY requests DESC
+    """
+
+    data = []
+    with track_query(ctx.con, query, params, "pop_health") as cursor:
+        for row in cursor.fetchall():
+            data.append(
+                PopHealthItem(
+                    pop=row[0],
+                    requests=row[1],
+                    errors=row[2],
+                    error_rate=row[3],
+                    p50_rtt_us=row[4],
+                    p95_ttfb_ms=row[5],
+                    cache_hit_rate=row[6],
+                    bandwidth_bytes=row[7] or 0,
+                )
+            )
+
+    return PopHealthListResponse.with_telemetry(data=data)

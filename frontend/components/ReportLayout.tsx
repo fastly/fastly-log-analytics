@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useActiveService } from '@/hooks/useActiveService'
+import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useTimeRange } from '@/hooks/useTimeRange'
 import { useTimezone } from '@/hooks/useTimezone'
 import { useReportConfig, type ReportConfiguration } from '@/hooks/useReportConfig'
@@ -22,11 +23,13 @@ interface ReportLayoutProps<TData = unknown> {
   apiCall?: (params: {
     startTime: string | null
     endTime: string | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     filters: any
     bucketSeconds: number
   }) => Promise<TData | undefined>
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
+  serviceId?: string | null
   children: (props: {
     data: TData | undefined
     isLoading: boolean
@@ -47,6 +50,7 @@ interface ReportLayoutProps<TData = unknown> {
     endTime: string | null
     timezone: string
     activeServiceId: string | null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     filterPayload: any
   }) => React.ReactNode
 }
@@ -59,10 +63,12 @@ export function ReportLayout<TData = unknown>({
   apiCall,
   defaultInterval = '1 hour',
   headerActions,
+  serviceId,
   children
 }: ReportLayoutProps<TData>) {
   const { startTime, endTime } = useTimeRange()
-  const { activeServiceId } = useActiveService()
+  const effectiveServiceId = useEffectiveServiceId()
+  const activeServiceId = (serviceId !== undefined ? serviceId : effectiveServiceId) ?? null
   const timezone = useTimezone()
   const { config, setChartInterval, trend, setTrend } = useReportConfig({ defaultInterval })
   // Pass `true` so the FilterBar's "Edge only" toggle injects

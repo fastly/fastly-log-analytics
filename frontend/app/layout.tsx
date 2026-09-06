@@ -4,6 +4,7 @@ import { cookies, headers } from "next/headers";
 import { QueryClient, dehydrate } from "@tanstack/react-query";
 import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
 import { AppLayout } from "@/components/AppLayout";
@@ -31,6 +32,18 @@ export const metadata: Metadata = {
 // optimization — that trade-off is reversed now that the layout has
 // real per-request work to do.
 export const dynamic = "force-dynamic";
+
+function generateScriptHash(serviceId: string | null): string {
+  if (!serviceId) return "";
+  const input = `${serviceId}-rum-v1`;
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(16).substring(0, 8);
+}
 
 export default async function RootLayout({
   children,
@@ -83,13 +96,16 @@ export default async function RootLayout({
   // path takes over unchanged. Never a broken page.
   const bootstrap = await fetchBootstrapServerSide();
   let dehydratedState: DehydratedState | null = null;
+  let isRumEnabled = false;
+  let sid: string | null = null;
+
   if (bootstrap) {
     const client = new QueryClient();
     client.setQueryData(queryKeys.bootstrap(), bootstrap);
     // Mirror the dependent-cache seeds from useBootstrap.queryFn so
     // hooks gated on the bootstrap status flip find their slice in
     // cache too. Key shapes live at frontend/hooks/useBootstrap.ts.
-    const sid = (bootstrap as { active_service_id?: string | null })?.active_service_id;
+    sid = (bootstrap as { active_service_id?: string | null })?.active_service_id ?? null;
     if (sid) {
       const b = bootstrap as Record<string, unknown>;
       if (Array.isArray(b.views)) {
@@ -118,6 +134,10 @@ export default async function RootLayout({
     const services = (bootstrap as Record<string, unknown>)?.services;
     if (Array.isArray(services)) {
       client.setQueryData(["services"], { services, _section_timings: [] });
+      if (sid) {
+        const activeSvc = services.find((s) => (s as Record<string, unknown>).service_id === sid) as Record<string, unknown> | undefined;
+        isRumEnabled = !!activeSvc?.rum_enabled;
+      }
     }
     // P1#5 (perf audit): the SSR share_status seed is removed. Bootstrap no
     // longer carries share_status (build_share_status cost ~2.1s and sat on
@@ -141,6 +161,11 @@ export default async function RootLayout({
             gzip of bandwidth on every non-chart page (/share-login,
             /admin/*, /alerts, /usage, /logs). See P-1 / P-2 in the
             2026-06-15 audit. */}
+        <script
+          src="/js/rum.js"
+          nonce={nonce}
+          async
+        />
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden
@@ -189,7 +214,11 @@ export default async function RootLayout({
                 rest of the app so the existing fetch wrapper / origin
                 handling Just Works. */}
             <WebVitalsReporter />
-            <AppLayout initialCollapsed={initialSidebarCollapsed}>
+            <AppLayout
+              initialCollapsed={initialSidebarCollapsed}
+              ssrActiveServiceId={sid}
+              ssrIsRumEnabled={isRumEnabled}
+            >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>
           </QueryProvider>

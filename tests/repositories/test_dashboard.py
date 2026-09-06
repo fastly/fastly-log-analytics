@@ -1578,3 +1578,85 @@ def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
         "top": [{"value": "1", "count": 3}, {"value": "6–20", "count": 1}],
         "total": 4,
     }
+
+
+def test_get_aggregates_prunes_non_top_n_fields(in_memory_duckdb, test_service_source, monkeypatch):
+    """Verify that fields in NON_TOP_N_FIELDS are pruned from batch_fields in both paths."""
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    # 1. Test Rollup Path
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+
+    rollup_calls: list[list[str]] = []
+
+    def spy_top_n_rollups(self, fields, start_time, end_time, limit=10, per_field_limits=None, **_kwargs):
+        rollup_calls.append(list(fields))
+        return [(f, f"{f}_val", 5) for f in fields], list(fields)
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", spy_top_n_rollups)
+
+    dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+        fields_filter=["status", "req_bytes", "resp_bytes", "host"],
+        include_time_series=False,
+        include_conn_requests=False,
+        include_map_data=False,
+        include_top_n=True,
+    )
+
+    assert len(rollup_calls) == 1
+    assert "status" in rollup_calls[0]
+    assert "host" in rollup_calls[0]
+    assert "req_bytes" not in rollup_calls[0]
+    assert "resp_bytes" not in rollup_calls[0]
+
+    # 2. Test Non-rollup Path
+    # Force use_rollups = False
+    monkeypatch.setattr(dash.os.path, "isdir", lambda path: False)
+
+    batch_calls: list[list[str]] = []
+
+    def spy_top_n_batch(self, fields, table_name, actual_cols, schema_types, limit=10, **_kwargs):
+        batch_calls.append(list(fields))
+        return ([], [])
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_batch", spy_top_n_batch)
+
+    # Let's ensure the table schema contains our columns so they are considered valid field_totals/actual_cols
+    # "status" and "host" should be in the DB. "req_bytes" is also in actual_cols but should be pruned.
+    dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=None,
+        end_time=None,
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+        fields_filter=["status", "req_bytes", "resp_bytes", "host"],
+        include_time_series=False,
+        include_conn_requests=False,
+        include_map_data=False,
+        include_top_n=True,
+    )
+
+    assert len(batch_calls) == 1
+    assert "status" in batch_calls[0]
+    assert "host" in batch_calls[0]
+    assert "req_bytes" not in batch_calls[0]
+    assert "resp_bytes" not in batch_calls[0]

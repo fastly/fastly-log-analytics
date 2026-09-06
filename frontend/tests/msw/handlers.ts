@@ -165,6 +165,17 @@ export const handlers = [
       readiness_days: 7,
     }),
   ),
+  // RumVersionPicker (ProvisionWizard StorageStep) fetches this directly.
+  // Default mirrors a fresh, never-provisioned service: nothing pinned yet.
+  // Per-test overrides via server.use() cover the 503/empty-list branches.
+  http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
+    HttpResponse.json({
+      available: [],
+      current: null,
+      latest: null,
+      update_available: false,
+    }),
+  ),
 
   // ── Dashboard / analytics aggregates (default: empty results) ─────
   http.post(`${API_BASE}/api/dashboard/aggregates`, () =>
@@ -190,6 +201,16 @@ export const handlers = [
   ),
   http.post(`${API_BASE}/api/security/top-bots`, () =>
     HttpResponse.json({ rows: [], total: 0 }),
+  ),
+  http.post(`${API_BASE}/api/security/proxies`, () =>
+    HttpResponse.json({
+      active_proxies_count: 0,
+      tunnel_requests_count: 0,
+      distance_mismatches_count: 0,
+      traffic_quality: [],
+      suspicious_isps: [],
+      active_clients: [],
+    }),
   ),
   http.post(`${API_BASE}/api/performance/aggregates`, () =>
     HttpResponse.json({ rows: [], columns: [], total: 0 }),
@@ -274,7 +295,7 @@ export const handlers = [
     HttpResponse.json({ status: 'completed', service_id: 'svc-default' }),
   ),
   http.get(`${API_BASE}/api/provision/services`, () =>
-    HttpResponse.json({ services: [] }),
+    HttpResponse.json([]),
   ),
   http.get(`${API_BASE}/api/provision/ngwaf-workspaces`, () =>
     HttpResponse.json({ workspaces: [] }),
@@ -395,6 +416,19 @@ export const handlers = [
 
   // ── Admin-page endpoint defaults ──────────────────────────────────
   http.get(`${API_BASE}/api/admin/health-snapshot`, ok({ ok: true })),
+  http.get(`${API_BASE}/api/admin/debug-settings`, () =>
+    HttpResponse.json({
+      query_debug_visibility: 'disabled',
+      api_call_debug_visibility: 'disabled',
+    }),
+  ),
+  http.patch(`${API_BASE}/api/admin/debug-settings`, async ({ request }) => {
+    const body = (await request.json()) as { query_debug_visibility?: string; api_call_debug_visibility?: string }
+    return HttpResponse.json({
+      query_debug_visibility: body.query_debug_visibility ?? 'disabled',
+      api_call_debug_visibility: body.api_call_debug_visibility ?? 'disabled',
+    })
+  }),
   http.get(`${API_BASE}/api/admin/metadata-storage`, () =>
     HttpResponse.json({ bytes: 0, tables: [] }),
   ),

@@ -25,13 +25,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useStreamAggregates } from './useStreamAggregates'
 import { StreamTimeline } from './StreamTimeline'
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ${Math.round(seconds % 60)}s`
-  const h = Math.floor(seconds / 3600)
-  const m = Math.round((seconds % 3600) / 60)
-  return m > 0 ? `${h}h ${m}m` : `${h}h`
-}
+import { formatDuration } from '@/lib/date'
 
 const NETWORK_LAYOUT = {
   yaxis: { title: { text: 'Throughput (kbps)' } },

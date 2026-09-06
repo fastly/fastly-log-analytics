@@ -66,7 +66,7 @@ def test_validate_vcl_valid_expression_returns_valid_true():
     assert isinstance(body["warnings"], list)
     assert isinstance(body["format_length"], int)
     assert body["format_length"] > 0
-    assert body["format_length_limit"] == 8000
+    assert body["format_length_limit"] == 12000
 
 
 def test_validate_vcl_invalid_expression_returns_errors():

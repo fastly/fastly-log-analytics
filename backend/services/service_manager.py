@@ -161,7 +161,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "service_id": sid,
                 "name": name,
                 "access_level": cfg.get("access_level", "read_write"),
-                "storage_mode": "cloud",
+                "storage_mode": cfg.get("storage_mode", "cloud"),
                 "log_period": cfg.get("log_period", 60),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),
@@ -191,6 +191,9 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                     "cron_ngwaf", {"interval_mins": 15, "log_enabled": True, "log_retention_days": 7}
                 ),
                 "ngwaf_workspace_id": cfg.get("ngwaf_workspace_id"),
+                "logging_enabled": cfg.get("logging_enabled", True),
+                "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
+                "cmcd_enabled": bool((cfg.get("cmcd") or {}).get("enabled")),
             }
         )
 

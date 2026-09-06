@@ -47,7 +47,6 @@ const ROUTES = [
   '/alerts',
   '/logs',
   '/query',
-  '/charts',
   '/insights',
   '/control-room',
 ]
@@ -121,7 +120,8 @@ test.describe('SSR hydration smoke', () => {
       // surfaced when the first react-query setData re-rendered the still-
       // hydrating tree. networkidle never settles here (SSE + polling), so
       // wait a fixed window long enough to cover hydration + first refetch.
-      await page.waitForTimeout(2_500)
+      const settleTimeout = process.env.CI ? 6_000 : 2_500
+      await page.waitForTimeout(settleTimeout)
 
       expect(
         hydrationErrors,

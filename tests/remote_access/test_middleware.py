@@ -50,6 +50,10 @@ def _build_test_app() -> FastAPI:
     def _web_vitals():
         return {"ok": True}
 
+    @app.post("/api/ux-events")
+    def _ux_events():
+        return {"ok": True}
+
     @app.get("/api/cron/stream")
     def _sse():
         return {"ok": True}
@@ -84,6 +88,40 @@ def _build_test_app() -> FastAPI:
 
     @app.get("/api/custom-endpoint/{service_id}/data")
     def _custom_endpoint(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    # RUM suffix gate: admin-only mutate/config-disclosure endpoints.
+    @app.post("/api/services/{service_id}/rum/enable")
+    def _rum_enable(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.post("/api/services/{service_id}/rum/disable")
+    def _rum_disable(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/status")
+    def _rum_status(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/versions")
+    def _rum_versions(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.post("/api/services/{service_id}/rum/upgrade")
+    def _rum_upgrade(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    # Analyst-NEEDED RUM reads — must NOT be shadowed by the suffix gate.
+    @app.get("/api/services/{service_id}/rum/beacon-health")
+    def _rum_beacon_health(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/analytics")
+    def _rum_analytics(service_id: str):
+        return {"ok": True, "service_id": service_id}
+
+    @app.get("/api/services/{service_id}/rum/live-events")
+    def _rum_live_events(service_id: str):
         return {"ok": True, "service_id": service_id}
 
     # H-1: usage / cost surface (entire /api/usage/ tree is admin-only).
@@ -929,6 +967,63 @@ def test_analyst_NOT_blocked_from_scoring_reads_they_need(client, path):
     assert r.status_code == 200, f"{path} should be reachable; got {r.status_code}: {r.text}"
 
 
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/services/svcA/rum/enable"),
+        ("POST", "/api/services/svcA/rum/disable"),
+        ("GET", "/api/services/svcA/rum/versions"),
+        ("POST", "/api/services/svcA/rum/upgrade"),
+    ],
+)
+def test_analyst_blocked_from_rum_admin_suffix(client, method, path):
+    """RUM suffix gate, same shape as H-4's scoring gate. Pins the fix for a
+    real pre-existing gap: before this gate was added, /rum/enable and
+    /rum/disable had no ``/rum/`` entry anywhere in the analyst blocklists
+    and were reachable by an authenticated analyst even though they mutate
+    deployed edge config. Authorizing the analyst for the service (svcA)
+    must NOT bypass the suffix block. /rum/status is deliberately NOT in
+    this list (F1 audit fix) — see test_analyst_NOT_blocked_from_rum_reads_they_need."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.request(
+        method,
+        path,
+        # Origin header needed so POSTs clear the CSRF origin gate and reach
+        # the admin_only suffix check this test targets, rather than
+        # tripping the (separately-tested) origin_not_allowed gate first.
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r.status_code == 403, f"{path}: expected 403, got {r.status_code}: {r.text}"
+    assert r.json()["error"] == "admin_only"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/services/svcA/rum/status",
+        "/api/services/svcA/rum/beacon-health",
+        "/api/services/svcA/rum/analytics",
+        "/api/services/svcA/rum/live-events",
+    ],
+)
+def test_analyst_NOT_blocked_from_rum_reads_they_need(client, path):
+    """Negative control: RUM dashboards and the beacon-health setup check
+    rely on these read-only endpoints — the suffix gate must NOT shadow
+    them. /rum/status was blocked pre-fix (F1 audit finding), which made
+    the analyst RUM page 403 → dead on every load."""
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    r = client.get(
+        path,
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r.status_code == 200, f"{path} should be reachable; got {r.status_code}: {r.text}"
+
+
 # ── Origin gate ────────────────────────────────────────────────────────────
 
 
@@ -1163,3 +1258,31 @@ def test_dispatch_admin_shared_secret_wrong_token_returns_401(client, monkeypatc
     r = client.get("/api/dashboard", headers={"X-Admin-Token": "wrong-token"})
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "admin_token_invalid"
+
+
+@pytest.mark.security_regression
+def test_unauthenticated_telemetry_beacon_allowed_without_session(client):
+    """An unauthenticated remote request to /api/web-vitals or /api/ux-events
+    must bypass the session gate (regression guard for _UNAUTH_ANALYST_PATHS)."""
+    _start_share()
+    # Explicitly clear cookies to simulate no session
+    client.cookies.clear()
+
+    # /api/web-vitals
+    r = client.post(
+        "/api/web-vitals?service=svcA",
+        json={"id": "unauth-1", "name": "LCP", "value": 1.0, "rating": "good"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    # Since it is exempt from auth, it should reach the handler and return 200 (not 401)
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+
+    # /api/ux-events
+    r = client.post(
+        "/api/ux-events?service=svcA",
+        json={"event": "some_ui_action", "pathname": "/share-login", "details": {}},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True

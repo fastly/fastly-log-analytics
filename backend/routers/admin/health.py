@@ -261,3 +261,89 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
             out["fos"] = None
 
     return out
+
+
+@router.get("/admin/vcl-health")
+def api_vcl_health(service_id: str) -> dict[str, Any]:
+    """Verify VCL state after migration — check for legacy/consolidated snippet presence.
+
+    Returns a dict with:
+    - legacy_snippets_found: count of pre-2.2 consolidated snippets
+    - consolidated_snippets_found: count of new consolidated snippets
+    - is_clean: True if no legacy snippets remain
+    - recommendation: guidance for the operator
+
+    Used by the admin UI post-deploy to show migration status.
+    """
+    try:
+        from backend import config as svcconfig
+        from backend.provision.declarative import fastly_integration
+
+        cfg = svcconfig.load_config(service_id)
+        if not cfg:
+            return {
+                "service_id": service_id,
+                "error": f"Service {service_id} not configured",
+                "is_clean": False,
+            }
+
+        token = cfg.get("admin_token")
+        if not token:
+            return {
+                "service_id": service_id,
+                "error": "No Fastly API token in service config",
+                "is_clean": False,
+            }
+
+        active_version = fastly_integration.fetch_active_version(service_id, token)
+        if active_version is None:
+            return {
+                "service_id": service_id,
+                "error": "No active version found",
+                "is_clean": False,
+            }
+
+        snippets = fastly_integration.fetch_snippets(service_id, active_version, token)
+
+        # Count legacy vs consolidated
+        from backend.provision.declarative.reconciler import _is_legacy_snippet
+
+        legacy = [s for s in snippets if _is_legacy_snippet(s.name)]
+        consolidated = [s for s in snippets if s.name.startswith("Fastly Log Analytics - ")]
+
+        is_clean = len(legacy) == 0 and len(consolidated) > 0
+
+        return {
+            "service_id": service_id,
+            "active_version": active_version,
+            "legacy_snippets_found": len(legacy),
+            "legacy_names": [s.name for s in legacy],
+            "consolidated_snippets_found": len(consolidated),
+            "consolidated_names": [s.name for s in consolidated],
+            "is_clean": is_clean,
+            "recommendation": (
+                "✓ Clean state — VCL migration complete. Ready for production."
+                if is_clean
+                else (
+                    f"⚠ Migration in progress: {len(legacy)} legacy snippet(s) remain. "
+                    "Run reconciliation to complete the migration."
+                    if legacy and consolidated
+                    else (
+                        f"⚠ Pre-migration state: {len(legacy)} legacy snippet(s) found. "
+                        "Run reconciliation to migrate to consolidated VCL."
+                        if legacy
+                        else "⚠ Unexpected state: no snippets found. Service may not be configured."
+                    )
+                )
+            ),
+        }
+    except Exception as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.exception("VCL health check failed")
+        return {
+            "service_id": service_id,
+            "error": str(e),
+            "is_clean": False,
+        }

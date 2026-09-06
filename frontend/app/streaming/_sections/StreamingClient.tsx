@@ -8,21 +8,14 @@ import { quantizeAnchor } from '@/lib/time-window'
 import type { FiltersPayload } from '@/types/filters'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { parseFromInput } from '@/lib/date'
+import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { parseFromInput, formatDuration, formatDate } from '@/lib/date'
 import { Play, Users, Wifi, BarChart3, Gauge, Globe, Film, AlertTriangle, TrendingUp, Clock, UserPlus } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { StatCard } from '@/components/ui/stat-card'
 import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
-
-function _formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`
-  const h = Math.floor(seconds / 3600)
-  const m = Math.round((seconds % 3600) / 60)
-  return m > 0 ? `${h}h ${m}m` : `${h}h`
-}
 
 const SESSIONS_LAYOUT = {
   yaxis: { title: { text: 'Active Viewers' } },
@@ -131,21 +124,21 @@ function StreamingBody({
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.p50_buffer),
         name: 'p50 Buffer',
         type: 'scatter' as const,
         line: { color: '#6366f1' },
       },
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.p95_buffer),
         name: 'p95 Buffer',
         type: 'scatter' as const,
         line: { color: '#a78bfa', dash: 'dot' },
       },
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.starvation_rate),
         name: 'Starvation Rate',
         type: 'bar' as const,
@@ -153,14 +146,14 @@ function StreamingBody({
         marker: { color: '#ef4444', opacity: 0.4 },
       },
     ]
-  }, [data?.buffer_health_ts])
+  }, [data?.buffer_health_ts, timezone])
 
   const bitrateData = React.useMemo(() => {
     const ts = data?.bitrate_ts
     if (!ts?.length) return []
     const traces: Record<string, unknown>[] = [
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.avg_bitrate),
         name: 'Avg Bitrate',
         type: 'scatter' as const,
@@ -169,7 +162,7 @@ function StreamingBody({
     ]
     if (ts.some((d) => d.utilization_ratio != null)) {
       traces.push({
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.utilization_ratio),
         name: 'Utilization',
         type: 'scatter' as const,
@@ -178,38 +171,38 @@ function StreamingBody({
       })
     }
     return traces
-  }, [data?.bitrate_ts])
+  }, [data?.bitrate_ts, timezone])
 
   const throughputData = React.useMemo(() => {
     const ts = data?.throughput_ts
     if (!ts?.length) return []
     return [
-      { x: ts.map((d) => d.bucket), y: ts.map((d) => d.p50), name: 'p50', type: 'scatter' as const, line: { color: '#6366f1' } },
-      { x: ts.map((d) => d.bucket), y: ts.map((d) => d.p95), name: 'p95', type: 'scatter' as const, line: { color: '#a78bfa', dash: 'dot' } },
-      { x: ts.map((d) => d.bucket), y: ts.map((d) => d.p99), name: 'p99', type: 'scatter' as const, line: { color: '#ec4899', dash: 'dash' } },
+      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p50), name: 'p50', type: 'scatter' as const, line: { color: '#6366f1' } },
+      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p95), name: 'p95', type: 'scatter' as const, line: { color: '#a78bfa', dash: 'dot' } },
+      { x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")), y: ts.map((d) => d.p99), name: 'p99', type: 'scatter' as const, line: { color: '#ec4899', dash: 'dash' } },
     ]
-  }, [data?.throughput_ts])
+  }, [data?.throughput_ts, timezone])
 
   const startupData = React.useMemo(() => {
     const ts = data?.startup_ts
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.startup_ratio),
         type: 'scatter' as const,
         fill: 'tozeroy' as const,
         line: { color: '#6366f1' },
       },
     ]
-  }, [data?.startup_ts])
+  }, [data?.startup_ts, timezone])
 
   const sessionsData = React.useMemo(() => {
     const ts = data?.sessions_ts
     if (!ts?.length) return []
     const traces: Record<string, unknown>[] = [
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.concurrent_sessions),
         name: 'Active Viewers',
         type: 'scatter' as const,
@@ -219,7 +212,7 @@ function StreamingBody({
     ]
     if (ts.some((d) => d.rebuffer_session_pct != null)) {
       traces.push({
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.rebuffer_session_pct),
         name: 'Rebuffer Rate',
         type: 'scatter' as const,
@@ -228,21 +221,21 @@ function StreamingBody({
       })
     }
     return traces
-  }, [data?.sessions_ts])
+  }, [data?.sessions_ts, timezone])
 
   const sessionStartsData = React.useMemo(() => {
     const ts = data?.sessions_ts
     if (!ts?.length) return []
     return [
       {
-        x: ts.map((d) => d.bucket),
+        x: ts.map((d) => formatDate(d.bucket as string, timezone, "yyyy-MM-dd HH:mm:ss")),
         y: ts.map((d) => d.new_sessions),
         name: 'New Sessions',
         type: 'bar' as const,
         marker: { color: '#10b981' },
       },
     ]
-  }, [data?.sessions_ts])
+  }, [data?.sessions_ts, timezone])
 
   const durationDistData = React.useMemo(() => {
     const dist = data?.session_duration_dist
@@ -349,7 +342,7 @@ function StreamingBody({
         />
         <StatCard
           title="Avg Duration"
-          value={overview?.avg_session_duration != null ? _formatDuration(overview.avg_session_duration) : '—'}
+          value={overview?.avg_session_duration != null ? formatDuration(overview.avg_session_duration) : '—'}
           sub="per session"
           icon={Clock}
           loading={cmcdQuery.isLoading}
@@ -407,7 +400,15 @@ function StreamingBody({
         helpTitle={STREAMING_INFO.active_viewers.title}
         helpContent={STREAMING_INFO.active_viewers.body}
       >
-        <PlotlyChart data={sessionsData} layout={SESSIONS_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+        <TimeSeriesChart
+          data={sessionsData}
+          layout={SESSIONS_LAYOUT}
+          startTime={startTime}
+          endTime={endTime}
+          timezone={timezone}
+          height="100%"
+          onRelayout={handleChartRelayout}
+        />
       </AnalyticsCard>
 
       {/* Session Starts */}
@@ -423,7 +424,15 @@ function StreamingBody({
         helpTitle={STREAMING_INFO.session_starts.title}
         helpContent={STREAMING_INFO.session_starts.body}
       >
-        <PlotlyChart data={sessionStartsData} layout={SESSION_STARTS_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+        <TimeSeriesChart
+          data={sessionStartsData}
+          layout={SESSION_STARTS_LAYOUT}
+          startTime={startTime}
+          endTime={endTime}
+          timezone={timezone}
+          height="100%"
+          onRelayout={handleChartRelayout}
+        />
       </AnalyticsCard>
 
       {/* Time Series Charts */}
@@ -440,7 +449,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.buffer_health.title}
           helpContent={STREAMING_INFO.buffer_health.body}
         >
-          <PlotlyChart data={bufferHealthData} layout={BUFFER_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={bufferHealthData}
+            layout={BUFFER_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -455,7 +472,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.bitrate_quality.title}
           helpContent={STREAMING_INFO.bitrate_quality.body}
         >
-          <PlotlyChart data={bitrateData} layout={BITRATE_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={bitrateData}
+            layout={BITRATE_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -470,7 +495,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.throughput.title}
           helpContent={STREAMING_INFO.throughput.body}
         >
-          <PlotlyChart data={throughputData} layout={THROUGHPUT_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={throughputData}
+            layout={THROUGHPUT_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
 
         <AnalyticsCard
@@ -485,7 +518,15 @@ function StreamingBody({
           helpTitle={STREAMING_INFO.startup.title}
           helpContent={STREAMING_INFO.startup.body}
         >
-          <PlotlyChart data={startupData} layout={STARTUP_LAYOUT} height="100%" onRelayout={handleChartRelayout} />
+          <TimeSeriesChart
+            data={startupData}
+            layout={STARTUP_LAYOUT}
+            startTime={startTime}
+            endTime={endTime}
+            timezone={timezone}
+            height="100%"
+            onRelayout={handleChartRelayout}
+          />
         </AnalyticsCard>
       </div>
 

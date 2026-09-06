@@ -36,6 +36,13 @@ export function Results({ s, r }: ResultsProps) {
           detail={`${r.cdnEgressGB.toFixed(3)} GB`}
           cost={fmtUSD(r.costEgress)}
         />
+        {s.rumBeaconsDay > 0 && (
+          <ResultRow
+            label='Real User Monitoring (RUM) Cost Portion'
+            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Class A & Storage above)`}
+            cost={fmtUSD(r.costRum)}
+          />
+        )}
         <ResultRow
           label='Total Estimated Monthly Cost'
           cost={fmtUSD(r.totalCost)}
@@ -56,6 +63,10 @@ export function Results({ s, r }: ResultsProps) {
             ['Iceberg data files created / month', fmtN(Math.round(r.parquetFilesPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
+            ...(s.rumBeaconsDay > 0 ? [
+              ['RUM beacons / month', fmtN(Math.round(r.rumBeaconsMonth))],
+              ['RUM footprint / month', Math.max(0.001, r.rumParquetGBMonths).toFixed(3) + ' GB-mo']
+            ] : [])
           ].map(([label, value]) => (
             <div key={label} className='flex justify-between text-xs py-0.5'>
               <span className='text-muted-foreground'>{label}</span>

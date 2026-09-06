@@ -337,12 +337,12 @@ def _get_cached_or_scan_metadata(source: dict, table) -> tuple[int, int, dict, s
         return result
 
 
-def get_table_info(source: dict, table=None) -> dict:
+def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
     """Return snapshot count, data file count, total size, and latest snapshot time."""
     try:
         if table is None:
             catalog = _core_mod._get_catalog(source)
-            identifier = _core_mod._table_identifier(source)
+            identifier = _core_mod._table_identifier(source, table_name=table_name)
 
             # Ensure our local view of the table is up-to-date with FOS
             _core_mod._refresh_local_catalog_metadata(catalog, source, identifier)
@@ -354,7 +354,7 @@ def get_table_info(source: dict, table=None) -> dict:
             "snapshots": 0,
             "data_files": 0,
             "size_bytes": 0,
-            "table_name": source.get("name", "unknown"),
+            "table_name": table_name,
         }
 
     snapshots = list(table.snapshots())
@@ -379,11 +379,11 @@ def get_table_info(source: dict, table=None) -> dict:
     if current:
         latest_ts = datetime.fromtimestamp(current.timestamp_ms / 1000, tz=UTC).isoformat()
 
-    buf = _core_mod.buffer_files(source)
+    buf = _core_mod.buffer_files(source, table_name=table_name)
     buf_size = sum(os.path.getsize(p) for p in buf if os.path.exists(p))
 
     return {
-        "table_name": source.get("name", "unknown"),
+        "table_name": table_name,
         "snapshots": len(snapshots),
         "data_files": data_files,
         "size_bytes": size_bytes,
@@ -397,12 +397,12 @@ def get_table_info(source: dict, table=None) -> dict:
     }
 
 
-def get_snapshot_calendar(source: dict, table=None) -> dict:
+def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") -> dict:
     """Return per-date file counts derived from Iceberg partition metadata."""
     try:
         if table is None:
             catalog = _core_mod._get_catalog(source)
-            identifier = _core_mod._table_identifier(source)
+            identifier = _core_mod._table_identifier(source, table_name=table_name)
 
             _core_mod._refresh_local_catalog_metadata(catalog, source, identifier)
 

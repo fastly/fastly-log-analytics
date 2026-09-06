@@ -62,7 +62,7 @@ _MAX_PARTITION_BYTES = int(os.environ.get("LOCAL_COMPACT_MAX_PARTITION_MB", "256
 # Partitions older than this become eligible for cross-hour daily compaction.
 # Recent hours stay hourly so the dashboard's time-range pruning stays tight
 # at the file level (each scan opens one daily file vs 24 hourly files).
-_DAILY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_DAILY_TIER_DAYS", "7"))
+_DAILY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_DAILY_TIER_DAYS", "1"))
 
 # Daily files older than this become eligible for cross-day weekly compaction.
 # Only useful when log_retention_days > this; otherwise daily files just age
@@ -155,7 +155,9 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
     return bins
 
 
-def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry_run: bool = False) -> dict[str, Any]:
+def compact_local_partitions(
+    source: dict, min_files_per_partition: int = 1, dry_run: bool = False, table_name: str = "logs"
+) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
     ``_DAILY_TIER_AGE_DAYS`` into per-day merged files.
@@ -172,6 +174,7 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry
             previous ``> 3``. Without this, the historic 12 days of ~2×
             duplication would never self-heal.
         dry_run: if True, report what would be done without writing.
+        table_name: table name identifier ("logs", "client_vitals", "client_errors")
 
     Returns:
         Result dict — see implementation for fields.
@@ -180,7 +183,7 @@ def compact_local_partitions(source: dict, min_files_per_partition: int = 1, dry
 
     t0 = time.time()
     cache_root = _cache_dir(source)
-    data_dir = os.path.join(cache_root, "data")
+    data_dir = os.path.join(cache_root, "data" if table_name == "logs" else f"data_{table_name}")
     result: dict[str, Any] = {
         "partitions_scanned": 0,
         "partitions_compacted": 0,
@@ -438,8 +441,11 @@ def _rollup_bins(
                     col_names = {d[0] for d in probe}
                     cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
                     select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+                    order_by = "ORDER BY timestamp"
+                    if "ip" in col_names:
+                        order_by += ", ip"
                     con.execute(
-                        f"COPY ({select_sql} ORDER BY timestamp, ip) "
+                        f"COPY ({select_sql} {order_by}) "
                         f"TO '{escape_sql_literal(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                     )
                 finally:
@@ -676,11 +682,13 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
         col_names = {d[0] for d in probe}
         cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
         select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+        order_by = "ORDER BY timestamp"
+        if "ip" in col_names:
+            order_by += ", ip"
         # zstd compression matches Fastly's parquet output and the
         # buffer-commit writer; keeps decompression cost stable.
         con.execute(
-            f"COPY ({select_sql} ORDER BY timestamp, ip) "
-            f"TO '{escape_sql_literal(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            f"COPY ({select_sql} {order_by}) TO '{escape_sql_literal(tmp_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)"
         )
     finally:
         con.close()
@@ -718,14 +726,14 @@ _COMPACTION_STATS_TTL = 5.0
 _COMPACTION_STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
-def compaction_stats(source: dict) -> dict[str, Any]:
+def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
     """Snapshot of file-count distribution across local cache partitions.
 
     Returns counts that downstream metrics / health endpoints can graph
     to spot small-file regressions (e.g., if the cron stops running and
     files start accumulating, ``partitions_above_threshold`` climbs).
 
-    Results are memoised per cache_root for ``_COMPACTION_STATS_TTL`` s
+    Results are memoised per cache_root + table_name for ``_COMPACTION_STATS_TTL`` s
     so the admin health-snapshot poll doesn't re-walk the data dir on
     every tick.
     """
@@ -733,11 +741,12 @@ def compaction_stats(source: dict) -> dict[str, Any]:
 
     cache_root = _cache_dir(source)
     now = time.monotonic()
-    cached = _COMPACTION_STATS_CACHE.get(cache_root)
+    cache_key = f"{cache_root}:{table_name}"
+    cached = _COMPACTION_STATS_CACHE.get(cache_key)
     if cached is not None and (now - cached[0]) < _COMPACTION_STATS_TTL:
         return cached[1]
 
-    data_dir = os.path.join(cache_root, "data")
+    data_dir = os.path.join(cache_root, "data" if table_name == "logs" else f"data_{table_name}")
     total_files = 0
     partitions = 0
     above_3 = 0
@@ -754,7 +763,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
             "weekly_files": 0,
             "avg_files_per_partition": 0.0,
         }
-        _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+        _COMPACTION_STATS_CACHE[cache_key] = (now, result)
         return result
     for entry in os.listdir(data_dir):
         full = os.path.join(data_dir, entry)
@@ -781,7 +790,7 @@ def compaction_stats(source: dict) -> dict[str, Any]:
         "weekly_files": weekly_files,
         "avg_files_per_partition": (total_files / partitions) if partitions else 0.0,
     }
-    _COMPACTION_STATS_CACHE[cache_root] = (now, result)
+    _COMPACTION_STATS_CACHE[cache_key] = (now, result)
     return result
 
 

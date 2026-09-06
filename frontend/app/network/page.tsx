@@ -2,6 +2,7 @@
 
 import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, HealthBadge, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
 import React, { useState } from 'react'
+import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
@@ -466,6 +467,12 @@ export default function NetworkPage() {
         />
       </div>
 
+      <div className="my-6">
+        {activeServiceId && (
+          <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />
+        )}
+      </div>
+
       {/* ── Heatmap ── */}
       {heatmapData && (
         <AnalyticsCard
@@ -582,7 +589,7 @@ export default function NetworkPage() {
               </div>
             }
           >
-            <div className="flex flex-col h-[420px] overflow-auto">
+            <div className="flex flex-col h-[420px] overflow-hidden">
               {shieldingData?.has_data ? (
                 <>
                   <DataTable
@@ -591,6 +598,7 @@ export default function NetworkPage() {
                     hideToolbar
                     columnVisibility={shieldingVisibility}
                     onColumnVisibilityChange={setShieldingVisibility}
+                    tableContainerClassName="max-h-[295px]"
                   />
                   {/* M1: the backend returns a (top-by-volume ∪ top-by-overhead)
                       subset when there are more routes than the cap, so a

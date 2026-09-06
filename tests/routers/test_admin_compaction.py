@@ -11,7 +11,7 @@ returns the shape the endpoint expects to forward.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # ── POST /api/admin/optimize-now ────────────────────────────────────────────
 
@@ -389,3 +389,42 @@ def test_metadata_cleanup_sets_no_buffering_headers(client):
     assert "no-store" in cache_control or "no-cache" in cache_control
     assert resp.headers.get("x-accel-buffering") == "no"
     assert resp.headers.get("connection") == "keep-alive"
+
+
+def test_backfill_bundle_rollups_success(client):
+    """POST /admin/backfill-bundle-rollups invokes all rollup backfillers and closed-day compactors."""
+    mocks = [
+        "backfill_slow_urls_bundles",
+        "backfill_origin_summary_bundles",
+        "backfill_origin_dims_bundles",
+        "backfill_origin_latency_ts_bundles",
+        "backfill_network_rtt_bundles",
+        "backfill_network_speed_bundles",
+        "backfill_verified_bots_ts_bundles",
+        "backfill_perf_latency_bundles",
+        "backfill_security_dims_bundles",
+        "backfill_perf_dims_bundles",
+        "backfill_wellknown_bots_rollup",
+        "backfill_ngwaf_bots_bundles",
+        "backfill_overview_bundles",
+        "backfill_network_summary_bundles",
+        "compact_origin_summary_closed_days_to_daily",
+        "compact_origin_dims_closed_days_to_daily",
+        "compact_origin_latency_ts_closed_days_to_daily",
+        "compact_network_rtt_closed_days_to_daily",
+        "compact_network_speed_closed_days_to_daily",
+        "compact_verified_bots_ts_closed_days_to_daily",
+        "compact_perf_latency_closed_days_to_daily",
+        "compact_security_dims_closed_days_to_daily",
+        "compact_perf_dims_closed_days_to_daily",
+        "compact_ngwaf_bots_closed_days_to_daily",
+        "compact_overview_closed_days_to_daily",
+    ]
+
+    with patch.multiple("backend.core.rollups", **{name: MagicMock(return_value=1) for name in mocks}):
+        resp = client.post("/api/admin/backfill-bundle-rollups")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["slow_urls"] == 1
+        assert body["origin_summary"] == 1
+        assert body["origin_summary_days"] == 1

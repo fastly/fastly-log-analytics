@@ -401,6 +401,27 @@ def test_config_to_source_defaults_access_level_to_read_write():
     assert src["access_level"] == "read_write"
 
 
+def test_config_to_source_includes_rum_fields():
+    """Verify config_to_source maps rum_enabled and rum config blocks."""
+    # Test with rum_enabled on root
+    cfg = _cfg(rum_enabled=True, rum={"enabled": False})
+    src = svcconfig.config_to_source(cfg)
+    assert src["rum_enabled"] is True
+    assert src["rum"] == {"enabled": False}
+
+    # Test with rum enabled on sub-dictionary
+    cfg2 = _cfg(rum_enabled=False, rum={"enabled": True})
+    src2 = svcconfig.config_to_source(cfg2)
+    assert src2["rum_enabled"] is True
+    assert src2["rum"] == {"enabled": True}
+
+    # Test with both disabled / missing
+    cfg3 = _cfg(rum_enabled=False)
+    src3 = svcconfig.config_to_source(cfg3)
+    assert src3["rum_enabled"] is False
+    assert src3["rum"] == {}
+
+
 # ── fetch_service_name ───────────────────────────────────────────────────────
 
 
@@ -546,7 +567,7 @@ def test_refresh_all_service_names_returns_map_of_id_to_name():
         return f"Name-{sid}"
 
     with patch("backend.config.refresh_service_name", side_effect=_fake_refresh):
-        out = svcconfig.refresh_all_service_names(configs)
+        out = svcconfig.refresh_all_service_names(configs, _sync=True)
 
     assert out == {"a": "Name-a", "b": "Name-b"}
 
@@ -566,7 +587,7 @@ def test_refresh_all_service_names_falls_back_to_config_name_on_per_service_exce
         return f"Fresh-{sid}"
 
     with patch("backend.config.refresh_service_name", side_effect=_fake_refresh):
-        out = svcconfig.refresh_all_service_names(configs)
+        out = svcconfig.refresh_all_service_names(configs, _sync=True)
 
     assert out["ok"] == "Fresh-ok"
     assert out["bad"] == "Bad-svc"  # fell back to cfg["name"]

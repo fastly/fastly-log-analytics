@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # 30 s, so a 30 s server-side TTL is well inside any user-visible
 # staleness budget and removes the spinner feel.
 _FASTLY_COUNTS_TTL = 45.0
-_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str], tuple[float, dict[str, int]]] = {}
+_FASTLY_COUNTS_CACHE: dict[tuple[str, int, int, str, bool], tuple[float, dict[str, int]]] = {}
 
 # Same TTL on the per-bucket DuckDB COUNT(*) since the function arguments
 # are functions of (service name, window, by) and the answer is stable
@@ -60,30 +60,33 @@ def backfill_window(
 
 
 def _fetch_fastly_request_counts(
-    logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str
+    logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str, edge_only: bool = False
 ) -> dict[str, int]:
-    """Return bucket_iso → Fastly ``requests`` count.
+    """Return bucket_iso → Fastly ``requests`` (or ``edge_requests`` if edge_only) count.
 
-    ``requests`` is the loss denominator: it sits 1:1 with our ingested rows
-    (one S3 log line per real client request), so ``requests − our_rows`` is
-    the honest gap. We deliberately do NOT use Fastly's ``log`` stat — it
+    ``requests`` (or ``edge_requests``) is the loss denominator: it sits 1:1 with
+    our ingested rows (one S3 log line per real client request), so ``requests − our_rows``
+    is the honest gap. We deliberately do NOT use Fastly's ``log`` stat — it
     counts ``vcl_log`` RE-EXECUTIONS (bot-challenge / restart paths re-run
     ``vcl_recv``), so it reads 2.7–3.8× ``requests`` on some services and
     produces a permanent phantom gap that is not data loss.
+
+    If edge_only is True, we use ``edge_requests`` to avoid phantom gaps from
+    Origin Shielding where forwarded requests are double-counted in aggregate stats.
 
     Bucket key is the UTC ISO string at the same width the local SQL bucket
     uses (`YYYY-MM-DDTHH` for hour, `YYYY-MM-DD` for day) so the outer-join
     in api_log_accounting can key on string equality directly.
 
     Memoised for ``_FASTLY_COUNTS_TTL`` s on
-    ``(logging_svc_id, from_ts, to_ts, by)``. Inputs are hour-aligned, so
+    ``(logging_svc_id, from_ts, to_ts, by, edge_only)``. Inputs are hour-aligned, so
     repeats from the admin poll loop (every 30-60 s) hit cache.
     """
     from datetime import UTC, datetime
 
     from backend.core.fastly.client import fastly
 
-    cache_key = (logging_svc_id, from_ts, to_ts, by)
+    cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
     now_mono = time.monotonic()
     cached = _FASTLY_COUNTS_CACHE.get(cache_key)
     if cached is not None and (now_mono - cached[0]) < _FASTLY_COUNTS_TTL:
@@ -98,12 +101,13 @@ def _fetch_fastly_request_counts(
     width = 13 if by == "hour" else 10
     records = payload.get("data", []) or []
     out: dict[str, int] = {}
+    stat_key = "edge_requests" if edge_only else "requests"
     for r in records:
         ts = r.get("start_time")
         if ts is None:
             continue
         bucket = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
-        out[bucket] = out.get(bucket, 0) + int(r.get("requests") or 0)
+        out[bucket] = out.get(bucket, 0) + int(r.get(stat_key) or r.get("requests") or 0)
     _FASTLY_COUNTS_CACHE[cache_key] = (now_mono, out)
     return out
 
@@ -191,6 +195,7 @@ def _try_row_counts_from_rollup(
         return None
 
     result: dict[str, int] = {}
+    unit = "day" if "%H" not in fmt else "hour"
 
     if rollup_paths:
         from backend.repositories._base import quote_path_list
@@ -200,12 +205,12 @@ def _try_row_counts_from_rollup(
         et_tz = end.astimezone(UTC).isoformat()
         with _ConnectionHolder(source, read_only=True) as con:
             rows = con.execute(
-                f"SELECT strftime(hour_start, '{fmt}') AS bucket, "
+                f"SELECT strftime(date_trunc('{unit}', hour_start), '{fmt}') AS bucket, "
                 f"  SUM(requests) AS n "
                 f"FROM read_parquet([{paths_sql}]) "
                 f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
                 f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
-                f"GROUP BY 1"
+                f"GROUP BY date_trunc('{unit}', hour_start)"
             ).fetchall()
         for b, n in rows:
             result[b] = int(n)
@@ -244,11 +249,11 @@ def _try_row_counts_from_rollup(
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
             with _ConnectionHolder(source, read_only=True) as con:
                 rows = con.execute(
-                    f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
+                    f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
                     f"FROM read_parquet([{paths_sql}], union_by_name=true) "
                     f"WHERE timestamp >= TIMESTAMP '{live_start_iso}' "
                     f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-                    f"GROUP BY 1"
+                    f"GROUP BY date_trunc('{unit}', timestamp)"
                 ).fetchall()
             for b, n in rows:
                 result[b] = result.get(b, 0) + int(n)
@@ -269,13 +274,14 @@ def _raw_row_counts(
     table_name = _ddb._safe_table_name(source["name"])
     start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
     end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
+    unit = "day" if "%H" not in fmt else "hour"
     with _ConnectionHolder(source, read_only=True) as con:
         rows = con.execute(
-            f"SELECT strftime(timestamp, '{fmt}') AS bucket, COUNT(*) AS n "
+            f"SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMP '{start_iso}' "
             f"  AND timestamp <  TIMESTAMP '{end_iso}' "
-            f"GROUP BY 1"
+            f"GROUP BY date_trunc('{unit}', timestamp)"
         ).fetchall()
     return {b: int(n) for b, n in rows}
 
@@ -326,13 +332,34 @@ def compute_log_accounting(source: dict, hours: int = 24, by: str = "hour") -> d
     if by == "day":
         now = now.replace(hour=0)
     start = now - timedelta(hours=hours)
+
+    cfg = svcconfig.load_config(service_id) or {}
+    prov = cfg.get("provisioning") or {}
+    edge_only = prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False)
+    edge_only = bool(edge_only)
+
+    created_at_str = cfg.get("created_at")
+    if created_at_str:
+        try:
+            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            # Align created_at to bucket start boundary
+            created_at_aligned = created_at.replace(minute=0, second=0, microsecond=0)
+            if by == "day":
+                created_at_aligned = created_at_aligned.replace(hour=0)
+            if start < created_at_aligned:
+                start = created_at_aligned
+        except Exception as e:
+            logger.warning("Failed to parse created_at '%s' for service %s: %s", created_at_str, service_id, e)
+
     from_ts = int(start.timestamp())
     to_ts = int((now + timedelta(hours=1 if by == "hour" else 24)).timestamp())
 
     try:
         fastly_counts = timer.call(
             "fastly_fetch",
-            lambda: _fetch_fastly_request_counts(logging_svc_id, api_key, from_ts, to_ts, by),
+            lambda: _fetch_fastly_request_counts(logging_svc_id, api_key, from_ts, to_ts, by, edge_only=edge_only),
         )
     except Exception as e:
         raise_internal(logger, e, code="fastly_stats_failed", status=502)
