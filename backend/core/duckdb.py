@@ -195,6 +195,7 @@ _httpfs_lock = threading.Lock()
 # because every connection setup in _configure_fos crashes. The SECRET is
 # process-wide once created, so serialising the writes is sufficient.
 _fos_proxy_secret_lock = threading.Lock()
+_fos_secret_fingerprint: tuple[str, str, str, str] | None = None
 
 
 def _load_httpfs(con: duckdb.DuckDBPyConnection):
@@ -285,6 +286,18 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         proxy_ep,
         *headers.values(),
     ]
+    global _fos_secret_fingerprint
+    fp = (secret_params[0], secret_params[1], secret_params[2], proxy_ep)
+    if _fos_secret_fingerprint == fp:
+        try:
+            con.execute("SET http_timeout=60;")
+            con.execute("SET http_retries=5;")
+            con.execute("SET httpfs_client_implementation = 'curl';")
+            con.execute("SET custom_user_agent = 'FastlyObjectStorageLogAnalysis/1.0';")
+            con.execute("SET http_keep_alive = true;")
+        except Exception:
+            con.execute("SET http_keep_alive = false;")
+        return
     with _fos_proxy_secret_lock:
         # _load_httpfs above runs INSTALL/LOAD httpfs, which starts an implicit
         # transaction with a catalog snapshot taken BEFORE we acquired the lock.
@@ -301,6 +314,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
                 pass
             try:
                 con.execute(create_secret_sql, secret_params)
+                _fos_secret_fingerprint = fp
                 break
             except Exception as e:
                 if "write-write conflict" in str(e).lower() and attempt < 2:
