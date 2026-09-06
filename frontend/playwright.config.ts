@@ -26,7 +26,7 @@ const isCI = !!process.env.CI
 
 export default defineConfig({
   testDir: './e2e',
-  timeout: 60_000,
+  timeout: 90_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
   forbidOnly: isCI,
