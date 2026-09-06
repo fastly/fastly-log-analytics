@@ -86,7 +86,7 @@ export function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn(),
   }
-  const useServiceStore = vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
+  const useServiceStore: any = vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
     return selector ? selector(state) : state
   })
   useServiceStore.getState = () => state

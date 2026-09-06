@@ -19,7 +19,7 @@ vi.mock('@/stores/serviceStore', () => {
     setInitialized: vi.fn(),
     setActiveServiceId: vi.fn()
   }
-  const useServiceStore = vi.fn((selector) => selector ? selector(state) : state)
+  const useServiceStore: any = vi.fn((selector) => selector ? selector(state) : state)
   useServiceStore.getState = () => state
   return { useServiceStore }
 })

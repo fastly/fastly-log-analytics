@@ -39,7 +39,7 @@ let mockState = {
 }
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore = vi.fn((selector?: (s: typeof mockState) => any) =>
+  const useServiceStore: any = vi.fn((selector?: (s: typeof mockState) => any) =>
     selector ? selector(mockState) : mockState,
   )
   useServiceStore.getState = () => mockState
