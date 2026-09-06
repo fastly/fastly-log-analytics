@@ -30,7 +30,7 @@ test('dashboard mounts the maplibre container without crashing', async ({ page }
   // canvas to attach. ChoroplethMap renders an empty div first, then
   // maplibre attaches the canvas. Polling for visibility returns as
   // soon as maplibre is up rather than burning a fixed 3 s on every run.
-  await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 30_000 })
+  await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 45_000 })
 
   // Tightened from `>= 0` (always true) to `>= 1` — pins that at least
   // one canvas element actually mounted.

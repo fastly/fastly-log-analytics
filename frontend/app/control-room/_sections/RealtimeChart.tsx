@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { HelpCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -25,6 +25,7 @@ interface RealtimeChartProps {
 }
 
 const WINDOW = 60
+const STATIC_CONFIG = { displayModeBar: false, responsive: true }
 
 function makeTimeLabels(count: number): string[] {
   const now = new Date()
@@ -51,7 +52,7 @@ export function RealtimeChart({
   const [helpOpen, setHelpOpen] = useState(false)
   const labels = makeTimeLabels(traces[0]?.y.length ?? WINDOW)
 
-  const data = traces.map((trace) => ({
+  const data = useMemo(() => traces.map((trace) => ({
     type: 'bar' as const,
     x: labels,
     y: trace.y,
@@ -59,60 +60,61 @@ export function RealtimeChart({
     marker: { color: trace.color },
     yaxis: trace.yaxis || 'y',
     hovertemplate: `%{x} · %{y:,.4~g}<extra>${trace.name}</extra>`,
-  }))
+  })), [traces, labels])
 
   const hasLegend = traces.length > 1
-  const layout: Record<string, unknown> = {
-    xaxis: {
-      type: 'category',
-      tickangle: -45,
-      nticks: 6,
-      tickfont: { size: 9 },
-      range: [-0.5, WINDOW - 0.5],
-    },
-    yaxis: {
-      showgrid: true,
-      gridcolor: 'rgba(128,128,128,0.15)',
-      zeroline: false,
-      autorange: true,
-      rangemode: 'tozero',
-      exponentformat: 'SI',
-      ...(yAxisSuffix ? { ticksuffix: yAxisSuffix } : {}),
-    },
-    barmode: stacked ? 'stack' : 'group',
-    bargap: 0.02,
-    margin: { l: yAxisSuffix ? 55 : 42, r: dualYAxis ? (y2AxisSuffix ? 55 : 42) : 15, t: hasLegend ? 32 : 8, b: 32 },
-    plot_bgcolor: 'transparent',
-    paper_bgcolor: 'transparent',
-    showlegend: hasLegend,
-    legend: {
-      orientation: 'h',
-      y: 1.05,
-      x: 0.5,
-      xanchor: 'center',
-      yanchor: 'bottom',
-      font: { size: 9.5 },
-      bgcolor: 'transparent',
-    },
-    uirevision: 'stable',
-    font: { size: 11 },
-    hovermode: 'x unified',
-  }
-
-  if (dualYAxis) {
-    layout.yaxis2 = {
-      side: 'right',
-      overlaying: 'y',
-      showgrid: false,
-      zeroline: false,
-      autorange: true,
-      rangemode: 'tozero',
-      exponentformat: 'SI',
-      ...(y2AxisSuffix ? { ticksuffix: y2AxisSuffix } : {}),
+  const layout = useMemo(() => {
+    const l: Record<string, unknown> = {
+      xaxis: {
+        type: 'category',
+        tickangle: -45,
+        nticks: 6,
+        tickfont: { size: 9 },
+        range: [-0.5, WINDOW - 0.5],
+      },
+      yaxis: {
+        showgrid: true,
+        gridcolor: 'rgba(128,128,128,0.15)',
+        zeroline: false,
+        autorange: true,
+        rangemode: 'tozero',
+        exponentformat: 'SI',
+        ...(yAxisSuffix ? { ticksuffix: yAxisSuffix } : {}),
+      },
+      barmode: stacked ? 'stack' : 'group',
+      bargap: 0.02,
+      margin: { l: yAxisSuffix ? 55 : 42, r: dualYAxis ? (y2AxisSuffix ? 55 : 42) : 15, t: hasLegend ? 32 : 8, b: 32 },
+      plot_bgcolor: 'transparent',
+      paper_bgcolor: 'transparent',
+      showlegend: hasLegend,
+      legend: {
+        orientation: 'h',
+        y: 1.05,
+        x: 0.5,
+        xanchor: 'center',
+        yanchor: 'bottom',
+        font: { size: 9.5 },
+        bgcolor: 'transparent',
+      },
+      uirevision: 'stable',
+      font: { size: 11 },
+      hovermode: 'x unified',
     }
-  }
 
-  const config = { displayModeBar: false, responsive: true }
+    if (dualYAxis) {
+      l.yaxis2 = {
+        side: 'right',
+        overlaying: 'y',
+        showgrid: false,
+        zeroline: false,
+        autorange: true,
+        rangemode: 'tozero',
+        exponentformat: 'SI',
+        ...(y2AxisSuffix ? { ticksuffix: y2AxisSuffix } : {}),
+      }
+    }
+    return l
+  }, [stacked, dualYAxis, hasLegend, yAxisSuffix, y2AxisSuffix])
 
   return (
     <Card className={className}>
@@ -135,7 +137,7 @@ export function RealtimeChart({
         </div>
       </CardHeader>
       <CardContent className="px-4 pb-4 pt-0">
-        <PlotlyChart data={data} layout={layout} config={config} height={height} a11yTitle={title} />
+        <PlotlyChart data={data} layout={layout} config={STATIC_CONFIG} height={height} a11yTitle={title} />
       </CardContent>
       {helpText && (
         <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} title={title}>

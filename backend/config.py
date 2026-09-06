@@ -25,6 +25,7 @@ Config file schema:
 }
 """
 
+import copy
 import json
 import os
 import re
@@ -52,13 +53,13 @@ _name_refresh_in_flight: set[str] = set()
 _name_refresh_lock = threading.Lock()
 _NAME_CACHE_TTL = 300  # 5 minutes
 
-# Cache for parsed configs: {service_id: (mtime_ns, raw_bytes)}.
+# Cache for parsed configs: {service_id: (mtime_ns, parsed_dict)}.
 # Revalidated by stat() on each load_config call AND explicitly invalidated
 # by save_config — mtime alone is not enough because Linux ext4/tmpfs can
 # produce identical st_mtime_ns for two writes within the same microsecond.
 # Hot paths (sync-status polls, every cron tick, every dashboard request)
 # hit this enough that skipping the open+read on the no-change path adds up.
-_config_cache: dict[str, tuple[int, bytes]] = {}
+_config_cache: dict[str, tuple[int, dict]] = {}
 _config_cache_lock = threading.Lock()
 
 # Path-keyed memo for _ensure_dirs(). Called from every list_configs /
@@ -152,14 +153,14 @@ def load_config(service_id: str | None) -> dict | None:
 
     cached = _config_cache.get(service_id)
     if cached is not None and cached[0] == mtime_ns:
-        return json.loads(cached[1])
+        return copy.deepcopy(cached[1])
 
     with open(path, "rb") as f:
         raw = f.read()
     parsed = json.loads(raw)
     with _config_cache_lock:
-        _config_cache[service_id] = (mtime_ns, raw)
-    return parsed
+        _config_cache[service_id] = (mtime_ns, parsed)
+    return copy.deepcopy(parsed)
 
 
 def _atomic_write_json(path, data: dict) -> None:

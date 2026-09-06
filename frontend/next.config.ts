@@ -6,7 +6,7 @@ const apiProxyUrl = process.env.API_PROXY_URL || 'http://127.0.0.1:8000'
 
 const nextConfig: NextConfig = {
   experimental: {
-    optimizePackageImports: ['lucide-react'],
+    optimizePackageImports: ['lucide-react', '@tanstack/react-query', '@tanstack/react-table'],
   },
   output: isStaticExport ? 'export' : 'standalone',
   trailingSlash: false,
