@@ -6,8 +6,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', '');\" && npm run gen:types && next dev -H 127.0.0.1",
-    "build": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', '');\" && npm run gen:types && next build",
+    "dev": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs');\" && npm run gen:types && next dev -H 127.0.0.1",
+    "build": "node -e \"const fs=require('fs'); fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs');\" && npm run gen:types && next build",
     "start": "next start",
     "lint": "eslint",
     "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js",
@@ -16,7 +16,7 @@
     "test:e2e": "playwright test --project=chromium",
     "test:e2e:all": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "postinstall": "node -e \"const fs=require('fs'); if (fs.existsSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js')) { fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-csp-worker.js', 'public/maplibre-gl-worker.mjs'); fs.writeFileSync('public/maplibre-gl-shared.mjs', ''); }\""
+    "postinstall": "node -e \"const fs=require('fs'); if (fs.existsSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs')) { fs.mkdirSync('public', {recursive: true}); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs', 'public/maplibre-gl-worker.mjs'); fs.copyFileSync('node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', 'public/maplibre-gl-shared.mjs'); }\""
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -37,7 +37,7 @@
     "date-fns": "^4.2.1",
     "date-fns-tz": "^3.2.0",
     "lucide-react": "^1.31.0",
-    "maplibre-gl": "^5.24.0",
+    "maplibre-gl": "^6.5.0",
     "next": "16.3.1",
     "next-themes": "^0.4.6",
     "nuqs": "^2.9.5",
