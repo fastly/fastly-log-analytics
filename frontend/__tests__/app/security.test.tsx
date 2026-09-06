@@ -14,19 +14,19 @@ import React from 'react'
 // NetworkSection) are exercised by their own component tests + the
 // Playwright journey in Phase 3.
 
-vi.mock('@/stores/serviceStore', () => ({
-  useServiceStore: vi.fn((selector) => {
-    const state = {
-      activeServiceId: 'test-svc',
-      isInitialized: true,
-      services: [{ id: 'test-svc', name: 'Test Service' }],
-      setServices: vi.fn(),
-      setInitialized: vi.fn(),
-      setActiveServiceId: vi.fn(),
-    }
-    return selector ? selector(state) : state
-  }),
-}))
+vi.mock('@/stores/serviceStore', () => {
+  const state = {
+    activeServiceId: 'test-svc',
+    isInitialized: true,
+    services: [{ id: 'test-svc', name: 'Test Service' }],
+    setServices: vi.fn(),
+    setInitialized: vi.fn(),
+    setActiveServiceId: vi.fn(),
+  }
+  const useServiceStore = vi.fn((selector) => selector ? selector(state) : state)
+  useServiceStore.getState = () => state
+  return { useServiceStore }
+})
 
 vi.mock('@/stores/filterStore', () => ({
   useFilterStore: vi.fn((selector) => {

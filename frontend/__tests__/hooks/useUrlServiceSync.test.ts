@@ -38,11 +38,13 @@ let mockState = {
   setActiveServiceId: mockSetActiveServiceId,
 }
 
-vi.mock('@/stores/serviceStore', () => ({
-  useServiceStore: vi.fn((selector?: (s: typeof mockState) => any) =>
+vi.mock('@/stores/serviceStore', () => {
+  const useServiceStore = vi.fn((selector?: (s: typeof mockState) => any) =>
     selector ? selector(mockState) : mockState,
-  ),
-}))
+  )
+  useServiceStore.getState = () => mockState
+  return { useServiceStore }
+})
 
 beforeEach(() => {
   mockUrlService = null
