@@ -26,16 +26,24 @@ test('dashboard mounts the maplibre container without crashing', async ({ page }
   await page.goto('/dashboard')
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-  // Map container is keyed by its lone canvas; wait for the canvas to
-  // attach to the DOM. ChoroplethMap renders an empty div first, then
-  // maplibre attaches the canvas. Firefox's WebGL init is slower than
-  // chromium/webkit in CI so we wait for 'attached' (DOM presence) rather
-  // than 'visible' (requires layout + paint) to avoid a ~46s firefox-only
-  // timeout that never fires on the other engines.
-  await page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 })
+  // ChoroplethMap wraps `new maplibregl.Map()` in a try/catch: when WebGL2
+  // context creation fails (headless/locked-down browser — real in CI
+  // Firefox, which reproducibly cannot get a WebGL2 context), it renders a
+  // text fallback ("Interactive map unavailable...") instead of the canvas
+  // container div, so no <canvas> ever attaches. maplibre-gl 6.7 made this
+  // failure loud and synchronous (GPUInitializationError thrown from the
+  // constructor) where earlier versions silently limped along — see
+  // https://github.com/maplibre/maplibre-gl-js/issues/8066. Both outcomes
+  // are "mounts without crashing"; race them instead of assuming the
+  // canvas always wins.
+  const canvasAttached = page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 })
+  const fallbackVisible = page.getByText(/Interactive map unavailable/i).waitFor({ state: 'visible', timeout: 45_000 })
+  // Promise.any (not .race): resolves as soon as either outcome lands, and
+  // only rejects if BOTH time out. .race would reject on the first
+  // rejection even if the other promise was about to succeed.
+  await Promise.any([canvasAttached, fallbackVisible])
 
-  // Tightened from `>= 0` (always true) to `>= 1` — pins that at least
-  // one canvas element actually mounted.
   const canvasCount = await page.locator('canvas').count()
-  expect(canvasCount).toBeGreaterThanOrEqual(1)
+  const fallbackCount = await page.getByText(/Interactive map unavailable/i).count()
+  expect(canvasCount + fallbackCount).toBeGreaterThanOrEqual(1)
 })
