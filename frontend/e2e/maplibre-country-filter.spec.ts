@@ -26,11 +26,13 @@ test('dashboard mounts the maplibre container without crashing', async ({ page }
   await page.goto('/dashboard')
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-  // Map container is keyed by its lone canvas; wait for the actual
-  // canvas to attach. ChoroplethMap renders an empty div first, then
-  // maplibre attaches the canvas. Polling for visibility returns as
-  // soon as maplibre is up rather than burning a fixed 3 s on every run.
-  await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 45_000 })
+  // Map container is keyed by its lone canvas; wait for the canvas to
+  // attach to the DOM. ChoroplethMap renders an empty div first, then
+  // maplibre attaches the canvas. Firefox's WebGL init is slower than
+  // chromium/webkit in CI so we wait for 'attached' (DOM presence) rather
+  // than 'visible' (requires layout + paint) to avoid a ~46s firefox-only
+  // timeout that never fires on the other engines.
+  await page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 })
 
   // Tightened from `>= 0` (always true) to `>= 1` — pins that at least
   // one canvas element actually mounted.
