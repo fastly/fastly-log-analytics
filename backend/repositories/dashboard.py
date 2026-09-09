@@ -19,6 +19,7 @@ from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
     _get_schema,
+    _rc_service_id,
     _safe_table,
     force_rebuild_view,
     get_source_extent,
@@ -329,9 +330,7 @@ def get_aggregates(
 
     from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
 
-    _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(
-        src.get("service_id") or src.get("name") or ""
-    )
+    _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src))
     use_rollups = not filters and os.path.isdir(rollup_dir) and not _durable_blocked
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.
