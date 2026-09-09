@@ -135,6 +135,36 @@ def _initialize_service(cfg: dict):
             if src:
                 _db.refresh_config_status(sid)
                 _ensure_persistent_view(sid, src)
+                # Durable-serving catch-up (spec Part 1): this pod's rollup
+                # cache may start empty while the durable DuckLake table
+                # already holds weeks of history from decoupled Celery
+                # ingest workers. Block this service's "initialized" state
+                # on one backfill pass so the dashboard gate (Task 3) has
+                # something real to trust. lookback_days=30 matches the
+                # existing daily deep-pass ceiling — anything older is out
+                # of scope, same as today's rollup_compact_daily job.
+                if svcconfig.is_durable_serving_mode(src):
+                    try:
+                        from backend.core.rollups.recompute import backfill_missing_hour_bundles
+
+                        backfill_missing_hour_bundles(sid, src, lookback_days=30)
+                        from backend.core.rollup_readiness import mark_rollup_coverage_ready
+
+                        mark_rollup_coverage_ready(sid)
+                        logging.info("[fastapi] Service %s: durable-mode rollup coverage catch-up complete.", sid)
+                    except Exception as e:
+                        # Best-effort: the hourly rollup_hour_heal self-heal
+                        # (also wired to mark_rollup_coverage_ready in Task 5)
+                        # will flip the flag within the hour if this fails or
+                        # times out via the existing _background_startup
+                        # per-service timeout. Durable-mode reads keep
+                        # raw-scanning (today's behavior) until then — never a
+                        # 500, never a silent undercount.
+                        logging.warning(
+                            "[fastapi] Service %s: durable-mode rollup catch-up failed (will retry via hourly self-heal): %s",
+                            sid,
+                            e,
+                        )
                 # Pre-warm compute_sync_status_cached so the very first
                 # /api/sync-status?skip_fos=true after restart doesn't pay
                 # the ~700ms _get_dir_size walk (19k files on a populated
