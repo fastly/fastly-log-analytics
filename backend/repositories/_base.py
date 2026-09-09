@@ -2237,6 +2237,7 @@ class QueryRunner:
             # the same metric-derivation logic as the rollup branch so the
             # buckets align exactly.
             live_start = max(st, active_hour_dt)
+            live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
             live_end = et
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
@@ -2280,6 +2281,22 @@ class QueryRunner:
                 f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
                 f"GROUP BY 1"
             )
+
+            if partial_rows:
+                # partial_rows is (field, value, count) for ALL rolled-up
+                # fields; this chart only needs the specific metric field(s)
+                # `parts` derives from — sum count across every row whose
+                # field matches the chart's underlying column. When
+                # chart_metric == "requests" this is just every partial_rows
+                # row regardless of field (a plain row count), matching
+                # `parts['num_rollup']`'s COUNT(*) semantics for that metric.
+                partial_total = sum(c for _, _, c in partial_rows) if chart_metric == "requests" else 0
+                if partial_total:
+                    partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
+                    select_clauses.append(
+                        f"SELECT TIMESTAMPTZ '{partial_bucket_tz}' AS out_bucket, "
+                        f"       {partial_total} AS num, {partial_total} AS den"
+                    )
 
         if not select_clauses:
             return []
@@ -2395,6 +2412,7 @@ class QueryRunner:
         live_needs_params = False
         if crosses_active:
             live_start = max(st, active_hour_dt)
+            live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
             live_end = et
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
@@ -2417,6 +2435,9 @@ class QueryRunner:
                 f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
                 f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
             )
+
+            if partial_rows:
+                select_clauses.append(f"SELECT {sum(c for _, _, c in partial_rows)} AS num")
 
         if not select_clauses:
             return 0

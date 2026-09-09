@@ -295,3 +295,119 @@ class TestActiveHourDirectLiveSlice:
         )
 
         assert rows is None, "filtered window must not serve the live slice via the direct read"
+
+
+class TestPartialHourMergeIntoRollupReaders:
+    """The partial-hour speed layer (Task 7's ``_partial_hour_adjusted_live_start``)
+    must be wired into BOTH the time_series and count readers' live branches:
+    narrowing ``live_start`` to the partial rollup's watermark (so the direct
+    live read never re-scans rows the partial rollup already folded in) AND
+    summing the partial rollup's rows into the response.
+
+    Each test is built so it fails if EITHER half of the wiring is missing:
+    dropping the narrowing double-counts the watermark-covered buffer row,
+    dropping the partial-rows merge undercounts by that same row — neither
+    produces the expected total.
+    """
+
+    def _write_partial_hour(self, cache_dir: str, hour: str, *, watermark_epoch: float, count: int) -> None:
+        from backend.core.rollups.partial_hour import _all_fields_path, _write_partial_hour_watermark
+
+        _write_partial_hour_watermark({"_cache_dir_override": cache_dir}, hour, watermark_epoch)
+        path = _all_fields_path({"_cache_dir_override": cache_dir}, hour)
+        con = duckdb.connect()
+        try:
+            con.execute(
+                f"COPY (SELECT * FROM (VALUES ('requests', '', {count})) "
+                f"AS t(field, value, count)) TO '{path}' (FORMAT PARQUET)"
+            )
+        finally:
+            con.close()
+
+    def _write_buffer_rows(self, cache_dir: str, *timestamps: datetime) -> None:
+        buffer_dir = Path(cache_dir) / "buffer"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        values_sql = ", ".join(f"(TIMESTAMPTZ '{ts.isoformat()}')" for ts in timestamps)
+        con = duckdb.connect()
+        try:
+            con.execute(
+                f"COPY (SELECT * FROM (VALUES {values_sql}) AS t(timestamp)) "
+                f"TO '{buffer_dir / 'live.parquet'}' (FORMAT PARQUET)"
+            )
+        finally:
+            con.close()
+
+    def test_time_series_merges_partial_hour_without_double_counting(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
+
+        # One closed hour before the active hour.
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        # Buffer holds two active-hour rows: one BEFORE the partial rollup's
+        # watermark (already folded into the partial rollup — must NOT be
+        # re-counted by the live direct read) and one AFTER it (not yet
+        # folded — must be picked up live).
+        watermark_instant = active_start + timedelta(minutes=10)
+        already_merged_row = active_start + timedelta(minutes=5)
+        not_yet_merged_row = active_start + timedelta(minutes=20)
+        self._write_buffer_rows(cache_dir, already_merged_row, not_yet_merged_row)
+
+        # Partial rollup already folded in the one row before the watermark.
+        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert rows is not None, "reader fell back to raw — partial-hour wiring likely broke the live SQL"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        # Expected: 600 (closed hour) + 1 (partial rollup's already-merged
+        # row) + 1 (live direct read's not-yet-merged row) = 602.
+        # If narrowing were dropped: the live direct read would ALSO count
+        # the already-merged row (its business timestamp is still >=
+        # active_start), giving 603 (double count).
+        # If the partial-rows merge were dropped: the already-merged row
+        # would never surface at all (the narrowed live scan explicitly
+        # excludes it), giving 601 (undercount).
+        assert by_time[active_start] == 2, f"active-hour bucket should sum to 2 (1 partial + 1 live), got {by_time}"
+        assert sum(by_time.values()) == 602, f"expected 602 total, got {sum(by_time.values())} ({by_time})"
+
+    def test_count_merges_partial_hour_without_double_counting(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
+
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        watermark_instant = active_start + timedelta(minutes=10)
+        already_merged_row = active_start + timedelta(minutes=5)
+        not_yet_merged_row = active_start + timedelta(minutes=20)
+        self._write_buffer_rows(cache_dir, already_merged_row, not_yet_merged_row)
+        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert total is not None, "reader fell back to raw — partial-hour wiring likely broke the live SQL"
+        assert total == 602, f"expected 602 (600 closed + 1 partial + 1 live), got {total}"

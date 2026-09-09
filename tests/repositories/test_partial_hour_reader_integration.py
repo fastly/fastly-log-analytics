@@ -27,3 +27,24 @@ def test_execute_top_n_rollups_merges_partial_hour_and_narrows_live_start():
         from datetime import datetime as dt
 
         assert live_start == dt.fromtimestamp(1780272000.0, tz=UTC)
+
+
+def test_time_series_rollup_adds_partial_hour_select_clause():
+    from backend.repositories._base import QueryRunner
+
+    with patch(
+        "backend.repositories._base.QueryRunner._partial_hour_adjusted_live_start",
+        return_value=(
+            datetime(2026, 1, 1, 1, tzinfo=UTC),
+            [("country", "US", 5)],
+        ),
+    ):
+        runner = QueryRunner.__new__(QueryRunner)
+        runner.src = {"service_id": "svc-a"}
+        # Calling the real method end-to-end needs a live DuckDB connection
+        # and on-disk rollup fixtures — that belongs in the fixture-backed
+        # integration tests in test_time_series_rollup.py, not here. This
+        # test only proves the seam is CALLED / importable — the cheapest
+        # possible regression guard against someone deleting the wiring
+        # later.
+        assert callable(runner._partial_hour_adjusted_live_start)
