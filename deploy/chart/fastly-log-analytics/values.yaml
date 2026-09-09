@@ -5,10 +5,10 @@
 # exercise the multi-pod Celery/valkey split on Kubernetes.
 #
 # PREREQUISITES. The defaults below install the single-node topology
-# (config.ingestMode: sync) and need NOTHING but a cluster with a
+# (config.deploymentMode: standard) and need NOTHING but a cluster with a
 # ReadWriteOnce StorageClass — `helm install` with no --set flags works.
 #
-# The scaled topology (config.ingestMode: celery) needs two datastores that
+# The scaled topology (config.deploymentMode: high_throughput) needs two datastores that
 # this chart does NOT ship: it declares no subchart dependencies, so Postgres
 # and valkey/redis are bring-your-own. See README.md for the value set, and
 # note that selecting celery mode without them fails at `helm template` time
@@ -122,32 +122,29 @@ persistence:
   size: 20Gi
 
 config:
-  # "sync"   — single-node ingest on the backend pod's in-process APScheduler.
+  # "standard" — single-node ingest on the backend pod's in-process APScheduler.
   #            Needs no Postgres, no broker, no worker/beat pods. This is the
-  #            app's own default (backend/config.py: INGEST_MODE) and the only
+  #            app's own default (backend/config.py: DEPLOYMENT_MODE) and the only
   #            mode that installs with no further values, so it is the chart
   #            default too.
-  # "celery" — the horizontally-scaled ingest fleet (ADR-15/ADR-16). Renders
+  # "high_throughput" — the horizontally-scaled ingest fleet (ADR-15/ADR-16). Renders
   #            the worker + beat Deployments and the KEDA ScaledObject, and
   #            REQUIRES all three of config.ducklakeCatalog,
   #            secrets.metadataDsn and secrets.celeryBrokerUrl (or an
   #            existingSecret carrying the latter two). Both DSNs must be
   #            Postgres: a DuckDB-file catalog is single-process and per-pod
   #            SQLite metadata cannot serialize the cron lease across pods.
-  #            backend/config.py::validate_ingest_mode() enforces the same
+  #            backend/config.py::validate_deployment_mode() enforces the same
   #            three conditions at boot; templates/validate.yaml enforces them
   #            at template time so a misconfiguration is a `helm install`
   #            error, not a CrashLoopBackOff.
   #
   # Note this scales INGEST only. The serving tier stays single-pod in both
   # modes — see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
-  ingestMode: sync
-  # "file"    — native per-service DuckDB + local buffers (sync only).
-  # "durable" — read-only ephemeral DuckDB over Postgres DuckLake (celery
-  #             only); no native service DuckDB file is opened by serving.
-  servingMode: file
+  deploymentMode: standard
   # "external" hands the discovery/ingest job family to RedBeat in the broker,
-  # so it only makes sense with ingestMode: celery (enforced at template time).
+  # so it only makes sense with deploymentMode: high_throughput (enforced at
+  # template time).
   schedulerMode: inprocess
   # "valkey" fans SSE events out across pods via the Celery broker, so it
   # needs secrets.celeryBrokerUrl. "local" is in-process.
@@ -185,7 +182,8 @@ config:
   # (or just under) resources.requests.cpu so DuckDB can't oversubscribe.
   duckdbThreads: "2"
   # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
-  # which is correct for ingestMode: sync and rejected for ingestMode: celery
+  # which is correct for deploymentMode: standard and rejected for
+  # deploymentMode: high_throughput
   # (which requires postgres:// or postgresql://).
   ducklakeCatalog: ""
   ducklakeDataPath: ""
@@ -193,7 +191,7 @@ config:
 
 # Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
 # does not take a redis:// URL). Only read when autoscaling.enabled and
-# ingestMode: celery. Keep in sync with secrets.celeryBrokerUrl.
+# deploymentMode: high_throughput. Keep in sync with secrets.celeryBrokerUrl.
 broker:
   host: valkey-master
   port: 6379
@@ -220,7 +218,8 @@ secrets:
   # e.g. postgresql://fla:PASSWORD@postgres:5432/ducklake
   metadataDsn: ""
 
-# Worker and beat Deployments are rendered only in ingestMode: celery.
+# Worker and beat Deployments are rendered only in deploymentMode:
+# high_throughput.
 workers:
   # Same RWO-PVC caveat as replicaCount above.
   replicaCount: 1

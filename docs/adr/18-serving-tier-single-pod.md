@@ -13,7 +13,7 @@ Scope note: this is about running **N backend pods concurrently**. One backend p
 
 The first safe serving increment is deliberately narrower than a complete
 stateless dashboard redesign: Celery mode with a Postgres DuckLake catalog
-now has an explicit `SERVING_MODE=durable`. Serving connections are
+now has an explicit `DEPLOYMENT_MODE=high_throughput`. Serving connections are
 read-only, independent in-memory DuckDB instances, and their `logs` views
 read only the per-service durable DuckLake table. Native service `.duckdb`
 files and local buffer files are not part of that serving path. Sync/file mode
@@ -71,7 +71,7 @@ Record the constraint and make it hard to violate by accident. Concretely, along
 - The backend Deployment in `deploy/chart/fastly-log-analytics/` is pinned to one replica and no longer has an HPA. Previously `.Values.autoscaling.enabled` gated the backend HPA **and** the worker KEDA ScaledObject together, so the only lever for scaling the (scalable) worker fleet also scaled the (unscalable) backend to `maxReplicas: 10`. Worker autoscaling stays on that flag; the backend is not offered as a knob, because there is no value of it that works. Pinned by `tests/chart/test_helm.py`.
 - `backend/core/duckdb_pool.py` carries a pointer here at the `read_only=False` note, so the next reader of "multi-pod scalable architecture" does not infer that the serving tier scales.
 
-The durable mode is opt-in and only valid with `INGEST_MODE=celery` plus a
+The durable mode is opt-in and only valid with `DEPLOYMENT_MODE=high_throughput` plus a
 Postgres `DUCKLAKE_CATALOG`; boot validation rejects an incoherent combination.
 The sync/file mode remains unchanged. This does not yet make every dashboard
 accelerator shared: rollups, local compaction, and prewarming must still be
@@ -154,7 +154,7 @@ These are recorded so they are not rediscovered as mysteries. None is worth fixi
 - **`metric_snapshot` takes no lease.** `backend/cron/jobs/metric_snapshot.py` never calls `start_cron_run`, so all N pods sample every 60s and write into a key with no pod dimension — N interleaved series stored as one. Harmless at N=1, meaningless above it. Note this is the *correct* behavior for a pod-local sampler and the wrong storage shape for it; it is blocker 3's mirror image.
 - **`committed_buffers` was missing from the Postgres schema.** It is created by SQLite migration 004, not by `_SCHEMA`, and `scripts/setup_pg_schema.py` only translates `_SCHEMA` plus explicit DDL — so Postgres metadata mode had no `committed_buffers` table at all, silently losing the durable checkpoint that stops a crash between `table.append()` and `tombstone_buffer_files()` from re-appending the same rows. `pg_connection._IGNORE_TABLES` already listed the table, i.e. the dialect shim was written assuming it existed. DDL added to `setup_pg_schema.py` alongside this ADR, since `docker-compose.multipod.yml` now runs on Postgres metadata and would otherwise have regressed.
 - **`service_id` is not on every metadata table.** `pg_connection`'s module docstring claimed migration 015 added `service_id` to every per-service table; it added it to `cron_runs` and `local_compacted_files` only. `committed_buffers` has no `service_id` and `filter_uncommitted_buffers` applies no such predicate, so that table is cross-tenant by buffer basename under a shared database — safe only because those basenames are uuid-derived. Docstring corrected; the schema was not changed.
-- **Chart deployment defaults CrashLoop — CLOSED.** `values.yaml` shipped `config.ingestMode: celery` with `config.ducklakeCatalog: ""` and `secrets.metadataDsn: ""`, so a default `helm install` booted a backend, worker and beat that `validate_ingest_mode()` correctly refused to start. The gate was behaving as designed; the defaults were wrong. Resolved after this ADR was written: the chart now defaults to `config.ingestMode: sync` (single-node, no external datastores, so a bare `helm install` is deployable), renders the worker/beat/KEDA objects only in celery mode, and validates the celery prerequisites in `templates/validate.yaml` — so selecting celery without a Postgres `ducklakeCatalog`/`metadataDsn`/broker is a `helm template` error naming the missing value, not three CrashLoopBackOffs. Pinned by `tests/chart/test_helm.py`.
+- **Chart deployment defaults CrashLoop — CLOSED.** `values.yaml` shipped `config.deploymentMode: high_throughput` with `config.ducklakeCatalog: ""` and `secrets.metadataDsn: ""`, so a default `helm install` booted a backend, worker and beat that `validate_deployment_mode()` correctly refused to start. The gate was behaving as designed; the defaults were wrong. Resolved after this ADR was written: the chart now defaults to `config.deploymentMode: standard` (single-node, no external datastores, so a bare `helm install` is deployable), renders the worker/beat/KEDA objects only in high-throughput mode, and validates the high-throughput prerequisites in `templates/validate.yaml` — so selecting high-throughput without a Postgres `ducklakeCatalog`/`metadataDsn`/broker is a `helm template` error naming the missing value, not three CrashLoopBackOffs. Pinned by `tests/chart/test_helm.py`.
 
 ## Out of scope
 
@@ -164,4 +164,4 @@ These are recorded so they are not rediscovered as mysteries. None is worth fixi
   replica-aware.
 - Anything about the ingest tier, which scales as ADR-15/ADR-16 describe.
 
-(The chart's `ingestMode`/`ducklakeCatalog` default mismatch was out of scope when this ADR was written and has since been fixed — see the gap list above.)
+(The chart's `deploymentMode`/`ducklakeCatalog` default mismatch was out of scope when this ADR was written and has since been fixed — see the gap list above.)

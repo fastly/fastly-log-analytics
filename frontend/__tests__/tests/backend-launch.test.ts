@@ -53,8 +53,7 @@ beforeEach(() => {
   for (const [key, value] of Object.entries(rejected)) vi.stubEnv(key, value)
   for (const key of ['FLA_DEV_NO_CRONS', 'FASTLY_MOCK_MODE']) vi.stubEnv(key, '0')
   vi.stubEnv('SCHEDULER_MODE', 'external')
-  vi.stubEnv('INGEST_MODE', 'celery')
-  vi.stubEnv('SERVING_MODE', 'durable')
+  vi.stubEnv('DEPLOYMENT_MODE', 'high_throughput')
   vi.stubEnv('SSE_BACKPLANE', 'valkey')
   vi.stubEnv('OTEL_EXPORTER', 'otlp')
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
@@ -102,8 +101,7 @@ describe('backend harness child isolation', () => {
         FASTLY_MOCK_MODE: '1',
         FLA_DEV_NO_CRONS: '1',
         SCHEDULER_MODE: 'inprocess',
-        INGEST_MODE: 'sync',
-        SERVING_MODE: 'file',
+        DEPLOYMENT_MODE: 'standard',
         SSE_BACKPLANE: 'local',
         OTEL_EXPORTER: 'none',
         UV_NO_ENV_FILE: '1',

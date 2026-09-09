@@ -64,7 +64,7 @@ never templated leaves the pod stuck in CreateContainerConfigError.
 */}}
 {{- define "fastly-log-analytics.managedSecret" -}}
 {{- if .Values.secrets.existingSecret -}}
-{{- else if or (eq .Values.config.ingestMode "celery") .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl -}}
+{{- else if or (eq .Values.config.deploymentMode "high_throughput") .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl -}}
 true
 {{- end -}}
 {{- end }}
@@ -97,14 +97,12 @@ plus the DuckLake settings.
 In celery mode both keys are marked non-optional. That is the only check the
 chart has left for a pre-created secrets.existingSecret it cannot read: a
 missing key stops the pod at CreateContainerConfigError naming the key,
-instead of starting it and letting validate_ingest_mode() CrashLoop it.
+instead of starting it and letting validate_deployment_mode() CrashLoop it.
 */}}
 {{- define "fastly-log-analytics.sharedEnv" -}}
-{{- $celery := eq .Values.config.ingestMode "celery" -}}
-- name: INGEST_MODE
-  value: {{ .Values.config.ingestMode | quote }}
-- name: SERVING_MODE
-  value: {{ .Values.config.servingMode | default "file" | quote }}
+{{- $highThroughput := eq .Values.config.deploymentMode "high_throughput" -}}
+- name: DEPLOYMENT_MODE
+  value: {{ .Values.config.deploymentMode | quote }}
 - name: SCHEDULER_MODE
   value: {{ .Values.config.schedulerMode | quote }}
 {{- if include "fastly-log-analytics.hasSecret" . }}
@@ -113,13 +111,13 @@ instead of starting it and letting validate_ingest_mode() CrashLoop it.
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: CELERY_BROKER_URL
-      optional: {{ not $celery }}
+      optional: {{ not $highThroughput }}
 - name: METADATA_DSN
   valueFrom:
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: METADATA_DSN
-      optional: {{ not $celery }}
+      optional: {{ not $highThroughput }}
 {{- end }}
 {{- if .Values.config.ducklakeCatalog }}
 - name: DUCKLAKE_CATALOG

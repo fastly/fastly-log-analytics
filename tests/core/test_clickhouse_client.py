@@ -424,7 +424,7 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
         patch("backend.main._migrate_config_on_startup"),
         patch("backend.main._enforce_proxy_headers_configured"),
         patch("backend.core.metadata.pg_schema.ensure_pg_schema"),
-        patch("backend.config.validate_ingest_mode"),
+        patch("backend.config.validate_deployment_mode"),
         patch("backend.utils.telemetry_proxy.start_proxy_server"),
         patch("backend.utils.tunnel.get_tunnel_manager"),
         patch("backend.main._bounded_scheduler_shutdown"),

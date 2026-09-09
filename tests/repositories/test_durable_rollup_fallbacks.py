@@ -9,12 +9,12 @@ def _durable_source() -> dict:
     return {
         "name": "durable_rollup_svc",
         "service_id": "durable_rollup_svc",
-        "serving_mode": "durable",
+        "deployment_mode": "high_throughput",
     }
 
 
 def _enable_durable(monkeypatch):
-    monkeypatch.setattr(svcconfig, "INGEST_MODE", "celery")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://catalog/ducklake")
 
 
@@ -78,7 +78,7 @@ def test_durable_network_health_uses_ducklake_fallback_when_rollups_are_missing(
     monkeypatch, in_memory_duckdb, test_service_source
 ):
     _enable_durable(monkeypatch)
-    src = {**test_service_source, "name": "durable_network_svc", "serving_mode": "durable"}
+    src = {**test_service_source, "name": "durable_network_svc", "deployment_mode": "high_throughput"}
     table = src["name"]
     in_memory_duckdb.execute(
         f'CREATE TABLE "{table}" ('

@@ -125,12 +125,12 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # METADATA_DSN. The two are separate concerns (commit-path catalog vs.
     # cron/ingest bookkeeping) and ADR-15 §2 states the code does not assume
     # they coincide. A fallback made that false in the one configuration where
-    # it was reachable: INGEST_MODE=sync with METADATA_DSN set (the documented
+    # it was reachable: DEPLOYMENT_MODE=standard with METADATA_DSN set (the documented
     # halfway point of the SQLite→Postgres metadata migration), where it would
     # silently plant DuckLake's catalog tables inside the metadata database
     # AND abandon the per-service .ducklake file that held the real table
     # state — a silent catalog swap, which fails empty rather than loud. In
-    # celery mode it was already unreachable: validate_ingest_mode() requires
+    # high-throughput mode it was already unreachable: validate_deployment_mode() requires
     # a Postgres DUCKLAKE_CATALOG, so the left operand is never falsy there.
     dsn = config.DUCKLAKE_CATALOG
     service_id = source.get("service_id") or source.get("name", "default")

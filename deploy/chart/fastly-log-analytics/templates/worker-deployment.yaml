@@ -1,4 +1,4 @@
-{{- if eq .Values.config.ingestMode "celery" -}}
+{{- if eq .Values.config.deploymentMode "high_throughput" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

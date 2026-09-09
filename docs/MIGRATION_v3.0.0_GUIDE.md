@@ -14,8 +14,8 @@ Read [Before you upgrade](#before-you-upgrade) first — it is short, and one it
 
 | | You are here if | What you do |
 |---|---|---|
-| **Single node** (default) | You run one instance — the v2.x default. `INGEST_MODE` unset. | Pull, restart. Nothing else. |
-| **Scaled ingest** (opt-in) | You want ingestion to fan out across many workers. | Provision Postgres + valkey, set three env vars, restart. |
+| **Standard** (default) | You run one instance — the v2.x default. `DEPLOYMENT_MODE=standard`. | Pull, restart. Nothing else. |
+| **High-throughput** (opt-in) | You want ingestion to fan out across many workers. | Provision Postgres + valkey, set three env vars, restart. |
 
 Single node remains the default and is fully supported. Scaled ingest is opt-in; you are not required to move to it, and **nothing about your v2.x deployment stops working if you don't**.
 
@@ -46,7 +46,7 @@ Adoption reads the Iceberg **table**, so it is not bounded by your local cache. 
 
 ---
 
-## Path A — single node
+## Path A — standard deployment
 
 ```bash
 git pull                      # or pull the new image
@@ -80,7 +80,7 @@ curl -s 'http://localhost/api/health?deep=1'   # expect "status": "ok"
 
 ---
 
-## Path B — scaled ingest (`INGEST_MODE=celery`)
+## Path B — high-throughput deployment (`DEPLOYMENT_MODE=high_throughput`)
 
 Only take this path if you actually need ingestion to scale across workers. It requires two datastores you provide.
 
@@ -92,7 +92,7 @@ Only take this path if you actually need ingestion to scale across workers. It r
 ### Configuration
 
 ```bash
-INGEST_MODE=celery
+DEPLOYMENT_MODE=high_throughput
 DUCKLAKE_CATALOG=postgresql://USER:PASS@HOST:5432/DBNAME
 METADATA_DSN=postgresql://USER:PASS@HOST:5432/DBNAME
 CELERY_BROKER_URL=redis://HOST:6379/0

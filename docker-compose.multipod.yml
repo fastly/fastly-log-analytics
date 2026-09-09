@@ -58,17 +58,13 @@ services:
     - SSE_BACKPLANE=valkey
     - CELERY_BROKER_URL=redis://valkey:6379/0
     - SCHEDULER_MODE=external
-    - INGEST_MODE=celery
-    # Serving never opens a pod-local native DuckDB file in the shared
-    # Postgres/DuckLake topology; each request uses an ephemeral read-only
-    # connection and a durable-only logs view.
-    - SERVING_MODE=durable
+    - DEPLOYMENT_MODE=high_throughput
     # Celery/multipod mode also REQUIRES shared metadata: per-service SQLite
     # is a pod-local file, so the cron lease / ingest ledger / ingested-file
     # manifest would each be private to one process. This stack only ever
     # "worked" on SQLite because backend and worker share the ./data bind
     # mount on one host — that is not a topology, it is a coincidence.
-    # validate_ingest_mode() now refuses to boot celery mode without it.
+    # validate_deployment_mode() now refuses to boot celery mode without it.
     # Same Postgres instance and database as the DuckLake catalog above:
     # separate table namespaces, one container to run locally. They are
     # separate concerns and nothing in the code assumes they coincide.
@@ -210,10 +206,9 @@ services:
     - PYTHONUNBUFFERED=1
     - DUCKDB_MEMORY_LIMIT=4GB
     - CELERY_BROKER_URL=redis://valkey:6379/0
-    # Cron/ingest bodies execute here and gate on INGEST_MODE; SSE progress
+    # Cron/ingest bodies execute here and gate on DEPLOYMENT_MODE; SSE progress
     # events publish through the valkey backplane.
-    - INGEST_MODE=celery
-    - SERVING_MODE=durable
+    - DEPLOYMENT_MODE=high_throughput
     - SSE_BACKPLANE=valkey
     - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
     # Shared metadata — same rationale as the backend service above.
@@ -245,10 +240,9 @@ services:
     environment:
     - PYTHONUNBUFFERED=1
     - CELERY_BROKER_URL=redis://valkey:6379/0
-    - INGEST_MODE=celery
-    - SERVING_MODE=durable
+    - DEPLOYMENT_MODE=high_throughput
     - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
-    # beat never calls validate_ingest_mode() (that fires in
+    # beat never calls validate_deployment_mode() (that fires in
     # worker_process_init, and beat forks no worker children) and touches no
     # metadata today — set here anyway so it can never quietly open a
     # pod-local SQLite metadata file if that ever changes.

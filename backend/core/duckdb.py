@@ -645,7 +645,7 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
         "hostname": socket.gethostname(),
         "db_path": db_path,
         "read_only": read_only,
-        "ingest_mode": os.getenv("INGEST_MODE", "sync"),
+        "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standard"),
         "catalog_mode": catalog_mode,
     }
 
@@ -1054,7 +1054,7 @@ def get_connection(
                 raise DBBusyError(
                     "Database is locked by another process "
                     f"(path={db_path}, pid={os.getpid()}, read_only={read_only}, "
-                    f"ingest_mode={context['ingest_mode']}, catalog_mode={context['catalog_mode']}). "
+                    f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
                     "Try again in a few seconds."
                 ) from e
             _record_lock_retry()

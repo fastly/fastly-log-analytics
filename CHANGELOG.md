@@ -19,7 +19,7 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 ### Added
 
 - **DuckLake commit path** — DuckDB's DuckLake extension replaces Apache Iceberg/pyiceberg as the catalog and write path. The catalog is a local `.ducklake` file for single-node deployments or a Postgres DSN for multi-writer ones; committed parquet lands in Fastly Object Storage for cloud-backed sources.
-- **Distributed ingest (`INGEST_MODE=celery`)** — discovery and conversion fan out across Celery workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
+- **Distributed ingest (`DEPLOYMENT_MODE=high_throughput`)** — discovery and conversion fan out across Celery workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
 - **Batched commits** — a batch of objects costs one catalog transaction rather than one per file, keeping catalog snapshots proportional to batches instead of to file count. Tunable via `LEDGER_CONVERT_BATCH_SIZE` (default 50).
 - **Postgres metadata backend** — `METADATA_DSN` switches cron state, the ingest ledger, and ingested-file manifests from per-node SQLite to a shared Postgres database, which is what allows more than one ingest process to coordinate. Cron leases are acquired atomically via a partial unique index so two processes can never run the same job.
 - **RUM beacon ingest on the ledger** — client vitals and client errors ingest through the same ledger/worker path, writing both tables in one transaction.
@@ -33,8 +33,8 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 
 ### Breaking
 
-- **`INGEST_MODE=celery` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
-- Deployments that set `DUCKLAKE_CATALOG` empty while running `INGEST_MODE=celery` will not start until it is configured. The Helm chart now defaults to `config.ingestMode: sync` (installable with no `--set` flags) and rejects a celery install that is missing the Postgres DSNs or the broker at `helm template` time.
+- **`DEPLOYMENT_MODE=high_throughput` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
+- Deployments that set `DUCKLAKE_CATALOG` empty while running `DEPLOYMENT_MODE=high_throughput` will not start until it is configured. The Helm chart now defaults to `config.deploymentMode: standard` (installable with no `--set` flags) and rejects a high-throughput install that is missing the Postgres DSNs or the broker at `helm template` time.
 
 ### Upgrading from 2.x
 

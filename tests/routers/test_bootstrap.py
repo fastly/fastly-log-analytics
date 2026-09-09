@@ -74,7 +74,7 @@ def test_bootstrap_projects_path_a_capability_for_sync_services(client, tmp_path
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
-    monkeypatch.setattr(config, "INGEST_MODE", "sync")
+    monkeypatch.setattr(config, "DEPLOYMENT_MODE", "standard")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
 
     response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
@@ -89,7 +89,7 @@ def test_bootstrap_projects_path_a_capability_for_celery_services(client, tmp_pa
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
-    monkeypatch.setattr(config, "INGEST_MODE", "celery")
+    monkeypatch.setattr(config, "DEPLOYMENT_MODE", "high_throughput")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "raw_layout_version": 3})
 
     response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})

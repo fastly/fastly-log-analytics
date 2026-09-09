@@ -6,7 +6,7 @@ from backend.core import rollup_readiness as rr
 def test_initialize_service_marks_coverage_ready_for_durable_service():
     rr.reset_rollup_coverage_ready()
     cfg = {"service_id": "svc-durable"}
-    fake_src = {"service_id": "svc-durable", "serving_mode": "durable"}
+    fake_src = {"service_id": "svc-durable", "deployment_mode": "high_throughput"}
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
@@ -30,7 +30,7 @@ def test_initialize_service_marks_coverage_ready_for_durable_service():
 def test_initialize_service_skips_catchup_for_file_mode_service():
     rr.reset_rollup_coverage_ready()
     cfg = {"service_id": "svc-file"}
-    fake_src = {"service_id": "svc-file", "serving_mode": "file"}
+    fake_src = {"service_id": "svc-file", "deployment_mode": "standard"}
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),

@@ -855,7 +855,7 @@ class Scheduler:
             # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
             # the previous `now.minute % 15 == 0` gate inside the discovery tick
             # fired zero-or-multiple times depending on interval alignment.
-            if svcconfig.INGEST_MODE == "celery":
+            if svcconfig.is_high_throughput_mode(src):
                 from backend.cron.jobs.sync import _run_ledger_sweep
 
                 sweep_job_id = f"ledger_sweep_{service_id}"
@@ -885,7 +885,7 @@ class Scheduler:
             # independent dedup registries that don't know about each other.
             rum_cfg = cfg.get("rum", {})
             rum_enabled = bool(cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False))
-            if rum_enabled and svcconfig.INGEST_MODE == "celery":
+            if rum_enabled and svcconfig.is_high_throughput_mode(src):
                 from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
                 rum_disc_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))

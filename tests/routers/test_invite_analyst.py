@@ -57,7 +57,7 @@ def test_generate_viewer_key_requires_stored_api_key():
 def test_generate_viewer_key_rejects_celery_topology():
     """Scalable DuckLake services must use Path B instead of FOS-only invites."""
     with (
-        patch("backend.config.INGEST_MODE", "celery"),
+        patch("backend.config.DEPLOYMENT_MODE", "high_throughput"),
         patch("backend.config.load_config", return_value=_FAKE_CFG),
     ):
         client = TestClient(app)

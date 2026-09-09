@@ -20,7 +20,7 @@ def durable_metrics(monkeypatch, tmp_path):
     source = {
         "name": sid,
         "service_id": sid,
-        "serving_mode": "durable",
+        "deployment_mode": "high_throughput",
         "fos_local_warehouse": True,
         "_cache_dir_override": str(tmp_path / "cache"),
         "duckdb_path": str(tmp_path / "must-not-open.duckdb"),

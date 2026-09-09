@@ -1,7 +1,7 @@
-"""Boot-time gate on incoherent ``INGEST_MODE=celery`` configuration.
+"""Boot-time gate on incoherent ``DEPLOYMENT_MODE=high_throughput`` configuration.
 
-``config.validate_ingest_mode()`` is the only thing standing between a
-half-configured celery deployment and a fleet that degrades invisibly. It
+``config.validate_deployment_mode()`` is the only thing standing between a
+half-configured high-throughput deployment and a fleet that degrades invisibly. It
 runs from BOTH entry points — the backend lifespan (``main.py``) and
 ``worker_process_init`` in ``celery_app.py`` — so every process refuses to
 start rather than one of them silently operating on pod-local state.
@@ -35,8 +35,7 @@ def celery_env(monkeypatch):
     """A fully coherent celery-mode configuration. Each test knocks out the
     one piece it is asserting on, so a passing test proves that piece is
     load-bearing rather than that some unrelated field was missing."""
-    monkeypatch.setattr(svcconfig, "INGEST_MODE", "celery")
-    monkeypatch.setattr(svcconfig, "SERVING_MODE", "durable")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
     monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "redis://valkey:6379/0")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
     monkeypatch.setenv("METADATA_DSN", _PG)
@@ -45,39 +44,23 @@ def celery_env(monkeypatch):
 
 def test_sync_mode_never_validates(monkeypatch):
     """Sync mode is the single-pod default and requires none of the three."""
-    monkeypatch.setattr(svcconfig, "INGEST_MODE", "sync")
-    monkeypatch.setattr(svcconfig, "SERVING_MODE", "file")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
     monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "")
     monkeypatch.delenv("METADATA_DSN", raising=False)
 
-    assert svcconfig.validate_ingest_mode() is None
+    assert svcconfig.validate_deployment_mode() is None
 
 
 def test_coherent_celery_config_passes(celery_env):
-    assert svcconfig.validate_ingest_mode() is None
+    assert svcconfig.validate_deployment_mode() is None
 
 
 def test_celery_requires_broker(celery_env):
     celery_env.setattr(svcconfig, "CELERY_BROKER_URL", "")
 
     with pytest.raises(RuntimeError, match="requires CELERY_BROKER_URL"):
-        svcconfig.validate_ingest_mode()
-
-
-def test_celery_requires_explicit_durable_serving_mode(celery_env):
-    celery_env.setattr(svcconfig, "SERVING_MODE", "file")
-
-    with pytest.raises(RuntimeError, match="requires SERVING_MODE=durable"):
-        svcconfig.validate_ingest_mode()
-
-
-def test_durable_serving_mode_is_celery_only(monkeypatch):
-    monkeypatch.setattr(svcconfig, "INGEST_MODE", "sync")
-    monkeypatch.setattr(svcconfig, "SERVING_MODE", "durable")
-
-    with pytest.raises(RuntimeError, match="SERVING_MODE=durable requires INGEST_MODE=celery"):
-        svcconfig.validate_ingest_mode()
+        svcconfig.validate_deployment_mode()
 
 
 @pytest.mark.parametrize(
@@ -89,7 +72,7 @@ def test_celery_rejects_non_postgres_ducklake_catalog(celery_env, catalog):
     celery_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
 
     with pytest.raises(RuntimeError, match="requires DUCKLAKE_CATALOG to be a Postgres DSN"):
-        svcconfig.validate_ingest_mode()
+        svcconfig.validate_deployment_mode()
 
 
 @pytest.mark.parametrize(
@@ -107,7 +90,7 @@ def test_celery_rejects_non_postgres_metadata_dsn(celery_env, dsn):
         celery_env.setenv("METADATA_DSN", dsn)
 
     with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
-        svcconfig.validate_ingest_mode()
+        svcconfig.validate_deployment_mode()
 
 
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql"])
@@ -118,7 +101,7 @@ def test_both_postgres_url_schemes_accepted(celery_env, scheme):
     celery_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
     celery_env.setenv("METADATA_DSN", dsn)
 
-    assert svcconfig.validate_ingest_mode() is None
+    assert svcconfig.validate_deployment_mode() is None
 
 
 def test_metadata_dsn_error_names_the_shared_state_at_risk(celery_env):
@@ -128,9 +111,28 @@ def test_metadata_dsn_error_names_the_shared_state_at_risk(celery_env):
     celery_env.delenv("METADATA_DSN", raising=False)
 
     with pytest.raises(RuntimeError) as exc:
-        svcconfig.validate_ingest_mode()
+        svcconfig.validate_deployment_mode()
 
     msg = str(exc.value)
     assert "job_runs" in msg
     assert "ingest ledger" in msg
     assert "pod-local" in msg
+
+
+def test_unknown_deployment_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "unknown")
+
+    with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize("mode", ["standard", "high_throughput"])
+def test_config_to_source_emits_deployment_mode(monkeypatch, tmp_path, mode):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda _service_id: str(tmp_path / "service.duckdb"))
+
+    source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
+
+    assert source["deployment_mode"] == mode
+    assert "ingest_mode" not in source
+    assert "serving_mode" not in source

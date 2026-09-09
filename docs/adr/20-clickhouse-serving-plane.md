@@ -191,10 +191,10 @@ evidence; Tasks 7–10 subsequently added and measured the experimental
 dispatcher and admin tooling. Task 12 removed only the dashboard dispatcher.
 
 A baseline must identify its running revision and effective
-`INGEST_MODE=celery`, `SERVING_MODE=durable`, Postgres metadata, and Postgres
+`DEPLOYMENT_MODE=high_throughput`, Postgres metadata, and Postgres
 DuckLake catalog. Healthy HTTP endpoints alone do not establish that topology.
 The initial running Docker image inspected on 2026-09-07 did not expose the
-`SERVING_MODE` config implementation; it is not the required baseline.
+`DEPLOYMENT_MODE` config implementation; it is not the required baseline.
 
 Capture at least 30 requests after warm-up, with dataset size, fixed query
 corpus, concurrency, achieved throughput, p50/p95/p99, errors, ingest lag, and

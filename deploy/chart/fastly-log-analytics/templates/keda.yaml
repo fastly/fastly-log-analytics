@@ -1,6 +1,6 @@
 {{- /* No worker fleet to scale in sync mode — the ScaledObject would target
 a Deployment this chart does not render. */ -}}
-{{- if and .Values.autoscaling.enabled (eq .Values.config.ingestMode "celery") }}
+{{- if and .Values.autoscaling.enabled (eq .Values.config.deploymentMode "high_throughput") }}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

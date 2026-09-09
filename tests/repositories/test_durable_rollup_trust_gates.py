@@ -7,7 +7,7 @@ from backend.repositories import _base
 
 def test_collect_hourly_bundle_paths_trusts_durable_once_ready(tmp_path):
     rr.reset_rollup_coverage_ready()
-    src = {"service_id": "svc-durable", "name": "svc-durable", "serving_mode": "durable"}
+    src = {"service_id": "svc-durable", "name": "svc-durable", "deployment_mode": "high_throughput"}
 
     with (
         patch("backend.config.is_durable_serving_mode", return_value=True),

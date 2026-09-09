@@ -254,8 +254,7 @@ def runtime(container: str) -> tuple[str, int]:
                 "docker-compose.clickhouse-prototype.yml",
             )
         )
-        or env.get("INGEST_MODE") != "celery"
-        or env.get("SERVING_MODE") != "durable"
+        or env.get("DEPLOYMENT_MODE") != "high_throughput"
         or env.get("CLICKHOUSE_ENABLED") not in ("true", "false")
         or not env.get("METADATA_DSN", "").startswith("postgres")
         or not env.get("DUCKLAKE_CATALOG", "").startswith("postgres")

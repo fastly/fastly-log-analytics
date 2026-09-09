@@ -33,7 +33,7 @@ phase-specific gate results as current.
 
 The final Docker backend was rebuilt with all three overlays, leaving workers,
 other services, and persistent volumes intact. Runtime inspection confirmed
-`INGEST_MODE=celery`, `SERVING_MODE=durable`, `CLICKHOUSE_ENABLED=true`, and
+`DEPLOYMENT_MODE=high_throughput`, `CLICKHOUSE_ENABLED=true`, and
 `OTEL_EXPORTER=otlp`. ClickHouse enablement controls tooling, not dashboard routing.
 
 After the final source changes and full-CI attempt, the requested command ran:
@@ -156,7 +156,7 @@ or raw debug SQL into reports.
 The comparison backend was rebuilt from checkout `cf623a66`, **including the
 existing uncommitted `pg_schema.py` and `metric_snapshots.py` changes**. This is
 not a pristine-commit benchmark. Runtime inspection confirmed
-`INGEST_MODE=celery`, `SERVING_MODE=durable`, Postgres operational metadata, and
+`DEPLOYMENT_MODE=high_throughput`, Postgres operational metadata, and
 a Postgres DuckLake catalog. Requests used the local Docker stack through Caddy
 on port 80, not a separate development server.
 
@@ -669,8 +669,8 @@ backend was **not** restarted or enabled during Task 7 verification.
 The local multipod + observability + prototype compose overlays supply:
 
 ```text
-INGEST_MODE=celery
-SERVING_MODE=durable
+DEPLOYMENT_MODE=high_throughput
+DEPLOYMENT_MODE=high_throughput
 CLICKHOUSE_ENABLED=true
 CLICKHOUSE_HOST=clickhouse
 CLICKHOUSE_PORT=8123

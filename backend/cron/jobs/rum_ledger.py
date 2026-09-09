@@ -9,7 +9,7 @@ The pre-existing v2 (non-celery) RUM path — ``backend.core.rum_ingest``,
 ``backend.cron.jobs.rum_commit``, and the ``rum_sync_{id}``/``rum_commit_{id}``
 APScheduler jobs registered in ``backend.cron.scheduler`` — is untouched and
 keeps running unchanged for non-celery deployments. The scheduler only
-registers THIS module's jobs when ``INGEST_MODE == "celery"``, so the two
+registers THIS module's jobs in high-throughput mode, so the two
 pipelines never run concurrently against the same service (which would
 double-ingest: both write into the same DuckLake ``client_vitals``/
 ``client_errors`` tables via independent dedup registries that don't know
@@ -96,7 +96,7 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
             0.0,
             "error",
             run_id=run_id,
-            error_message="INGEST_MODE=celery requires CELERY_BROKER_URL",
+            error_message="DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL",
             summary="Celery RUM ingest misconfigured: no broker URL",
         )
         return
@@ -141,19 +141,17 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
 def _run_rum_ledger_sweep(service_id: str) -> None:
     """Celery-mode crash net for the RUM ledger pipeline — RUM counterpart
     of ``backend.cron.jobs.sync._run_ledger_sweep``. Registered by the
-    scheduler only when INGEST_MODE=celery and RUM is enabled for this
+    scheduler only when high-throughput mode and RUM is enabled for this
     service."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import sweep_rum_ledger_once
 
-    if svcconfig.INGEST_MODE != "celery":
+    src = get_source_for_service(service_id)
+    if src is None or not svcconfig.is_high_throughput_mode(src):
         return
     cfg = svcconfig.load_config(service_id)
     if not cfg:
-        return
-    src = get_source_for_service(service_id)
-    if src is None:
         return
 
     try:

@@ -1,6 +1,6 @@
 {{- /* Beat schedules the RedBeat job family, which only exists in celery
 mode; in sync mode the backend's in-process APScheduler runs everything. */ -}}
-{{- if and .Values.beat.enabled (eq .Values.config.ingestMode "celery") -}}
+{{- if and .Values.beat.enabled (eq .Values.config.deploymentMode "high_throughput") -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

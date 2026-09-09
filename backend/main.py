@@ -582,11 +582,12 @@ async def _application_lifespan(app: FastAPI):
 
     ensure_pg_schema()
 
-    # Ingest-mode sanity: INGEST_MODE is the single gate for the Celery data
+    # Deployment-mode sanity: DEPLOYMENT_MODE is the single gate for the
+    # high-throughput data
     # plane (jobs must NOT key off CELERY_BROKER_URL truthiness — setting the
     # broker URL for the SSE backplane alone must not reroute ingestion), and
     # celery mode requires a multi-writer (Postgres) DuckLake catalog.
-    svcconfig.validate_ingest_mode()
+    svcconfig.validate_deployment_mode()
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
     # or silently switch engines when this startup probe fails.
@@ -1237,7 +1238,7 @@ def health_check(
             # cutover). Freshness = the newest ledger commit; a backlog of
             # non-terminal rows older than the stale cutoff degrades even when
             # discovery keeps succeeding (workers dead / queue wedged).
-            if os.environ.get("INGEST_MODE") == "celery":
+            if config.DEPLOYMENT_MODE == "high_throughput":
                 try:
                     lrow = con.execute(
                         "SELECT max(committed_at) AS c FROM ingest_ledger WHERE service_id = ?",

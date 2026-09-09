@@ -60,7 +60,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         logger.info("⏭️  \x1b[95m[commit]\x1b[0m %s: skipping — %s", service_id, str(e))
         return
 
-    if svcconfig.INGEST_MODE == "celery":
+    if svcconfig.is_high_throughput_mode(src):
         # Celery/ledger data plane: converts commit to DuckLake per insert, so
         # this job's role is adjacent-small-file compaction. Run it INLINE
         # (this job already executes on a worker in external mode) so the

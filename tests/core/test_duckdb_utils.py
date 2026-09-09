@@ -92,7 +92,7 @@ class TestGetConnectionLockHandling:
         assert record.args["service_id"] == "svc-1"
         assert record.args["db_path"] == "/tmp/_test.duckdb"
         assert record.args["read_only"] is True
-        assert record.args["ingest_mode"] == "sync"
+        assert record.args["deployment_mode"] == "standard"
 
     def test_conflict_error_retries_then_raises_db_busy(self):
         """``"conflict"`` in the message is the original lock signal —

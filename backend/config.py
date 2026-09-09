@@ -50,10 +50,10 @@ NGWAF_DATA_DIR = DATA_DIR / "ngwaf"
 CACHE_DATA_DIR = DATA_DIR / "cache"
 SYSTEM_DATA_DIR = DATA_DIR / "system"
 
-# Serving topology is deployment-wide rather than per-service. Define this
+# Deployment topology is deployment-wide rather than per-service. Define this
 # before the default source is built so config_to_source() can safely include
 # it during module import.
-SERVING_MODE = os.getenv("SERVING_MODE", "file").strip().lower()
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standard").strip().lower()
 
 
 @dataclass(frozen=True)
@@ -382,10 +382,10 @@ def get_active_service_id(fallback_to_first: bool = True) -> str | None:
 
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the db.py 'source' dict format."""
-    if INGEST_MODE == "celery" and cfg.get("raw_layout_version") != 3:
+    if is_high_throughput_mode() and cfg.get("raw_layout_version") != 3:
         raise RuntimeError(
             f"service {cfg.get('service_id', '<unknown>')} uses the v2 raw-log layout; "
-            "tear it down and reprovision it for v3 before enabling celery ingestion"
+            "tear it down and reprovision it for v3 before enabling high-throughput deployment"
         )
     actual_db_path = duckdb_path(cfg.get("service_id", "default"))
 
@@ -432,7 +432,7 @@ def config_to_source(cfg: dict) -> dict:
         "cdn_service_id": cfg.get("cdn_service_id", ""),
         "logging_service_id": cfg.get("service_id", ""),
         "duckdb_path": actual_db_path,
-        "serving_mode": SERVING_MODE,
+        "deployment_mode": DEPLOYMENT_MODE,
         "access_level": cfg.get("access_level", "read_write"),
         "storage_mode": cfg.get("storage_mode", "cloud"),
         "log_period": int(cfg.get("log_period", 60)),
@@ -690,7 +690,6 @@ _CacheRegistry.register("config._name_cache", _name_cache)
 _CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)
 
 # Cloud / Scalability Overrides (Phase 2+)
-INGEST_MODE = os.getenv("INGEST_MODE", "sync")
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
 DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
 DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
@@ -708,14 +707,17 @@ def is_durable_serving_mode(source: dict | None = None) -> bool:
     topology with a Postgres DuckLake catalog. Sync/file mode keeps its
     existing native per-service DuckDB file and local-buffer behavior.
     """
-    mode = (source or {}).get("serving_mode") or SERVING_MODE
-    return (
-        mode == "durable" and INGEST_MODE == "celery" and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
-    )
+    return is_high_throughput_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
 
 
-def validate_ingest_mode() -> None:
-    """Fail fast on incoherent Celery-mode configuration.
+def is_high_throughput_mode(source: dict | None = None) -> bool:
+    """Return whether the deployment uses the high-throughput topology."""
+    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
+    return mode == "high_throughput"
+
+
+def validate_deployment_mode() -> None:
+    """Fail fast on incoherent high-throughput configuration.
 
     Called from the backend lifespan AND celery worker init so both
     processes refuse to run rather than degrade invisibly:
@@ -737,17 +739,15 @@ def validate_ingest_mode() -> None:
     ``metadata.pg_connection.is_postgres()`` (which also reads it live)
     can never disagree about which backend is active.
     """
-    if SERVING_MODE not in {"file", "durable"}:
-        raise RuntimeError("SERVING_MODE must be either 'file' or 'durable'")
-    if SERVING_MODE == "durable" and INGEST_MODE != "celery":
-        raise RuntimeError("SERVING_MODE=durable requires INGEST_MODE=celery")
-    if INGEST_MODE != "celery":
+    if DEPLOYMENT_MODE not in {"standard", "high_throughput"}:
+        raise RuntimeError("DEPLOYMENT_MODE must be either 'standard' or 'high_throughput'")
+    if DEPLOYMENT_MODE != "high_throughput":
         return
     if not CELERY_BROKER_URL:
-        raise RuntimeError("INGEST_MODE=celery requires CELERY_BROKER_URL to be set")
+        raise RuntimeError("DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL to be set")
     if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
-            "INGEST_MODE=celery requires DUCKLAKE_CATALOG to be a Postgres DSN — "
+            "DEPLOYMENT_MODE=high_throughput requires DUCKLAKE_CATALOG to be a Postgres DSN — "
             "a DuckDB-file catalog is single-process and cannot serve concurrent "
             "worker writers plus backend readers (torn merges corrupt the catalog). "
             f"Got: {DUCKLAKE_CATALOG!r}"
@@ -755,18 +755,11 @@ def validate_ingest_mode() -> None:
     metadata_dsn = os.getenv("METADATA_DSN", "")
     if not metadata_dsn.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
-            "INGEST_MODE=celery requires METADATA_DSN to be a Postgres DSN — "
+            "DEPLOYMENT_MODE=high_throughput requires METADATA_DSN to be a Postgres DSN — "
             "per-service SQLite metadata is a pod-local file, so the cron lease "
             "(job_runs), the ingest ledger, and the ingested-file manifest would "
             "each be private to one process: every worker would re-discover and "
             "re-convert the same objects and no lease could serialize them. A "
             "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
             f"Got: {metadata_dsn!r}"
-        )
-    if SERVING_MODE != "durable":
-        raise RuntimeError(
-            "INGEST_MODE=celery requires SERVING_MODE=durable — "
-            "the serving tier must use read-only ephemeral DuckDB connections "
-            "against the shared Postgres DuckLake catalog; SERVING_MODE=file "
-            "would reopen a pod-local native DuckDB file."
         )

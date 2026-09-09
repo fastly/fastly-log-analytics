@@ -41,7 +41,7 @@ To provide real-time query speed without waiting for a commit, the DuckDB `logs`
 
 ## 2. Ingest Pipeline & Atomic Guarantees
 
-There are two ingest data planes, selected by `INGEST_MODE`. Both write through the same DuckLake commit path and the same unified `logs` view — they differ in how work is scheduled and fanned out, not in where data ends up.
+There are two supported deployment modes selected by `DEPLOYMENT_MODE`. Standard uses the synchronous ingest data plane; high-throughput uses the ledger-backed Celery data plane. Both write through the same DuckLake commit path and unified `logs` view — they differ in scheduling and fan-out, not in where data ends up.
 
 ### Default mode: per-service APScheduler
 
@@ -62,7 +62,7 @@ graph TD
 3.  **Commit Promotion:** Once the Parquet buffer is written successfully, the database transfers the records into `ingested_files` and clears the `ingest_in_flight` table.
 4.  **Idempotent Auto-Recovery:** Upon any startup or tick cycle, the ingest system inspects left-over entries in the in-flight table. If the corresponding buffer exists, it is promoted; otherwise, it is dropped and queued for clean re-download on the next LIST tick.
 
-### `INGEST_MODE=celery`: the ledger data plane
+### `DEPLOYMENT_MODE=high_throughput`: the ledger data plane
 
 For horizontally-scaled ingestion (many Celery workers pulling from FOS concurrently — the 100k-1M RPS target), discovery and conversion fan out across worker processes instead of running in one pod's scheduler loop:
 

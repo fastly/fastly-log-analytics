@@ -122,8 +122,7 @@ def test_ducklake_benchmark_does_not_require_disabling_diagnostics(enabled):
     container = {
         "Config": {
             "Env": [
-                "INGEST_MODE=celery",
-                "SERVING_MODE=durable",
+                "DEPLOYMENT_MODE=high_throughput",
                 f"CLICKHOUSE_ENABLED={enabled}",
                 "METADATA_DSN=postgresql://fixture",
                 "DUCKLAKE_CATALOG=postgresql://fixture",

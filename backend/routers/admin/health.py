@@ -7,6 +7,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from backend import config
 from backend.models.admin import HealthSnapshotResponse
 
 from ._router import router
@@ -265,7 +266,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
 
     # ── Celery Metrics ───────────────────────────────────────────────
     try:
-        if os.environ.get("INGEST_MODE") == "celery":
+        if config.DEPLOYMENT_MODE == "high_throughput":
             from backend.celery_app import app as celery_app
             from backend.celery_status import celery_queue_depths
 

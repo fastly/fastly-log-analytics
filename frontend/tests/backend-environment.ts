@@ -31,8 +31,7 @@ export function backendTestEnvironment(
     FLA_DEV_NO_CRONS: '1',
     // The external scheduler branch is selected before the no-crons guard.
     SCHEDULER_MODE: 'inprocess',
-    INGEST_MODE: 'sync',
-    SERVING_MODE: 'file',
+    DEPLOYMENT_MODE: 'standard',
     SSE_BACKPLANE: 'local',
     OTEL_EXPORTER: 'none',
     CONTRACT_CONFIGS_DIR: join(sandbox, 'configs'),

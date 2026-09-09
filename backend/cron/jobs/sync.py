@@ -140,7 +140,7 @@ def _run_log_discovery_cron(
             logger.info("[scheduler] %s: skipping sync — %s", service_id, str(e))
             return
 
-        if svcconfig.INGEST_MODE == "celery":
+        if svcconfig.is_high_throughput_mode(src):
             # Celery/ledger data plane: run discovery INLINE (this job already
             # executes on a worker via RedBeat in external mode) so the
             # cron_runs row carries the real outcome — files discovered, real
@@ -159,7 +159,7 @@ def _run_log_discovery_cron(
                     0.0,
                     "error",
                     run_id=run_id,
-                    error_message="INGEST_MODE=celery requires CELERY_BROKER_URL",
+                    error_message="DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL",
                     summary="Celery ingest misconfigured: no broker URL",
                 )
                 return
@@ -736,7 +736,7 @@ def _run_full_sweep(
         logger.info("⏭️  \x1b[95m[full_sync]\x1b[0m %s: skipping — %s", service_id, e)
         return
 
-    if svcconfig.INGEST_MODE == "celery":
+    if svcconfig.is_high_throughput_mode(src):
         # Celery data plane: the catch-net is a full-prefix LIST diffed into
         # the ingest_ledger (converts fan out from there). Running the v2
         # file-based ingest here would open the per-service .duckdb from a
@@ -1109,18 +1109,16 @@ def _run_gap_heal(service_id: str) -> None:
 def _run_ledger_sweep(service_id: str) -> None:
     """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
     rows, and diff a lookback FOS LIST against the ledger. Registered by the
-    scheduler only when INGEST_MODE=celery."""
+    scheduler only when high-throughput mode."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import sweep_ledger_once
 
-    if svcconfig.INGEST_MODE != "celery":
-        return
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
     src = get_source_for_service(service_id)
-    if src is None:
+    if src is None or not svcconfig.is_high_throughput_mode(src):
         return
 
     try:

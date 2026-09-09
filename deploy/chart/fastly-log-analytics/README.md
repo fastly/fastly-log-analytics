@@ -6,9 +6,9 @@ exercise the multi-pod Celery/valkey ingest split on Kubernetes.
 
 ## Two topologies
 
-The chart renders one of two shapes, selected by `config.ingestMode`.
+The chart renders one of two shapes, selected by `config.deploymentMode`.
 
-| | `sync` (default) | `celery` |
+| | `standard` (default) | `high_throughput` |
 |---|---|---|
 | Ingest | in-process APScheduler on the backend pod | Celery worker fleet + RedBeat |
 | Pods | backend, frontend | backend, frontend, worker, beat |
@@ -31,7 +31,7 @@ applies to the stateless frontend only.
 helm install fla ./deploy/chart/fastly-log-analytics
 ```
 
-`celery` mode needs **Postgres and valkey/redis, which this chart does not
+`high_throughput` mode needs **Postgres and valkey/redis, which this chart does not
 ship.** `Chart.yaml` declares no subchart dependencies on purpose: vendoring
 them would make `helm lint`/`helm template` (and therefore `make
 deploy-validate`) depend on `helm dependency update` having network access.
@@ -40,8 +40,7 @@ same namespace is enough for a test cluster — then:
 
 ```sh
 helm install fla ./deploy/chart/fastly-log-analytics \
-  --set config.ingestMode=celery \
-  --set config.servingMode=durable \
+  --set config.deploymentMode=high_throughput \
   --set config.schedulerMode=external \
   --set config.sseBackplane=valkey \
   --set config.ducklakeCatalog=postgresql://fla:PASSWORD@postgres:5432/ducklake \
@@ -66,21 +65,20 @@ The two DSNs may point at the same Postgres database; every DuckLake table is
 ([ADR-15](../../../docs/adr/15-multi-writer-topology.md)). Run
 `scripts/setup_pg_schema.py` against the metadata database before first boot.
 
-Celery mode requires `config.servingMode=durable`. In this mode backend
+High-throughput mode uses durable serving. In this mode backend
 requests use ephemeral read-only DuckDB connections over the shared Postgres
 DuckLake catalog and do not open a native per-service DuckDB file.
 
 ## Misconfiguration is a template-time error
 
-`backend/config.py::validate_ingest_mode()` refuses to boot a backend or
-worker whose `INGEST_MODE=celery` lacks a Postgres `DUCKLAKE_CATALOG` or
+`backend/config.py::validate_deployment_mode()` refuses to boot a backend or
+worker whose `DEPLOYMENT_MODE=high_throughput` lacks a Postgres `DUCKLAKE_CATALOG` or
 `METADATA_DSN`. `templates/validate.yaml` reproduces those conditions at
 render time, so `helm install`/`helm template` fails with a message naming the
 value to set instead of deploying backend, worker and beat pods that all
 CrashLoop. It also rejects the combinations that fail *silently* at runtime:
-an unrecognised `ingestMode` (the backend would quietly fall back to `sync`),
-`servingMode=durable` outside celery mode or `servingMode=file` in celery mode,
-`schedulerMode=external` outside celery mode (RedBeat-routed jobs with no
+an unrecognised `deploymentMode`, or `schedulerMode=external` outside
+high-throughput mode (RedBeat-routed jobs with no
 worker fleet to consume them), and `sseBackplane=valkey` with no broker URL.
 
 The one case it cannot check is an `existingSecret` missing a key — the chart

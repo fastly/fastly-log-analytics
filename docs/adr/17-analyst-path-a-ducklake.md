@@ -15,7 +15,7 @@ This is a genuine regression for any service running celery mode / DuckLake with
 
 ## Decision
 
-Path A is explicitly rejected when `INGEST_MODE=celery`. The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
+Path A is explicitly rejected when `DEPLOYMENT_MODE=high_throughput`. The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
 
 Path A remains available for the synchronous topology for backward compatibility with existing FOS/metadata-pointer deployments. A future FOS-resident DuckLake catalog export may restore Path A for scalable deployments, but it requires the validation spike described above before changing this gate.
 
@@ -45,7 +45,7 @@ No implementation ships with this ADR. The decision is to record the gap precise
 ## Consequences
 
 - Anyone re-enabling or documenting Path A for a celery-mode service must first resolve this ADR's open question, not assume pyiceberg-era behavior still holds.
-- The join flow (`generate-viewer-key`, `/api/provision/join`) should eventually branch on `INGEST_MODE`/`DUCKLAKE_CATALOG` shape to either provision option 2's export mechanism or explicitly reject the join with a clear error — currently it does neither.
+- The join flow (`generate-viewer-key`, `/api/provision/join`) should eventually branch on `DEPLOYMENT_MODE`/`DUCKLAKE_CATALOG` shape to either provision option 2's export mechanism or explicitly reject the join with a clear error — currently it does neither.
 - Path B (live shared instance, direct-mode against the admin's running process) is unaffected — it never had its own catalog dependency; it reads through the admin's already-running backend, which already has a valid DuckLake attach.
 
 ## Out of scope

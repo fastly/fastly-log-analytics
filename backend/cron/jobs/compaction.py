@@ -125,7 +125,7 @@ def _run_local_compact(service_id: str) -> None:
         # so the overlapping 15-min lookback just re-heals late arrivals.
         from backend import config as svcconfig
 
-        if svcconfig.INGEST_MODE == "celery":
+        if svcconfig.is_high_throughput_mode(src):
             try:
                 rollup_hours = _ledger_touched_hours(service_id, lookback_s=15 * 60)
                 if rollup_hours:
@@ -134,7 +134,7 @@ def _run_local_compact(service_id: str) -> None:
                     recompute_touched_hours(service_id, src, rollup_hours)
                     summary += f"; rollups recomputed for {len(rollup_hours)} ledger hour(s)"
             except Exception as e:
-                errors = list(errors) + [f"celery rollup recompute failed: {e}"]
+                errors = list(errors) + [f"high-throughput rollup recompute failed: {e}"]
                 logger.warning("[local-compact] %s: celery rollup recompute failed: %s", service_id, e)
         if errors:
             err_preview = "\n".join(errors[:3])

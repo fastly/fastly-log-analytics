@@ -88,9 +88,9 @@ def _worker_process_init(**_kwargs):
     # Fail the worker fast on incoherent celery-mode config (missing broker,
     # file-based DuckLake catalog) instead of degrading invisibly — same
     # guard the backend lifespan runs.
-    from backend.config import validate_ingest_mode
+    from backend.config import validate_deployment_mode
 
-    validate_ingest_mode()
+    validate_deployment_mode()
 
     # Workers issue metadata queries (ingest ledger, cron_runs) and may boot
     # before — or without — the API pod, so they cannot rely on the backend
