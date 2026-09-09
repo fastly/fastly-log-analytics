@@ -193,6 +193,8 @@ def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             src = {**source, "_cache_dir_override": tmp_dir}
+            if "iceberg_metadata_location" in source:
+                src["iceberg_metadata_location"] = source["iceberg_metadata_location"]
             try:
                 if not db_iceberg.ducklake_table_exists(src):
                     return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}

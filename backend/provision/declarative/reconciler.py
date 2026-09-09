@@ -1149,7 +1149,7 @@ def _apply_diff(
     if has_rum_cond:
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
-        statement = 'req.url.path == "/rum-beacon"'
+        statement = 'req.url.path == "/rum-beacon" && req.method == "POST"'
         if (
             desired_state
             and getattr(desired_state, "rum_custom_condition", None)

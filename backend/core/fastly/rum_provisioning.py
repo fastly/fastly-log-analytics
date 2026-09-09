@@ -395,6 +395,9 @@ if (obj.status == 611) {
     set obj.status = 204;
     set obj.response = "No Content";
     set obj.http.Cache-Control = "no-cache, no-store, must-revalidate";
+    set obj.http.Access-Control-Allow-Origin = "*";
+    set obj.http.Access-Control-Allow-Methods = "POST, OPTIONS";
+    set obj.http.Access-Control-Allow-Headers = "Content-Type";
     synthetic "";
     return (deliver);
 }"""
