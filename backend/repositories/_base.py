@@ -1776,6 +1776,15 @@ class QueryRunner:
                             continue
                     live_topn_fields.append(f)
                 live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_str)
+                # live_where was built above from the un-narrowed live_start;
+                # rebuild it here so the create_filtered_temp_table fallback
+                # (used when the direct-read path below returns None) scans
+                # only [narrowed live_start, live_end) too. Otherwise the
+                # fallback re-scans [hour_start, watermark) — the exact
+                # range partial_rows already covers — and both get summed
+                # into the same by_field dict, double-counting every
+                # affected field.
+                live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
                 _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
                 if tmp_name is None:

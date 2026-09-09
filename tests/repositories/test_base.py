@@ -787,6 +787,108 @@ class TestExecuteTopNBatchPerFieldLimits:
             f"partial-hour rollup rows were not merged into execute_top_n_rollups: {country_counts}"
         )
 
+    def test_execute_top_n_rollups_fallback_scan_does_not_double_count_partial_hour_window(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Regression: ``live_where`` (the SQL predicate the
+        create_filtered_temp_table FALLBACK uses when the direct-read path
+        returns None) was built from the un-narrowed ``live_start`` BEFORE
+        ``_partial_hour_adjusted_live_start`` narrows it. That meant the
+        fallback re-scanned ``[hour_start, watermark)`` — the exact window
+        the partial-hour rollup already covers — and both got summed into
+        ``by_field``, inflating every affected field's count.
+
+        This seeds fallback-scan rows that fall INSIDE
+        ``[hour_start, watermark)`` (i.e. genuinely overlap what the partial
+        rollup already covers) and asserts they are counted once, not
+        twice: with the fix, ``live_where`` is rebuilt from the narrowed
+        ``live_start`` so the fallback only scans
+        ``[watermark, live_end)`` and these old-window rows are excluded —
+        the field's total then comes ONLY from the partial rollup.
+        """
+        from datetime import timedelta
+
+        import duckdb as _duckdb
+
+        from backend.core.rollups import partial_hour as ph
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour = active_dt.strftime("%Y-%m-%d-%H")
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht_overlap")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        # Force the direct-read fast path off so the live scan goes through
+        # the create_filtered_temp_table FALLBACK this bug lives in — same
+        # technique as the sibling test above.
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda self, *a, **kw: None)
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        # Real per-field hourly parquet fixture feeding the actual
+        # merge_partial_hour writer — this is the ONLY source of "DE" rows;
+        # the partial rollup's watermark ends up ~"now" (the fixture file's
+        # real mtime).
+        hourly_dir = tmp_path / "data" / f"timestamp_hour={active_hour}"
+        hourly_dir.mkdir(parents=True)
+        con = _duckdb.connect(":memory:")
+        try:
+            con.execute("SET TimeZone='UTC';")
+            con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR)")
+            con.executemany(
+                "INSERT INTO t VALUES (?, ?)",
+                [
+                    (active_dt + timedelta(minutes=1), "DE"),
+                    (active_dt + timedelta(minutes=1), "DE"),
+                ],
+            )
+            con.execute(f"COPY t TO '{hourly_dir / 'batch1.parquet'}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+
+        stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
+        assert stats["new_files"] == 1
+
+        # Fallback-scan seed table: "DE" rows placed just after the hour
+        # boundary (definitely before the watermark, which is ~real "now" —
+        # by the time this line runs, real wall-clock time has advanced
+        # well past active_dt + 1 second) so they fall INSIDE
+        # [hour_start, watermark) — the window the partial rollup already
+        # covers. A correctly-narrowed fallback must exclude them. "US"
+        # rows placed comfortably after "now" stay outside that window and
+        # must still be counted, proving the fallback isn't narrowed into
+        # uselessness either.
+        in_memory_duckdb.execute("CREATE TABLE logs_pht_overlap (timestamp TIMESTAMPTZ, country VARCHAR)")
+        now = datetime.now(UTC)
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_pht_overlap VALUES (?, 'DE'), (?, 'DE'), (?, 'US'), (?, 'US')",
+            [
+                active_dt + timedelta(seconds=1),
+                active_dt + timedelta(seconds=1),
+                now + timedelta(minutes=1),
+                now + timedelta(minutes=1),
+            ],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = active_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_pht_overlap")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 2, f"post-watermark live rows must still be counted: {country_counts}"
+        assert country_counts.get("DE") == 2, (
+            "fallback scan double-counted the partial-hour window — DE should come ONLY from the "
+            f"partial rollup (2), not also from the pre-watermark fallback rows: {country_counts}"
+        )
+
     def test_execute_top_n_rollups_live_skips_nonrendered_identifier_fields(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):
