@@ -591,6 +591,75 @@ export function StorageStep({ s }: { s: WizardState }) {
             )}
           </div>
 
+          {/* Section: Local Cache Retention Policies */}
+          <div
+            className={cn(
+              "p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity",
+              !config.enable_cron_sync && "opacity-30 pointer-events-none",
+            )}
+          >
+            <div>
+              <LabelWithInfo
+                label="Local Dashboard Cache Retention"
+                info="Control how long data is stored on this server's local NVMe disk for instantaneous dashboard querying. Data older than this is seamlessly queried directly from S3 (slower, but saves local disk space)."
+              />
+              <p className="text-[10px] text-muted-foreground leading-relaxed">
+                Configure local hot-cache windows. Rollups are tiny and should be kept long-term; raw logs are huge and can be evicted early. If your local disk gets &gt;85% full, the oldest cache is automatically evicted regardless of these settings to prevent disk exhaustion.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  label="Local Raw Log Cache"
+                  info="How many days of raw logs to keep on the local NVMe disk. Older logs are automatically queried directly from S3 Object Storage."
+                />
+                <Select
+                  value={String(config.cache_retention_days)}
+                  onValueChange={(v) =>
+                    setConfig({ ...config, cache_retention_days: Number(v) })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RETENTION_OPTIONS.map((o) => (
+                      <SelectItem key={o.value} value={o.value} className="text-xs">
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  label="Local Rollups & Metrics"
+                  info="How many MONTHS of pre-aggregated time-series rollups to keep locally. These are very small and allow instant loading of 90-day dashboard charts."
+                />
+                <Select
+                  value={String(config.rollup_retention_months)}
+                  onValueChange={(v) =>
+                    setConfig({ ...config, rollup_retention_months: Number(v) })
+                  }
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1" className="text-xs">1 month</SelectItem>
+                    <SelectItem value="3" className="text-xs">3 months</SelectItem>
+                    <SelectItem value="6" className="text-xs">6 months</SelectItem>
+                    <SelectItem value="12" className="text-xs">12 months</SelectItem>
+                    <SelectItem value="24" className="text-xs">24 months</SelectItem>
+                    <SelectItem value="0" className="text-xs">Forever</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+
           <div
             className={cn(
               "flex items-center justify-between p-3 border rounded-md bg-muted/5 transition-opacity",

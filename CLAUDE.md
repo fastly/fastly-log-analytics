@@ -95,13 +95,26 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 
 
 ### Deployment
-- Single GCE VM: Docker Compose + Caddy reverse proxy
+- **Supported path:** single GCE VM, Docker Compose + Caddy reverse proxy
 - Prod binds 127.0.0.1; Caddy:80 is sole ingress (stamps X-Proxied-By-Caddy)
 - Admin access via SSH tunnel to :3001; analyst access via `/share-login`
 - Deploy: `gcloud compute ssh <INSTANCE> --zone=<ZONE> --command="~/restart.sh"`
 - Verify on dev (ports 13002/18002) before GCE deploy
 - `local-docs/` and `pending-docs/` never reach `main`; `docs/` is PUBLIC
 - Repo is PUBLIC — never commit GCE/bucket/service-ID strings; use `infra-leak-sweep` skill
+- **Experimental Kubernetes chart:** `deploy/chart/fastly-log-analytics/` (Helm). Not the supported path —
+  exists to exercise the multi-pod Celery/valkey ingest split. Two topologies via `config.ingestMode`:
+  `sync` (default, no external datastores) or `celery` (worker + beat pods, requires bring-your-own
+  Postgres + valkey/redis). See the chart's own [README](deploy/chart/fastly-log-analytics/README.md).
+  - **The serving tier does not scale in either topology.** The backend Deployment is pinned to
+    `replicas: 1` with no HPA — the per-service `.duckdb` file takes a process-exclusive lock, so a
+    second backend pod 503s every request. Only ingest (`workers.replicaCount` / KEDA) scales.
+    See [docs/adr/18-serving-tier-single-pod.md](docs/adr/18-serving-tier-single-pod.md) before touching
+    `replicaCount`, chart autoscaling, or anything implying the backend is horizontally scalable.
+  - PVC is ReadWriteOnce — every pod mounting it (including workers) is pinned to one node. Disabling
+    persistence swaps it for `emptyDir` and loses the service registry (`/app/configs`) on every restart.
+  - Misconfiguration (celery mode missing its Postgres/broker DSNs) fails at `helm template`/install time
+    via `templates/validate.yaml`, not as a CrashLoop — pinned by `tests/chart/test_helm.py`.
 
 ### Pre-merge / PR readiness
 - **`local-docs/` and `pending-docs/` must be deleted before squash-merging.** They are working notes,

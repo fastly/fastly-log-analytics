@@ -236,7 +236,16 @@ def write_service_config(state: dict):
                 )
             ),
             "cache_retention_days": int(
-                state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90)
+                state.get(
+                    "cache_retention_days",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90),
+                )
+            ),
+            "rollup_retention_months": int(
+                state.get(
+                    "rollup_retention_months",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("rollup_retention_months", 12),
+                )
             ),
         },
         "cron_compact": {

@@ -70,6 +70,8 @@ export interface ProvisionConfig {
   rum_enabled: boolean;
   log_retention_days: number;
   rum_retention_days: number;
+  cache_retention_days: number;
+  rollup_retention_months: number;
   rum_custom_condition: string;
   // Pinned Faro Web SDK version chosen in the RUM version picker
   // (StorageStep). null = unpinned — the backend serves whatever is
@@ -107,6 +109,8 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_enabled: false,
   log_retention_days: 30,
   rum_retention_days: 30,
+  cache_retention_days: 14,
+  rollup_retention_months: 12,
   rum_custom_condition: "",
   faro_version: null,
 };

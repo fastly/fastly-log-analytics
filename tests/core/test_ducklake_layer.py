@@ -72,6 +72,9 @@ def _lake_count(source: dict) -> int:
 
 def test_ducklake_table_name_is_per_service_and_sanitized():
     assert ducklake_table_name({"service_id": "AbC-123"}) == "logs_abc_123"
+    assert ducklake_table_name({"service_id": "FastlyService123", "name": "Customer-facing name"}) == (
+        "logs_fastlyservice123"
+    )
     assert ducklake_table_name({"name": "svc.two"}) == "logs_svc_two"
     assert ducklake_table_name({"name": "svc.two"}, "client_vitals") == "logs_svc_two__client_vitals"
     # hostile input cannot break out of an identifier
