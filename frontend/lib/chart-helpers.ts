@@ -85,6 +85,8 @@ const MAX_DENSE_BUCKETS = 5000
 export function denseTimeGrid(
   times: Array<string | number | null | undefined>,
   intervalSeconds: number | undefined,
+  startTime?: string | null,
+  endTime?: string | null,
 ): string[] | null {
   if (!intervalSeconds || intervalSeconds <= 0) return null
   const stepMs = intervalSeconds * 1000
@@ -96,10 +98,27 @@ export function denseTimeGrid(
         .filter((t) => !Number.isNaN(t)),
     ),
   ].sort((a, b) => a - b)
-  if (timesMs.length < 2) return null
 
-  const first = timesMs[0]
-  const last = timesMs[timesMs.length - 1]
+  let first = timesMs.length > 0 ? timesMs[0] : undefined
+  let last = timesMs.length > 0 ? timesMs[timesMs.length - 1] : undefined
+
+  if (startTime) {
+    const sMs = Date.parse(startTime)
+    if (!Number.isNaN(sMs)) {
+      const startBucket = sMs - (sMs % stepMs)
+      if (first === undefined || startBucket < first) first = startBucket
+    }
+  }
+  if (endTime) {
+    const eMs = Date.parse(endTime)
+    if (!Number.isNaN(eMs)) {
+      const endBucket = eMs - (eMs % stepMs)
+      if (last === undefined || endBucket > last) last = endBucket
+    }
+  }
+
+  if (first === undefined || last === undefined || first > last) return null
+
   // Bail if any present bucket is off the interval grid — filling would silently
   // drop its value. DuckDB guarantees alignment, so this only trips on a mixed
   // or unexpected grain.
@@ -107,7 +126,8 @@ export function denseTimeGrid(
 
   const nBuckets = Math.round((last - first) / stepMs) + 1
   // Already contiguous (no gaps) or grid too large to be worth/safe filling.
-  if (nBuckets <= timesMs.length || nBuckets > MAX_DENSE_BUCKETS) return null
+  if (nBuckets <= timesMs.length && !startTime && !endTime) return null
+  if (nBuckets > MAX_DENSE_BUCKETS) return null
 
   const grid: string[] = []
   for (let k = 0; k < nBuckets; k++) grid.push(new Date(first + k * stepMs).toISOString())
@@ -137,10 +157,14 @@ export function densifyBarSeries(
   time_series: BarSeriesPoint[],
   intervalSeconds: number | undefined,
   hasCategories: boolean,
+  startTime?: string | null,
+  endTime?: string | null,
 ): BarSeriesPoint[] {
   const grid = denseTimeGrid(
     time_series.map((d) => d.time),
     intervalSeconds,
+    startTime,
+    endTime,
   )
   if (!grid) return time_series
 

@@ -20,7 +20,7 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("optimize_iceberg")
+@cron_task("optimize_iceberg", job_name="optimize")
 def _run_optimize(service_id: str) -> None:
     """Daily job: compact small Iceberg data files into target-sized ones."""
     from backend.core import iceberg as db_iceberg
@@ -48,7 +48,7 @@ def _run_optimize(service_id: str) -> None:
     cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="optimize")
     _display = _display_label(src, service_id)
-    logger.info("▶️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
+    logger.info("🏎️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
     _log_and_add_progress(
         run_id,
         service_id,
@@ -137,4 +137,14 @@ def _run_optimize(service_id: str) -> None:
 
     finalize_cron_duration(src, run_id, start_time)
 
-    logger.info("⏹️  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
+
+        _snapshot = compute_sync_status_cached(service_id)
+        if _snapshot is not None:
+            _sync_status_publisher.publish(service_id, _snapshot)
+    except Exception:
+        logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
+
+    logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)

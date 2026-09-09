@@ -21,6 +21,9 @@
 {
 	admin off
 	auto_https off
+	log {
+		level ERROR
+	}
 }
 
 # Host-agnostic on :80 — serves localhost, *.localhost (e.g. fastly.localhost,

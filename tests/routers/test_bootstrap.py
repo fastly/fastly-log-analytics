@@ -69,6 +69,39 @@ def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
     assert data["settings"]["mask_ips"] is False
 
 
+def test_bootstrap_projects_path_a_capability_for_sync_services(client, tmp_path, monkeypatch):
+    """Sync-mode services advertise independent analyst Path A as available."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setattr(config, "INGEST_MODE", "sync")
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    service = response.json()["services"][0]
+    assert service["analyst_path_a_supported"] is True
+    assert service["analyst_path_a_reason"] is None
+
+
+def test_bootstrap_projects_path_a_capability_for_celery_services(client, tmp_path, monkeypatch):
+    """Celery/DuckLake services advertise Path A as unavailable with the Path B remedy."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    monkeypatch.setattr(config, "INGEST_MODE", "celery")
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "raw_layout_version": 3})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    service = response.json()["services"][0]
+    assert service["analyst_path_a_supported"] is False
+    assert service["analyst_path_a_reason"] == (
+        "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+        "Use live shared-instance analyst access (Path B)."
+    )
+
+
 def test_bootstrap_omits_admin_token_when_env_unset(client, tmp_path, monkeypatch):
     """ADMIN_SHARED_SECRET unset (the default) → ``settings.admin_token`` is
     null. Pinned because Phase Q's frontend interceptor MUST no-op in this
@@ -258,7 +291,7 @@ def test_startup_stub_still_withholds_warmup_dependent_fields(monkeypatch):
         assert payload["settings"]["initializing"] is True
 
 
-def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy):
+def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy, ngwaf_workspace_id=None):
     """Seed a masking/non-masking analyst invite, log in, and return the
     /api/bootstrap response body for assertions about ``settings``."""
     from backend import config
@@ -269,7 +302,7 @@ def _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, *, pii_policy):
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
     share_db.reset_for_tests()
     tunnel.reset_for_tests()
-    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "ngwaf_workspace_id": ngwaf_workspace_id})
 
     invite = share_db.create_remote_invite(
         name="Test Analyst",
@@ -336,6 +369,43 @@ def test_bootstrap_mask_ips_false_for_non_masking_analyst(client, tmp_path, monk
 
 
 # ── /api/bootstrap: edge cases ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("workspace_id", [None, "", "mock-ngwaf-workspace"])
+def test_bootstrap_ngwaf_capability_is_service_scoped(client, tmp_path, monkeypatch, workspace_id):
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(
+        MOCK_SERVICE_ID,
+        {
+            "service_id": MOCK_SERVICE_ID,
+            "ngwaf_workspace_id": workspace_id,
+            "log_fields": {"schema_version": 2, "groups": ["J"], "custom_fields": []},
+        },
+    )
+    config.save_config("other-service", {"service_id": "other-service", "ngwaf_workspace_id": "other-workspace"})
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    assert response.json()["ngwaf_configured"] is bool(workspace_id)
+
+
+@pytest.mark.parametrize("workspace_id", [None, "mock-ngwaf-workspace"])
+@pytest.mark.security_regression
+def test_bootstrap_analyst_gets_ngwaf_capability_without_workspace_id(client, tmp_path, monkeypatch, workspace_id):
+    from backend.core import share_db
+    from backend.utils import tunnel
+
+    try:
+        body = _login_analyst_and_bootstrap(
+            client, tmp_path, monkeypatch, pii_policy=None, ngwaf_workspace_id=workspace_id
+        )
+        assert body["ngwaf_configured"] is bool(workspace_id)
+        assert all("ngwaf_workspace_id" not in service for service in body["services"])
+    finally:
+        share_db.close_all_connections()
+        tunnel.reset_for_tests()
 
 
 def test_bootstrap_exposes_active_log_field_ids(client, tmp_path, monkeypatch):
@@ -861,6 +931,70 @@ def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkey
     assert data["header_badge"]["request"]["total_rows"] == 7399200
     assert data["header_badge"]["request"]["latest_log_at"] == "2026-06-29T12:00:00Z"
     assert data["header_badge"]["local_rows"] == 7400000
+
+    # The fallback result differs from its input snapshot. Cache by INPUT,
+    # not output metrics, or every legacy header poll re-runs these scans.
+    scan_calls = mock_duckdb_con.execute.call_count
+    again = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert again.status_code == 200
+    assert again.json()["header_badge"] == data["header_badge"]
+    assert mock_duckdb_con.execute.call_count == scan_calls
+
+
+@pytest.mark.parametrize("request_latest", ["2026-09-07T19:31:22Z", "2026-09-04T01:00:00Z", None])
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_bootstrap_header_badge_uses_live_sync_snapshot(client, tmp_path, monkeypatch, request_latest, warm_cache):
+    """Bootstrap freshness must match the dedicated sync-status snapshot."""
+    from backend import config
+    from backend.routers import bootstrap
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID})
+    current_status = {
+        "local_rows": 0 if request_latest is None else 20,
+        "latest_log_at": "2026-09-06T17:19:00Z",
+        "earliest_log_at": "2026-09-04T00:00:00Z",
+        "rum": {"latest_log_at": "2026-09-08T10:00:00Z", "total_rows": 10},
+        "request": {
+            "latest_log_at": request_latest,
+            "total_rows": 0 if request_latest is None else 20,
+            "last_sync_at": None,
+        },
+    }
+    monkeypatch.setattr(
+        config,
+        "get_status",
+        lambda sid: current_status.copy(),
+    )
+    monkeypatch.setattr(
+        "backend.core.metadata.get_ingested_files_status_summary",
+        lambda _: {"latest_file_name": "logs_2026-09-06T17-19-00.gz", "total_rows": 99},
+    )
+    if warm_cache:
+        # A valid TTL must not resurrect a previous event extent after reset
+        # or hide an advancing snapshot. No fallback scans are needed here.
+        monkeypatch.setitem(
+            bootstrap._header_badge_cache,
+            MOCK_SERVICE_ID,
+            (
+                float("inf"),
+                {"latest_log_at": "2026-09-06T17:19:00Z", "local_rows": 99},
+                {"configured": True, "latest_log_at": "2026-09-06T17:19:00Z"},
+                {},
+            ),
+        )
+
+    response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["header_badge"]["latest_log_at"] == request_latest
+    assert data["header_badge"]["request"]["latest_log_at"] == request_latest
+    assert data["log_extents"]["latest_log_at"] == request_latest
+    assert data["sync_status"]["latest_log_at"] == request_latest
+    assert data["sync_status"]["latest_ingested_file_at"] == "2026-09-06 17:19:00"
+    assert data["header_badge"]["rum"]["latest_log_at"] == "2026-09-08T10:00:00Z"
+    assert data["header_badge"]["local_rows"] == current_status["local_rows"]
 
 
 # Silence unused-import warnings

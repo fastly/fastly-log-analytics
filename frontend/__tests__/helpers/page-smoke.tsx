@@ -78,19 +78,19 @@ export function spyOnConsoleError(): MockInstance {
 export function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
   const service: Record<string, unknown> = { id: 'test-svc', name: 'Test' }
   if (opts.accessLevel) service.accessLevel = opts.accessLevel
-  return {
-    useServiceStore: vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
-      const state = {
-        activeServiceId: 'test-svc',
-        isInitialized: true,
-        services: [service],
-        setServices: vi.fn(),
-        setInitialized: vi.fn(),
-        setActiveServiceId: vi.fn(),
-      }
-      return selector ? selector(state) : state
-    }),
+  const state = {
+    activeServiceId: 'test-svc',
+    isInitialized: true,
+    services: [service],
+    setServices: vi.fn(),
+    setInitialized: vi.fn(),
+    setActiveServiceId: vi.fn(),
   }
+  const useServiceStore: any = vi.fn((selector?: (s: Record<string, unknown>) => unknown) => {
+    return selector ? selector(state) : state
+  })
+  useServiceStore.getState = () => state
+  return { useServiceStore }
 }
 
 /** `@/stores/filterStore`. */

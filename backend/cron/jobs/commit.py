@@ -26,7 +26,7 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("cron_compact")
+@cron_task("cron_commit", job_name="commit")
 def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
     """Commit the local buffer to the shared Iceberg table in FOS.
 
@@ -60,6 +60,72 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         logger.info("⏭️  \x1b[95m[commit]\x1b[0m %s: skipping — %s", service_id, str(e))
         return
 
+    if svcconfig.INGEST_MODE == "celery":
+        # Celery/ledger data plane: converts commit to DuckLake per insert, so
+        # this job's role is adjacent-small-file compaction. Run it INLINE
+        # (this job already executes on a worker in external mode) so the
+        # cron_runs lease is held for the duration — a dispatch-and-forget
+        # released the mutual-exclusion lease before the merge ran, letting
+        # overlapping ticks run concurrent merges — and the row records the
+        # real outcome instead of a fake instant success.
+        from backend.core.ingest import finalize_committed_raw, merge_lake_files
+        from backend.core.metadata.base import get_con
+
+        merge_started = time.time()
+        try:
+            merge_lake_files(service_id)
+
+            # Honest per-run counts for the cron row: how many files the
+            # convert workers landed since the previous commit tick, and
+            # how many durable raw .gz files we deleted (delete_after).
+            meta_con = get_con(service_id)
+            prev = meta_con.execute(
+                "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
+                "AND status != 'running' ORDER BY id DESC LIMIT 1",
+                (service_id,),
+            ).fetchone()
+            since_epoch = 0.0
+            if prev and prev["started_at"]:
+                from backend.utils.date_utils import parse_iso_utc
+
+                prev_dt = parse_iso_utc(prev["started_at"])
+                if prev_dt is not None:
+                    since_epoch = prev_dt.timestamp()
+            files_ingested = meta_con.execute(
+                "SELECT count(*) FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+                (service_id, since_epoch),
+            ).fetchone()[0]
+
+            raw = finalize_committed_raw(service_id)
+
+            summary = f"Ingested {files_ingested} file(s); merged small lake files"
+            if raw["delete_after"]:
+                summary += f"; deleted {raw['deleted']} raw file(s)"
+            else:
+                summary += "; raw deletion disabled (delete_after=false)"
+            log_cron_run(
+                src,
+                "commit",
+                time.time() - merge_started,
+                "success",
+                run_id=run_id,
+                files_downloaded=files_ingested,
+                files_deleted_fos=raw["deleted"],
+                summary=summary,
+            )
+        except Exception as e:
+            log_cron_run(
+                src,
+                "commit",
+                time.time() - merge_started,
+                "error",
+                run_id=run_id,
+                error_message=str(e),
+                summary="DuckLake merge / raw finalization failed",
+            )
+            logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
+        return
+
     # Disk pre-check: commits write manifest cache + cloud-staged parquet
     # locally before upload. A full disk during commit can corrupt the
     # iceberg state midway, which is much worse than refusing to start.
@@ -84,7 +150,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     start_progress(run_id, service_id=service_id, task="commit")
     _svc_name = cfg.get("name", service_id) if cfg else service_id
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("▶️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
+    logger.info("🏎️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
     _log_and_add_progress(
         run_id,
         service_id,
@@ -208,4 +274,14 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
 
     finalize_cron_duration(src, run_id, start_time)
 
-    logger.info("⏹️  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)
+    try:
+        from backend.sync_status_publisher import publisher as _sync_status_publisher
+        from backend.sync_status_snapshot import compute_sync_status_cached
+
+        _snapshot = compute_sync_status_cached(service_id)
+        if _snapshot is not None:
+            _sync_status_publisher.publish(service_id, _snapshot)
+    except Exception:
+        logger.exception("[%s] %s: sync-status SSE publish failed", "scheduler", service_id)
+
+    logger.info("🏁  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)

@@ -335,8 +335,8 @@ class SessionsResponse(BaseResponse):
     has_edge: bool
     has_edge_sid: bool = False
     has_cmcd: bool = False
-    min_reqs_flag: int
-    min_4xx_pct_flag: float
+    min_reqs_flag: int | None = None
+    min_4xx_pct_flag: float | None = None
 
 
 class SessionDetailRequest(BaseModel):

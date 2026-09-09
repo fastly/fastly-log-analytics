@@ -69,6 +69,18 @@ def _reset_singleton():
     query_registry._history.extend(history)
 
 
+def test_expire_pool_queries_interrupts_only_pooled_duckdb():
+    registry = QueryRegistry()
+    pooled = _RecordingConn()
+    qid = registry.register("DuckDB", "SELECT 1", service_id="svc", con=pooled, pool_slot="svc#0001")
+    active = registry._queries[qid]
+    active.started_at_mono -= 121
+
+    assert registry.expire_pool_queries() == 1
+    assert pooled.interrupts == 1
+    assert active.cancelled_at is not None
+
+
 # ── Attribution ─────────────────────────────────────────────────────────────
 
 

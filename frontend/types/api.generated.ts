@@ -1844,6 +1844,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/celery/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Celery Status
+         * @description Expose Celery queue depths, worker status, RedBeat schedule, and
+         *     ingest-ledger summary.
+         */
+        get: operations["api_celery_status_api_admin_celery_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/clickhouse/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Clickhouse Status */
+        get: operations["api_clickhouse_status_api_admin_clickhouse_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/clickhouse/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Api Clickhouse Replay */
+        post: operations["api_clickhouse_replay_api_admin_clickhouse_replay_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/optimize-now": {
         parameters: {
             query?: never;
@@ -2334,6 +2389,35 @@ export interface paths {
          *     still looks wrong. This is the nuclear-option version of refresh.
          */
         post: operations["rebuild_local_view_endpoint_api_admin_rebuild_local_view_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ducklake/migrate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ducklake Migrate Endpoint
+         * @description Adopt this service's legacy pyiceberg-era parquet into DuckLake.
+         *
+         *     The backend already runs this automatically on first boot under v3;
+         *     this endpoint is the explicit "run it now" button (and the retry path
+         *     after a failed sweep), so it bypasses the once-ever guard. Returns
+         *     202 Accepted — the adoption runs in a background thread (registering
+         *     thousands of files can take a while). Idempotent: files already
+         *     tracked by the DuckLake catalog are skipped, so re-running after a
+         *     partial failure is safe. The outcome lands as a ``ducklake_adopt``
+         *     row in ``cron_runs`` (visible in the Cron UI) as well as in the logs.
+         */
+        post: operations["ducklake_migrate_endpoint_api_admin_ducklake_migrate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5739,6 +5823,11 @@ export interface components {
             }[];
             /** Active Log Field Ids */
             active_log_field_ids?: string[];
+            /**
+             * Ngwaf Configured
+             * @default false
+             */
+            ngwaf_configured: boolean;
             /** Views */
             views?: {
                 [key: string]: unknown;
@@ -5794,6 +5883,15 @@ export interface components {
             access_level?: string | null;
             /** Cmcd Enabled */
             cmcd_enabled?: boolean | null;
+            /** Rum Enabled */
+            rum_enabled?: boolean | null;
+            /**
+             * Analyst Path A Supported
+             * @default true
+             */
+            analyst_path_a_supported: boolean;
+            /** Analyst Path A Reason */
+            analyst_path_a_reason?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -6063,6 +6161,161 @@ export interface components {
             buffer_cap: number;
             /** Dropped */
             dropped: number;
+        };
+        /** ClickHouseActiveGeneration */
+        ClickHouseActiveGeneration: {
+            /** Generation */
+            generation: string;
+            /** Dataset Id */
+            dataset_id: string;
+            /** Coverage Start */
+            coverage_start: string;
+            /** Coverage End */
+            coverage_end: string;
+            /** Expires At */
+            expires_at: string;
+            /** Expired */
+            expired: boolean;
+            /** Target Matches */
+            target_matches: boolean;
+            /** Coverage Age Seconds */
+            coverage_age_seconds: number;
+        };
+        /** ClickHouseReplayErrorResponse */
+        ClickHouseReplayErrorResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            detail: components["schemas"]["ErrorDetail"];
+        };
+        /** ClickHouseReplayRequest */
+        ClickHouseReplayRequest: {
+            /** Service Id */
+            service_id: string;
+            /** Dataset Id */
+            dataset_id?: string | null;
+            /** Generation */
+            generation?: string | null;
+            /**
+             * Dry Run
+             * @default true
+             */
+            dry_run: boolean;
+            /**
+             * Limit
+             * @default 100
+             */
+            limit: number;
+        };
+        /** ClickHouseReplayResponse */
+        ClickHouseReplayResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /**
+             * Operation
+             * @enum {string}
+             */
+            operation: "rebuild" | "resume";
+            /** Dataset Id */
+            dataset_id: string;
+            /** Generation */
+            generation: string | null;
+            /** Limit */
+            limit: number;
+            /** Artifact Count */
+            artifact_count: number;
+            /** Planned Artifacts */
+            planned_artifacts: number;
+            /**
+             * Attempted
+             * @default 0
+             */
+            attempted: number;
+            /**
+             * Published
+             * @default 0
+             */
+            published: number;
+            /**
+             * Activated
+             * @default false
+             */
+            activated: boolean;
+        };
+        /** ClickHouseStatusResponse */
+        ClickHouseStatusResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Service Id */
+            service_id: string;
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Health
+             * @enum {string}
+             */
+            health: "ok" | "disabled" | "unavailable";
+            /** Schema Version */
+            schema_version?: number | null;
+            /** Publication Counts */
+            publication_counts?: {
+                [key: string]: number;
+            } | null;
+            /** Oldest Pending Age Seconds */
+            oldest_pending_age_seconds?: number | null;
+            /** Last Published At */
+            last_published_at?: string | null;
+            active_generation?: components["schemas"]["ClickHouseActiveGeneration"] | null;
+            /** Expired Dataset Count */
+            expired_dataset_count?: number | null;
         };
         /** CmcdAggregatesResponse */
         CmcdAggregatesResponse: {
@@ -6490,6 +6743,8 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
@@ -6997,6 +7252,13 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HealthCeleryStats */
+        HealthCeleryStats: {
+            /** Queue Depth */
+            queue_depth: number;
+            /** Active Workers */
+            active_workers: number;
+        };
         /**
          * HealthConfigBackup
          * @description Freshness of the off-VM service-config backup (SRE-11 / ADR-13 §2.1).
@@ -7138,6 +7400,7 @@ export interface components {
             fos?: {
                 [key: string]: components["schemas"]["HealthFosProbe"];
             } | null;
+            celery?: components["schemas"]["HealthCeleryStats"] | null;
         };
         /** IOFormatBreakdown */
         IOFormatBreakdown: {
@@ -11440,6 +11703,8 @@ export interface components {
             rum_retention_days?: number | null;
             /** Cache Retention Days */
             cache_retention_days?: number | null;
+            /** Rollup Retention Months */
+            rollup_retention_months?: number | null;
             /** Keep Snapshot Days */
             keep_snapshot_days?: number | null;
             /** Expire Interval Mins */
@@ -11657,9 +11922,9 @@ export interface components {
              */
             has_cmcd: boolean;
             /** Min Reqs Flag */
-            min_reqs_flag: number;
+            min_reqs_flag?: number | null;
             /** Min 4Xx Pct Flag */
-            min_4xx_pct_flag: number;
+            min_4xx_pct_flag?: number | null;
         };
         /**
          * SettingsPayload
@@ -12088,6 +12353,15 @@ export interface components {
              */
             op: "execute" | "executemany" | "executescript";
         };
+        /** StreamMetrics */
+        StreamMetrics: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Total Rows */
+            total_rows?: number | null;
+            /** Last Sync At */
+            last_sync_at?: string | null;
+        };
         /**
          * SummaryResponse
          * @description Cheap counts that power the live-monitor tab badge.
@@ -12149,6 +12423,8 @@ export interface components {
             } | null;
             /** Ngwaf Workspace Id */
             ngwaf_workspace_id?: string | null;
+            rum?: components["schemas"]["StreamMetrics"] | null;
+            request?: components["schemas"]["StreamMetrics"] | null;
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
             /** Debug Calls */
@@ -23911,6 +24187,315 @@ export interface operations {
             };
         };
     };
+    api_celery_status_api_admin_celery_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_clickhouse_status_api_admin_clickhouse_status_get: {
+        parameters: {
+            query: {
+                service_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseStatusResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseStatusResponse"];
+                };
+            };
+        };
+    };
+    api_clickhouse_replay_api_admin_clickhouse_replay_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClickHouseReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseReplayResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClickHouseReplayErrorResponse"];
+                };
+            };
+        };
+    };
     optimize_now_api_admin_optimize_now_post: {
         parameters: {
             query?: {
@@ -26060,6 +26645,113 @@ export interface operations {
         };
     };
     rebuild_local_view_endpoint_api_admin_rebuild_local_view_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    ducklake_migrate_endpoint_api_admin_ducklake_migrate_post: {
         parameters: {
             query?: {
                 service?: string | null;

@@ -304,14 +304,19 @@ def test_reader_live_topup_joins_active_hour_buffer(tmp_path):
 
     con = duckdb.connect(":memory:")
     con.execute("INSTALL sqlite; LOAD sqlite;")
-    con.execute(f"ATTACH '{db_path}' AS ngwaf_top (TYPE SQLITE, READ_ONLY)")
-    runner = QueryRunner(con, {"name": "svc-nb-7"})
-    runner.get_schema_cols = lambda: ["timestamp", "waf_req_id"]  # type: ignore[method-assign]
+    from backend.repositories._base import attach_ngwaf_cache
 
-    st = closed[0].isoformat()
-    et = (active_dt + timedelta(minutes=30)).isoformat()
-    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        got = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=10)
+    with (
+        patch("backend.config.ngwaf_db_path", return_value=db_path),
+        attach_ngwaf_cache(con, ["waf_req_id"], "ngwaf_top"),
+    ):
+        runner = QueryRunner(con, {"name": "svc-nb-7"})
+        runner.get_schema_cols = lambda: ["timestamp", "waf_req_id"]  # type: ignore[method-assign]
 
-    # Closed: 2 hours × 2; live buffer adds w1 (matched) but not w9 (unmatched).
-    assert got == [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 5}]
+        st = closed[0].isoformat()
+        et = (active_dt + timedelta(minutes=30)).isoformat()
+        with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+            got = runner.try_ngwaf_top_bots_from_rollup(st, et, has_filters=False, n=10)
+
+        # Closed: 2 hours × 2; live buffer adds w1 (matched) but not w9 (unmatched).
+        assert got == [{"name": "GPTBot", "category": "AI-CRAWLER", "request_count": 5}]

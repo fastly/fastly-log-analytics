@@ -18,7 +18,7 @@ SERVICE_ID = os.getenv("SERVICE_ID", "rmWzCRA0lkAOs9Gnxvohs4")
 def generate_faro_beacon(path, lcp, cls, inp, load_time, browser, os, device):
     return {
         "meta": {
-            "page": {"url": f"https://fastly-se-demo.global.ssl.fastly.net{path}", "pathname": path},
+            "page": {"url": f"https://example.invalid{path}", "pathname": path},
             "browser": {"name": browser, "version": "120.0.0"},
             "os": {"name": os, "version": "14.1"},
             "device": {"type": device},

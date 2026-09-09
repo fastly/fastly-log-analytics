@@ -139,6 +139,11 @@ class HealthFosProbe(BaseModel):
     error: str | None = None
 
 
+class HealthCeleryStats(BaseModel):
+    queue_depth: int
+    active_workers: int
+
+
 class HealthSnapshotResponse(BaseModel):
     """One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
 
@@ -171,6 +176,8 @@ class HealthSnapshotResponse(BaseModel):
     config_backup: HealthConfigBackup | None = None
     # SRE-13: per-service FOS reachability — only populated when probe_fos=1.
     fos: dict[str, HealthFosProbe] | None = None
+    # Scaling Phase 10: Celery metrics (queue depth and worker count)
+    celery: HealthCeleryStats | None = None
 
 
 class TreeNode(BaseModel):
@@ -237,6 +244,12 @@ class QuarantineListResponse(BaseResponse):
     summary: QuarantineSummary = Field(default_factory=QuarantineSummary)
 
 
+class StreamMetrics(BaseModel):
+    latest_log_at: str | None = None
+    total_rows: int | None = None
+    last_sync_at: str | None = None
+
+
 class SyncStatus(LogExtentsMixin):
     configured: bool = True
     busy: bool = False
@@ -249,6 +262,8 @@ class SyncStatus(LogExtentsMixin):
     duckdb_exists: bool | None = None
     active_run: dict[str, Any] | None = None
     ngwaf_workspace_id: str | None = None
+    rum: StreamMetrics | None = None
+    request: StreamMetrics | None = None
 
 
 class SyncStatusResponse(BaseResponse, SyncStatus):

@@ -115,7 +115,7 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
     return ordered
 
 
-@cron_task("insights_prewarmer")
+@cron_task("insights_prewarmer", job_name="insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
     """Warm the default insights selection — the pair the adaptive frontend
     picker will request for this service's history, for the admin/unclamped
@@ -233,7 +233,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
             error_message=str(e),
             run_id=run_id,
         )
-        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e)
+        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e, exc_info=True)
     finally:
         if con is not None:
             try:

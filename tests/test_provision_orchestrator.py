@@ -513,6 +513,17 @@ def test_cleanup_local_data_removes_cache_directory_for_bucket(tmp_path, monkeyp
 # ── generate_analyst_invite ─────────────────────────────────────────────────
 
 
+def test_analyst_path_a_supported_only_for_non_celery(monkeypatch):
+    """The shared Path A topology predicate only blocks scalable Celery mode."""
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "INGEST_MODE", "sync")
+    assert orchestrator.analyst_path_a_supported() is True
+
+    monkeypatch.setattr(svcconfig, "INGEST_MODE", "celery")
+    assert orchestrator.analyst_path_a_supported() is False
+
+
 def test_generate_analyst_invite_raises_when_service_missing():
     """Unknown service → RuntimeError (caller maps to 404). Pinned
     because returning None would surface as a JSON-encode failure
@@ -528,6 +539,19 @@ def test_generate_analyst_invite_rejects_read_only_service():
     error message is what the frontend surfaces in the invite dialog."""
     with patch("backend.config.load_config", return_value={"access_level": "read_only", "fastly_api_key": "k"}):
         with pytest.raises(RuntimeError, match="read_write"):
+            orchestrator.generate_analyst_invite("svc")
+
+
+def test_generate_analyst_invite_rejects_celery_topology():
+    """Path A must not issue FOS-only credentials for the shared DuckLake catalog."""
+    with (
+        patch("backend.config.INGEST_MODE", "celery"),
+        patch(
+            "backend.config.load_config",
+            return_value={"access_level": "read_write", "fastly_api_key": "k"},
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="INGEST_MODE=celery"):
             orchestrator.generate_analyst_invite("svc")
 
 
@@ -1257,6 +1281,29 @@ def test_perform_teardown_calls_all_5_steps_with_default_opts():
     # 5 progress events (scoring, logging, FOS keys, FOS bucket, CDN)
     progress = [e for e in events if e["type"] == "progress"]
     assert len(progress) == 5
+
+
+def test_perform_teardown_refuses_to_delete_logging_service_as_cdn(caplog):
+    """Rollback must never delete the customer service when CDN state is corrupt."""
+    delete_cdn_called = []
+    state = _teardown_state(cdn_service_id="svc-td-test")
+
+    with (
+        patch("backend.provision.orchestrator.remove_logging_endpoint"),
+        patch("backend.provision.orchestrator.delete_fos_bucket"),
+        patch("backend.provision.orchestrator.delete_cdn_service", side_effect=delete_cdn_called.append),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_access_key",
+            return_value={"access_key": "TAK", "secret_key": "TSK", "id": "TID"},
+        ),
+        patch("backend.provision.orchestrator.delete_fos_access_key"),
+        patch("backend.provision.orchestrator.fastly", return_value={"data": []}),
+    ):
+        events, exc = _consume(orchestrator.perform_teardown(state, "tok"))
+
+    assert exc is None
+    assert delete_cdn_called == []
+    assert "refusing to delete CDN service" in caplog.text
 
 
 def test_perform_teardown_deletes_scoring_when_enabled():

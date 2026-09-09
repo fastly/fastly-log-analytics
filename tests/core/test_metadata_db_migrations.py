@@ -119,6 +119,107 @@ def test_apply_pending_is_idempotent(tmp_path):
         con.close()
 
 
+def test_migration_021_adds_lease_generation_and_ledger_indexes(tmp_path):
+    """Legacy ledger rows receive the fencing column and both hot indexes."""
+    path = str(tmp_path / "legacy-ledger.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        con.execute(
+            """CREATE TABLE ingest_ledger (
+                service_id TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claimed_at REAL,
+                committed_at REAL,
+                raw_deleted_at REAL,
+                PRIMARY KEY (service_id, object_key)
+            )"""
+        )
+        con.execute(
+            "INSERT INTO ingest_ledger (service_id, object_key, status, claimed_at) VALUES (?, ?, ?, ?)",
+            ("svc", "raw/legacy.gz", "claimed", 1.0),
+        )
+        con.commit()
+
+        sqlite_migrations.MIGRATIONS[21](con)
+
+        assert "lease_generation" in _columns(con, "ingest_ledger")
+        row = con.execute(
+            "SELECT lease_generation FROM ingest_ledger WHERE service_id=? AND object_key=?",
+            ("svc", "raw/legacy.gz"),
+        ).fetchone()
+        assert row == (0,)
+        indexes = {
+            r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='ingest_ledger'")
+        }
+        assert {
+            "idx_ingest_ledger_claimed_scan",
+            "idx_ingest_ledger_commit_scan",
+        } <= indexes
+    finally:
+        con.close()
+
+
+def test_migration_022_adds_publication_and_delete_claim_columns(tmp_path):
+    path = str(tmp_path / "legacy-ledger-claims.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        con.execute(
+            """CREATE TABLE ingest_ledger (
+                service_id TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                committed_at REAL,
+                raw_deleted_at REAL,
+                PRIMARY KEY (service_id, object_key)
+            )"""
+        )
+        con.commit()
+
+        sqlite_migrations.MIGRATIONS[22](con)
+
+        assert {
+            "published_at",
+            "raw_delete_claim_token",
+            "raw_delete_claimed_at",
+        } <= _columns(con, "ingest_ledger")
+        assert (
+            con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_ingest_ledger_raw_delete_scan'"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        con.close()
+
+
+def test_migration_023_adds_retry_schedule_columns_and_index(tmp_path):
+    path = str(tmp_path / "legacy-ledger-retry.metadata.db")
+    con = sqlite3.connect(path)
+    try:
+        con.execute(
+            """CREATE TABLE ingest_ledger (
+                service_id TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                PRIMARY KEY (service_id, object_key)
+            )"""
+        )
+        con.commit()
+
+        sqlite_migrations.MIGRATIONS[23](con)
+
+        assert {"error_kind", "next_attempt_at"} <= _columns(con, "ingest_ledger")
+        assert (
+            con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_ingest_ledger_retry_scan'"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        con.close()
+
+
 def test_migrations_are_transactional_on_failure(tmp_path):
     """If a migration body raises, the version must NOT advance — the
     next open should re-apply (and presumably hit the same failure to

@@ -2,11 +2,10 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const isStaticExport = process.env.STATIC_EXPORT === '1'
-const apiProxyUrl = process.env.API_PROXY_URL || 'http://127.0.0.1:8000'
 
 const nextConfig: NextConfig = {
   experimental: {
-    optimizePackageImports: ['lucide-react'],
+    optimizePackageImports: ['lucide-react', '@tanstack/react-query', '@tanstack/react-table'],
   },
   output: isStaticExport ? 'export' : 'standalone',
   trailingSlash: false,
@@ -15,26 +14,12 @@ const nextConfig: NextConfig = {
   // on port 13002. NEXT_DIST_DIR is only set by the Playwright config;
   // in every other context the default `.next/` is used.
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
-  turbopack: {
-    root: path.join(__dirname, '../'),
-  },
   ...(!isStaticExport && {
-    async rewrites() {
-      return [
-        {
-          source: '/api/:path*',
-          destination: `${apiProxyUrl}/api/:path*`,
-        },
-        {
-          source: '/js/:path*',
-          destination: `${apiProxyUrl}/js/:path*`,
-        },
-        {
-          source: '/rum-beacon',
-          destination: `${apiProxyUrl}/rum-beacon`,
-        },
-      ]
-    },
+    // /api/*, /js/*, /rum-beacon proxying moved to proxy.ts -- `rewrites()`
+    // is called once at `next build` and its destination is frozen into
+    // the routes manifest, which doesn't work when the backend's hostname
+    // is only known at deploy time (Helm). See proxy.ts's comment for the
+    // full story; this was confirmed live, not theoretical.
     async headers() {
       // Default Next.js sets `Cache-Control: s-maxage=31536000` on prerendered
       // HTML, which causes Fastly to cache the anonymous SSR output for a

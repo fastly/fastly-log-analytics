@@ -29,6 +29,23 @@ import { ACTIVE_SERVICE_COOKIE } from './lib/active-service-cookie'
 const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/logs']
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 
+// Same-origin /api/*, /js/*, /rum-beacon proxying for the production/
+// standalone build (dev mode fetches the backend directly cross-origin,
+// see getApiBase() and this file's CSP connect-src comment below, so this
+// path is never hit there). Used to live as next.config.ts's `rewrites()`,
+// which is called once at `next build` and its destination frozen into
+// .next/routes-manifest.json -- the standalone server reads that static
+// manifest at runtime rather than re-invoking rewrites(), so it can't see
+// a backend hostname only known at `helm install` time (Kubernetes).
+// Confirmed live: the manifest had the hardcoded 'http://caddy:80'
+// fallback baked in even though the container's actual runtime
+// API_PROXY_URL was correct. Proxy functions run fresh per request in the
+// Node.js runtime, so moving it here reads the real env on every call.
+const API_PROXY_PREFIXES = ['/api/', '/js/']
+function apiProxyTarget(): string {
+  return process.env.API_PROXY_URL || process.env.NEXT_PUBLIC_API_PROXY_URL || 'http://caddy:80'
+}
+
 // Skip CSP rebuild on static-asset paths — they don't render HTML and
 // a stray Content-Security-Policy header on every chunk download is
 // just wire noise. The matcher below also excludes them; the
@@ -80,7 +97,13 @@ function buildCsp(nonce: string): string {
 }
 
 export function proxy(request: NextRequest) {
-  const { pathname } = request.nextUrl
+  const { pathname, search } = request.nextUrl
+
+  // Bypass CSP/gating entirely -- those exist for HTML page renders, not
+  // proxied API responses.
+  if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p)) || pathname === '/rum-beacon') {
+    return NextResponse.rewrite(new URL(`${apiProxyTarget()}${pathname}${search}`))
+  }
 
   const contentType = request.headers.get('content-type') || ''
   const isServerAction = request.headers.has('next-action') || (request.method === 'POST' && contentType.toLowerCase().includes('multipart/form-data'))

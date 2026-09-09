@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { E2E_BACKEND_PORT, E2E_FRONTEND_PORT } from '../playwright.config'
+import { backendTestEnvironment } from '../tests/backend-environment'
 
 const HOST = '127.0.0.1'
 
@@ -72,6 +73,7 @@ function _seedDefaultServiceConfig(configsDir: string): void {
 }
 
 async function globalSetup() {
+  const repoRoot = join(__dirname, '..', '..')
   sandbox = mkdtempSync(join(tmpdir(), 'fla-playwright-'))
   const configsDir = join(sandbox, 'configs')
   const dataDir = join(sandbox, 'data')
@@ -82,12 +84,6 @@ async function globalSetup() {
   const fs = await import('node:fs')
   fs.mkdirSync(configsDir, { recursive: true })
   fs.mkdirSync(dataDir, { recursive: true })
-  // The share DB resolves its dir from REMOTE_SHARE_DB_DIR (default literal
-  // ``data/system``) — it does NOT honor CONTRACT_DATA_DIR's svcconfig patch —
-  // so without this the e2e backend would read/write the developer's REAL
-  // remote_share.db. Sandbox it explicitly.
-  const shareDbDir = join(dataDir, 'system')
-  fs.mkdirSync(shareDbDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
 
   // Wire the analyst-OAuth feature against the in-process mock IdP (all on
@@ -106,8 +102,6 @@ async function globalSetup() {
     }),
   )
 
-  const repoRoot = join(__dirname, '..', '..')
-
   proc = spawn(
     'uv',
     [
@@ -121,23 +115,11 @@ async function globalSetup() {
     ],
     {
       cwd: repoRoot,
-      env: {
-        ...process.env,
-        DEBUG_RESPONSES: 'true',
-        FASTLY_MOCK_MODE: '1',
-        CONTRACT_CONFIGS_DIR: configsDir,
-        CONTRACT_DATA_DIR: dataDir,
-        // Isolate the share DB from the developer's real data/system (see above).
-        REMOTE_SHARE_DB_DIR: shareDbDir,
-        // Analyst OAuth against the in-process mock IdP.
-        OAUTH_MOCK_IDP: '1',
-        OAUTH_MOCK_IDP_ISSUER: `http://${HOST}:${E2E_BACKEND_PORT}/mock-idp`,
-        OAUTH_PROVIDERS_CONFIG_PATH: oauthRegistryPath,
-        OAUTH_FLOW_STATE_SECRET: 'e2e-oauth-flow-state-secret-0123456789',
-        OAUTH_GOOGLE_CLIENT_ID: 'e2e-mock-client-id',
-        OAUTH_GOOGLE_CLIENT_SECRET: 'e2e-mock-client-secret',
-        OAUTH_REDIRECT_BASE: `http://${HOST}:${E2E_FRONTEND_PORT}`,
-      },
+      env: backendTestEnvironment(sandbox, {
+        backendPort: E2E_BACKEND_PORT,
+        frontendPort: E2E_FRONTEND_PORT,
+        registryPath: oauthRegistryPath,
+      }),
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.
       detached: false,

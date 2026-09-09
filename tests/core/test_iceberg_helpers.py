@@ -926,6 +926,7 @@ def test_write_to_buffer_creates_buffer_dir_if_missing(tmp_path):
         patch("backend.core.duckdb._cache_dir", return_value=str(target)),
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
         patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
+        patch("os.rename"),
     ):
         out = write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
 
@@ -951,6 +952,7 @@ def test_write_to_buffer_uses_zstd_compression_level_1():
         patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
         patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
         patch("os.makedirs"),
+        patch("os.rename"),
     ):
         write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
 
@@ -1037,6 +1039,7 @@ def test_quarantine_handles_filename_collision(tmp_path):
     assert __import__("os").path.exists(p2)
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_commit_buffer_quarantines_unreadable_files_instead_of_skipping(tmp_path):
     """The hot-path integration: commit_buffer encounters a corrupt parquet,
     moves it into .quarantine/, increments the counter, and the good files
@@ -1099,6 +1102,7 @@ def test_commit_buffer_quarantines_unreadable_files_instead_of_skipping(tmp_path
     assert len(sidecar) == 1
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_commit_buffer_does_not_retry_quarantined_files_on_next_run(tmp_path):
     """After a corrupt file is quarantined, the next commit_buffer must
     NOT re-encounter it (because buffer_files() ignores the .quarantine
@@ -1150,6 +1154,7 @@ def test_commit_buffer_does_not_retry_quarantined_files_on_next_run(tmp_path):
             p.stop()
 
 
+@pytest.mark.skip(reason="Migrated to ducklake")
 def test_commit_buffer_chunks_appends_when_files_exceed_chunk_size(tmp_path, monkeypatch):
     """With chunk_size=3 and 7 buffer files, commit_buffer must call
     table.append() exactly 3 times (ceil(7/3)) and delete each chunk's
@@ -1299,29 +1304,34 @@ def test_write_table_summary_async_skips_catalog_load_when_table_passed():
     fake_s3.put_object.assert_called_once()
 
 
-def test_write_table_summary_async_loads_catalog_when_table_is_none():
-    """When called without `table` (legacy path), the worker still falls
-    back to `catalog.load_table()`. Pinned so the optimization stays
-    opt-in — code paths that can't pass the table (e.g. an out-of-band
-    dashboard refresher) still work."""
+def test_write_table_summary_async_never_loads_pyiceberg_catalog():
+    """`get_table_info`/`get_snapshot_calendar` are DuckLake-native (v3
+    write-path cutover) and read `lake.*` state themselves — a pyiceberg
+    `Table` object no longer carries anything they consult. The worker
+    must never call `_get_catalog`/`catalog.load_table()`, whether or not
+    a (now-vestigial) `table` kwarg was passed — that pyiceberg catalog is
+    permanently frozen post-cutover, so a load would burn a round trip
+    for state nothing downstream reads."""
     from backend.core.iceberg import _write_table_summary_async
 
     fake_catalog = MagicMock()
-    fake_loaded_table = MagicMock()
-    fake_catalog.load_table.return_value = fake_loaded_table
     fake_s3 = MagicMock()
 
     with (
         _run_thread_synchronously(),
         patch("backend.core.iceberg._get_catalog", return_value=fake_catalog) as mock_get_catalog,
-        patch("backend.core.iceberg.get_table_info", return_value={"min_timestamp": "a", "max_timestamp": "b"}),
-        patch("backend.core.iceberg.get_snapshot_calendar", return_value=[]),
+        patch(
+            "backend.core.iceberg.get_table_info", return_value={"min_timestamp": "a", "max_timestamp": "b"}
+        ) as mock_info,
+        patch("backend.core.iceberg.get_snapshot_calendar", return_value=[]) as mock_calendar,
         patch("backend.core.duckdb._get_fos_client", return_value=fake_s3),
     ):
         _write_table_summary_async({"name": "svc", "bucket": "b", "prefix": ""})
 
-    mock_get_catalog.assert_called_once()
-    fake_catalog.load_table.assert_called_once()
+    mock_get_catalog.assert_not_called()
+    fake_catalog.load_table.assert_not_called()
+    mock_info.assert_called_once_with({"name": "svc", "bucket": "b", "prefix": ""})
+    mock_calendar.assert_called_once_with({"name": "svc", "bucket": "b", "prefix": ""})
 
 
 def test_write_table_summary_async_skips_put_when_payload_unchanged():

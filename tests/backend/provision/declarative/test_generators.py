@@ -214,7 +214,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         main = [e for e in endpoints if e.name == "Fastly Log Analytics"]
         assert len(main) == 1, "Should have exactly one main endpoint"
-        assert "analytics_log" in main[0].path
+        assert "year=%Y" in main[0].path
 
     def test_generator_endpoints_use_null_placement(self):
         """Verify that S3 logging endpoints use None/null placement for Format Version Default."""
@@ -264,7 +264,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
         assert len(rum) == 1, "Should have RUM endpoint when RUM enabled"
-        assert "/rum/raw/" in rum[0].path
+        assert "raw/rum/" in rum[0].path
         assert rum[0].response_condition == "rum_log_condition"
 
     def test_generator_rum_endpoint_not_created_when_disabled(self):

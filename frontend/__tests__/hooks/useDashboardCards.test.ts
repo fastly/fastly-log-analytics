@@ -113,8 +113,8 @@ describe('useDashboardCards', () => {
     expect(byId).toEqual({ status: true, method: false })
   })
 
-  it('force-shows VIRTUAL fields even when not in active_log_field_ids', async () => {
-    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['status'] } })
+  it('force-shows supported VIRTUAL fields even when not in active_log_field_ids', async () => {
+    useBootstrap.mockReturnValue({ data: { active_log_field_ids: ['status'], ngwaf_configured: true } })
     useLogFieldsCatalog.mockReturnValue({
       data: {
         fields: [
@@ -131,6 +131,36 @@ describe('useDashboardCards', () => {
     expect(byId._bot_name).toBe(true)
     expect(byId._ngwaf_bot_name).toBe(true)
     expect(byId.waf_sig_ind).toBe(true)
+  })
+
+  it.each([false, undefined])('excludes NGWAF cards when attachment is %s, even with WAF fields', async (configured) => {
+    useBootstrap.mockReturnValue({
+      data: {
+        ngwaf_configured: configured,
+        active_log_field_ids: ['status', 'waf_req_id', 'waf_sig'],
+        custom_dashboard_cards: [{ id: '_ngwaf_bot_name', label: 'Stale card' }],
+      },
+    })
+    useLogFieldsCatalog.mockReturnValue({
+      data: {
+        fields: [
+          { id: '_bot_name', label: 'Fastly Bots', group: 'VIRTUAL' },
+          { id: '_ngwaf_bot_name', label: 'NGWAF Verified Bots', group: 'VIRTUAL' },
+          { id: 'waf_sig_ind', label: 'NGWAF Signals', group: 'VIRTUAL' },
+        ],
+      },
+    })
+    const { useDashboardCards } = await loadHook()
+    const { result, rerender } = renderHook(() => useDashboardCards())
+    expect(result.current.map(c => c.id)).toEqual(['_bot_name'])
+
+    useBootstrap.mockReturnValue({ data: { ngwaf_configured: true, active_log_field_ids: [] } })
+    rerender()
+    expect(result.current.map(c => c.id)).toEqual(['_bot_name', '_ngwaf_bot_name', 'waf_sig_ind'])
+
+    useBootstrap.mockReturnValue({ data: { ngwaf_configured: false, active_log_field_ids: [] } })
+    rerender()
+    expect(result.current.map(c => c.id)).toEqual(['_bot_name'])
   })
 
   it('force-hides noisy IDs (rid, prid, waf_sig, waf_req_id) even when active', async () => {

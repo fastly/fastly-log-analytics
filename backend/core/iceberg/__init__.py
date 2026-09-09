@@ -167,6 +167,17 @@ del _k, _v
 _proxy.__path__ = _self.__path__  # type: ignore[attr-defined]
 _proxy.__file__ = _self.__file__
 _proxy.__spec__ = _self.__spec__
+from backend.core.iceberg._ducklake import (
+    _ducklake_attach,
+    _ducklake_add_data_files,
+    ducklake_current_snapshot_id,
+    ducklake_table_name,
+)
+
+_proxy.__dict__["_ducklake_attach"] = _ducklake_attach
+_proxy.__dict__["_ducklake_add_data_files"] = _ducklake_add_data_files
+_proxy.__dict__["ducklake_current_snapshot_id"] = ducklake_current_snapshot_id
+_proxy.__dict__["ducklake_table_name"] = ducklake_table_name
 _sys.modules[__name__] = _proxy
 
 # Don't leak the construction helpers as iceberg attributes.

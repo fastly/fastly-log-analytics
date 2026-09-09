@@ -1,0 +1,71 @@
+# Helm values overlay for the ingest load test on GKE Autopilot.
+# Apply on top of the chart defaults:
+#   helm install fla-loadtest deploy/chart/fastly-log-analytics \
+#     -f scripts/load_test/k8s/values-loadtest.yaml
+#
+# Postgres/valkey are NOT part of this chart (bring-your-own, see chart
+# README) -- apply postgres.yaml/valkey.yaml first, and create the
+# fla-loadtest-postgres/fla-loadtest-app-secret Secrets (see README.md in
+# this directory) before installing.
+
+image:
+  # No -backend/-frontend suffix -- the chart's templates append
+  # "-backend"/"-frontend" themselves (see backend-deployment.yaml /
+  # frontend-deployment.yaml). Push both images under this common prefix.
+  repository: us-central1-docker.pkg.dev/<gcp-project-id>/fla-loadtest/fla
+  tag: loadtest
+  pullPolicy: IfNotPresent
+
+config:
+  ingestMode: celery
+  servingMode: durable
+  schedulerMode: external
+  sseBackplane: valkey
+  ducklakeCatalog: "postgresql://fla:PLACEHOLDER@postgres:5432/ducklake"
+  # NOT the pod CIDR -- this is Google Cloud Load Balancer's documented
+  # source-IP range for the health-check/proxy path an Ingress uses to
+  # reach a Service. Affects XFF-based client-IP extraction for the public
+  # path only (masking/geo correctness), NOT the admin-trust boundary --
+  # see LOCAL_ADMIN_CIDRS note below. Verify against real GKE Ingress
+  # traffic once the cluster exists; this is Google's documented range, not
+  # something measured against this specific cluster yet.
+  trustedProxyIps: "35.191.0.0/16,130.211.0.0/22"
+
+# Deliberately NOT setting LOCAL_ADMIN_CIDRS here. kubectl port-forward
+# execs into the pod's network namespace and connects via loopback from
+# there (unlike the docker-compose multipod topology, where SSH-tunnel-then
+# -bridge-network traffic does NOT present as loopback, hence that
+# topology's LOCAL_ADMIN_CIDRS=172.28.0.0/16 widening). Verify this
+# assumption for real before relying on it for admin work: port-forward to
+# the backend and confirm a debug/health response shows client_host as
+# 127.0.0.1, not some other address. If that's wrong, widen
+# LOCAL_ADMIN_CIDRS narrowly with real evidence -- do not guess a broad
+# range preemptively.
+
+broker:
+  host: valkey-master
+  port: 6379
+  databaseIndex: "0"
+
+secrets:
+  # Created imperatively (see README.md) -- keeps the broker URL and the
+  # Postgres password out of a committed values file.
+  existingSecret: fla-loadtest-app-secret
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+workers:
+  replicaCount: 2
+
+ingress:
+  enabled: true
+  className: "gce"
+  hosts:
+    - host: <fastly-domain>
+      paths:
+        - path: /
+          pathType: Prefix

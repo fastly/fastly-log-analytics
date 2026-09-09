@@ -331,9 +331,58 @@ if _env_hosts:
 
 import ipaddress
 
+# LOCAL_ADMIN_CIDRS: explicit, default-OFF widening of the admin trust
+# boundary for containerized topologies. On the single-VM prod deploy the
+# admin boundary is loopback (SSH tunnel / Caddy on the same host), but in
+# the multipod compose (and eventually k8s) NOTHING arrives over loopback —
+# the operator's browser lands as the docker gateway IP and the frontend's
+# SSR as its container IP, so both were misclassified as remote analysts.
+# The operator declares the ISOLATED infra network (e.g. 172.28.0.0/16, the
+# fixed compose subnet whose only ingress is a 127.0.0.1-bound Caddy) as
+# admin-trusted. NEVER set this to a subnet that untrusted clients can
+# source from; 0.0.0.0/0 (and ::/0) are rejected outright.
+_LOCAL_ADMIN_CIDRS_ENV = "LOCAL_ADMIN_CIDRS"
+_local_admin_cidrs_cache: tuple[str, tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = ("", ())
+
+
+def _local_admin_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    global _local_admin_cidrs_cache
+    raw = os.environ.get(_LOCAL_ADMIN_CIDRS_ENV, "")
+    if raw == _local_admin_cidrs_cache[0]:
+        return _local_admin_cidrs_cache[1]
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            net = ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            logger.error("[remote_access] ignoring invalid %s entry %r", _LOCAL_ADMIN_CIDRS_ENV, part)
+            continue
+        # Refuse anything that isn't a NARROW, private infra segment. This
+        # guard exists to make the two historical bypass classes
+        # unconfigurable: a broad RFC1918 range (VPN analyst promoted to
+        # admin — e.g. 10.0.0.0/8) and link-local (169.254.169.254 cloud
+        # metadata SSRF-as-admin). 2**16 still admits a /16 compose/pod
+        # subnet, which is as wide as an isolated infra network ever needs.
+        if not net.is_private or net.is_link_local or net.num_addresses > 2**16:
+            logger.error(
+                "[remote_access] REFUSING %s entry %r — admin trust segments must "
+                "be private, non-link-local, and no wider than a /16. Scope it to "
+                "the isolated infra network.",
+                _LOCAL_ADMIN_CIDRS_ENV,
+                part,
+            )
+            continue
+        nets.append(net)
+    _local_admin_cidrs_cache = (raw, tuple(nets))
+    return _local_admin_cidrs_cache[1]
+
 
 def _is_private_or_loopback(ip_str: str) -> bool:
-    """Check if the provided IP or hostname is loopback or a local-test stub.
+    """Check if the provided IP or hostname is loopback, an operator-declared
+    local-admin network member, or a local-test stub.
 
     The original implementation treated ANY RFC1918 / link-local IP as
     "local admin" — which broke down for real users coming in from a
@@ -348,17 +397,21 @@ def _is_private_or_loopback(ip_str: str) -> bool:
     (127.0.0.1, host network mode + ``--forwarded-allow-ips=127.0.0.1``)
     so the only legitimate "this is the admin / TestClient" peer is
     loopback. Keep ``is_loopback`` and the literal-stub set; drop the
-    over-broad ``is_private`` rule.
+    over-broad ``is_private`` rule. Containerized topologies opt in to a
+    NARROW extra trust segment via ``LOCAL_ADMIN_CIDRS`` (see above) —
+    default empty, so prod behavior is unchanged.
 
     Function name is retained for backwards compatibility with the rest
     of remote_access.py — callers see no signature change.
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-        return ip.is_loopback
     except ValueError:
         # Hostnames or test client stub names (e.g. "testclient", "localhost")
         return ip_str in ("testclient", "localhost")
+    if ip.is_loopback:
+        return True
+    return any(ip in net for net in _local_admin_networks())
 
 
 def is_request_remote(request: Request) -> bool:

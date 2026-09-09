@@ -123,12 +123,23 @@ class _ConnectionHolder:
         # so behaviour matches the pre-pool design exactly.
         from backend.core import duckdb_pool
 
-        use_pool = self._read_only and not self._skip_view_update and duckdb_pool._pool_enabled()
-        max_wait_env = os.getenv("DUCKDB_POOL_MAX_WAIT_S", "20.0")
+        use_pool = (
+            self._read_only
+            and not self._skip_view_update
+            and duckdb_pool._pool_enabled()
+            and not svcconfig.is_durable_serving_mode(self._source)
+        )
+        # Pool saturation is normal during dashboard fan-out: one composite
+        # request can hold two connections while several cards mount at once.
+        # Wait long enough for the bounded pool queue to drain instead of
+        # turning an ordinary burst into a user-visible 503. This remains
+        # bounded for a genuinely wedged connection and can be tuned lower
+        # for constrained deployments via DUCKDB_POOL_MAX_WAIT_S.
+        max_wait_env = os.getenv("DUCKDB_POOL_MAX_WAIT_S", "10.0")
         try:
             max_wait = max(1.0, float(max_wait_env))
         except (TypeError, ValueError):
-            max_wait = 20.0
+            max_wait = 10.0
 
         try:
             if use_pool:

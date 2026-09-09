@@ -119,7 +119,7 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 # This avoids pulling in the entire frontend/ directory
 COPY --chown=app:app backend/ ./backend/
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
-COPY --chown=app:app scripts/generate_openapi.py scripts/
+COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
 
 # Include the default empty scoring matrix. The trained matrix.json is
 # a build artifact (gitignored, produced by scripts/scoring/train.py)

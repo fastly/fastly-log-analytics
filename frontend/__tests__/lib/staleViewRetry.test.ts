@@ -168,8 +168,9 @@ describe('STALE_VIEW_RETRY_OPTIONS', () => {
   })
 
   it('slow-polls only while parked on a stale-view error', () => {
-    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: staleErr } })).toBe(STALE_VIEW_POLL_MS)
-    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: new Error('500') } })).toBe(false)
-    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: null } })).toBe(false)
+    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: staleErr, data: undefined } })).toBe(STALE_VIEW_POLL_MS)
+    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: staleErr, data: { aggregates: {} } } })).toBe(false)
+    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: new Error('500'), data: undefined } })).toBe(false)
+    expect(STALE_VIEW_RETRY_OPTIONS.refetchInterval({ state: { error: null, data: undefined } })).toBe(false)
   })
 })

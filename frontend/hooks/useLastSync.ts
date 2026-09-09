@@ -20,7 +20,7 @@ export interface LastSyncInfo {
 /**
  * Fetches the most recent ``sync``-task row from ``/api/cron-runs``,
  * surfaced as the "Last Sync: Xs ago" header badge. Refetches whenever
- * ``useAdminEventStream`` sees a ``task === 'sync'`` event arrive —
+ * ``useAdminEventStream`` sees a ``task === 'log_discovery'`` event arrive —
  * primary update path is SSE invalidation, not the 5-minute fallback
  * poll.
  *
@@ -62,7 +62,7 @@ export function useLastSync() {
         // task=? precount inside the repo — useLastSync only reads
         // entries[0] and never touches `total`, so the count was a
         // 200-330 ms wasted scan per call on a busy service.
-        params: { query: { task: 'sync', per_page: 1, page: 1, skip_total: true } },
+        params: { query: { task: 'log_discovery', per_page: 1, page: 1, skip_total: true } },
       } as never)
       if (error) throw error
       const e = (data as CronRunsResponse | undefined)?.entries?.[0]

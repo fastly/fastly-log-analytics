@@ -35,9 +35,9 @@ def cleanup_orphans(service_id: str):
     bucket = src["bucket"]
     prefix = src.get("prefix", "").strip("/")
     if prefix:
-        prefix = f"{prefix}/raw/"
+        prefix = f"{prefix}/raw/request/"
     else:
-        prefix = "raw/"
+        prefix = "raw/request/"
 
     # 1. Connect to the SQLite metadata DB
     logger.info(f"Connecting to metadata database for service '{service_id}'...")

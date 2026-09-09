@@ -235,6 +235,9 @@ def _shape_summary(
     )
     obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
 
+    total_misses = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'MISS'))" if "cache" in actual_cols_set else "NULL"
+    total_passes = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'PASS'))" if "cache" in actual_cols_set else "NULL"
+
     # Single () grouping over the requested window. The previous
     # GROUPING SETS shape returned a per-edge breakdown as ``by_leg``
     # in the same scan, but no UI surface consumed it (the page
@@ -243,6 +246,8 @@ def _shape_summary(
     cur = runner.execute(
         SQL.SUMMARY_ROLLUP.format(
             lat_val=lat_val,
+            total_misses=total_misses,
+            total_passes=total_passes,
             ottlb_p50=ottlb_p50,
             ottlb_p95=ottlb_p95,
             cdn_ovh=cdn_ovh,

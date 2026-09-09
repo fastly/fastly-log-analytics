@@ -81,18 +81,18 @@ def _safe_table_for(source: dict) -> str | None:
     Slugifies the same way the dashboard's view-builder does
     (``backend.core.duckdb._safe_table_name``: non-alphanumerics to ``_``,
     lowercased, ``logs_`` prefix) so the rollup COPY/SELECT targets the
-    same view name the dashboard creates. Reads ``service_id`` first (the
-    canonical slug in normalized source dicts) and falls back to ``name``
-    for callers that pass a raw on-disk config — both cases pass through
-    the slugifier identically.
+    same view name the dashboard creates. Reads ``name`` first (matching
+    ``update_iceberg_view``) and falls back to ``service_id`` for callers that
+    pass a raw on-disk config — both cases pass through the slugifier
+    identically.
     """
-    raw = source.get("service_id") or source.get("name") or ""
-    if not raw:
+    slug = source.get("name") or source.get("service_id")
+    if not slug:
         logger.warning("[rollups] no service_id/name in source dict; skipping rollup")
         return None
     from backend.core.duckdb import _safe_table_name
 
-    return _safe_table_name(raw)
+    return _safe_table_name(slug)
 
 
 def _get_fields(src: dict) -> list[str]:

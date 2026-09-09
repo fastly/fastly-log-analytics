@@ -8,6 +8,7 @@ from typing import Any
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -116,6 +117,9 @@ def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time
     ``_build_security_response`` would BinderException — so we MUST
     only drop the column when the rollup serve is virtually guaranteed.
     """
+    if svcconfig.is_durable_serving_mode(src):
+        return False
+
     from datetime import UTC, datetime, timedelta
 
     from backend.core.duckdb import _cache_dir
@@ -188,6 +192,8 @@ def _ipv6_per_hour_from_rollups(
     Returns ``None`` when start/end is missing, no in-window closed-
     hour rollups exist, or a read raises (caller falls back to live SQL).
     """
+    if svcconfig.is_durable_serving_mode(src):
+        return None
     if not start_time or not end_time:
         return None
 
@@ -395,7 +401,7 @@ def get_top_bots(
     actual_cols = runner.get_schema_cols()
     timer.mark("top_bots:get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(bots=[], ngwaf_bots=[])
+        return empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry())
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -404,7 +410,7 @@ def get_top_bots(
     arcjet_bots: list[dict] = []
     ngwaf_bots: list[dict] = []
 
-    use_rollups = not filters
+    use_rollups = not filters and not svcconfig.is_durable_serving_mode(src)
 
     # ── Arcjet UA matching ──────────────────────────────────────────
     # Rollup-served when no filters apply. The hour bundles already
@@ -583,16 +589,15 @@ def get_security_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
     if not actual_cols:
-        return empty_schema_response(
-            tls_fingerprints=[],
-            req_size_dist=[],
-            ipv6_adoption=[],
-            proxy_dist=[],
-            conn_reuse_dist=[],
-            http_versions=[],
-            section_timings=section_timings,
+        return {
+            "tls_fingerprints": [],
+            "req_size_dist": [],
+            "ipv6_adoption": [],
+            "proxy_dist": [],
+            "conn_reuse_dist": [],
+            "section_timings": section_timings,
             **runner.telemetry(),
-        )
+        }
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -967,7 +972,8 @@ def _build_security_response(
             try:
                 from backend.core.rollups import read_wellknown_bots_rollup
 
-                _wk_rows = read_wellknown_bots_rollup(src, start_time, end_time)
+                if not svcconfig.is_durable_serving_mode(src):
+                    _wk_rows = read_wellknown_bots_rollup(src, start_time, end_time)
             except Exception:
                 _wk_rows = None
             if _wk_rows is not None:

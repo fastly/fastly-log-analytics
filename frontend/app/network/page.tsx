@@ -122,7 +122,7 @@ const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
 export default function NetworkPage() {
   const [metric, setMetric] = useState('health_score')
   const [mapAsn, setMapAsn] = useState('all')
-  const [animBucketSeconds, setAnimBucketSeconds] = useState(5)
+  const [animBucketSeconds, setAnimBucketSeconds] = useState(3600)
   const [regionCountry, setRegionCountry] = useState('US')
   const [shieldingVisibility, setShieldingVisibility, onShieldingVisChange] = useColumnVisibility()
   // Min edge→shield requests before a route's transit median is trusted enough

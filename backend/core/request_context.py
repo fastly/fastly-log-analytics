@@ -150,9 +150,18 @@ def build_request_context(
 
     # Build the RequestTelemetry root span. Cheap when the SDK is not
     # initialised (test mode); ~100ns when it is.
+    #
+    # Use the matched route TEMPLATE, not request.url.path — several routes
+    # embed service_id in the path (e.g. /api/services/{service_id}/scoring/
+    # dashboard), and the template is what keeps span-name cardinality
+    # bounded when a span-metrics processor (e.g. Tempo's) turns span names
+    # into per-route RED metrics. Depends() runs after routing, so the match
+    # is always present outside of 404s.
+    route = request.scope.get("route")
+    route_template = getattr(route, "path", None) or request.url.path
     telemetry = RequestTelemetry(
         request_method=request.method,
-        request_path=request.url.path,
+        request_path=route_template,
     )
     telemetry.start_request()
 

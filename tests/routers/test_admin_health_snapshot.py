@@ -10,6 +10,7 @@ CI runners.
 
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
 
 
@@ -41,6 +42,15 @@ def test_health_snapshot_returns_shape_with_known_collectors(client):
     assert "recent_cron_failures" in body
     assert "observability" in body
     assert "config_backup" in body
+
+
+def test_health_snapshot_celery_failure_keeps_valid_response(client):
+    with (
+        patch.dict(os.environ, {"INGEST_MODE": "celery"}),
+        patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("broker down")),
+    ):
+        body = _get_health(client)
+    assert body["celery"] is None
 
 
 # ── Failure paths: each collector under try/except. ────────────────────────

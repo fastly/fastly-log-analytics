@@ -1,0 +1,278 @@
+# Default values for fastly-log-analytics.
+#
+# EXPERIMENTAL: this chart is not the supported deployment path (the
+# supported topology is the single-VM docker-compose.prod.yml). It exists to
+# exercise the multi-pod Celery/valkey split on Kubernetes.
+#
+# PREREQUISITES. The defaults below install the single-node topology
+# (config.ingestMode: sync) and need NOTHING but a cluster with a
+# ReadWriteOnce StorageClass — `helm install` with no --set flags works.
+#
+# The scaled topology (config.ingestMode: celery) needs two datastores that
+# this chart does NOT ship: it declares no subchart dependencies, so Postgres
+# and valkey/redis are bring-your-own. See README.md for the value set, and
+# note that selecting celery mode without them fails at `helm template` time
+# with a message naming each missing value — it does not deploy pods that
+# then CrashLoop.
+#
+# Applies to the STATELESS FRONTEND only. The backend Deployment is pinned to
+# replicas: 1 in the template and ignores this value, because the serving tier
+# is single-pod-only: the per-service `.duckdb` file is a read-write
+# single-file database and DuckDB takes a PROCESS-EXCLUSIVE lock on it, so a
+# second backend pod sharing the PVC fails every connection checkout with
+# `Could not set lock on file` and returns 503 on every data request. Two
+# further blockers (pod-local compacted parquet registered in shared Postgres,
+# and a fleet-wide cron lease on jobs whose output is pod-local) make it fail
+# silently rather than loudly. Do not "fix" this by editing a value — see
+# docs/adr/18-serving-tier-single-pod.md.
+#
+# Ingest DOES scale horizontally: raise workers.replicaCount (or enable
+# autoscaling below, which drives the worker KEDA ScaledObject).
+replicaCount: 1
+
+image:
+  repository: fastly-log-analytics
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  # DuckDB's httpfs extension writes $HOME on every pool acquire and the app
+  # writes /app/data + /app/cache, so the root filesystem cannot be
+  # read-only for the backend/worker images.
+  readOnlyRootFilesystem: false
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  hosts:
+    - host: fastly.analytics.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Applies to backend/frontend/beat (worker sizing is separate: see
+# workers.resources below, since ingest workers scale via replicaCount/KEDA
+# and have a very different CPU/memory profile than the pinned single-pod
+# backend). Starting point only, sized off docker-compose.prod.yml's known
+# 4-core-VM math (DUCKDB_POOL_MAX_SIZE=4 x DUCKDB_POOL_CONN_MEMORY_LIMIT=
+# 1536MB = 6GB, see that file's comments) plus pod overhead -- not yet
+# validated under real GKE load. Refine after the ingest load test; frontend
+# and beat are cheap enough that sharing this block over-provisions them
+# somewhat, which is an accepted simplification for now, not a target for a
+# separate values key until it actually costs something under Autopilot.
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "3"
+    memory: 8Gi
+
+# Scales the Celery workers (KEDA ScaledObject, queue-depth triggered) and the
+# stateless frontend. It does NOT scale the backend — there is no backend HPA;
+# see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+# Shared app state (configs + data + cache). ReadWriteOnce: every pod that
+# mounts it is pinned to the same node. Scaling past one node requires
+# METADATA_DSN/DUCKLAKE_CATALOG (Postgres) + shared object storage instead.
+#
+# enabled: false swaps the PVC for an emptyDir, which loses /app/configs on
+# every pod restart — that is where the service registry lives, so the
+# install forgets every configured service. Only turn it off for a
+# throwaway kick-the-tires install.
+persistence:
+  enabled: true
+  # Use an existing PVC instead of creating one.
+  existingClaim: ""
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+
+config:
+  # "sync"   — single-node ingest on the backend pod's in-process APScheduler.
+  #            Needs no Postgres, no broker, no worker/beat pods. This is the
+  #            app's own default (backend/config.py: INGEST_MODE) and the only
+  #            mode that installs with no further values, so it is the chart
+  #            default too.
+  # "celery" — the horizontally-scaled ingest fleet (ADR-15/ADR-16). Renders
+  #            the worker + beat Deployments and the KEDA ScaledObject, and
+  #            REQUIRES all three of config.ducklakeCatalog,
+  #            secrets.metadataDsn and secrets.celeryBrokerUrl (or an
+  #            existingSecret carrying the latter two). Both DSNs must be
+  #            Postgres: a DuckDB-file catalog is single-process and per-pod
+  #            SQLite metadata cannot serialize the cron lease across pods.
+  #            backend/config.py::validate_ingest_mode() enforces the same
+  #            three conditions at boot; templates/validate.yaml enforces them
+  #            at template time so a misconfiguration is a `helm install`
+  #            error, not a CrashLoopBackOff.
+  #
+  # Note this scales INGEST only. The serving tier stays single-pod in both
+  # modes — see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
+  ingestMode: sync
+  # "file"    — native per-service DuckDB + local buffers (sync only).
+  # "durable" — read-only ephemeral DuckDB over Postgres DuckLake (celery
+  #             only); no native service DuckDB file is opened by serving.
+  servingMode: file
+  # "external" hands the discovery/ingest job family to RedBeat in the broker,
+  # so it only makes sense with ingestMode: celery (enforced at template time).
+  schedulerMode: inprocess
+  # "valkey" fans SSE events out across pods via the Celery broker, so it
+  # needs secrets.celeryBrokerUrl. "local" is in-process.
+  sseBackplane: local
+  # Pin to the subnet your ingress/proxy pods actually egress from (pod CIDR
+  # or the RFC1918 ranges below). The backend REFUSES TO BOOT on `*` — a
+  # wildcard lets any direct client spoof X-Forwarded-For and be classified
+  # loopback-admin.
+  trustedProxyIps: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  # Empty by default (safest for a chart going to arbitrary clusters) --
+  # the frontend's SSR/proxy calls to the backend travel over the pod
+  # network, not loopback, so with this unset every browser session
+  # through the frontend is classified remote/analyst and gets the
+  # needs_login redirect, confirmed live: a k8s-native admin experience
+  # (browse via kubectl port-forward, no separate login) needs this set to
+  # the cluster's pod CIDR, mirroring docker-compose.multipod.yml's
+  # LOCAL_ADMIN_CIDRS=172.28.0.0/16 and its reasoning exactly -- "nothing
+  # reaches the backend over loopback here, so the network this chart's
+  # Services are only reachable from (no public Ingress route to them,
+  # port-forward only) is the trusted equivalent." Only safe under that
+  # same condition: never set this to something a public Ingress can reach.
+  localAdminCidrs: ""
+  duckdbMemoryLimit: "4GB"
+  # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
+  # which is correct for ingestMode: sync and rejected for ingestMode: celery
+  # (which requires postgres:// or postgresql://).
+  ducklakeCatalog: ""
+  ducklakeDataPath: ""
+  hotS3Endpoint: ""
+
+# Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
+# does not take a redis:// URL). Only read when autoscaling.enabled and
+# ingestMode: celery. Keep in sync with secrets.celeryBrokerUrl.
+broker:
+  host: valkey-master
+  port: 6379
+  databaseIndex: "0"
+
+# Connection strings are wired into pods via a Secret, never as plain env in
+# the pod spec. For production, pre-create a Secret with keys
+# CELERY_BROKER_URL and (optionally) METADATA_DSN and set existingSecret —
+# values-provided strings land in the release manifest and stay readable to
+# anyone with helm access.
+# Both are empty by default because the default (sync) install needs neither,
+# and an unused broker URL pointing at a valkey that may not exist is worse
+# than no default at all. In celery mode both are required — either here or,
+# preferred, via existingSecret.
+secrets:
+  # Name of a pre-created Secret. When set, no Secret is templated and
+  # celeryBrokerUrl/metadataDsn below are ignored. It must carry
+  # CELERY_BROKER_URL (and METADATA_DSN in celery mode) — the chart cannot
+  # read a Secret it did not create, so a missing key surfaces as the pod
+  # failing to start with "couldn't find key ... in Secret".
+  existingSecret: ""
+  # e.g. redis://valkey-master:6379/0
+  celeryBrokerUrl: ""
+  # e.g. postgresql://fla:PASSWORD@postgres:5432/ducklake
+  metadataDsn: ""
+
+# Worker and beat Deployments are rendered only in ingestMode: celery.
+workers:
+  # Same RWO-PVC caveat as replicaCount above.
+  replicaCount: 1
+  # CPU-bound convert/compaction work (backend/core/ingest.py's
+  # convert_batch_objects), not a DuckDB pool holding dashboard queries, so
+  # the profile is real cores over memory headroom. Starting point pending
+  # the ingest load test's measured per-worker throughput ceiling -- this is
+  # the number that determines how many replicas KEDA needs at a given RPS
+  # target, so expect this to move once that measurement exists.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+
+beat:
+  enabled: true
+
+# Prometheus + Tempo + Grafana + exporters, ported from
+# docker-compose.observability.yml. Off by default -- opt in per install.
+# Admin-only by design: every Service here is ClusterIP with no Ingress
+# entry anywhere in this chart, reached via `kubectl port-forward`, same
+# access pattern as every other admin surface in this deployment. Grafana
+# itself uses anonymous Admin (see grafana.yaml's comment) because that
+# network boundary is the actual control, not Grafana's own auth.
+#
+# Limitation: the Prometheus/Tempo/exporter Services use bare names
+# (prometheus, tempo, redis-exporter, ...) because the ported configs
+# (files/observability/*.yml) are static, not templated -- so only one
+# release of this chart per namespace can have observability.enabled,
+# matching docker-compose's own one-instance-per-host model.
+observability:
+  enabled: false
+  prometheus:
+    image: prom/prometheus:v3.5.0
+  tempo:
+    image: grafana/tempo:2.7.2
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    anonymousAdmin: true
+  # Shared by prometheus/tempo/grafana (they're low-traffic, config-driven
+  # services, not the ingest hot path -- no need for a separate profile
+  # like workers.resources has).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  exporters:
+    redis:
+      image: oliver006/redis_exporter:v1.66.0
+      # BYO valkey/redis address -- same instance as broker.host/port above.
+      address: "redis://valkey-master:6379"
+    postgres:
+      image: prometheuscommunity/postgres-exporter:v0.16.0
+      # BYO Postgres DSN -- should point at the same instance as
+      # config.ducklakeCatalog/secrets.metadataDsn. Kept as its own value
+      # rather than reusing those directly since this is a read-only
+      # metrics credential, not the app's own connection.
+      dataSourceName: ""
+    celery:
+      image: danihodovic/celery-exporter:0.11.3
+      # BYO broker URL -- same instance as secrets.celeryBrokerUrl.
+      brokerUrl: "redis://valkey-master:6379/0"

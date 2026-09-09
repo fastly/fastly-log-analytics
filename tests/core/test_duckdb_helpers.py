@@ -196,7 +196,7 @@ def test_fos_glob_with_prefix_includes_prefix_path():
     from backend.core.duckdb import _fos_glob
 
     src = {"bucket": "b", "prefix": "my-org"}
-    assert _fos_glob(src) == "s3://b/my-org/raw/**/*.gz"
+    assert _fos_glob(src) == "s3://b/my-org/raw/request/**/*.gz"
 
 
 def test_fos_glob_without_prefix_drops_to_bucket_root():
@@ -205,7 +205,7 @@ def test_fos_glob_without_prefix_drops_to_bucket_root():
     double the trailing slash."""
     from backend.core.duckdb import _fos_glob
 
-    assert _fos_glob({"bucket": "b", "prefix": ""}) == "s3://b/raw/**/*.gz"
+    assert _fos_glob({"bucket": "b", "prefix": ""}) == "s3://b/raw/request/**/*.gz"
 
 
 def test_fos_glob_strips_leading_and_trailing_slashes_in_prefix():
@@ -214,7 +214,7 @@ def test_fos_glob_strips_leading_and_trailing_slashes_in_prefix():
     strip would render ``s3://b//my-prefix//raw/...``."""
     from backend.core.duckdb import _fos_glob
 
-    assert _fos_glob({"bucket": "b", "prefix": "/my-prefix/"}) == "s3://b/my-prefix/raw/**/*.gz"
+    assert _fos_glob({"bucket": "b", "prefix": "/my-prefix/"}) == "s3://b/my-prefix/raw/request/**/*.gz"
 
 
 # ── _cache_dir (local cache for source) ─────────────────────────────────

@@ -247,7 +247,8 @@ async def realtime_seed(
     from backend.core.realtime.poller import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
 
-    ticks = rt_publisher.get_recent_ticks(service_id, count=60)
+    # Sync Redis I/O in valkey-backplane mode — keep it off the event loop.
+    ticks = await asyncio.to_thread(rt_publisher.get_recent_ticks, service_id, 60)
     if len(ticks) >= 60:
         return {"ticks": ticks}
 

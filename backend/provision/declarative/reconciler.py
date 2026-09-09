@@ -539,6 +539,15 @@ def reconcile_cdn_service_state(
         if status_cb:
             status_cb(f"⏳ Finding existing CDN service named '{cdn_service_name}'...")
         existing = find_service_by_name(cdn_service_name, token)
+        if existing and existing.get("id") == logging_service_id:
+            # A customer service may share the requested display name. Never
+            # adopt it as the analytics CDN or allow rollback to delete it.
+            existing = None
+            if status_cb:
+                status_cb(
+                    f"⚠️ Ignoring service {logging_service_id} as CDN candidate; "
+                    "the analytics CDN must be a separate service."
+                )
         if existing:
             cdn_service_id = existing["id"]
             if status_cb:
@@ -1106,7 +1115,9 @@ def _apply_diff(
     if has_main_cond:
         if status_cb:
             status_cb("➕ Configuring log analytics condition 'log_analytics_condition'...")
-        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
+        cond_parts = ["!segmented_caching.is_inner_req"]
+        if desired_state and desired_state.rum_enabled:
+            cond_parts.append('req.url.path != "/rum-beacon"')
         if desired_state:
             scoring_enabled = desired_state.scoring.enabled
             if desired_state.edge_only:

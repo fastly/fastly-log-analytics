@@ -10,7 +10,7 @@ export const CARD_CATEGORIES: CardCategory[] = [
   {
     id: 'request',
     label: 'Request',
-    cardIds: ['ip', 'asn', 'host', 'url', 'method', 'status', 'cache', 'proto', 'ua', 'referer'],
+    cardIds: ['ip', 'asn', 'host', 'url', 'method', 'status', 'cache', 'proto', 'ua', 'referer', 'cookie_session', 'resp_header_content_encoding'],
     tint: { bg: 'bg-blue-50/60 dark:bg-blue-950/40', border: 'border-blue-200/70 dark:border-blue-900/60', dot: 'bg-blue-500' },
   },
   {
@@ -44,7 +44,7 @@ export const CARD_CATEGORIES: CardCategory[] = [
     id: 'security',
     label: 'Security',
     cardIds: [
-      '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind',
+      '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind', 'edge_score_reason_ind',
       'waf', 'waf_resp', 'waf_ms',
       'p_type', 'p_desc',
       'ja3', 'ja4', 'tls_ciphers_sha',
@@ -62,6 +62,12 @@ export const CARD_CATEGORIES: CardCategory[] = [
     label: 'QUIC / HTTP3',
     cardIds: ['bw', 'q_rtt', 'q_rtt_var', 'q_lost', 'q_cwnd'],
     tint: { bg: 'bg-indigo-50/60 dark:bg-indigo-950/40', border: 'border-indigo-200/70 dark:border-indigo-900/60', dot: 'bg-indigo-500' },
+  },
+  {
+    id: 'io',
+    label: 'Image Optimization',
+    cardIds: ['io_input_format', 'io_output_format'],
+    tint: { bg: 'bg-fuchsia-50/60 dark:bg-fuchsia-950/40', border: 'border-fuchsia-200/70 dark:border-fuchsia-900/60', dot: 'bg-fuchsia-500' },
   },
 ]
 

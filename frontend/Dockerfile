@@ -30,6 +30,8 @@ WORKDIR /app
 # unrs-resolver via @unrs/resolver-binding-linux-*-gnu) or is darwin-only
 # (fsevents). If a future dep needs node-gyp, reinstate `python3 make g++`.
 
+ENV NODE_OPTIONS="--max_old_space_size=1024"
+ENV NEXT_MEMORY_LIMIT=1024
 COPY frontend/package.json frontend/package-lock.json ./
 # Cache mount keeps npm's tarball cache across builds — entries are keyed by the
 # SHA-512 integrity hash from package-lock.json and verified before extraction,

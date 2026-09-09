@@ -50,6 +50,10 @@ services:
       # prod-only) so a localhost run still boots if someone removes them.
       - TRUSTED_PROXY_IPS=127.0.0.1
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
+      # Admin trust for this containerized topology: nothing reaches the
+      # backend over loopback here (operator traffic lands as the docker
+      # gateway IP), so the isolated compose subnet is declared admin-trusted.
+      - LOCAL_ADMIN_CIDRS=172.29.0.0/16
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -91,3 +95,6 @@ services:
 networks:
   app-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16

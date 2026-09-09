@@ -227,7 +227,7 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     // last-sync needs BOTH start and completion sync events so the
     // badge can flip to "Last Sync: running" the moment a sync starts
     // and flip back to "Xs ago" the moment it completes.
-    if (payload.task === 'sync') {
+    if (payload.task === 'log_discovery') {
       schedule('last-sync')
     }
     // Iceberg panels only need to refresh once the mutating task

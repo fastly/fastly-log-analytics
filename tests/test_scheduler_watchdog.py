@@ -1,34 +1,28 @@
-"""Tests for the hard-cap watchdog inside ``backend.cron.decorators.cron_task``.
+"""Tests for the watchdog inside ``backend.cron.decorators.cron_task``.
 
 Pins the deadlock fix landed for the 2026-05-21 incident where
-``_run_service_cron`` hung 10+ minutes on the usage-log step and APScheduler's
-``max_instances=1`` wedged every subsequent tick. The watchdog runs the cron
-body on a single-worker ThreadPoolExecutor with a hard cap; on timeout it
-returns control to APScheduler so the next tick can fire, leaking the stuck
-inner thread (Python can't cleanly kill threads).
+``_run_log_discovery_cron`` hung 10+ minutes on the usage-log step and APScheduler's
+``max_instances=1`` wedged every subsequent tick. The watchdog reports an
+overlong body but waits for it to finish before releasing the scheduler slot;
+abandoning a thread that owns DuckDB/FOS resources causes lock leaks.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from unittest.mock import patch
 
 
-def test_cron_task_returns_when_inner_function_exceeds_hard_cap(monkeypatch, caplog):
-    """A cron body that runs past the hard cap must NOT block the wrapper.
-
-    Otherwise APScheduler's worker thread is wedged and ``max_instances=1``
-    skips every subsequent tick — exactly the failure mode this fix exists
-    for. The wrapper returns None and an ERROR log line names the cron +
-    service so the next incident leaves a breadcrumb.
-    """
+def test_cron_task_waits_for_cleanup_after_watchdog_threshold(monkeypatch, caplog):
+    """An overlong body is reported but its resource-owning thread is joined."""
     from backend.cron import decorators as sched_mod
 
-    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.5)
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.05)
 
     @sched_mod.cron_task("hang-test")
     def _hangs_forever(service_id: str) -> None:
-        time.sleep(30)
+        time.sleep(0.15)
 
     caplog.set_level(logging.ERROR, logger="backend.scheduler")
 
@@ -36,14 +30,12 @@ def test_cron_task_returns_when_inner_function_exceeds_hard_cap(monkeypatch, cap
     result = _hangs_forever("svc-watchdog")
     elapsed = time.monotonic() - start
 
-    assert result is None, "watchdog should return None on timeout"
-    assert elapsed < 5, (
-        f"wrapper returned in {elapsed:.2f}s — expected <5s (hard cap was 0.5s). "
-        "If this fails, the executor is being shut down with wait=True and the "
-        "watchdog is defeated."
-    )
+    assert result is None
+    assert elapsed >= 0.15, "the resource-owning worker must finish before release"
     assert any(
-        "exceeded" in rec.getMessage() and "hard cap" in rec.getMessage() and "svc-watchdog" in rec.getMessage()
+        "exceeded" in rec.getMessage()
+        and "watchdog threshold" in rec.getMessage()
+        and "svc-watchdog" in rec.getMessage()
         for rec in caplog.records
         if rec.levelno >= logging.ERROR
     ), f"expected ERROR log naming the service; got {[r.getMessage() for r in caplog.records]}"
@@ -95,3 +87,28 @@ def test_cron_task_preserves_telemetry_context(monkeypatch):
         f"expected process_context='ctx-test' inside cron body; got {captured.get('ctx')!r}. "
         "If None, the process_context_scope is being applied in the wrong thread."
     )
+
+
+def test_cron_task_heartbeat_thread_releases_its_connection(monkeypatch):
+    """Live incident (2026-09-03): the per-invocation heartbeat thread
+    (a fresh ``threading.Thread``, never reused across ticks — unlike the
+    bounded watchdog executor) called ``get_con()`` but never gave the
+    connection back. Under Postgres that permanently pins one slot of the
+    bounded METADATA_PG_POOL_MAX pool per cron tick across the WHOLE
+    scheduler, and every metadata-touching request/cron eventually starts
+    raising PoolTimeout once the pool is exhausted. The heartbeat thread
+    must release its connection on exit, whether or not it ever actually
+    used one (job_name=None skips the UPDATE, but the finally must still
+    run and be a safe no-op)."""
+    from backend.cron import decorators as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
+
+    @sched_mod.cron_task("release-test", job_name="release_test_job")
+    def _quick(service_id: str):
+        return None
+
+    with patch("backend.core.metadata.base.release_thread_connection") as mock_release:
+        _quick("svc-release")
+
+    mock_release.assert_called_once_with()

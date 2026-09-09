@@ -18,7 +18,7 @@ import atexit
 import threading
 from typing import Any
 
-from backend.core.metadata.base import get_con
+from backend.core.metadata.base import get_con, release_thread_connection
 
 _INSERT_SQL = """
     INSERT INTO slow_queries (
@@ -113,6 +113,8 @@ def _flush_all(*, only_service: str | None = None) -> None:
             con.commit()
         except Exception:
             pass
+        finally:
+            release_thread_connection()
 
 
 def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
@@ -176,8 +178,8 @@ def list_slow_queries(
     """
     _flush_all(only_service=service_id)
     con = get_con(service_id)
-    sql = ["SELECT * FROM slow_queries WHERE started_at_utc >= ?"]
-    args: list[Any] = [since_utc]
+    sql = ["SELECT * FROM slow_queries WHERE service_id = ? AND started_at_utc >= ?"]
+    args: list[Any] = [service_id, since_utc]
     if until_utc is not None:
         sql.append("AND started_at_utc < ?")
         args.append(until_utc)
@@ -209,8 +211,8 @@ def count_slow_queries(
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
-        "SELECT COUNT(*) AS n FROM slow_queries WHERE started_at_utc >= ? AND duration_ms >= ?",
-        (since_utc, threshold_ms),
+        "SELECT COUNT(*) AS n FROM slow_queries WHERE service_id = ? AND started_at_utc >= ? AND duration_ms >= ?",
+        (service_id, since_utc, threshold_ms),
     ).fetchone()
     return int(row["n"] or 0)
 
@@ -222,8 +224,8 @@ def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     cur = con.execute(
-        "DELETE FROM slow_queries WHERE started_at_utc < ?",
-        (older_than_utc,),
+        "DELETE FROM slow_queries WHERE service_id = ? AND started_at_utc < ?",
+        (service_id, older_than_utc),
     )
     con.commit()
     return cur.rowcount or 0
@@ -235,7 +237,8 @@ def slow_queries_storage_stats(service_id: str) -> dict[str, Any]:
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
-        "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries"
+        "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries WHERE service_id = ?",
+        (service_id,),
     ).fetchone()
     return {
         "row_count": int(row["n"] or 0),

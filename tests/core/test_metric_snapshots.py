@@ -8,6 +8,32 @@ from backend.core import metric_snapshots
 from backend.utils.date_utils import iso_z
 
 
+class _FakePgCursor:
+    def __init__(self, rows=(), rowcount=0):
+        self._rows = list(rows)
+        self.rowcount = rowcount
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakePgConnection:
+    def __init__(self, rows=(), rowcount=0):
+        self.calls = []
+        self._rows = rows
+        self._rowcount = rowcount
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, params))
+        return _FakePgCursor(self._rows, self._rowcount)
+
+    def close(self):
+        pass
+
+
 def test_record_and_get_global_metric_roundtrip():
     # Explicit timestamps because the second-resolution PK would otherwise
     # collide on two writes in the same second. Production sampler fires
@@ -117,3 +143,30 @@ def test_idempotent_insert_overwrites_same_pk_per_service():
     )
     assert len(out) == 1
     assert out[0]["value"] == 2.0
+
+
+def test_postgres_backend_is_shared_for_metric_writes_and_reads(monkeypatch):
+    """Durable serving must not silently write metric history to pod-local SQLite."""
+    write_con = _FakePgConnection()
+    read_con = _FakePgConnection(
+        rows=[
+            {
+                "metric": "pool_wait_p95_ms",
+                "service_id": "svc-a",
+                "task": "",
+                "ts": "2026-01-01T00:00:00Z",
+                "value": 4.5,
+            }
+        ]
+    )
+    monkeypatch.setattr(metric_snapshots, "_use_postgres", lambda: True)
+    monkeypatch.setattr(metric_snapshots, "_pg_write_connection", lambda: write_con)
+    monkeypatch.setattr(metric_snapshots, "_pg_connection", lambda: read_con)
+
+    metric_snapshots.record_snapshot("pool_wait_p95_ms", 4.5, service_id="svc-a", ts="2026-01-01T00:00:00Z")
+    out = metric_snapshots.get_batch(since=datetime(2025, 12, 31, tzinfo=UTC))
+
+    assert out["pool_wait_p95_ms|svc-a"][0]["value"] == 4.5
+    assert "ON CONFLICT" in write_con.calls[0][0]
+    assert write_con.calls[0][1][2] == "svc-a"
+    assert read_con.calls[0][1] == ("2025-12-31T00:00:00Z",)

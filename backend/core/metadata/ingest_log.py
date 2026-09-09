@@ -173,7 +173,7 @@ def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) 
         "latest_file_name": (latest_fn_row["file_name"] if latest_fn_row else None),
     }
     con.execute(
-        """INSERT INTO ingested_files_summary
+        """INSERT INTO ingested_files_summary AS summary
                (source_name, file_count, total_rows, total_bytes,
                 count_with_bytes, latest_file_name, last_ingested)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -309,10 +309,15 @@ def get_log_accounting_counts(
     """
     import contextlib
 
+    from backend.core.metadata.pg_connection import is_postgres
+
     start_date = sql_start[:10]
     end_date = sql_end[:10]
     sql_start_space = sql_start.replace("T", " ")
     sql_end_space = sql_end.replace("T", " ")
+    date_pattern_check = (
+        " ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'" if is_postgres() else " GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'"
+    )
 
     # Optimize fast arm SELECT expression and parameters based on width
     fast_params: tuple[int, ...]
@@ -335,11 +340,11 @@ def get_log_accounting_counts(
         """
         slow_params = ()
     else:
-        slow_bucket_expr = """
+        slow_bucket_expr = f"""
               CASE
                 WHEN instr(file_name, 'T') >= 11
                  AND substr(file_name, instr(file_name, 'T') - 10, 10)
-                     GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                     {date_pattern_check}
                 THEN substr(file_name, instr(file_name, 'T') - 10, ?)
                 WHEN ingested_at IS NOT NULL
                 THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
@@ -510,7 +515,7 @@ def get_latest_ingest_ts(service_id: str) -> str | None:
     con = get_con(service_id)
     row = con.execute(
         """
-        SELECT datetime(max(ingested_at)) AS latest
+        SELECT max(ingested_at) AS latest
         FROM ingested_files
         WHERE source_name = ? AND file_name != '__seeding_attempted__'
         """,
@@ -563,8 +568,8 @@ def register_locally_compacted(service_id: str, file_names: list[str]) -> None:
         return
     con = get_con(service_id)
     con.executemany(
-        "INSERT OR IGNORE INTO local_compacted_files (file_name) VALUES (?)",
-        [(n,) for n in file_names],
+        "INSERT OR IGNORE INTO local_compacted_files (service_id, file_name) VALUES (?, ?)",
+        [(service_id, n) for n in file_names],
     )
     con.commit()
 
@@ -575,7 +580,12 @@ def get_locally_compacted_basenames(service_id: str) -> set[str]:
     Cached at the call site if used in a hot loop.
     """
     con = get_con(service_id)
-    return {row[0] for row in con.execute("SELECT file_name FROM local_compacted_files").fetchall()}
+    return {
+        row[0]
+        for row in con.execute(
+            "SELECT file_name FROM local_compacted_files WHERE service_id = ?", (service_id,)
+        ).fetchall()
+    }
 
 
 def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None]], table_name: str = "logs") -> None:
@@ -666,30 +676,39 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
                file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
         [(fn, service_id, rc, sz, _parse_file_date(fn), table_name) for (fn, rc, sz) in rows],
     )
+    from backend.core.metadata.pg_connection import is_postgres
+
+    # Postgres needs an explicit target alias to disambiguate the aggregate
+    # row from EXCLUDED; SQLite does not support that alias syntax.
+    target_table = "ingested_files_summary AS summary" if is_postgres() else "ingested_files_summary"
+    target_ref = "summary" if is_postgres() else "ingested_files_summary"
+
     # Use the just-applied DB clock so last_ingested matches the row's
     # ingested_at default (datetime('now')) — keeps the rollup honest.
     now_str = con.execute("SELECT datetime('now')").fetchone()[0]
     con.execute(
-        """INSERT INTO ingested_files_summary
+        f"""INSERT INTO {target_table}
                (source_name, file_count, total_rows, total_bytes,
                 count_with_bytes, latest_file_name, last_ingested)
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_name) DO UPDATE SET
-               file_count       = file_count + excluded.file_count,
-               total_rows       = total_rows + excluded.total_rows,
-               total_bytes      = total_bytes + excluded.total_bytes,
-               count_with_bytes = count_with_bytes + excluded.count_with_bytes,
+               file_count       = {target_ref}.file_count + excluded.file_count,
+               total_rows      = {target_ref}.total_rows + excluded.total_rows,
+               total_bytes      = {target_ref}.total_bytes + excluded.total_bytes,
+               count_with_bytes = {target_ref}.count_with_bytes + excluded.count_with_bytes,
                latest_file_name = CASE
-                   WHEN latest_file_name IS NULL OR
+                   WHEN {target_ref}.latest_file_name IS NULL OR
                         substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
-                        substr(latest_file_name, instr(latest_file_name, '.gz') + 3, 19)
+                        substr({target_ref}.latest_file_name,
+                               instr({target_ref}.latest_file_name, '.gz') + 3, 19)
                        THEN excluded.latest_file_name
-                   ELSE latest_file_name
+                   ELSE {target_ref}.latest_file_name
                END,
                last_ingested = CASE
-                   WHEN last_ingested IS NULL OR excluded.last_ingested > last_ingested
+                   WHEN {target_ref}.last_ingested IS NULL OR
+                        excluded.last_ingested > {target_ref}.last_ingested
                        THEN excluded.last_ingested
-                   ELSE last_ingested
+                   ELSE {target_ref}.last_ingested
                END""",
         (
             service_id,

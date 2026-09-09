@@ -68,7 +68,8 @@ def test_each_subcommand_has_working_help():
 # ── cmd_provision ───────────────────────────────────────────────────────────
 
 
-def test_provision_parses_edge_only_true_and_invokes_wizard():
+@patch("backend.provision.orchestrator.provision", return_value=[])
+def test_provision_parses_edge_only_true_and_invokes_wizard(mock_provision):
     """``--edge-only`` arrives at wizard as ``True`` — typer's
     Optional[bool] toggle is the trickiest part of the surface."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
@@ -81,7 +82,8 @@ def test_provision_parses_edge_only_true_and_invokes_wizard():
     assert args.yes is True
 
 
-def test_provision_parses_no_edge_only_as_false():
+@patch("backend.provision.orchestrator.provision", return_value=[])
+def test_provision_parses_no_edge_only_as_false(mock_provision):
     """``--no-edge-only`` half of the toggle arrives as ``False``."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
         result = runner.invoke(app, ["provision", "--yes", "--service-id", "s", "--no-edge-only"])
@@ -89,7 +91,8 @@ def test_provision_parses_no_edge_only_as_false():
     assert mock_wizard.call_args.args[0].edge_only is False
 
 
-def test_provision_edge_only_default_is_none():
+@patch("backend.provision.orchestrator.provision", return_value=[])
+def test_provision_edge_only_default_is_none(mock_provision):
     """When NEITHER flag is supplied, wizard sees ``None`` so its own
     default-resolution (yes→True, interactive→prompt) can run."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
@@ -97,7 +100,8 @@ def test_provision_edge_only_default_is_none():
     assert mock_wizard.call_args.args[0].edge_only is None
 
 
-def test_provision_collects_repeated_enable_group_into_list():
+@patch("backend.provision.orchestrator.provision", return_value=[])
+def test_provision_collects_repeated_enable_group_into_list(mock_provision):
     """Repeated ``--enable-group`` accumulates — collapsing would
     silently drop all but the last admin-supplied group."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
@@ -122,7 +126,8 @@ def test_provision_collects_repeated_enable_group_into_list():
     assert args.disable_field == ["client.geo.region"]
 
 
-def test_provision_applies_documented_default_values():
+@patch("backend.provision.orchestrator.provision", return_value=[])
+def test_provision_applies_documented_default_values(mock_provision):
     """Defaults match the docker-compose-relied-upon contract:
     commit_interval_mins=5, log_retention_days=30, disable_*=False."""
     with patch("backend.provision.cli.wizard") as mock_wizard:

@@ -140,14 +140,27 @@ services:
       # and the first composite request parallelizes cleanly.
       - DUCKDB_POOL_WARM_AT_BOOT=true
       # Cap concurrent pool connections per service. The prod VM is 4 cores,
-      # so the default of 8 oversubscribes (8 conns x up-to-4 DuckDB threads)
-      # AND raises peak RSS — each in-flight query holds uncounted httpfs read
-      # buffers + object-cache growth outside DUCKDB_MEMORY_LIMIT. Lowering to
-      # 4 cuts peak memory and, crucially, lets the recycle drain the pool to
-      # in_use==0 quickly so it can actually destroy+rebuild the instance and
-      # free the leaked cache (an undrainable pool => recycle returns
-      # 'incomplete' and frees nothing => OOM). See [[backend-oom-restart-loop]].
+      # so the default of 8 raises peak RSS — each in-flight query holds
+      # uncounted httpfs read buffers + object-cache growth outside
+      # DUCKDB_MEMORY_LIMIT. Lowering to 4 cuts peak memory and, crucially,
+      # lets the recycle drain the pool to in_use==0 quickly so it can
+      # actually destroy+rebuild the instance and free the leaked cache (an
+      # undrainable pool => recycle returns 'incomplete' and frees nothing =>
+      # OOM). See [[backend-oom-restart-loop]]. Per-connection thread count
+      # already defaults to 1 (backend/core/duckdb_pool.py:_pool_conn_threads),
+      # so 4 conns x 1 thread fits the 4 cores exactly — no oversubscription.
       - DUCKDB_POOL_MAX_SIZE=4
+      # Each pool connection otherwise inherits the full DUCKDB_MEMORY_LIMIT
+      # (6GB) independently via its own SET max_memory — 4 concurrent
+      # connections could each try to grow to 6GB (24GB) despite the 12GB
+      # container cap this file's DUCKDB_MEMORY_LIMIT comment budgets for.
+      # 2026-09-08 concurrency benchmarking (docs/adr/20-clickhouse-serving-plane.md)
+      # measured this directly: uncapped per-connection memory tripped a
+      # conservative abort well before real memory pressure, masking that
+      # DuckLake's actual latency/throughput ceiling under load is CPU/pool-
+      # queueing, not memory. 1536MB x 4 = 6GB total, matching the existing
+      # process-wide budget instead of relying on queries never overlapping.
+      - DUCKDB_POOL_CONN_MEMORY_LIMIT=1536MB
       # Periodic DuckDB instance recycle (backend/core/duckdb_recycle.py).
       # DuckDB's enable_object_cache caches parquet metadata keyed by
       # filename and never evicts deleted files; under continuous buffer +

@@ -85,7 +85,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
         patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.sync._run_service_cron"),
+        patch("backend.cron.jobs.sync._run_log_discovery_cron"),
     ):
         resp = client.post(
             "/api/admin/ingest-logs",
@@ -98,7 +98,7 @@ def test_ingest_endpoint_read_write_starts_sync_in_background_thread(client):
     assert body["run_id"] == "run-123"
     assert "started" in body["message"].lower()
     # Read-write services run the regular sync (not metadata_sync)
-    assert started["task"] == "sync"
+    assert started["task"] == "log_discovery"
 
 
 def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_source):
@@ -157,7 +157,7 @@ def test_ingest_endpoint_returns_existing_run_id_when_already_running(client, te
     from backend.cron_progress import _run_metadata
 
     _run_metadata.clear()
-    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "sync"}
+    _run_metadata["existing-run-id"] = {"service_id": test_service_source["name"], "task": "log_discovery"}
 
     try:
         with patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("sync busy")):

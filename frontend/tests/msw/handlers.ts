@@ -61,6 +61,25 @@ export const handlers = [
   ),
 
   http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.get(`${API_BASE}/api/admin/clickhouse/status`, ({ request }) =>
+    HttpResponse.json({
+      service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',
+      enabled: false,
+      health: 'disabled',
+      schema_version: null,
+      publication_counts: null,
+      oldest_pending_age_seconds: null,
+      last_published_at: null,
+      active_generation: null,
+      expired_dataset_count: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/admin/clickhouse/replay`, () =>
+    HttpResponse.json(
+      { detail: { error: 'clickhouse_disabled', message: 'ClickHouse prototype disabled' } },
+      { status: 409 },
+    ),
+  ),
   http.get(`${API_BASE}/api/schema`, ok({ tables: [], custom_fields: [] })),
 
   // ── Log-fields catalog (gates every analytics page) ───────────────
@@ -326,6 +345,7 @@ export const handlers = [
   ),
   http.patch(`${API_BASE}/api/admin/usage-logging`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/commit-iceberg`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/ducklake/migrate`, ok({ ok: true, started: true })),
   http.post(`${API_BASE}/api/admin/ingest-logs`, ok({ ok: true, ingested: 0 })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),
@@ -349,6 +369,9 @@ export const handlers = [
   http.get(`${API_BASE}/api/cron-runs`, () => HttpResponse.json({ runs: [] })),
   http.get(`${API_BASE}/api/cron-schedule`, () =>
     HttpResponse.json({ schedule: [], next_run_at: null }),
+  ),
+  http.get(`${API_BASE}/api/admin/celery/status`, () =>
+    HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
 
   // ── AppLayout always-on calls (every page render hits these) ─────

@@ -115,7 +115,11 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/meta/admin_state.json", Body=b"{}")
     s3_mock.put_object(Bucket="test-bucket", Key="errors/bad.bad.jsonl", Body=b"bad")
-    s3_mock.put_object(Bucket="test-bucket", Key="raw/2026/01/01/00/log.gz", Body=b"raw")
+    s3_mock.put_object(
+        Bucket="test-bucket",
+        Key="raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz",
+        Body=b"raw",
+    )
 
     events = list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
 
@@ -141,7 +145,9 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     assert "iceberg/default/logs/data/foo.parquet" not in keys
     assert "iceberg/meta/admin_state.json" in keys, "iceberg/meta/ must survive the purge"
     assert "errors/bad.bad.jsonl" not in keys
-    assert "raw/2026/01/01/00/log.gz" in keys, "raw/ must be left alone when delete_raw_logs=False (default)"
+    assert "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz" in keys, (
+        "raw/ must be left alone when delete_raw_logs=False (default)"
+    )
 
     # Scheduler paused then resumed, and the config flag restored.
     assert fake_scheduler.call_count >= 2
@@ -151,12 +157,13 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
 
 def test_delete_raw_logs_true_purges_raw_prefix(s3_mock, fos_source, fake_scheduler):
     _save_config()
-    s3_mock.put_object(Bucket="test-bucket", Key="raw/2026/01/01/00/log.gz", Body=b"raw")
+    raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
+    s3_mock.put_object(Bucket="test-bucket", Key=raw_key, Body=b"raw")
 
     list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, delete_raw_logs=True, reload_scheduler=fake_scheduler))
 
     keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
-    assert "raw/2026/01/01/00/log.gz" not in keys
+    assert raw_key not in keys
 
 
 def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler):

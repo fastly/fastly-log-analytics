@@ -3,10 +3,11 @@
 Backs the trend lines on the admin System Health card / Trends tab. Each
 row is one numeric sample: ``(ts, metric, service_id?, task?, value)``.
 
-Singleton SQLite file under ``data/system/system_metrics.db`` — the
-same convention as ``remote_share.db``. One writer (the sampler cron
-job), many readers (the admin endpoint). WAL pragmas mirror the other
-singleton caches (ngwaf_bot_cache, remote_share).
+With Postgres metadata configured, snapshots live in the shared
+``metric_snapshots`` table. Otherwise they use the singleton SQLite file
+``data/system/system_metrics.db``: one writer (the sampler cron job), many
+readers (the admin endpoint), and WAL pragmas matching the other singleton
+caches (ngwaf_bot_cache, remote_share).
 
 Public surface
 --------------
@@ -18,7 +19,7 @@ Public surface
 - :func:`purge_old` — daily cleanup cron drops rows past retention.
 - :func:`teardown` / :func:`close_all_connections` — pytest fixtures.
 
-Why a new singleton file (vs. per-service ``metadata.db``):
+Why the SQLite mode uses a singleton file (vs. per-service ``metadata.db``):
 - Global metrics (CPU, mem, disk) don't have a natural service scope.
 - One writer means no per-service WAL fragmentation under load.
 - Keeps per-service migration histories clean (no add-then-revert risk).
@@ -30,6 +31,7 @@ import logging
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import iso_z, iso_z_now
@@ -61,6 +63,25 @@ _EMPTY = ""
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized = False
+
+
+def _use_postgres() -> bool:
+    """Use shared storage whenever the process is on the multipod topology."""
+    from backend.core.metadata.pg_connection import is_postgres
+
+    return is_postgres()
+
+
+def _pg_connection():
+    from backend.core.metadata.pg_connection import get_pg_readonly_connection
+
+    return get_pg_readonly_connection()
+
+
+def _pg_write_connection():
+    from backend.core.metadata.pg_connection import get_pg_thread_connection
+
+    return get_pg_thread_connection()
 
 
 def _db_path() -> str:
@@ -134,6 +155,21 @@ def record_snapshot(
     if not metric:
         raise ValueError("metric is required")
     ts_str = ts or iso_z_now()
+    if _use_postgres():
+        try:
+            con = _pg_write_connection()
+            con.execute(
+                """
+                INSERT INTO metric_snapshots (ts, metric, service_id, task, value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (metric, service_id, task, ts)
+                DO UPDATE SET value = EXCLUDED.value
+                """,
+                (ts_str, metric, service_id or _EMPTY, task or _EMPTY, float(value)),
+            )
+        except Exception as e:
+            logger.warning("[metric_snapshots] Postgres insert failed for %s: %s", metric, e)
+        return
     con = _get_con()
     try:
         con.execute(
@@ -160,6 +196,21 @@ def get_history(
     Each row: ``{"ts": "...", "value": 12.3}``. Service / task are baked
     into the query when provided so the caller doesn't have to filter.
     """
+    if _use_postgres():
+        try:
+            with closing(_pg_connection()) as con:
+                rows = con.execute(
+                    """
+                    SELECT ts, value FROM metric_snapshots
+                    WHERE metric = %s AND service_id = %s AND task = %s AND ts >= %s
+                    ORDER BY ts ASC
+                    """,
+                    (metric, service_id or _EMPTY, task or _EMPTY, iso_z(since)),
+                ).fetchall()
+            return [{"ts": r["ts"], "value": r["value"]} for r in rows]
+        except Exception as e:
+            logger.warning("[metric_snapshots] Postgres history read failed: %s", e)
+            return []
     try:
         con = _open_readonly()
     except sqlite3.OperationalError:
@@ -185,6 +236,22 @@ def get_batch(*, since: datetime) -> dict:
     admin Trends page does one round-trip; the frontend partitions
     by metric prefix.
     """
+    if _use_postgres():
+        try:
+            with closing(_pg_connection()) as con:
+                rows = con.execute(
+                    """
+                    SELECT metric, service_id, task, ts, value
+                    FROM metric_snapshots
+                    WHERE ts >= %s
+                    ORDER BY metric, service_id, task, ts ASC
+                    """,
+                    (iso_z(since),),
+                ).fetchall()
+            return _group_batch_rows(rows)
+        except Exception as e:
+            logger.warning("[metric_snapshots] Postgres batch read failed: %s", e)
+            return {}
     try:
         con = _open_readonly()
     except sqlite3.OperationalError:
@@ -196,17 +263,7 @@ def get_batch(*, since: datetime) -> dict:
             "WHERE ts >= ? ORDER BY metric, service_id, task, ts ASC",
             (cutoff,),
         ).fetchall()
-        out: dict[str, list[dict]] = {}
-        for r in rows:
-            key = r["metric"]
-            svc = r["service_id"]
-            if svc:
-                key = f"{key}|{svc}"
-                task = r["task"]
-                if task:
-                    key = f"{key}|{task}"
-            out.setdefault(key, []).append({"ts": r["ts"], "value": r["value"]})
-        return out
+        return _group_batch_rows(rows)
     finally:
         con.close()
 
@@ -227,6 +284,22 @@ def last_snapshot_age_s() -> float | None:
     Doubles as the SRE-21 snapshot-integrity probe: if the sampler dies or its
     writes start failing, this age climbs without bound.
     """
+    if _use_postgres():
+        try:
+            with closing(_pg_connection()) as con:
+                row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
+        except Exception as e:
+            logger.warning("[metric_snapshots] Postgres liveness read failed: %s", e)
+            return None
+        latest = row["latest"] if row else None
+        if not latest:
+            return None
+        from backend.utils.date_utils import parse_iso_utc
+
+        dt = parse_iso_utc(latest)
+        if dt is None:
+            return None
+        return max(0.0, (datetime.now(UTC) - dt).total_seconds())
     try:
         con = _open_readonly()
     except sqlite3.OperationalError:
@@ -255,6 +328,15 @@ def purge_old(retention_days: int = 30) -> int:
     """Delete rows older than ``retention_days``. Returns the row count."""
     if retention_days <= 0:
         return 0
+    if _use_postgres():
+        cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
+        try:
+            con = _pg_write_connection()
+            cur = con.execute("DELETE FROM metric_snapshots WHERE ts < %s", (cutoff,))
+            return cur.rowcount or 0
+        except Exception as e:
+            logger.warning("[metric_snapshots] Postgres purge failed: %s", e)
+            return 0
     con = _get_con()
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     try:
@@ -278,6 +360,20 @@ def close_all_connections() -> None:
         except Exception:
             pass
         _local.con = None
+
+
+def _group_batch_rows(rows) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        key = r["metric"]
+        svc = r["service_id"]
+        if svc:
+            key = f"{key}|{svc}"
+            task = r["task"]
+            if task:
+                key = f"{key}|{task}"
+        out.setdefault(key, []).append({"ts": r["ts"], "value": r["value"]})
+    return out
 
 
 def teardown() -> None:

@@ -42,4 +42,4 @@ version: 1
 # orchestrator's Fastly calls survive a transient rate-limit without
 # aborting the provision. Refresh after verifying that Fastly's 429
 # wire shape hasn't changed.
-recorded_at: '2026-06-16T00:00:00Z'
+recorded_at: '2026-09-02T00:00:00Z'

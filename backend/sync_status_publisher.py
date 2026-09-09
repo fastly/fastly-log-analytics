@@ -17,14 +17,18 @@ cron-runs channel) so a bug in one channel can't stall the other.
 from __future__ import annotations
 
 from backend._in_process_publisher import _InProcessPublisher
+from backend.config import SSE_BACKPLANE
 
+publisher: ValkeyPublisher | _InProcessPublisher
 
-class SyncStatusPublisher(_InProcessPublisher):
-    def __init__(self) -> None:
-        # State snapshot channel: last-write-wins is correct, and we never
-        # need to replay stale snapshots to new subscribers since the
-        # initial cached status is already offered on subscribe.
-        super().__init__(replay_size=0)
+if SSE_BACKPLANE == "valkey":
+    from backend.utils.valkey_publisher import ValkeyPublisher
 
+    publisher = ValkeyPublisher()
+else:
 
-publisher = SyncStatusPublisher()
+    class SyncStatusPublisher(_InProcessPublisher):
+        def __init__(self) -> None:
+            super().__init__(replay_size=0)
+
+    publisher = SyncStatusPublisher()

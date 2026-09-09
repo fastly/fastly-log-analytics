@@ -35,9 +35,20 @@ Lifecycle:
 
 Concurrency:
   * Multiple connections to the same DuckDB file on the same process are safe
-    — they share the in-memory database state.
-  * All connections open with ``read_only=False`` (``get_connection`` forces
-    this) so cron write connections never conflict with pool connections.
+    — they share the in-memory database state. In durable serving mode each
+    pooled connection is instead an independent in-memory DuckDB instance.
+  * File-backed connections open with ``read_only=False`` (``get_connection``
+    forces this) so cron write connections never conflict with pool
+    connections. Durable serving connections never open the native service
+    file and attach DuckLake read-only.
+  * That safety is WITHIN ONE PROCESS only for the file-backed path. DuckDB
+    takes a process-exclusive lock on a read-write single-file database, so a
+    SECOND backend process (e.g. a second pod sharing the PVC) fails every
+    checkout with ``Could not set lock on file``; the retry loop below
+    classifies it transient and surfaces ``DBBusyError`` -> 503 on every data
+    request. Durable serving avoids this file ownership, though pod-local
+    accelerators remain a separate constraint. See
+    docs/adr/18-serving-tier-single-pod.md.
 
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a
@@ -229,6 +240,10 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     if src is None:
         return None
     try:
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(src):
+            return None
         from backend.core.iceberg._core import _buffer_dir
 
         if src.get("name", "").endswith("::rum"):

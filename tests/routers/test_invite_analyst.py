@@ -54,6 +54,19 @@ def test_generate_viewer_key_requires_stored_api_key():
     assert response.status_code == 400
 
 
+def test_generate_viewer_key_rejects_celery_topology():
+    """Scalable DuckLake services must use Path B instead of FOS-only invites."""
+    with (
+        patch("backend.config.INGEST_MODE", "celery"),
+        patch("backend.config.load_config", return_value=_FAKE_CFG),
+    ):
+        client = TestClient(app)
+        response = client.post("/api/services/svc123/generate-viewer-key")
+
+    assert response.status_code == 409
+    assert "Path B" in response.json()["detail"]["error"]
+
+
 def test_generate_viewer_key_requires_read_write_service():
     """Analyst services (read_only) cannot generate viewer keys."""
     ro_cfg = {**_FAKE_CFG, "access_level": "read_only"}

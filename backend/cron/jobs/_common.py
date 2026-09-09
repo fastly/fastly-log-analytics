@@ -34,7 +34,7 @@ def refresh_view_and_warm_pool(
         from backend.core.duckdb import get_connection as _get_conn
         from backend.core.duckdb_pool import warm_pool_for_service as _warm
 
-        con_v = _get_conn(source=source, read_only=False)
+        con_v = _get_conn(source=source, read_only=True)
         try:
             _ice.update_iceberg_view(con_v, source, force=True)
             _warm(service_id, source)

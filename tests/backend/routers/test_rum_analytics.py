@@ -2,10 +2,21 @@ import asyncio
 import datetime
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def skip_view_update(request):
+    if request.node.name == "test_rum_analytics_cold_start_readonly":
+        yield None
+    else:
+        with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
+            yield mock
+
 
 from backend.core.request_context import RequestContext
 from backend.main import app
@@ -18,10 +29,11 @@ client = TestClient(app)
 @pytest.fixture(scope="function")
 def setup_temp_rum_db(tmp_path, monkeypatch):
     """Sets up a temporary DuckDB database for RUM and mocks the source resolver."""
-    temp_db_path = tmp_path / "test.rum.duckdb"
+    base_db_path = tmp_path / "test.duckdb"
+    rum_db_path = tmp_path / "test.rum.duckdb"
 
     # Initialize DuckDB schema
-    con = duckdb.connect(str(temp_db_path))
+    con = duckdb.connect(str(rum_db_path))
     con.execute("""
         CREATE TABLE client_vitals (
             timestamp TIMESTAMPTZ,
@@ -64,6 +76,7 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
         )
     """)
     con.close()
+    con.close()
 
     import uuid
 
@@ -73,7 +86,7 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
     mock_source = {
         "name": unique_id,
         "service_id": unique_id,
-        "duckdb_path": str(tmp_path / "test.duckdb"),
+        "duckdb_path": str(base_db_path),
         "access_level": "read_write",
         "endpoint": "localhost",
         "access_key_id": "mock",
@@ -81,14 +94,21 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
         "region": "mock",
     }
 
-    monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
+    import backend.core.duckdb_pool as duckdb_pool
 
-    return temp_db_path
+    duckdb_pool.reset_pool_for_service("test_service")
+    duckdb_pool.reset_pool_for_service("test_service_rum")
+    monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
+    monkeypatch.setattr("backend.deps._resolve_source_or_400", lambda service_id, read_only=False: mock_source)
+
+    return rum_db_path
 
 
 def _insert_beacons(temp_rum_db_path, beacons_list):
     """Helper to parse Faro-like beacons and insert them into DuckDB tables."""
-    con = duckdb.connect(str(temp_rum_db_path))
+    import backend.core.duckdb_pool as duckdb_pool
+
+    duckdb_pool.shutdown_all()
 
     vitals_rows = []
     errors_rows = []
@@ -96,6 +116,7 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
     for i, b in enumerate(beacons_list):
         received_at = b.get("received_at")
         if not received_at:
+            # Shift back by a shorter amount to ensure it is in the last 24h filter
             received_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=i + 5)).isoformat()
 
         # Parse timestamp
@@ -252,16 +273,18 @@ def _insert_beacons(temp_rum_db_path, beacons_list):
                 )
             )
 
-    if vitals_rows:
-        con.executemany(
-            "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vitals_rows
-        )
-    if errors_rows:
-        con.executemany(
-            "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", errors_rows
-        )
-
-    con.close()
+    con = duckdb.connect(str(temp_rum_db_path), read_only=False)
+    try:
+        if vitals_rows:
+            con.executemany(
+                "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vitals_rows
+            )
+        if errors_rows:
+            con.executemany(
+                "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", errors_rows
+            )
+    finally:
+        con.close()
 
 
 def test_rum_analytics_fallback(setup_temp_rum_db) -> None:
@@ -595,93 +618,88 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
     ]
     _insert_beacons(setup_temp_rum_db, test_beacons)
 
-    con = duckdb.connect(str(setup_temp_rum_db))
-    try:
-        # Analyst asking for a range far wider than their 1h invite window.
-        analyst_sess = _analyst_session(window_hours=1)
-        analyst_req = _fake_request(analyst_sess)
-        import typing
+    # Analyst asking for a range far wider than their 1h invite window.
+    analyst_sess = _analyst_session(window_hours=1)
+    analyst_req = _fake_request(analyst_sess)
+    import typing
 
-        analyst_time_bounds = get_analyst_time_bounds(typing.cast(typing.Any, analyst_req))
+    analyst_time_bounds = get_analyst_time_bounds(typing.cast(typing.Any, analyst_req))
 
-        analyst_ctx = RequestContext(
-            service_id=service_id,
-            source={
-                "name": "test_service",
-                "service_id": "test_service",
-                "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
-                "access_level": "read_write",
-                "endpoint": "localhost",
-                "access_key_id": "mock",
-                "secret_access_key": "mock",
-                "region": "mock",
-            },
-            con=con,
-            telemetry=typing.cast(
-                typing.Any,
-                SimpleNamespace(
-                    start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
-                ),
+    analyst_ctx = RequestContext(
+        service_id=service_id,
+        source={
+            "name": "test_service",
+            "service_id": "test_service",
+            "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
+            "access_level": "read_write",
+            "endpoint": "localhost",
+            "access_key_id": "mock",
+            "secret_access_key": "mock",
+            "region": "mock",
+        },
+        con=None,
+        telemetry=typing.cast(
+            typing.Any,
+            SimpleNamespace(
+                start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
             ),
-            analyst_session=analyst_sess,
-            read_only=True,
-            time_bounds=analyst_time_bounds,
+        ),
+        analyst_session=analyst_sess,
+        read_only=True,
+        time_bounds=analyst_time_bounds,
+    )
+
+    result = asyncio.run(
+        rum_router.rum_analytics(
+            request=typing.cast(typing.Any, analyst_req),
+            start_time="2000-01-01T00:00:00Z",
+            end_time=None,
+            filters=None,
+            ctx=analyst_ctx,
         )
+    )
+    paths = [p["path"] for p in result["worst_pages"]]
+    assert "/thirty-days-old" not in paths, "analyst invite-window clamp did not apply"
 
-        result = asyncio.run(
-            rum_router.rum_analytics(
-                request=typing.cast(typing.Any, analyst_req),
-                start_time="2000-01-01T00:00:00Z",
-                end_time=None,
-                filters=None,
-                ctx=analyst_ctx,
-            )
-        )
-        paths = [p["path"] for p in result["worst_pages"]]
-        assert "/thirty-days-old" not in paths, "analyst invite-window clamp did not apply"
+    from backend.utils.remote_access import TimeBounds
 
-        from backend.utils.remote_access import TimeBounds
-
-        # Negative control: admin (no analyst_session) with the same
-        # far-in-the-past start_time is NOT clamped — sees the old beacon.
-        admin_ctx = RequestContext(
-            service_id=service_id,
-            source={
-                "name": "test_service",
-                "service_id": "test_service",
-                "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
-                "access_level": "read_write",
-                "endpoint": "localhost",
-                "access_key_id": "mock",
-                "secret_access_key": "mock",
-                "region": "mock",
-            },
-            con=con,
-            telemetry=typing.cast(
-                typing.Any,
-                SimpleNamespace(
-                    start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
-                ),
+    # Negative control: admin (no analyst_session) with the same
+    # far-in-the-past start_time is NOT clamped — sees the old beacon.
+    admin_ctx = RequestContext(
+        service_id=service_id,
+        source={
+            "name": "test_service",
+            "service_id": "test_service",
+            "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
+            "access_level": "read_write",
+            "endpoint": "localhost",
+            "access_key_id": "mock",
+            "secret_access_key": "mock",
+            "region": "mock",
+        },
+        con=None,
+        telemetry=typing.cast(
+            typing.Any,
+            SimpleNamespace(
+                start_section=lambda *a, **kw: SimpleNamespace(__enter__=lambda *x: None, __exit__=lambda *x: None)
             ),
-            analyst_session=None,
-            read_only=True,
-            time_bounds=TimeBounds(None, None),
-        )
+        ),
+        analyst_session=None,
+        read_only=True,
+        time_bounds=TimeBounds(None, None),
+    )
 
-        admin_result = asyncio.run(
-            rum_router.rum_analytics(
-                request=typing.cast(typing.Any, _fake_request(None)),
-                start_time="2000-01-01T00:00:00Z",
-                end_time=None,
-                filters=None,
-                ctx=admin_ctx,
-            )
+    admin_result = asyncio.run(
+        rum_router.rum_analytics(
+            request=typing.cast(typing.Any, _fake_request(None)),
+            start_time="2000-01-01T00:00:00Z",
+            end_time=None,
+            filters=None,
+            ctx=admin_ctx,
         )
-        admin_paths = [p["path"] for p in admin_result["worst_pages"]]
-        assert "/thirty-days-old" in admin_paths
-
-    finally:
-        con.close()
+    )
+    admin_paths = [p["path"] for p in admin_result["worst_pages"]]
+    assert "/thirty-days-old" in admin_paths
 
 
 def test_rum_analytics_cold_start_readonly(tmp_path, monkeypatch):

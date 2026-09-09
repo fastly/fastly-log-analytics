@@ -93,6 +93,11 @@ _SLOW_QUERY_PERSIST_DISABLED = os.environ.get("QUERY_REGISTRY_PERSIST_DISABLED",
     "true",
     "yes",
 )
+try:
+    _POOL_QUERY_TIMEOUT_S = max(1.0, float(os.environ.get("DUCKDB_POOL_QUERY_TIMEOUT_S", "120")))
+except (TypeError, ValueError):
+    _POOL_QUERY_TIMEOUT_S = 120.0
+_POOL_QUERY_WATCH_INTERVAL_S = 1.0
 
 _seq = itertools.count(1)
 
@@ -346,6 +351,28 @@ class QueryRegistry:
             )
         except Exception:
             logger.debug("query_registry.deregister failed", exc_info=True)
+
+    def expire_pool_queries(self, *, now_mono: float | None = None) -> int:
+        """Interrupt pooled DuckDB statements that exceed the serving budget.
+
+        This is deliberately limited to queries stamped with a pool slot.
+        Cron and ingest connections are not pooled and must not be interrupted
+        by the serving-tier watchdog.
+        """
+        now = time.monotonic() if now_mono is None else now_mono
+        expired = [
+            active.query_id
+            for active in tuple(self._queries.values())
+            if active.db_type == "DuckDB"
+            and active.attribution.pool_slot is not None
+            and now - active.started_at_mono >= _POOL_QUERY_TIMEOUT_S
+        ]
+        interrupted = 0
+        for qid in expired:
+            if self.cancel_query(qid, admin_id="pool-timeout") == "cancelled":
+                interrupted += 1
+                logger.warning("interrupting pooled DuckDB query after %.1fs", _POOL_QUERY_TIMEOUT_S)
+        return interrupted
 
     # ── cancel ───────────────────────────────────────────────────────────────
 
@@ -612,3 +639,19 @@ def _row_for_completed(c: CompletedQuery, full_sql: bool) -> dict[str, Any]:
 
 # Process-wide singleton — every instrumentation site imports this.
 query_registry = QueryRegistry()
+
+
+def _pool_query_watchdog() -> None:
+    while True:
+        try:
+            query_registry.expire_pool_queries()
+        except Exception:
+            logger.debug("pooled-query watchdog failed", exc_info=True)
+        time.sleep(_POOL_QUERY_WATCH_INTERVAL_S)
+
+
+threading.Thread(
+    target=_pool_query_watchdog,
+    name="duckdb-pool-query-watchdog",
+    daemon=True,
+).start()

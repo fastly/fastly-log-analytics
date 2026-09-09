@@ -59,7 +59,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
         <CardContent className="pt-6">
           <div className="flex items-center gap-2 text-destructive">
             <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load Iceberg table info</span>
+            <span className="text-sm font-medium">Failed to load DuckLake table info</span>
           </div>
           <p className="text-xs text-muted-foreground mt-1">{(error as any)?.message || 'Unknown error'}</p>
         </CardContent>
@@ -72,19 +72,19 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
       label: 'Snapshots',
       value: info?.snapshots ?? 0,
       icon: Layers,
-      tooltip: 'Total number of atomic commits in the Iceberg table history.'
+      tooltip: 'Total number of atomic commits in the DuckLake table history.'
     },
     {
       label: 'Data Files',
       value: info?.data_files ?? 0,
       icon: FileCode,
-      tooltip: 'Number of Parquet data files currently in the Iceberg table.'
+      tooltip: 'Number of Parquet data files currently in the DuckLake table.'
     },
     {
       label: 'Total Size',
       value: formatBytes(info?.size_bytes ?? 0),
       icon: Database,
-      tooltip: 'Cumulative size of all data files in the Iceberg table.'
+      tooltip: 'Cumulative size of all data files in the DuckLake table.'
     },
     {
       label: 'Latest Commit',
@@ -166,7 +166,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
               <div>
                 <h4 className="text-sm font-semibold">Local Buffer Status</h4>
                 <p className="text-xs text-muted-foreground">
-                  Data ingested but not yet committed to the Iceberg table.
+                  Data ingested but not yet committed to the DuckLake table.
                 </p>
               </div>
             </div>

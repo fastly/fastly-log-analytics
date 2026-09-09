@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 
 async function runVerification() {
-    const target = process.env.TARGET_URL || "https://fastly-se-demo.global.ssl.fastly.net";
+    const target = process.env.TARGET_URL || "https://example.invalid";
     const launchOptions = { headless: true };
     if (process.platform === 'darwin') {
         launchOptions.channel = 'chrome';

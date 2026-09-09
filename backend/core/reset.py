@@ -10,7 +10,8 @@ file + cache dir, and the SQLite ingestion ledgers (``ingested_files``,
 Preserves: ``sources``, ``views``, ``alerts``, ``audit_logs``,
 ``scoring_labels``, ``scoring_audit``, ``cron_runs``, ``slow_queries``,
 ``asn_names``, and everything under ``iceberg/meta/`` (admin_state.json,
-scoring_matrix.json). Raw logs under ``raw/`` are left alone by default —
+scoring_matrix.json). Raw request and RUM logs under ``raw/request/`` and
+``raw/rum/`` are left alone by default —
 see the re-ingestion-storm warning below.
 
 See ``local-docs/log_reset_design_plan.md`` for the full design rationale.
@@ -182,7 +183,7 @@ def reset_service_logs(
                 "message": (
                     "Warning: this source keeps raw logs after ingest (delete_after=False). "
                     "Deleting raw cloud logs now means the next full sync has no dedup record "
-                    "left and will re-ingest this service's ENTIRE history from raw/."
+                    "left and will re-ingest this service's ENTIRE request/RUM history."
                 ),
             }
 
@@ -248,11 +249,18 @@ def reset_service_logs(
             yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
 
         if delete_raw_logs:
-            raw_prefix = f"{prefix}/raw/" if prefix else "raw/"
+            raw_prefix = f"{prefix}/raw/request/" if prefix else "raw/request/"
             deleted_raw = yield from _purge_prefix(
-                fos, bucket, raw_prefix, _delete_objects_robust, label="raw object(s) under raw/"
+                fos, bucket, raw_prefix, _delete_objects_robust, label="request raw object(s) under raw/request/"
             )
-            yield {"type": "status", "message": f"Deleted {deleted_raw:,} raw object(s) under raw/."}
+            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+            deleted_rum = yield from _purge_prefix(
+                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
+            )
+            yield {
+                "type": "status",
+                "message": f"Deleted {deleted_raw:,} request and {deleted_rum:,} RUM raw object(s).",
+            }
 
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)
@@ -278,7 +286,10 @@ def reset_service_logs(
         clear_source_caches(service_key)
         iceberg_core.init_iceberg_table(source, create=True)
         con2 = _db.get_connection(source)
-        update_iceberg_view(con2, source, force=True)
+        try:
+            update_iceberg_view(con2, source, force=True)
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,
@@ -452,8 +463,11 @@ def reset_service_rum(
 
         # Pre-warm/initialize views on a standard connection
         con2 = _db.get_connection(rum_source)
-        update_iceberg_view(con2, source, force=True, target_table="client_vitals")
-        update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        try:
+            update_iceberg_view(con2, source, force=True, target_table="client_vitals")
+            update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,

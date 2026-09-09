@@ -184,6 +184,26 @@ def test_connection_holder_skip_view_update_forwarded():
         assert mock_get.call_args.kwargs["skip_view_update"] is True
 
 
+def test_connection_holder_default_max_wait_is_10s(disable_pool, monkeypatch):
+    """The default checkout wait covers ordinary dashboard fan-out bursts
+    without turning pool queuing into a user-visible 503."""
+    monkeypatch.delenv("DUCKDB_POOL_MAX_WAIT_S", raising=False)
+    fake_con = MagicMock()
+    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+        holder = deps._ConnectionHolder({"name": "x"}, read_only=True)
+        holder.__enter__()
+        assert mock_get.call_args.kwargs["max_wait"] == 10.0
+
+
+def test_connection_holder_max_wait_env_override_respected(disable_pool, monkeypatch):
+    monkeypatch.setenv("DUCKDB_POOL_MAX_WAIT_S", "9.5")
+    fake_con = MagicMock()
+    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+        holder = deps._ConnectionHolder({"name": "x"}, read_only=True)
+        holder.__enter__()
+        assert mock_get.call_args.kwargs["max_wait"] == 9.5
+
+
 def test_connection_holder_db_busy_maps_to_503(disable_pool):
     """``DBBusyError`` from get_connection → 503 with ``busy: true``.
     The 503 (rather than 500/400) is what makes the frontend's React

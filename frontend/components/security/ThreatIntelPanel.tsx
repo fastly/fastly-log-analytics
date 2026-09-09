@@ -219,7 +219,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         onOpenChange={setIsHelpOpen}
         title="Client TLS Fingerprints & Threat Intelligence Guide"
         icon={<Shield className="h-5 w-5 text-primary" />}
-        size="lg"
+        size="xl"
       >
         <div className="space-y-4 text-sm text-muted-foreground">
           <div>

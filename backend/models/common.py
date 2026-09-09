@@ -229,6 +229,9 @@ class BootstrapService(BaseModel):
     name: str | None = None
     access_level: str | None = None
     cmcd_enabled: bool | None = None
+    rum_enabled: bool | None = None
+    analyst_path_a_supported: bool = True
+    analyst_path_a_reason: str | None = None
 
 
 class BootstrapResponse(BaseResponse):
@@ -251,6 +254,7 @@ class BootstrapResponse(BaseResponse):
     settings: dict[str, str | bool | None] | None = None
     custom_dashboard_cards: list[dict] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
+    ngwaf_configured: bool = False
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a
     # second /api/views/{service_id} round-trip on every page nav.

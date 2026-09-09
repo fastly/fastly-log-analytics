@@ -7,6 +7,9 @@ export interface Service {
   name: string
   accessLevel?: string
   cmcdEnabled?: boolean
+  rum_enabled?: boolean
+  analystPathASupported?: boolean
+  analystPathAReason?: string | null
 }
 
 interface ServiceState {

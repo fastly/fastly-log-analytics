@@ -58,10 +58,11 @@ function useOpsOverviewSeed(): { seed: OpsOverviewSeed; seedServiceId: string | 
 
 export function OperationsOverview() {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
       <LiveQueriesCard />
       <IngestHealthCard />
       <SlowQueriesTeaser />
+      <CeleryStatusCard />
     </div>
   )
 }
@@ -328,5 +329,38 @@ function OverviewCard({
         </CardContent>
       </Card>
     </Link>
+  )
+}
+
+
+// ── Card 4: Celery Status ───────────────────────────────────────────
+
+function CeleryStatusCard() {
+  const { data, isError } = useQuery({
+    queryKey: ['admin', 'overview', 'celery-status'],
+    queryFn: async ({ signal }) => {
+      const r = await adminFetch('/api/admin/celery/status', { signal })
+      if (!r.ok) throw new Error(`status ${r.status}`)
+      return r.json()
+    },
+    retry: false,
+    staleTime: POLL_MS,
+    refetchInterval: POLL_MS,
+  })
+
+  const workers = data?.workers?.count ?? 0
+  const ingestQ = data?.queues?.['q.ingest'] ?? 0
+  const controlQ = data?.queues?.['q.control'] ?? 0
+
+  return (
+    <OverviewCard
+      href="/admin/queue"
+      icon={<Activity className="h-4 w-4" />}
+      title="Workers & Queues"
+      primary={`${workers} workers`}
+      primaryTone={workers > 0 ? 'default' : 'warning'}
+      secondary={`ingest: ${ingestQ} · control: ${controlQ}`}
+      isStale={isError && !!data}
+    />
   )
 }

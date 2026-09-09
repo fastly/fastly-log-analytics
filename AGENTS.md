@@ -29,12 +29,12 @@ The canonical reference for any contributor or AI agent working on this project.
 
 ## Overview
 
-FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + Apache Iceberg and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
+FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + DuckLake (formerly PyIceberg) using a Celery/Valkey architecture and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
 
 User-facing pitch + features list lives in [README.md](README.md). This file documents *how it works internally*.
 
 **Stack:**
-- Backend: FastAPI, DuckDB, PyIceberg, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
+- Backend: FastAPI, DuckDB, DuckLake, Celery, Valkey, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
 - Frontend: Next.js 16, React 19, TanStack Query v5, Zustand, shadcn/ui, openapi-fetch, vitest
 - Storage: FOS (S3-compatible), per-service DuckDB + SQLite (operational metadata), global SQLite for NGWAF bot cache + live-share
 - Optional: [`falco`](https://github.com/ysugimoto/falco) VCL linter — detected via `shutil.which("falco")`, degrades gracefully to regex checks when absent
@@ -47,18 +47,23 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 
 | Layer | Location | Purpose |
 |---|---|---|
-| Raw logs | `s3://{bucket}/{prefix}/raw/**/*.gz` | Immutable gzipped JSON from Fastly |
-| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and Iceberg commit |
-| Iceberg table | `s3://{bucket}/{prefix}/iceberg/` | Durable long-term storage, hour-partitioned |
-| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance) |
+| Raw logs | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON from Fastly; v3 services use these roots exclusively |
+| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and commit |
+| DuckLake table | Catalog: local `.ducklake` file or Postgres DSN (multi-pod/celery-mode requires Postgres); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Durable long-term storage. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0-beta1 — see [ADR-14](docs/adr/14-ducklake-replacement.md). `buffer.py`/`sync.py` still carry pyiceberg-era code for the commit machinery itself; not yet fully retired. |
+| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Path predates the DuckLake cutover; unaffected since it was never part of the Iceberg/DuckLake commit-path catalog. |
 | DuckDB | `data/services/{service_id}.duckdb` | Per-service analytical engine **only**: session-scoped `logs` view + temp tables |
-| Service metadata DB | `data/services/{service_id}.metadata.db` | Per-service SQLite (WAL): `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries` |
+| Service metadata DB | `data/services/{service_id}.metadata.db`, or a shared Postgres database (`METADATA_DSN`, required for multi-pod — see [ADR-15](docs/adr/15-multi-writer-topology.md)) | Per-service SQLite (WAL): `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `ingest_ledger` (celery mode — see [ADR-16](docs/adr/16-ingest-ledger.md)) |
 | Usage-log DB | `data/services/{service_id}.usage_log.db` | Per-service SQLite (WAL): `usage_log` + `usage_log_hourly_summary`, split out of `metadata.db` so the cron writer's lock never blocks admin readers |
 | NGWAF bot cache | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite for VERIFIED-BOT enrichment |
 | Live-share DB | `data/system/remote_share.db` | Singleton SQLite (WAL): invites, sessions, audit, TOS, lockouts |
 | Service configs | `configs/{logging_service_id}.json` | Credentials, settings, log_fields config |
 
-The DuckDB `logs` view stitches the Iceberg table and the local Parquet buffer so queries always see all data without callers caring which layer holds which row.
+The DuckDB `logs` view stitches the DuckLake table and the local Parquet buffer
+so queries always see all data without callers caring which layer holds which
+row. In the explicit `SERVING_MODE=durable` Celery/Postgres topology, serving
+connections are ephemeral in-memory DuckDB instances and the view reads only
+the durable DuckLake table; native service files and local buffers are not
+opened by the serving path. Sync/file mode retains the local-buffer behavior.
 
 ### Package layout (post v2.0 carve-ups)
 
@@ -84,7 +89,7 @@ Other new modules introduced by the cleanup:
 - [`backend/core/request_context.py`](backend/core/request_context.py) — Phase 2 single FastAPI dependency that bundles `service_id`, `source`, `con`, `telemetry`, `analyst_session`, `cached_temps`. Replaces the v1 `AnalyticsDeps` bundle (deleted at the v2.0 cut — Phase 8.1/8.2) and folds `require_service_access` into context construction (there is no path that builds a context without enforcing tenancy). 23 analytics endpoints across 8 routers (dashboard / query / sessions / security / network / origin / performance / insights) now take `ctx: RequestContext = Depends(build_request_context)` directly.
 - [`backend/core/request_telemetry.py`](backend/core/request_telemetry.py) — Phase 1 thin wrapper around the OTel tracer that owns section spans, query attribution, call log, cache state, and the `app.thread_wait_ms` custom metric instrumented at `_Pool.acquire`. Lives on `RequestContext`.
 - [`backend/core/sqlite_pool.py`](backend/core/sqlite_pool.py) — `ThreadLocalPool`, the generic thread-local SQLite pool extracted from the three previously-duplicated pools in `metadata/base.py`, `metadata/usage_log_db.py`, and `share_db/connection.py`. Each is now a thin wrapper configuring `path_fn` / `schema_fn` / `connect_fn` / `on_borrow_fn` around the one shared implementation; `share_db` queries flow through `InstrumentedConnection` for the first time and appear in the Live Query Monitor under `service=__global_share__`.
-- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py).
+- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py). `SERVING_MODE=file` preserves sync/file serving; Celery with Postgres DuckLake requires explicit `SERVING_MODE=durable` and serves from ephemeral read-only connections.
 - [`backend/core/iceberg/_core.py`](backend/core/iceberg/_core.py) `execute_with_stale_view_retry(con, src, fn)` — self-heal wrapper for code paths that open raw DuckDB connections instead of going through `QueryRunner`. On stale-buffer "No files found" errors, busts `_view_cache` via `clear_source_caches(keep_snapshot_cache=True)` + `update_iceberg_view(force=True)` then retries `fn` once. Used by `rdns_cache` discovery, `rollups` DESCRIBE sites, and `/api/query`. Pre-fix prod incidents: ~8h of 100%-failing rdns runs + analyst-visible query errors on the same buffer-deletion race.
 
 ### Personas (where the two onboarding paths live)
@@ -92,25 +97,29 @@ Other new modules introduced by the cleanup:
 The README explains the two collaboration modes for end users. Implementation pointers:
 
 - **Admin** (`access_level: "read_write"`) — full ingest/management surface. Config: `configs/{logging_service_id}.json`.
-- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode.
+- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode. **Known gap as of v3.0.0-beta1**: this flow was never updated for the DuckLake cutover — pyiceberg's catalog was reconstructible purely from FOS-resident `metadata.json` pointers, which is what let a Path-A instance with only bucket credentials work standalone; DuckLake's catalog (Postgres or a local file) is not FOS-resident, so a Path-A analyst against a DuckLake/celery-mode service currently has no way to discover committed table state. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md) (Proposed, unimplemented) before touching this flow for such a service.
 - **Analyst Path B — live shared instance** (direct-mode against an HTTPS public_endpoint; the SSH-tunnel-to-localhost.run option was deleted in v2.0). No FOS credentials, uses admin's running process. See [Live Dashboard Sharing](#live-dashboard-sharing) below for components.
 
 **Both paths must keep working.** Don't remove either. Don't introduce a "unified" replacement without keeping the JSON-config flow intact — it's the only option when the admin's instance can't stay running.
 
 ## Ingest Pipeline
 
-APScheduler runs the core sync-family jobs per service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note):
+Two data planes, selected by `INGEST_MODE` (`sync` default vs `celery`; there is no `local` value) — see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design. Both commit to the same DuckLake table and the same unified `logs` view.
+
+**Default (`sync`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0-beta1 rework — grep history for the old names if you're reading pre-v3 code or logs:
 
 | Job | Schedule | Function |
 |---|---|---|
-| `sync_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
-| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → Iceberg table, flush usage log |
+| `log_discovery_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
+| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → DuckLake table, flush usage log |
 | `local_compact_{id}` | every 2 min | Compact local-only hourly/daily Parquet files, flush usage log |
 | `rollup_heal_{id}` | hourly at :05 | Re-run the idempotent `backfill_missing_hour_bundles` (1-day lookback) so closed hours the per-sync recompute missed get their top-N rollups within ~1 h; local-only writes |
 | `rollup_compact_{id}` | daily 02:00 UTC | Consolidate closed-day per-hour rollup parquet into per-day files (30-day deep pass); local-only writes |
-| `optimize_{id}` | daily 03:00 UTC | Compact small Iceberg data files, flush usage log |
-| `expire_{id}` | weekly Sun 04:00 UTC | Expire old Iceberg snapshots, flush usage log |
+| `optimize_{id}` | daily 03:00 UTC | DuckLake-native (`db_iceberg.optimize_table` → `_optimize_table_impl`): `CALL ducklake_flush_inlined_data('lake')` **then** `CALL ducklake_rewrite_data_files('lake')`. The flush is a DURABILITY step, not an optimization — DuckLake inlines small commits into the metadata catalog, and neither `ducklake_rewrite_data_files` nor `ducklake_merge_adjacent_files` promotes inlined rows (both only touch already-materialized files), so without it a table stays at `file_count = 0` forever and the catalog DB holds the only copy of the data (the raw `.gz` is deleted after ingest). Complements celery mode's `ducklake_merge_adjacent_files` (called from `commit_batch`). |
+| `expire_{id}` | weekly Sun 04:00 UTC | DuckLake-native since v3.0.0-beta1 (`db_iceberg.run_cloud_maintenance` → `_run_cloud_maintenance_impl`). Four steps, each isolated so one failure records its own `*_error` result key (→ `warning` cron run) and the rest proceed: **(1)** retention delete — `DELETE FROM lake.<table> WHERE timestamp < ?` for `data_retention_days`, plus `rum_retention_days` over `client_vitals`/`client_errors` (RUM telemetry lives in those tables keyed by `cid`; `logs.rum_cid` is only the CDN-side correlation key, present solely when RUM provisioning injected that log field). **`0` means keep forever for BOTH knobs** — the pyiceberg original would have resolved `data_retention_days=0` + `rum_retention_days>0` to a "delete everything from now backwards" cutoff; that is now gated on `data_retention_days > 0`. **(2)** `ducklake_expire_snapshots('lake', older_than => ?)` for `keep_snapshot_days`, then a `ducklake_cleanup_old_files('lake', older_than => ?)` sweep. Expiry reclaims NO bytes on its own; it queues unreferenced parquet, and because a file is queued at expiry time a LATER run unlinks it — which is why the sweep is unconditional, not gated on "this run expired something". Never call `ducklake_delete_orphaned_files` here: it sweeps the data path by listing and would eat local-compaction output. Also note a snapshot cannot be expired while a live data file still anchors to it, so reclamation mostly follows the daily `optimize` rewrite. **(3)/(4)** filesystem-only purges of the local `data/` cache and `rollups/` (`cache_retention_days`, `rollup_retention_months`) — untouched by the DuckLake port. Under a shared Postgres `DUCKLAKE_CATALOG` the snapshot log is catalog-WIDE, so `snapshots_before`/`snapshots_after` and the expiry itself span every tenant, not just the one service. No CAS-retry loop: there is no metadata-pointer race to lose, the job holds the per-service write lock, and the pyiceberg exception shapes it keyed on cannot be raised. |
 | `metadata_sync_{id}` | varies | Sync admin state to FOS, flush usage log |
+
+**`INGEST_MODE=celery` mode** — discovery and conversion fan out across Celery workers instead of running in one pod's scheduler loop, backed by the `ingest_ledger` state machine (`discovered → claimed → committed`/`quarantined`/`dead_letter`). `log_discovery_{id}`/`commit_{id}` still exist as job names but run inline on a RedBeat-scheduled worker rather than the backend's APScheduler, plus a new `ledger_sweep_{id}` job (crash-net recovery: reclaims stuck claims, re-dispatches lost messages with a queue-depth guard, catches up via an FOS-diff). Requires a Postgres `DUCKLAKE_CATALOG` and `METADATA_DSN` (enforced at boot by `config.validate_ingest_mode()`) — a file-based catalog cannot serve concurrent worker writers. RUM beacon ingest is ported to this mode too (`rum_discovery_{id}` + `ledger_rum_sweep_{id}` in [backend/cron/jobs/rum_ledger.py](backend/cron/jobs/rum_ledger.py), both in `_REDBEAT_JOB_PREFIXES`); the v2 `rum_sync_{id}`/`rum_commit_{id}` pair remains the sync-mode path. **Ingest scales horizontally; the SERVING tier does not — it is single-pod, see [ADR-18](docs/adr/18-serving-tier-single-pod.md).**
 
 Teardown removes jobs on the next `_sync_jobs()` reload. The `config not found, skipping` warning during teardown is normal — a job fired after the config was deleted; harmless.
 
@@ -138,7 +147,7 @@ The window between `iceberg.write_to_buffer` and `metadata_db.insert_ingested_fi
 
 ### Health probe
 
-`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `sync` cron run per service; returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last sync errored, or a sync row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition — or the latest `commit` / `metadata_sync` cron errored). SQLite-only, never FOS or Fastly. Safe to wire into a load balancer.
+`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `log_discovery` cron run per service (queries match both `'log_discovery'` and the pre-v3.0.0-beta1 `'sync'` name — `cron_runs` history predates the rename); returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last discovery errored, or a discovery row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition, name unchanged since it's an internal constant, not a job name — or the latest `commit` / `metadata_sync` cron errored). Celery mode additionally derives freshness straight from `ingest_ledger` (`max(committed_at)`, oldest non-committed row age, worker count vs. queue depth) rather than relying on `cron_runs` timing alone — see [ADR-16](docs/adr/16-ingest-ledger.md). SQLite-only, never FOS or Fastly. Safe to wire into a load balancer.
 
 ## VCL Log Format & Custom Fields
 
@@ -731,13 +740,167 @@ Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/tes
 
 Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read ``Deleting CDN service '<customer-domain>'`` while actually deleting a different service id entirely — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
 
+### 32. DuckLake inlines small commits — only `ducklake_flush_inlined_data` makes them durable
+DuckLake does not write parquet for a small INSERT. It **inlines** the rows straight into the metadata catalog (Postgres, or the `.ducklake` file), visible as `changes: {'inlined_insert': [...]}` in `ducklake_snapshots`. `ducklake_table_info` then honestly reports `file_count = 0` for a table holding real committed rows.
+
+**Neither compaction primitive promotes inlined rows.** Verified empirically on a throwaway catalog: `ducklake_merge_adjacent_files` (celery path) and `ducklake_rewrite_data_files` (default path, via `optimize_table`) both leave `file_count = 0` with zero parquet on disk, because both operate on already-materialized files. A table whose every commit was inlined stays inlined forever no matter how often compaction runs. `ducklake_flush_inlined_data` is the ONLY primitive that promotes them.
+
+This was a live bug on this branch and it is a **durability** bug, not a layout preference: `finalize_committed_raw` deletes the raw `.gz` once its ledger row has been committed for `RAW_DELETE_GRACE_S`, so with no flush the only copy of every ingested row is the catalog itself. Observed on the live test service before the fix: 27,613 committed files, 27,615 catalog snapshots, FOS `ducklake/` prefix **empty**, and 4 raw files left in the bucket. Losing the Postgres volume would have been total data loss with nothing to re-ingest.
+
+Both compaction paths now flush first — `merge_lake_files` (celery) and `_optimize_table_impl` (default). **If you add a third write path, it needs the flush too**, and setting `DATA_PATH` to FOS is not a substitute: DATA_PATH only says where parquet goes *once written*. Pinned by `test_merge_lake_files_flushes_inlined_rows_to_parquet` and `test_optimize_table_flushes_inlined_rows_to_parquet` — both assert the durability property (`file_count > 0` after a run that starts at 0), never just that the call happens.
+
+Corollary for readers: any code inferring "is there data?" from file count alone is wrong under DuckLake. Count rows, or consult inlined state. This is what broke `get_table_info` (see [ADR-14](docs/adr/14-ducklake-replacement.md)).
+
+### 33. A catalog swap fails SILENTLY on the read side
+When the v3 DuckLake cutover moved the write path off pyiceberg, every reader still built on pyiceberg's Table API kept working — it just reported an empty, frozen catalog forever, with no error. `get_table_info` / `get_snapshot_calendar`, the post-commit `table_summary.json` writer, `lake_info.py`'s fallback, and `_run_cloud_maintenance_impl`'s retention deletion were all found in this state at different times, each discovered separately.
+
+The retention one was the worst: it is the ONLY enforcement of `data_retention_days` / `rum_retention_days`, so customer data retention silently never ran against DuckLake data. It also concealed a latent wipe — the original entered its conditional-prune branch whenever `rum_retention_days > data_retention_days` *including when `data_retention_days == 0`*, which resolves the cutoff to *now* and deletes every non-RUM row. That never fired only because the whole function was dead; making it live without gating on `> 0` would have shipped a data wipe.
+
+**When you migrate a storage backend, audit every caller of the OLD backend's read API before calling the cutover done — not just the write path.** A grep of the cron job file is not enough; read the function it calls. `optimize_{id}` and `expire_{id}` sit side by side, look identical from the scheduler, and only one of them had been migrated.
+
+### 34. `cache/.../data/` is a MIRROR — never adopt it alongside the FOS manifests
+The legacy-parquet adopter (`iceberg/_ducklake_migration.py`) has two candidate sources and they are **alternatives, not a union**. `sync_data` downloads the Iceberg table's FOS data files into `cache/{bucket}/data/` (see `_cloud_uri_to_local_path`), and local compaction rewrites subsets of that mirror into `compacted_*.parquet` / `daily/` / `weekly/` files holding the same rows again. Registering both would double-count every row inside the cache window — on default settings (`cache_retention_days` 90 ⊇ `data_retention_days` 30) that is the entire table. So the legacy Iceberg table wins whenever it yields ≥1 live data file, and the local tree is only the fallback for a service whose legacy table is genuinely absent.
+
+Adopting the local tree *alone* is the mirror-image bug and was the shipped behaviour: any operator keeping more history than their local cache (`data_retention_days: 365` against the default 90-day cache) migrated and silently lost visibility of everything older than the cache window. Trap #33's shape again — quiet, not loud.
+
+Two mechanical traps in the same code:
+- **`ducklake_add_data_files` is not idempotent** — re-adding a path duplicates its rows, for `s3://` URIs as much as for local paths. Callers MUST dedupe against `ducklake_list_files`.
+- **`ducklake_list_files` echoes an object-storage URI back verbatim.** `os.path.abspath("s3://b/k")` yields `/cwd/s3:/b/k`, so abspath-ing the registry makes the dedupe never match and every re-run duplicates the whole table. Normalise by scheme (`_normalize_data_path`).
+
+Boot-time adoption is guarded by a terminal `success` `cron_runs` row under task `ducklake_adopt` — durable under SQLite *and* shared Postgres, and the surface an operator already reads. `FLA_SKIP_LEGACY_ADOPTION=1` opts out; `POST /api/admin/ducklake/migrate` forces a run.
+
+### 35. Concurrent `ATTACH ... AS lake` on different connections silently corrupts the catalog
+`_ducklake_attach` had no synchronization. Two or more connections in the *same process* independently attaching the DuckLake catalog under the alias `lake` — which happens routinely, not just at boot: any burst of concurrent requests that need a fresh pooled connection (`duckdb_pool._Pool.acquire`'s "build fresh" branch) triggers this — race and corrupt each other's local catalog metadata. Every racing connection's `ATTACH` statement reports success (no exception), but `ducklake_snapshots('lake')` — and therefore the Iceberg-compat view rebuild, and therefore `earliest_log_at`/`latest_log_at`/`total_rows_total`/the Traffic-over-Time chart — then fails FOREVER on that connection with `Catalog "__ducklake_metadata_lake" does not exist`. Because pooled connections are long-lived, one bad race at connection-build time poisons that connection for its entire life in the pool; nothing ever retries or re-verifies the attach on reuse.
+
+Verified empirically (`tests/core/test_ducklake_attach_concurrency.py`): 6-8 threads each opening their own connection and calling `_ducklake_attach` concurrently reproduced the corruption on 100% of the racing connections, every run — including against a purely local (non-Postgres) DuckLake catalog, so this is not a Postgres-catalog-specific race. A single ad-hoc connection, or connections serialized with a lock, never reproduced it.
+
+**The fix is a process-wide lock around the ENTIRE `_ducklake_attach` body, including `INSTALL/LOAD ducklake`.** Locking only the `ATTACH` statements (not the extension load) fixed the corruption but introduced an intermittent hang under repeated concurrent test runs — extension loading isn't safe to race either. `INSTALL ducklake; LOAD ducklake;` must be inside the same critical section as the `ATTACH`, not run outside it.
+
+A companion bug fed the same race: `_update_iceberg_view_locked` unconditionally called `_ducklake_attach(con, source, read_only=False)` even when `lake` was already attached READ_ONLY on that connection (the common case — `get_connection()` always attaches `lake` read-only for pooled connections; this function also runs on those SAME read-only request connections via the slow-path view rebuild, not only on cron's dedicated write connections). The mode-mismatched re-attach throws `database with name "lake" already exists`, which `_ducklake_attach`'s broad "already exists → return True" match swallows as a harmless no-op — but the re-attach ATTEMPT itself is what triggers the corruption. **Check whether `lake` is already attached (`SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake'`) before calling `_ducklake_attach` again on the same connection; if it must attach, match the connection's actual read-only mode** — don't hardcode either value.
+
+Trap #33's shape again: a swallowed "already exists"/"already attached" is not proof the catalog is functional. If you add a new caller that re-attaches `lake` on a connection that might already have it, verify with a real query (`ducklake_snapshots('lake')`), not by trusting that `ATTACH` didn't raise.
+
+### 36. Single-host deploys: three compose files, and host bind-mounts must be owned `1000:1000`
+On a single-VM Docker Compose deployment, bring-up must run **all three** compose files, in order: `docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.deploy.yml up -d --build`. Omitting `docker-compose.prod.yml` silently drops `network_mode: host`, the loopback-only binds, and the anti-XFF-spoofing hardening (`TRUSTED_PROXY_IPS`, `REQUIRE_PROXY_HEADERS`) — the stack still comes up, just unhardened and without port 443 published (site becomes unreachable over HTTPS while looking "fine" in `docker compose ps`).
+
+Separately: the backend Dockerfile creates and runs as `app` (UID/GID 1000) and documents that bind-mount targets must be owned by that user (`RUN mkdir -p /app/configs /app/data /app/cache ... && chown -R app:app /app`), but this is only enforced **inside** the image — nothing enforces it on the **host-side** bind-mount sources (`data/`, `configs/`, `cache/` next to the compose files). If those directories drift to a different UID:GID, the container starts, then crash-loops on the first write with `PermissionError` / `OperationalError: attempt to write a readonly database` — it can sit like this for weeks if no write path is exercised until a restart forces one. Before restarting containers, verify `stat -c '%u:%g' data configs cache` reads `1000:1000`; `sudo chown -R 1000:1000` them if not.
+
+### 37. Map prewarming must configure the worker before constructing any map
+
+MapLibre shares its worker pool across map instances. `MapPrewarm` can run
+before any visible map module, so it must call
+`setWorkerUrl('/maplibre-gl-worker.mjs')` immediately after its lazy import and
+before constructing a map. Otherwise it creates a worker with an empty URL:
+the browser fetches the current page's HTML as a module, fails MIME checking,
+and subsequent maps inherit the broken pool. Configuring the visible map later
+does not repair workers already created.
+
+Do not treat an attached canvas as proof that a map works. The hidden prewarm
+canvas is 1px and can exist even when no country geometry is loaded. The map
+E2E test supplies country data and requires rendered `countries` features on
+the full-sized dashboard map; the unit test runs prewarm without another map
+component to pin configuration-before-construction.
+
+### 38. NGWAF dashboard cards require a configured workspace
+
+`bootstrap.ngwaf_configured` is the active service's attachment flag, available
+to both admin and analyst without exposing the workspace ID. `useDashboardCards`
+excludes NGWAF Verified Bots and NGWAF Signals from the available card list when
+it is false. Virtual fields must not bypass this gate: persisted card selections,
+"Show all", or leftover WAF log fields do not establish that NGWAF is configured.
+The header counts only available selected cards; saved preferences remain intact
+when switching back to a service where NGWAF is configured.
+
+### 39. Header freshness is request-event time, not a log-file timestamp
+
+The REQUEST header uses `request.latest_log_at`, the request table's event-time
+extent. A raw object's filename timestamp belongs in `latest_ingested_file_at`
+or `latest_available_file_at`; it must never overwrite that extent in a cached
+status overlay. Otherwise REST and SSE can report an older request than
+`log-extents` and the persisted request metrics, and the header falsely looks
+stalled. Bootstrap cache hits and misses must preserve the same meaning.
+
+Use the current snapshot's request metrics, with a flat extent fallback only
+when the request group is absent. Keep RUM separate. Explicit nulls clear
+metrics; omitted fields in a partial SSE update retain their prior values.
+Never choose the maximum of old and new timestamps: a reset or replacement
+can legitimately move the extent backward.
+
+In durable/Celery mode, `request_metrics_observer` owns a single backend
+reconciliation loop: observe the durable serving view, persist, then publish
+changed status through SSE. It waits 15 seconds after each completed pass;
+connection/query time is additional. This is serving work and remains enabled
+with development ingestion crons paused. It never starts an ingestion writer.
+Sync/file mode keeps its post-batch refresh. See ADR-18 for the ownership rule.
+
+### Bounded ClickHouse diagnostic index (ADR-20)
+
+`backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements
+explicit pinned DuckLake snapshot export to immutable Fastly Object Storage
+artifacts, with six Postgres control relations. It is not an ingest mirror.
+Task 12 rejected this prototype for dashboard serving after Task 10's measured
+latency/error/saturation failures; Task 11 Kubernetes packaging was not executed.
+Both dashboard endpoints call the existing DuckLake repository directly,
+regardless of `CLICKHOUSE_ENABLED`. That flag enables diagnostic index/replay
+tooling, not dashboard routing; do not add a separate serving flag.
+`repositories/clickhouse_dashboard.py` is an archived experimental evaluator
+for direct offline library comparisons, never imported by a live endpoint.
+Run `make clickhouse-prototype-schema`
+and `python -m scripts.clickhouse_replay`; see
+[the runbook](docs/runbooks/clickhouse-prototype.md).
+
+Use real psycopg pool transactions, not the SQLite-shaped metadata wrapper
+whose `commit()` is a no-op. All fact reads require `FINAL`. Only complete,
+content-verified generations may activate; rebuilds allocate a new generation
+and load every artifact, including previously published ones. Expired datasets
+and unverified targets are ineligible. The archived hybrid evaluator must pass
+the snapshot actually pinned to its DuckLake view into `readiness`; a separate
+current-version probe is not proof. The adapter builds a unique request view
+using `AT VERSION` and the existing normalization helper, never replaces the
+pooled service view, and rolls back its read transaction on exit. Readiness
+re-verifies the entire target on every request (intentionally costly).
+Unsupported requests log a DuckLake fallback reason; transport failures
+raise `HybridUnavailable` in direct evaluation. No dashboard HTTP route handles
+that exception anymore. Raw deletion and the ingest ledger remain unchanged.
+
+Task 8 instrumentation lives in `clickhouse_metrics.py` and
+`clickhouse_observer.py`. Use multipod + observability + ClickHouse overlays
+together: the existing OTLP exporter feeds Prometheus, with a recording alias
+for its byte-counter naming difference. Enabled backend callbacks share a
+bounded authenticated disk probe and a Postgres actionable-backlog aggregate;
+never run full generation readiness in a metric callback. Unknown lag/disk
+is not zero. Physical inserted-row counters include acknowledged retries.
+Query IDs belong in logs, never metric labels; Active Queries entries have
+`con=None` and cannot interrupt the shared HTTP client. Replay commands
+force-flush before exit; SDK resource instance IDs isolate concurrent
+cumulative streams. See the runbook for live names and verification evidence.
+
+Task 9 adds API-only admin controls in `routers/admin/clickhouse.py`:
+`GET /api/admin/clickhouse/status?service_id=...` and
+`POST /api/admin/clickhouse/replay`. Both remain behind the existing admin
+prefix block; never allow them through the analyst middleware. Status reports
+service-scoped publication history and actionable backlog age. Disabled or
+unavailable measurements are null, not zero; enabled dependency failures return
+503. An expired active generation remains visible with `expired=true`; health
+is connectivity/schema health, not a fresh-data guarantee.
+
+Replay requires a configured read-write service and exactly one `dataset_id`
+(new generation) or `generation` (resume). `dry_run=true` validates retained
+metadata references without FOS access, audit writes, or manifest mutations.
+The HTTP cap is 100 artifacts per request **and per dataset**, since activation
+verifies the whole dataset even after a small final replay batch. Work runs
+synchronously in a request thread with bounded Postgres waits; larger datasets
+use the explicit CLI. Apply uses only `FosArtifacts.load`, never export, and
+audits requested/completed/failed operations with safe counts. Responses,
+including debug-opted-in errors, must not disclose artifact URLs or credentials.
+
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
 
 ### Testing
 
-1. **Run `make ci` after every code change.** Fix all errors and warnings. Never report success without running CI.
+1. **Run focused tests after each coherent code change, then `make ci` after the complete change set.** Batch related selectors in one invocation. Diagnose and rerun a failed stage before repeating the full gate; do not rerun passing suites solely for staging changes. Fix failures without weakening assertions, coverage floors, or required gates. Never report completion without the final CI and required live verification.
 2. **Add tests for every non-trivial change.** New endpoint → router test. New utility → unit test. Bug fix → regression test that would have caught it.
 3. **Prefer integration tests over pure mocks** for backend behavior. The `in_memory_duckdb` + `client` fixture pattern tests real SQL while staying fast.
 4. **Test error paths.** Missing config, external 4xx/5xx, empty DB.
@@ -814,3 +977,45 @@ Update this file in the same commit that introduces:
 - Workflow changes that affect the user personas
 
 If a section here describes code or behavior that no longer exists, fix or delete it immediately. Stale docs are worse than missing docs — they actively mislead.
+
+<!-- graft:start -->
+## Graft — repo context graph
+
+This repo is indexed in `graft/`: small linked markdown nodes that explain each
+system and carry exact file:line spans, kept in sync with the code through git.
+
+For ANY task here — understanding how something works, finding where code lives,
+or scoping a change — get context from the graph before grepping or opening
+source files. Re-ask freely (it's cheap) and reuse literal identifiers you
+already have (symbol, error string, file name) as the query. New to this repo?
+Run `graft map` first — a token-budgeted orientation (dir clusters, hubs,
+hotspots), no LLM, no key.
+
+- Run `graft ask "<your question>" --source` → ranked nodes with the relevant
+  code spans inlined (each hit's ≤8-line crux by default; `--full` for whole
+  definitions when the crux isn't enough). Match the tool to the task shape:
+  for understanding or editing, the top node IS the answer — cite its
+  `covers:` file:line spans and edit straight from `--source`. For
+  exhaustive tasks ("every occurrence / every caller of this pattern"), ranked
+  results are top-N, not complete — run `graft grep "<literal>"` instead
+  (exhaustive over indexed files, grouped by enclosing symbol), falling back
+  to raw `grep -rn` only for unindexed files.
+- `graft skeleton <file>` → every definition's signature + span, ~10× cheaper
+  than reading the file; use it to skim an API surface.
+- `graft callers <symbol>` gives precomputed, exact edges — who calls this.
+  Add `--direction out` for what it calls, or `--depth N` to walk
+  transitively for the full blast radius. For structural questions, skip
+  ranking and use this directly.
+- Or browse: `graft/INDEX.md` lists every node; follow the links.
+- Monorepos and folders of multiple repos rank fairly across sub-projects —
+  hits carry `[scope/]` labels naming which one they're from. Narrow with
+  `graft ask "<task>" --in <scope>/` once you know where you're working.
+
+If a returned span is truncated ("+N more lines"), open the file at that exact
+range before finalizing. Only open source files when a node genuinely lacks a
+needed detail, and then at the exact file:line the node points to — never
+re-read whole files.
+
+After big code changes, refresh the graph with `graft build` (deterministic,
+no API key, $0).
+<!-- graft:end -->

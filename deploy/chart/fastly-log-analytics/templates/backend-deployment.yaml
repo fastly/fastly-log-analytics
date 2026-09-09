@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-backend
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # Pinned to 1, NOT .Values.replicaCount: the per-service DuckDB file is
+  # process-exclusive, so a second backend pod 503s every data request.
+  # See docs/adr/18-serving-tier-single-pod.md.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "fastly-log-analytics.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: "{{ .Values.image.repository }}-backend:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
+            - name: SSE_BACKPLANE
+              value: {{ .Values.config.sseBackplane | quote }}
+            - name: DUCKDB_MEMORY_LIMIT
+              value: {{ .Values.config.duckdbMemoryLimit | quote }}
+            # Pinned proxy trust — the backend refuses to boot on `*`.
+            - name: TRUSTED_PROXY_IPS
+              value: {{ .Values.config.trustedProxyIps | quote }}
+            - name: UVICORN_FORWARDED_ALLOW_IPS
+              value: {{ .Values.config.trustedProxyIps | quote }}
+            {{- if .Values.config.localAdminCidrs }}
+            # See config.localAdminCidrs's comment in values.yaml for why
+            # this exists and the condition under which it's safe to set.
+            - name: LOCAL_ADMIN_CIDRS
+              value: {{ .Values.config.localAdminCidrs | quote }}
+            {{- end }}
+            # The frontend's SSR calls hit this backend Service by its full
+            # in-cluster DNS name (API_PROXY_URL below), which isn't in
+            # backend/utils/remote_access.py's default Host allowlist
+            # (localhost/127.0.0.1/backend/frontend/etc) -- confirmed live:
+            # SSR's /api/bootstrap call 400'd host_not_allowed until this was
+            # added. Bare "backend" stays covered by the code default for
+            # anyone hairpinning through a plain hostname.
+            - name: LOCAL_HOSTS
+              value: {{ printf "%s-backend,%s-frontend" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) | quote }}
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: "http://prometheus:9090/api/v1/otlp/v1/metrics"
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://tempo:4318/v1/traces"
+            {{- end }}
+          # kubelet's httpGet probe sends the pod IP as the Host header by
+          # default (no override), which backend/utils/remote_access.py's
+          # Host allowlist rejects with 400 host_not_allowed -- confirmed
+          # against a live cluster: the probe's requests 400'd while an
+          # identical request via kubectl port-forward (Host: 127.0.0.1)
+          # returned 200. "localhost" is in the default allowlist
+          # (backend/config.py LOCAL_HOSTS), so pin the probe to it
+          # explicitly rather than relying on kubelet's default.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "fastly-log-analytics.dataVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "fastly-log-analytics.dataVolumes" . | nindent 8 }}

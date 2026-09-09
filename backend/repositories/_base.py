@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.core.rollups._common import quote_path_list
 
 if TYPE_CHECKING:
@@ -224,6 +225,12 @@ def collect_hourly_bundle_paths(
     import os
     from datetime import UTC, datetime, timedelta
 
+    if svcconfig.is_durable_serving_mode(src):
+        # Rollups are pod-local accelerators.  A durable serving replica
+        # cannot treat a missing local tree as evidence that the durable
+        # DuckLake table is empty or partially covered.
+        return None
+
     from backend.core.rollups import _rollups_root
 
     hour_per_field_root = _rollups_root(src)
@@ -393,14 +400,10 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         }
     )
     try:
-        con.execute(f"ATTACH ':memory:' AS {alias}")
-        con.from_arrow(tbl).create(f"{alias}.ngwaf_bots")
+        con.register(f"temp_arrow_{alias}", tbl)
+        con.execute(f"CREATE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
     except Exception as e:
-        _logger.warning("[ngwaf_bots] materializing %s.ngwaf_bots failed: %s", alias, e)
-        try:
-            con.execute(f"DETACH {alias}")
-        except Exception:
-            pass
+        _logger.warning("[ngwaf_bots] materializing %s_ngwaf_bots failed: %s", alias, e)
         return False
     return True
 
@@ -862,6 +865,8 @@ class QueryRunner:
             return cached
 
         actual_cols = [col["name"] for col in _get_schema(self.con, self.src)]
+        if actual_cols == ["timestamp"]:
+            actual_cols = []
         if not actual_cols:
             # The connection's bound view is stale — most likely the sync
             # cron deleted a buffer file the cached view SQL still references,
@@ -1010,6 +1015,7 @@ class QueryRunner:
         import uuid as _uuid
         from datetime import timedelta as _timedelta
 
+        from backend import config as svcconfig
         from backend.core.duckdb import _cache_dir
 
         try:
@@ -1089,13 +1095,37 @@ class QueryRunner:
                 pass
             return out
 
-        buffer_files = _list_parquets(buffer_dir, prune_mtime=True)
+        durable_serving = svcconfig.is_durable_serving_mode(self.src)
+        buffer_files = [] if durable_serving else _list_parquets(buffer_dir, prune_mtime=True)
+        # Committed rows for the active hour live in the per-service
+        # DuckLake table (post-v3) — without this branch up to ~55 min of
+        # the live hour vanished from dashboards once a commit drained the
+        # buffer. DuckLake prunes the scan on file stats, so the timestamp
+        # WHERE below keeps this cheap. Tombstoned buffer parquets stay
+        # excluded above: their rows are ALREADY in the lake table and
+        # reading both double-counts (Trap #26).
+        lake_table = None
+        try:
+            from backend.core.iceberg._ducklake import ducklake_table_name
+
+            cand = ducklake_table_name(self.src)
+            row = self.con.execute(
+                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                [cand],
+            ).fetchone()
+            if row:
+                lake_table = cand
+        except Exception:
+            lake_table = None
         # Hourly-partition files are already scoped to the active hour —
         # no mtime pruning (compaction may rewrite them with fresh mtimes
-        # anyway), and tombstones only ever mark buffer files.
-        hourly_files = _list_parquets(hourly_dir, prune_mtime=False)
+        # anyway), and tombstones only ever mark buffer files. Legacy
+        # fallback for pre-DuckLake caches: skipped when the lake table
+        # exists, since migrated hourly files may be registered there too
+        # (reading both would double-count).
+        hourly_files = [] if durable_serving or lake_table else _list_parquets(hourly_dir, prune_mtime=False)
         self._last_active_direct_n_files = len(buffer_files) + len(hourly_files)
-        if not buffer_files and not hourly_files:
+        if not buffer_files and not hourly_files and not lake_table:
             # Nothing on disk for the active hour. Caller will report
             # empty live_res — semantically correct (no current-hour rows).
             return None
@@ -1113,6 +1143,9 @@ class QueryRunner:
                 branches.append(
                     f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
+            if lake_table:
+                lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
+                branches.append(f"SELECT {cols_sql} FROM {lake_ident} WHERE {where}")
             if hourly_files:
                 paths_sql = quote_path_list(hourly_files)
                 branches.append(
@@ -1227,6 +1260,12 @@ class QueryRunner:
         from backend.core.rollups import _is_safe_ident, _safe_table_for
         from backend.utils.date_utils import parse_iso_utc
 
+        if svcconfig.is_durable_serving_mode(self.src):
+            # The result shape is retained for existing callers, but an
+            # empty tuple is explicitly an unavailable rollup result.  Each
+            # serving path must then run its DuckLake-backed raw fallback.
+            return [], fields
+
         # Optional phase-log instrumentation. Caller passes a list; we
         # append {"section": "top_n_rollups:<phase>", "time_ms": N} per
         # phase. None = no-op. Negligible overhead.
@@ -1236,8 +1275,6 @@ class QueryRunner:
 
         cache_dir = _cache_dir(self.src)
         rollup_dir = os.path.join(cache_dir, "rollups", "hour")
-        if not os.path.exists(rollup_dir):
-            return [], fields
 
         # Defense-in-depth: field names land in a SQL IN-list as quoted
         # literals AND the service name lands in the base-table identifier.
@@ -2445,6 +2482,9 @@ class QueryRunner:
         but the ranking is preserved for the URLs that dominate the
         panel.
         """
+        if svcconfig.is_durable_serving_mode(self.src):
+            return None
+
         import os
         from datetime import UTC, datetime, timedelta
 
@@ -2566,6 +2606,9 @@ class QueryRunner:
         from datetime import UTC, datetime, timedelta
 
         from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
+
+        if svcconfig.is_durable_serving_mode(self.src):
+            return None
 
         hour_root = _hour_bundled_root(self.src)
         if not os.path.isdir(hour_root):
@@ -3983,7 +4026,7 @@ class QueryRunner:
                         live_q = (
                             f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "
                             f'FROM "{tmp}" t '
-                            f"INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id) "
+                            f"INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id) "
                             f"WHERE nb.bot_name IS NOT NULL "
                             f"GROUP BY 1, 2"
                         )
@@ -4186,6 +4229,9 @@ class QueryRunner:
         )
         from backend.utils.date_utils import parse_iso_utc
         from backend.utils.hll import HyperLogLog
+
+        if svcconfig.is_durable_serving_mode(self.src):
+            return {}, {}
 
         def _phase(name: str, ms: float) -> None:
             if _phase_log is not None:

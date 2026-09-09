@@ -1,11 +1,11 @@
-"""Decorator that wraps every cron handler with telemetry + a hard watchdog.
+"""Decorator that wraps every cron handler with telemetry + a watchdog.
 
 The ``cron_task`` factory used to live at the top of the old monolithic scheduler module
 alongside the APScheduler lifecycle and every cron body. This module isolates
 the decorator so the job modules can import it without dragging the whole
 scheduler module in.
 
-The hard-cap is module-level so tests can monkeypatch
+The watchdog cap is module-level so tests can monkeypatch
 ``backend.cron.decorators._CRON_HARD_CAP_S`` without modifying the
 decorator itself (the wrapper reads it from module globals at call time).
 """
@@ -22,13 +22,10 @@ from functools import wraps
 # ``logger="backend.scheduler"`` keep receiving watchdog error lines.
 logger = logging.getLogger("backend.scheduler")
 
-# Hard upper bound on any single cron invocation. Ingest is already capped at
-# max_seconds=240 inside _run_service_cron; this leaves ~60s for the post-ingest
-# phases (refresh_config_status, usage-log block, update_cron_duration). If the
-# inner thread runs past this, the APScheduler worker thread returns anyway so
-# max_instances=1 cannot stay wedged across ticks. The leaked inner thread is
-# accepted — Python cannot cleanly kill a thread, but it will eventually unblock
-# (SQLite timeouts are 30s) and flush its own usage log on exit.
+# Watchdog threshold for reporting an overlong invocation. The wrapped body is
+# still allowed to finish before the APScheduler worker is released: Python
+# cannot safely kill a thread that owns DuckDB/FOS resources, and abandoning it
+# leaves those resources active while the next tick starts.
 _CRON_HARD_CAP_S = 300
 
 # Shared watchdog executor (see _watchdog_executor below). Sized >= APScheduler's
@@ -62,25 +59,16 @@ def _get_watchdog_executor() -> concurrent.futures.ThreadPoolExecutor:
         return _watchdog_executor
 
 
-def _abandon_watchdog_executor() -> None:
-    """Drop the shared executor after a hard-cap timeout.
-
-    A timed-out body's thread cannot be killed and is stuck (typically on a 30s
-    SQLite lock); keeping the shared pool would lose that worker slot forever.
-    Shut it down with ``wait=False`` (abandon the wedged thread) and null it so
-    the next call rebuilds a fresh pool. The abandoned thread's thread-local
-    SQLite connections become dead-owner orphans, which ThreadLocalPool's
-    cold-open reaper then closes. Rare — error path only.
-    """
-    global _watchdog_executor
-    with _watchdog_lock:
-        ex, _watchdog_executor = _watchdog_executor, None
-    if ex is not None:
-        ex.shutdown(wait=False)
-
-
-def cron_task(name: str):
+def cron_task(name: str, job_name: str | None = None):
     """Wraps a cron handler with telemetry + usage-log flush + a hard watchdog.
+
+    ``job_name`` is the ``job_runs.job_name`` the wrapped body registers via
+    ``start_cron_run`` (it often differs from the telemetry ``name``). The
+    heartbeat loop scopes its lease refresh to that job — an unscoped
+    refresh would keep EVERY running lease for the service alive, so a
+    wedged job whose own heartbeat died would never be reaped while any
+    healthy job kept ticking (re-creating the documented orphaned-sync-row
+    ingestion stall).
 
     The process_context_scope wrapper resets both the ContextVar and the
     process-global mirror (CAS-style) on exit. Otherwise APScheduler's
@@ -88,16 +76,57 @@ def cron_task(name: str):
     fsspec iothread keeps reading the stale global — misattributing every
     subsequent cron's I/O to whichever job ran last.
 
-    Watchdog: runs the wrapped function on a single-worker ThreadPoolExecutor
-    bounded by _CRON_HARD_CAP_S. On timeout, the executor is shut down with
-    wait=False so this wrapper returns and the APScheduler worker thread is
-    freed for the next tick.
+    Watchdog: runs the wrapped function on a shared ThreadPoolExecutor and logs
+    when it exceeds ``_CRON_HARD_CAP_S``. The future is then awaited to ensure
+    DuckDB, FOS, and thread-local metadata resources are released before the
+    APScheduler worker is freed; Python cannot safely cancel the body.
     """
 
     def decorator(func):
+        from backend.celery_app import app
+
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
+            def heartbeat_loop(stop_event: threading.Event):
+                import time
+
+                from backend.core.metadata.base import get_con, release_thread_connection
+
+                try:
+                    while not stop_event.is_set():
+                        if stop_event.wait(10.0):
+                            break
+                        try:
+                            con = get_con(service_id)
+                            if job_name:
+                                con.execute(
+                                    "UPDATE job_runs SET heartbeat_at = ? "
+                                    "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                                    (time.time(), service_id, job_name),
+                                )
+                            else:
+                                # No job_name declared: refresh nothing rather than
+                                # everything — an unscoped refresh keeps other jobs'
+                                # leaked leases alive forever (frozen-ingestion trap).
+                                pass
+                            con.commit()
+                        except Exception:
+                            pass
+                finally:
+                    # This thread is a fresh, never-reused `threading.Thread`
+                    # per cron invocation, not a pooled executor worker — the
+                    # `get_con()` connection it opened above must be handed
+                    # back explicitly before it exits, or it permanently pins
+                    # one slot of the bounded Postgres metadata pool (see
+                    # release_thread_connection's docstring). At
+                    # METADATA_PG_POOL_MAX ticks (any mix of cron jobs across
+                    # the whole scheduler) every later get_con() call anywhere
+                    # in the process starts raising PoolTimeout — this was a
+                    # live incident (AGENTS.md, "cron heartbeat thread leak").
+                    release_thread_connection()
+
             def _body():
+
                 from backend.utils.telemetry import process_context_scope, start_call_tracking
                 from backend.utils.usage_logger import flush_usage_log
 
@@ -108,29 +137,39 @@ def cron_task(name: str):
                     finally:
                         flush_usage_log(service_id)
 
-            # Read the cap from module globals at call time so tests that
-            # ``monkeypatch.setattr(backend.cron.decorators,
-            # "_CRON_HARD_CAP_S", ...)`` take effect per-invocation.
             cap = _CRON_HARD_CAP_S
-            # Submit to the SHARED watchdog pool — do NOT create (or shut down)
-            # an executor per call; that churn leaked a SQLite connection per
-            # tick (the 2026-06-22 OOM). On the happy path the pool is reused;
-            # only a hard-cap timeout tears it down (the wedged thread can't be
-            # cancelled, so we abandon the whole pool and rebuild it next call).
+
+            stop_event = threading.Event()
+            hb_thread = threading.Thread(target=heartbeat_loop, args=(stop_event,), daemon=True)
+            hb_thread.start()
+
             ex = _get_watchdog_executor()
             fut = ex.submit(_body)
             try:
                 return fut.result(timeout=cap)
             except concurrent.futures.TimeoutError:
                 logger.error(
-                    "[scheduler] %s/%s exceeded %ds hard cap — abandoning worker "
-                    "thread so APScheduler max_instances=1 doesn't wedge ingestion",
+                    "[scheduler] %s/%s exceeded %ds watchdog threshold — waiting "
+                    "for worker cleanup before releasing the scheduler slot",
                     name,
                     service_id,
                     cap,
                 )
-                _abandon_watchdog_executor()
-                return None
+                return fut.result()
+            finally:
+                stop_event.set()
+                hb_thread.join(timeout=1.0)
+
+        # Register celery task
+        task_name = f"{func.__module__}.{func.__name__}_celery"
+
+        @app.task(name=task_name, bind=True)
+        @wraps(func)
+        def celery_wrapper(self, service_id: str, *args, **kwargs):
+            return wrapper(service_id, *args, **kwargs)
+
+        wrapper.celery_task = celery_wrapper
+        wrapper.delay = celery_wrapper.delay
 
         return wrapper
 
@@ -156,26 +195,16 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
     import time
 
     def decorator(fn):
+        from backend.celery_app import app
+
         @wraps(fn)
         def wrapper() -> None:
-            # Import on each call so tests that patch
-            # ``backend.utils.system_jobs.record_job_run`` see their stub
-            # — a module-scope import bound the original reference into
-            # the decorator's closure at decorator-application time
-            # (well before the patch ran), defeating the mock.
             from backend.utils.system_jobs import record_job_run
             from backend.utils.telemetry import process_context_scope
 
             prefix = f"\x1b[{color}m[{tag}]\x1b[0m"
-            logger.info("▶️  %s %s job started.", prefix, label)
+            logger.info("🏎️  %s %s job started.", prefix, label)
             start = time.monotonic()
-            # SRE-09: enter the cron attribution scope (mirrors @cron_task) so
-            # any SQLite this global job runs against ``__global_share__``
-            # (e.g. share_audit_purge's DELETE) registers in the Live Query
-            # Monitor as kind="cron" / "Cron: <job_id>" instead of falling
-            # back to "System: thread:<generic APScheduler worker>". Without
-            # this an operator triaging a runaway purge at 2am can't tell it
-            # apart from boot/pool-warmer work.
             try:
                 with process_context_scope(f"cron:{job_id}"):
                     detail = fn()
@@ -183,7 +212,17 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
             except Exception as e:
                 record_job_run(job_id, "error", time.monotonic() - start, str(e))
                 logger.error("[%s] Failed: %s", job_id, e)
-            logger.info("⏹️  %s %s job finished.", prefix, label)
+            logger.info("🏁  %s %s job finished.", prefix, label)
+
+        task_name = f"{fn.__module__}.{fn.__name__}_celery"
+
+        @app.task(name=task_name, bind=True)
+        @wraps(fn)
+        def celery_wrapper(self, *args, **kwargs):
+            return wrapper(*args, **kwargs)
+
+        wrapper.celery_task = celery_wrapper
+        wrapper.delay = celery_wrapper.delay
 
         return wrapper
 

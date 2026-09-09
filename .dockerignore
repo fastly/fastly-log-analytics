@@ -42,3 +42,5 @@ docs/
 # IDE
 .vscode/
 .idea/
+.env*
+frontend/.env*

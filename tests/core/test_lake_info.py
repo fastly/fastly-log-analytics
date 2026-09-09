@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.core.test_ducklake_layer import _make_source, _write_buffer
 
 
 def _bytes_response(data: bytes, headers: dict | None = None):
@@ -188,12 +192,10 @@ def test_fast_path_missing_info_falls_through_to_iceberg(fos_src):
     fake_s3 = MagicMock()
     fake_s3.get_object.return_value = {"Body": body}
 
-    fake_table = object()  # init_iceberg_table is mocked, identity doesn't matter
-
     with (
         patch("backend.core.duckdb._get_fos_client", return_value=fake_s3),
         patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", return_value=fake_table),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=True),
         patch(
             "backend.core.iceberg.get_table_info",
             return_value={"min_timestamp": "2026-01-01T00:00:00Z", "max_timestamp": "2026-01-02T00:00:00Z"},
@@ -208,151 +210,134 @@ def test_fast_path_missing_info_falls_through_to_iceberg(fos_src):
     assert out["info"]["min_timestamp"] == "2026-01-01T00:00:00Z"
 
 
-# ── Iceberg fallback: direct ─────────────────────────────────────────────────
+# ── DuckLake fallback: direct (v3 write-path cutover) ────────────────────────
+#
+# The pyiceberg catalog these used to mock (`init_iceberg_table`) is
+# permanently frozen post-DuckLake-cutover — see `backend/core/iceberg/
+# _ducklake.py` module docstring. `_fetch_direct` now reads real DuckLake
+# state, so these are integration tests against a real file-backed DuckLake
+# catalog (via `_make_source`/`_write_buffer`/`_commit_buffer_impl` from
+# `test_ducklake_layer.py`), not mocks of the pyiceberg Table API.
 
 
-def test_iceberg_fallback_returns_table_info(fos_src):
+def test_iceberg_fallback_returns_table_info(tmp_path):
     """When the fast path fails (e.g. ``get_object`` raises NoSuchKey),
-    the Iceberg fallback opens the table and derives info/calendar
-    directly."""
-    fake_table = object()
+    the DuckLake fallback reads real committed lake state directly."""
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+    ts = datetime(2026, 2, 1, tzinfo=UTC)
+    _write_buffer(src, "batch.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=2)
+    from backend.core.iceberg.buffer import _commit_buffer_impl
 
-    with (
-        patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", return_value=fake_table),
-        patch(
-            "backend.core.iceberg.get_table_info",
-            return_value={
-                "min_timestamp": "2026-02-01T00:00:00Z",
-                "max_timestamp": "2026-02-02T00:00:00Z",
-                "row_count": 100,
-            },
-        ),
-        patch(
-            "backend.core.iceberg.get_snapshot_calendar",
-            return_value=[{"day": "2026-02-01"}],
-        ),
-    ):
+    assert _commit_buffer_impl(src)["rows_committed"] == 2
+
+    with patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")):
         from backend.core.iceberg.lake_info import fetch_lake_info
 
-        out = fetch_lake_info(fos_src)
-
-    assert out["table_exists"] is True
-    assert out["info"]["row_count"] == 100
-    assert out["range"]["start"] == "2026-02-01T00:00:00Z"
-
-
-def test_iceberg_fallback_returns_table_does_not_exist_when_none(fos_src):
-    """``init_iceberg_table`` returning None means the table file isn't
-    in the bucket yet (pre-first-ingest). The helper must surface this
-    as ``table_exists: False`` so the UI shows the empty state instead
-    of an error."""
-    with (
-        patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", return_value=None),
-    ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
-
-        out = fetch_lake_info(fos_src)
+        out = fetch_lake_info(src)
 
     assert out["ok"] is True
-    assert out["table_exists"] is False
-    assert "not found" in out["message"].lower()
+    assert out["table_exists"] is True
+    assert out["info"]["min_timestamp"] == "2026-02-01T00:00:00+00:00"
+    assert out["info"]["data_files"] == 2
+    assert out["calendar"] == {"2026-02-01": {"data_files": 2, "size_bytes": 0}}
+    assert out["range"]["start"] == "2026-02-01T00:00:00+00:00"
 
 
-def test_iceberg_fallback_treats_not_found_error_as_empty_lake(fos_src):
-    """``init_iceberg_table`` may raise with a message like "NoSuchTable"
-    or "metadata.json does not exist" — both must be coerced to the
-    same ``table_exists: False`` shape, not surfaced as `ok: False`."""
+def test_iceberg_fallback_returns_table_does_not_exist_when_none(tmp_path):
+    """A DuckLake catalog with no committed table yet (pre-first-ingest)
+    must surface as ``table_exists: False`` so the UI shows the empty
+    state instead of an error."""
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+
+    with patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")):
+        from backend.core.iceberg.lake_info import fetch_lake_info
+
+        out = fetch_lake_info(src)
+
+    assert out == {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
+
+
+def test_iceberg_fallback_surfaces_unexpected_errors(tmp_path):
+    """A real error (bad DuckLake attach) — NOT a missing-table — surfaces
+    as ``ok: False`` with the error string. The frontend distinguishes
+    this from the empty-lake case to render a different UI affordance."""
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+
+    def _boom(con, source, read_only=False):
+        raise RuntimeError("403 AccessDenied")
+
     with (
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("NoSuchTable: missing")),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_boom),
     ):
         from backend.core.iceberg.lake_info import fetch_lake_info
 
-        out = fetch_lake_info(fos_src)
-
-    assert out == {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
-
-
-def test_iceberg_fallback_surfaces_unexpected_errors(fos_src):
-    """A real error (S3 perms, decode error) — NOT a missing-table —
-    surfaces as ``ok: False`` with the error string. The frontend
-    distinguishes this from the empty-lake case to render a different
-    UI affordance."""
-    with (
-        patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("403 AccessDenied")),
-    ):
-        from backend.core.iceberg.lake_info import fetch_lake_info
-
-        out = fetch_lake_info(fos_src)
+        out = fetch_lake_info(src)
 
     assert out["ok"] is False
     assert "403" in out["error"]
 
 
-# ── Iceberg fallback: temp cache (use_temp_cache=True) ───────────────────────
+# ── DuckLake fallback: temp cache (use_temp_cache=True) ──────────────────────
 
 
-def test_temp_cache_path_clears_source_caches_on_exit(fos_src):
+def test_temp_cache_path_clears_source_caches_on_exit(tmp_path):
     """``use_temp_cache=True`` is used during PROVISIONING (the service
     isn't registered yet). After deriving info, it MUST call
     ``clear_source_caches`` — otherwise the in-memory catalog cache
     grows by one entry per provisioning attempt that gets aborted."""
-    fake_table = object()
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    _write_buffer(src, "batch.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=1)
+    from backend.core.iceberg.buffer import _commit_buffer_impl
+
+    assert _commit_buffer_impl(src)["rows_committed"] == 1
 
     with (
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", return_value=fake_table),
-        patch(
-            "backend.core.iceberg.get_table_info",
-            return_value={"min_timestamp": "x", "max_timestamp": "y"},
-        ),
-        patch("backend.core.iceberg.get_snapshot_calendar", return_value=[]),
         patch("backend.core.iceberg.clear_source_caches") as mock_clear,
     ):
         from backend.core.iceberg.lake_info import fetch_lake_info
 
-        fetch_lake_info(fos_src, use_temp_cache=True)
+        out = fetch_lake_info(src, use_temp_cache=True)
 
-    mock_clear.assert_called_once_with(fos_src["name"])
+    assert out["table_exists"] is True
+    mock_clear.assert_called_once_with(src["name"])
 
 
-def test_temp_cache_path_returns_empty_lake_when_table_missing(fos_src):
+def test_temp_cache_path_returns_empty_lake_when_table_missing(tmp_path):
     """Same empty-table coercion as the direct path, but routed through
     the temp_cache branch — pinned because both branches must agree
     on the shape they return to the provision wizard."""
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+
     with (
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", return_value=None),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
         from backend.core.iceberg.lake_info import fetch_lake_info
 
-        out = fetch_lake_info(fos_src, use_temp_cache=True)
+        out = fetch_lake_info(src, use_temp_cache=True)
 
-    assert out == {"ok": True, "table_exists": False, "message": "Iceberg table not found in bucket."}
+    assert out == {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
 
 
-def test_temp_cache_path_surfaces_unexpected_errors(fos_src):
+def test_temp_cache_path_surfaces_unexpected_errors(tmp_path):
     """An unexpected error inside the temp_cache branch must surface
     via the outer except as ``ok: False``."""
+    src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
+
+    def _boom(con, source, read_only=False):
+        raise RuntimeError("403 boom")
+
     with (
         patch("backend.core.duckdb._get_fos_client", side_effect=RuntimeError("no s3")),
-        patch("backend.core.iceberg._table_identifier", return_value=("ns", "tbl")),
-        patch("backend.core.iceberg.init_iceberg_table", side_effect=Exception("403 boom")),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_boom),
         patch("backend.core.iceberg.clear_source_caches"),
     ):
         from backend.core.iceberg.lake_info import fetch_lake_info
 
-        out = fetch_lake_info(fos_src, use_temp_cache=True)
+        out = fetch_lake_info(src, use_temp_cache=True)
 
     assert out["ok"] is False
     assert "403" in out["error"]

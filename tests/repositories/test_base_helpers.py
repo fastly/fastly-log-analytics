@@ -308,6 +308,12 @@ def test_canonical_metric_throughput_uses_template_placeholder():
         ("Catalog Error: Table with name logs_x does not exist", "CatalogException"),
         ("ParquetReader: file does not exist", "CatalogException"),
         ("IOError: No such file or directory: /tmp/logs.parquet", "IOException"),
+        # DuckLake's brief DETACH window during commit/optimize (Trap-adjacent
+        # v3 hazard) — a reader mid-checkout sees this exact message.
+        (
+            'Catalog Error: Table with name "lake.logs" does not exist because schema "lake" does not exist.',
+            "CatalogException",
+        ),
     ],
 )
 def test_is_stale_view_error_recognises_known_messages(msg, exc_cls):
@@ -466,10 +472,11 @@ def test_attach_ngwaf_cache_materializes_without_sqlite_scan_or_attach(monkeypat
     try:
         with attach_ngwaf_cache(con, schema_cols=["waf_req_id"], alias="ngwaf_test") as attached:
             assert attached is True
-            row = con.execute("SELECT bot_name, category FROM ngwaf_test.ngwaf_bots WHERE waf_req_id = 'w1'").fetchone()
+            row = con.execute(
+                "SELECT bot_name, category FROM temp.ngwaf_test_ngwaf_bots WHERE waf_req_id = 'w1'"
+            ).fetchone()
             assert row == ("GoogleBot", "SEARCH-ENGINE")
-            attached_dbs = [r[0] for r in con.execute("SELECT database_name FROM duckdb_databases()").fetchall()]
-            assert "ngwaf_test" in attached_dbs
+
     finally:
         con.close()
 

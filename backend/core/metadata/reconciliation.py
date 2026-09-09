@@ -260,6 +260,9 @@ def cleanup_metadata(
         cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
+    from backend.core.metadata.pg_connection import is_postgres
+
+    postgres = is_postgres() and not isinstance(con, sqlite3.Connection)
     t0 = _t.time()
 
     def _con_for(table: str) -> sqlite3.Connection:
@@ -314,16 +317,31 @@ def cleanup_metadata(
                     # Unix-epoch REAL cutoff for slow_queries — see
                     # ``_SLOW_QUERIES_TABLE`` comment above.
                     cutoff_epoch = _t.time() - days_int * 86400
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
-                        (cutoff_epoch, _BATCH),
-                    )
+                    if postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
                 else:
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN "
-                        f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
-                        (f"-{days_int} days", _BATCH),
-                    )
+                    if postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} "
+                            f"WHERE {ts_col} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                            (days_int, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
+                            (f"-{days_int} days", _BATCH),
+                        )
                 n = int(cur.rowcount or 0)
                 total_n += n
                 table_con.commit()
@@ -370,7 +388,14 @@ def cleanup_metadata(
             )
 
     vacuumed = False
-    if any(deleted.values()):
+    from backend.core.metadata.pg_connection import is_postgres
+
+    # File-vacuum (auto_vacuum/incremental_vacuum/freelist_count) is a
+    # SQLite-file concept with no Postgres equivalent — Postgres reclaims
+    # space via its own autovacuum daemon, outside app control. Skip the
+    # whole branch under a Postgres metadata backend; the DELETE trim above
+    # already ran and is what actually matters there.
+    if any(deleted.values()) and not is_postgres():
         # A bare VACUUM rewrites the whole file under an exclusive lock —
         # measured at 9.5s on a populated metadata.db, during which every
         # other writer to the SAME file (slow_queries batched insert,

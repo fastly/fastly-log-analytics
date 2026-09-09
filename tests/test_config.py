@@ -362,6 +362,11 @@ def test_config_to_source_falls_back_to_native_endpoint_without_cdn():
     assert src["endpoint"] == "us-east-1.object.fastlystorage.app"
 
 
+def test_config_to_source_uses_fixed_v3_raw_root():
+    src = svcconfig.config_to_source(_cfg(fos_prefix="customer-prefix"))
+    assert src["prefix"] == ""
+
+
 def test_config_to_source_native_endpoint_derives_from_region_when_missing():
     """If ``fos_endpoint`` is absent the helper synthesises it from
     region. Pinned because a typo here would silently point boto3 at
@@ -748,3 +753,117 @@ def test_ensure_dirs_is_idempotent():
     """Repeated calls (every save_config does one) must not raise."""
     svcconfig._ensure_dirs()
     svcconfig._ensure_dirs()  # again — must not raise
+
+
+@pytest.fixture
+def clickhouse_env(monkeypatch):
+    import os
+
+    for name in os.environ:
+        if name.startswith("CLICKHOUSE_"):
+            monkeypatch.delenv(name)
+    for key, value in {
+        "ENABLED": "true",
+        "HOST": "localhost",
+        "DATABASE": "analytics",
+        "USER": "default",
+        "SECURE": "false",
+    }.items():
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+
+
+def test_clickhouse_disabled_by_default(clickhouse_env, monkeypatch):
+    monkeypatch.delenv("CLICKHOUSE_ENABLED")
+    monkeypatch.setenv("CLICKHOUSE_QUERY_TIMEOUT_S", "not-a-timeout")
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", " FALSE "])
+def test_clickhouse_disabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
+def test_clickhouse_enabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.host == "localhost"
+    assert settings.port == 8123
+    assert settings.password == ""
+    assert settings.connect_timeout_s > 0
+    assert settings.query_timeout_s > 0
+
+
+@pytest.mark.parametrize("key", ["ENABLED", "SECURE"])
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_clickhouse_invalid_boolean(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["HOST", "DATABASE", "USER"])
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_clickhouse_incomplete_config(clickhouse_env, monkeypatch, key, value):
+    if value is None:
+        monkeypatch.delenv(f"CLICKHOUSE_{key}")
+    else:
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["CONNECT_TIMEOUT_S", "QUERY_TIMEOUT_S", "INSERT_TIMEOUT_S", "POOL_TIMEOUT_S"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1", "999999", "bad", ""])
+def test_clickhouse_bounded_timeouts(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("PORT", "0"),
+        ("PORT", "65536"),
+        ("PORT", "1.5"),
+        ("PORT", "bad"),
+        ("POOL_MAX_SIZE", "0"),
+        ("POOL_MAX_SIZE", "65"),
+    ],
+)
+def test_clickhouse_bounded_integers(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("HOST", "http://user:secret@localhost"),
+        ("HOST", "localhost/path"),
+        ("HOST", "localhost?password=secret"),
+        ("DATABASE", "logs; DROP DATABASE logs"),
+        ("DATABASE", "db.table"),
+        ("USER", "user\nX-Header: secret"),
+    ],
+)
+def test_clickhouse_rejects_unsafe_settings(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}") as error:
+        svcconfig.load_clickhouse_config()
+    assert value not in str(error.value)
+
+
+def test_clickhouse_remote_requires_password_and_defaults_to_tls(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_HOST", "clickhouse.example.com")
+    monkeypatch.delenv("CLICKHOUSE_SECURE")
+    with pytest.raises(ValueError, match="CLICKHOUSE_PASSWORD"):
+        svcconfig.load_clickhouse_config()
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "FAKE_PASSWORD")
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.secure is True
+    assert settings.port == 8443
+    assert "FAKE_PASSWORD" not in repr(settings)

@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "2.4.1"
+    "version": "3.0.0-beta1"
   },
   "paths": {
     "/api/dashboard/aggregates": {
@@ -17649,6 +17649,361 @@
         }
       }
     },
+    "/api/admin/celery/status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Celery Status",
+        "description": "Expose Celery queue depths, worker status, RedBeat schedule, and\ningest-ledger summary.",
+        "operationId": "api_celery_status_api_admin_celery_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/clickhouse/status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Clickhouse Status",
+        "operationId": "api_clickhouse_status_api_admin_clickhouse_status_get",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClickHouseStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClickHouseStatusResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/api/admin/clickhouse/replay": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Api Clickhouse Replay",
+        "operationId": "api_clickhouse_replay_api_admin_clickhouse_replay_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClickHouseReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClickHouseReplayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClickHouseReplayErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/optimize-now": {
       "post": {
         "tags": [
@@ -21123,6 +21478,182 @@
         "summary": "Rebuild Local View Endpoint",
         "description": "One-button \"fix it\" for a stuck or stale local DuckDB view.\n\nReturns 202 Accepted \u2014 the rebuild runs asynchronously in a worker\nthread and the response body carries a ``run_id`` the caller can\npoll for completion.\n\nClears the in-memory + on-disk caches that drive view SQL generation,\nthen triggers a metadata_sync that re-pulls the catalog from the cloud\nand rebuilds the view. The local raw buffer is NOT touched \u2014\nun-committed data is safe.\n\nWhen to use: after manually editing parquet files, after a catalog\nschema-mapping desync, or when \"Sync All\" already ran and the view\nstill looks wrong. This is the nuclear-option version of refresh.",
         "operationId": "rebuild_local_view_endpoint_api_admin_rebuild_local_view_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ducklake/migrate": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Ducklake Migrate Endpoint",
+        "description": "Adopt this service's legacy pyiceberg-era parquet into DuckLake.\n\nThe backend already runs this automatically on first boot under v3;\nthis endpoint is the explicit \"run it now\" button (and the retry path\nafter a failed sweep), so it bypasses the once-ever guard. Returns\n202 Accepted \u2014 the adoption runs in a background thread (registering\nthousands of files can take a while). Idempotent: files already\ntracked by the DuckLake catalog are skipped, so re-running after a\npartial failure is safe. The outcome lands as a ``ducklake_adopt``\nrow in ``cron_runs`` (visible in the Cron UI) as well as in the logs.",
+        "operationId": "ducklake_migrate_endpoint_api_admin_ducklake_migrate_post",
         "parameters": [
           {
             "name": "service",
@@ -40360,6 +40891,11 @@
             "type": "array",
             "title": "Active Log Field Ids"
           },
+          "ngwaf_configured": {
+            "type": "boolean",
+            "title": "Ngwaf Configured",
+            "default": false
+          },
           "views": {
             "items": {
               "additionalProperties": true,
@@ -40534,6 +41070,33 @@
               }
             ],
             "title": "Cmcd Enabled"
+          },
+          "rum_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Enabled"
+          },
+          "analyst_path_a_supported": {
+            "type": "boolean",
+            "title": "Analyst Path A Supported",
+            "default": true
+          },
+          "analyst_path_a_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Path A Reason"
           }
         },
         "additionalProperties": true,
@@ -41228,6 +41791,397 @@
           "dropped"
         ],
         "title": "ClearSqliteResponse"
+      },
+      "ClickHouseActiveGeneration": {
+        "properties": {
+          "generation": {
+            "type": "string",
+            "title": "Generation"
+          },
+          "dataset_id": {
+            "type": "string",
+            "title": "Dataset Id"
+          },
+          "coverage_start": {
+            "type": "string",
+            "title": "Coverage Start"
+          },
+          "coverage_end": {
+            "type": "string",
+            "title": "Coverage End"
+          },
+          "expires_at": {
+            "type": "string",
+            "title": "Expires At"
+          },
+          "expired": {
+            "type": "boolean",
+            "title": "Expired"
+          },
+          "target_matches": {
+            "type": "boolean",
+            "title": "Target Matches"
+          },
+          "coverage_age_seconds": {
+            "type": "number",
+            "title": "Coverage Age Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generation",
+          "dataset_id",
+          "coverage_start",
+          "coverage_end",
+          "expires_at",
+          "expired",
+          "target_matches",
+          "coverage_age_seconds"
+        ],
+        "title": "ClickHouseActiveGeneration"
+      },
+      "ClickHouseReplayErrorResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ClickHouseReplayErrorResponse"
+      },
+      "ClickHouseReplayRequest": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Service Id"
+          },
+          "dataset_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Id"
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": true
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 100
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "service_id"
+        ],
+        "title": "ClickHouseReplayRequest"
+      },
+      "ClickHouseReplayResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "rebuild",
+              "resume"
+            ],
+            "title": "Operation"
+          },
+          "dataset_id": {
+            "type": "string",
+            "title": "Dataset Id"
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "artifact_count": {
+            "type": "integer",
+            "title": "Artifact Count"
+          },
+          "planned_artifacts": {
+            "type": "integer",
+            "title": "Planned Artifacts"
+          },
+          "attempted": {
+            "type": "integer",
+            "title": "Attempted",
+            "default": 0
+          },
+          "published": {
+            "type": "integer",
+            "title": "Published",
+            "default": 0
+          },
+          "activated": {
+            "type": "boolean",
+            "title": "Activated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "dry_run",
+          "operation",
+          "dataset_id",
+          "generation",
+          "limit",
+          "artifact_count",
+          "planned_artifacts"
+        ],
+        "title": "ClickHouseReplayResponse"
+      },
+      "ClickHouseStatusResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "disabled",
+              "unavailable"
+            ],
+            "title": "Health"
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          },
+          "publication_counts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Counts"
+          },
+          "oldest_pending_age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Pending Age Seconds"
+          },
+          "last_published_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Published At"
+          },
+          "active_generation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClickHouseActiveGeneration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expired_dataset_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expired Dataset Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "enabled",
+          "health"
+        ],
+        "title": "ClickHouseStatusResponse"
       },
       "CmcdAggregatesResponse": {
         "properties": {
@@ -42265,6 +43219,17 @@
               }
             ],
             "title": "Cache Retention Days"
+          },
+          "rollup_retention_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup Retention Months"
           },
           "keep_snapshot_days": {
             "anyOf": [
@@ -43409,6 +44374,24 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HealthCeleryStats": {
+        "properties": {
+          "queue_depth": {
+            "type": "integer",
+            "title": "Queue Depth"
+          },
+          "active_workers": {
+            "type": "integer",
+            "title": "Active Workers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queue_depth",
+          "active_workers"
+        ],
+        "title": "HealthCeleryStats"
+      },
       "HealthConfigBackup": {
         "properties": {
           "last_backup_at": {
@@ -43804,6 +44787,16 @@
               }
             ],
             "title": "Fos"
+          },
+          "celery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthCeleryStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -55266,6 +56259,17 @@
             ],
             "title": "Cache Retention Days"
           },
+          "rollup_retention_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup Retention Months"
+          },
           "keep_snapshot_days": {
             "anyOf": [
               {
@@ -55857,11 +56861,25 @@
             "default": false
           },
           "min_reqs_flag": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Min Reqs Flag"
           },
           "min_4xx_pct_flag": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Min 4Xx Pct Flag"
           }
         },
@@ -55873,9 +56891,7 @@
           "limit",
           "has_rtt",
           "has_ja4",
-          "has_edge",
-          "min_reqs_flag",
-          "min_4xx_pct_flag"
+          "has_edge"
         ],
         "title": "SessionsResponse"
       },
@@ -56993,6 +58009,45 @@
         ],
         "title": "SqliteProfilerEntry"
       },
+      "StreamMetrics": {
+        "properties": {
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "total_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Rows"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          }
+        },
+        "type": "object",
+        "title": "StreamMetrics"
+      },
       "SummaryResponse": {
         "properties": {
           "active_total": {
@@ -57181,6 +58236,26 @@
               }
             ],
             "title": "Ngwaf Workspace Id"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "_debug_queries": {
             "items": {

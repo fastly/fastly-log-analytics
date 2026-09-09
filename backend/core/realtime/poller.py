@@ -51,7 +51,6 @@ class _ServiceState:
     last_good: dict | None = None
     last_good_at: datetime | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
-    backfill_done: threading.Event = field(default_factory=threading.Event)
 
 
 class RealtimePoller:
@@ -69,7 +68,6 @@ class RealtimePoller:
                 self._services[service_id] = state
             else:
                 state.stop_event.clear()
-                state.backfill_done.clear()
             t = threading.Thread(
                 target=self._poll_loop,
                 args=(service_id, state),
@@ -79,17 +77,25 @@ class RealtimePoller:
             state.thread = t
             t.start()
 
-    def wait_for_backfill(self, service_id: str, timeout: float = 10.0) -> bool:
-        with self._lock:
-            state = self._services.get(service_id)
-        if state is None:
-            return False
-        return state.backfill_done.wait(timeout=timeout)
-
     def _poll_loop(self, service_id: str, state: _ServiceState) -> None:
         idle_cycles = 0
         session = req_lib.Session()
         session.headers["Fastly-Key"] = ""
+
+        # Setup redis for leader election if valkey is active
+        redis_client = None
+        pod_id = ""
+        from backend.config import SSE_BACKPLANE
+
+        if SSE_BACKPLANE == "valkey":
+            import os
+            import uuid
+
+            from redis import Redis
+
+            broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+            redis_client = Redis.from_url(broker_url, decode_responses=True)
+            pod_id = str(uuid.uuid4())
 
         try:
             while not state.stop_event.is_set():
@@ -104,32 +110,55 @@ class RealtimePoller:
                     else:
                         idle_cycles = 0
 
-                    is_backfill = state.cursor == 0
-                    rt_json = self._fetch_realtime(session, service_id, state.cursor)
-                    if rt_json is not None:
-                        state.cursor = rt_json.get("Timestamp", state.cursor)
-                        data_points = rt_json.get("Data") or []
-                        if is_backfill and len(data_points) > 1:
-                            base_ts = state.cursor - len(data_points)
-                            for i, point in enumerate(data_points):
-                                ts = datetime.fromtimestamp(base_ts + i, tz=UTC).isoformat()
-                                tick = transform_single_second(point, ts)
-                                publisher.publish(service_id, tick)
-                            state.last_good = tick
-                            state.last_good_at = datetime.now(UTC)
-                            state.backfill_done.set()
-                        else:
-                            tick = transform_rt_response(rt_json)
-                            state.last_good = tick
-                            state.last_good_at = datetime.now(UTC)
-                            if not is_backfill:
-                                publisher.publish(service_id, tick)
-                            else:
-                                state.backfill_done.set()
-                        state.last_error = None
+                    is_leader = True
+                    if redis_client:
+                        # Leader election. TTL must exceed the worst-case RT
+                        # long-poll (the API can block several seconds) or the
+                        # lease expires mid-fetch and a second pod becomes a
+                        # concurrent leader publishing duplicate ticks. The
+                        # extend is a single atomic compare-and-set — a plain
+                        # GET-then-SET can steal the lock back after another
+                        # pod legitimately acquired it post-expiry (TOCTOU).
+                        lock_key = f"sse:rt-poller-lock:{service_id}"
+                        extended = redis_client.eval(
+                            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                            "  return redis.call('set', KEYS[1], ARGV[1], 'EX', ARGV[2], 'XX') "
+                            "else return false end",
+                            1,
+                            lock_key,
+                            pod_id,
+                            "15",
+                        )
+                        if not extended:
+                            is_leader = bool(redis_client.set(lock_key, pod_id, ex=15, nx=True))
+
+                    if not is_leader:
+                        # We are not the leader, just sleep for the interval
+                        pass
                     else:
-                        tick = error_tick_payload(state.last_good)
-                        publisher.publish(service_id, tick)
+                        is_backfill = state.cursor == 0
+                        rt_json = self._fetch_realtime(session, service_id, state.cursor)
+                        if rt_json is not None:
+                            state.cursor = rt_json.get("Timestamp", state.cursor)
+                            data_points = rt_json.get("Data") or []
+                            if is_backfill and len(data_points) > 1:
+                                base_ts = state.cursor - len(data_points)
+                                for i, point in enumerate(data_points):
+                                    ts = datetime.fromtimestamp(base_ts + i, tz=UTC).isoformat()
+                                    tick = transform_single_second(point, ts)
+                                    publisher.publish(service_id, tick)
+                                state.last_good = tick
+                                state.last_good_at = datetime.now(UTC)
+                            else:
+                                tick = transform_rt_response(rt_json)
+                                state.last_good = tick
+                                state.last_good_at = datetime.now(UTC)
+                                if not is_backfill:
+                                    publisher.publish(service_id, tick)
+                            state.last_error = None
+                        else:
+                            tick = error_tick_payload(state.last_good)
+                            publisher.publish(service_id, tick)
 
                 except _LongPollTimeout:
                     publisher.publish(service_id, gap_tick_payload())
@@ -146,6 +175,8 @@ class RealtimePoller:
                     state.stop_event.wait(timeout=remaining)
         finally:
             session.close()
+            if redis_client:
+                redis_client.close()
 
     def _fetch_realtime(self, session: req_lib.Session, service_id: str, cursor: int) -> dict | None:
         from backend import config

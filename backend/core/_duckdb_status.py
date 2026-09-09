@@ -364,34 +364,26 @@ def get_sync_status(
             .replace("+00:00", "Z")
         )
 
-        busy_row = con.execute(
-            """
-            SELECT count(*) FROM _cron_run_log
-            WHERE status = 'running' AND started_at > ?
-        """,
-            [time_cutoff],
-        ).fetchone()
-        busy = (busy_row[0] > 0) if busy_row else False
+        from backend.core.metadata.cron_log import latest_cron_per_task
 
-        for row in con.execute(
-            """
-            SELECT task, started_at, duration_s, status, error_message, summary
-            FROM (
-                SELECT task, started_at, duration_s, status, error_message, summary,
-                       ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC) AS rn
-                FROM _cron_run_log
-                WHERE task IN ('sync', 'commit')
-            )
-            WHERE rn = 1
-            """,
-        ).fetchall():
-            cron_stats[row[0]] = {
-                "last_run": _safe_iso(row[1]),
-                "duration_s": row[2],
-                "status": row[3],
-                "error_message": row[4],
-                "summary": row[5],
+        service_id = str(src.get("name") or src.get("service_id") or "")
+        crons = latest_cron_per_task(service_id)
+
+        busy = False
+        for t, data in crons.items():
+            st = data.get("started_at")
+            if data.get("status") == "running" and st and str(st) > time_cutoff:
+                busy = True
+
+            # Format to what UI expects
+            cron_stats[t] = {
+                "last_run": _safe_iso(data.get("started_at")),
+                "duration_s": data.get("duration_s"),
+                "status": data.get("status"),
+                "error_message": data.get("error_message"),
+                "summary": data.get("summary"),
             }
+
     except Exception:
         busy = False
         cron_stats = {}
@@ -437,6 +429,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         return
 
     source = svcconfig.config_to_source(src)
+    durable_serving = svcconfig.is_durable_serving_mode(source)
     # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
     buf_bytes = None
     try:
@@ -469,10 +462,14 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         #   - on RO, CREATE OR REPLACE VIEW would fail silently anyway
         #   - if the cached view is stale, get_sync_status' retry path busts
         #     the view cache so the NEXT writer connection rebuilds clean
-        con = get_connection(source, skip_view_update=True, read_only=True)
+        con = get_connection(source, skip_view_update=not durable_serving, read_only=True)
         # skip_fos=False so we do the full Parquet scan for accurate row counts
         # and timestamps. force=True bypasses any stale config-file cache.
-        status = get_sync_status(con, source, skip_fos=False, force=True)
+        # Durable request metrics must never pass through the local-file
+        # estimates / stale-count fallback in get_sync_status. Keep this
+        # heavy refresh for RUM, schema and suggestions; the shared seam below
+        # owns all durable request fields and serializes with the observer.
+        status = {} if durable_serving else get_sync_status(con, source, skip_fos=False, force=True)
 
         if buf_bytes is not None:
             status["buffer_size_bytes"] = buf_bytes
@@ -521,7 +518,9 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
             cron_data = latest_cron_per_task(service_id)
             rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
-            request_last_sync = cron_data.get("sync", {}).get("started_at")
+            request_last_sync = cron_data.get("log_discovery", {}).get("started_at") or cron_data.get("sync", {}).get(
+                "started_at"
+            )
         except Exception:
             pass
 
@@ -571,13 +570,19 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             "total_rows": rum_total,
             "last_sync_at": rum_last_sync,
         }
-        status["request"] = {
-            "latest_log_at": request_latest,
-            "total_rows": request_total,
-            "last_sync_at": request_last_sync,
-        }
+        if not durable_serving:
+            status["request"] = {
+                "latest_log_at": request_latest,
+                "total_rows": request_total,
+                "last_sync_at": request_last_sync,
+            }
 
-        svcconfig.update_status(service_id, status)
+        if durable_serving:
+            from backend.core.request_metrics import refresh_durable_request_metrics
+
+            refresh_durable_request_metrics(source, extra_status=status)
+        else:
+            svcconfig.update_status(service_id, status)
 
         # Also update the top values cache for fast filter suggestions
         if include_top_values:
@@ -941,6 +946,8 @@ def get_schema(
             # SRE-22: Instant catalog schema reflection via DESCRIBE bypasses heavy data scans
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": r[0], "type": r[1]} for r in result]
+            if len(schema) == 1 and schema[0]["name"] == "timestamp":
+                schema = []
             _schema_cache[cache_key] = (now, schema)
             return schema
 
@@ -966,6 +973,9 @@ def get_schema(
                     "count": count,
                 }
             )
+
+        if len(schema) == 1 and schema[0]["name"] == "timestamp":
+            schema = []
 
         _schema_cache[cache_key] = (now, schema)
         return schema

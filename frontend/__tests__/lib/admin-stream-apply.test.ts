@@ -114,7 +114,7 @@ describe('makeCronRunsApplier', () => {
     const applier = makeCronRunsApplier(qc, 'svc-1')
 
     applier.apply({ task: 'commit', status: 'success' })
-    applier.apply({ task: 'sync', status: 'running' })
+    applier.apply({ task: 'log_discovery', status: 'running' })
     // Nothing flushed yet — trailing-edge coalesce.
     expect(spy).not.toHaveBeenCalled()
 
@@ -145,7 +145,7 @@ describe('makeCronRunsApplier', () => {
     const spy = vi.spyOn(qc, 'invalidateQueries')
     const applier = makeCronRunsApplier(qc, 'svc-1')
 
-    applier.apply({ task: 'sync', status: 'running' })
+    applier.apply({ task: 'log_discovery', status: 'running' })
     vi.advanceTimersByTime(100)
     expect(invalidatedKeys(spy)).toContain(JSON.stringify(['last-sync', 'svc-1']))
 
@@ -201,7 +201,7 @@ describe('makeCronRunsApplier', () => {
 
     // running event → none of audit/ingested/schema
     spy.mockClear()
-    applier.apply({ task: 'sync', status: 'running' })
+    applier.apply({ task: 'log_discovery', status: 'running' })
     vi.advanceTimersByTime(100)
     keys = invalidatedKeys(spy)
     expect(keys).not.toContain(JSON.stringify(['admin', 'audit-logs', 'svc-1']))
@@ -226,7 +226,7 @@ describe('makeCronRunsApplier', () => {
     const spy = vi.spyOn(qc, 'invalidateQueries')
     const applier = makeCronRunsApplier(qc, 'svc-1')
 
-    applier.apply({ task: 'sync', status: 'success' })
+    applier.apply({ task: 'log_discovery', status: 'success' })
     applier.cleanup()
     vi.advanceTimersByTime(100)
     expect(spy).not.toHaveBeenCalled()

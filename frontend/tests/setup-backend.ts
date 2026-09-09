@@ -3,7 +3,7 @@
  *
  * The boot wires:
  *   - SERVICES_DATA_DIR / CONFIGS_DIR / NGWAF_DATA_DIR / CACHE_DATA_DIR
- *     / SYSTEM_DATA_DIR → a per-suite tmp tree so the live process
+ *     / SYSTEM_DATA_DIR and CWD → a per-suite sandbox so the test process
  *     doesn't write into the dev workstation's real data/configs.
  *   - DEBUG_RESPONSES=true so the contract assertions can also pin
  *     the telemetry envelope shape if a future test wants to.
@@ -22,6 +22,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { backendTestEnvironment } from './backend-environment'
 
 const PORT = 13003
 const HOST = '127.0.0.1'
@@ -47,9 +49,8 @@ async function poll(url: string, timeoutMs = 30_000): Promise<void> {
 
 export async function startBackend(): Promise<void> {
   if (proc) return
-  sandbox = mkdtempSync(join(tmpdir(), 'fla-contract-'))
-  const dataDir = join(sandbox, 'data')
   const repoRoot = join(__dirname, '..', '..')
+  sandbox = mkdtempSync(join(tmpdir(), 'fla-contract-'))
 
   proc = spawn(
     'uv',
@@ -64,17 +65,7 @@ export async function startBackend(): Promise<void> {
     ],
     {
       cwd: repoRoot,
-      env: {
-        ...process.env,
-        DEBUG_RESPONSES: 'true',
-        FASTLY_MOCK_MODE: '1',
-        // run_contract_backend.py reads these and patches
-        // backend.config.CONFIGS_DIR / DATA_DIR (+ sub-dirs) BEFORE
-        // any router loads — same pattern conftest.py uses for the
-        // in-process tests, but adapted for a fresh Python process.
-        CONTRACT_CONFIGS_DIR: join(sandbox, 'configs'),
-        CONTRACT_DATA_DIR: dataDir,
-      },
+      env: backendTestEnvironment(sandbox),
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )
@@ -105,7 +96,7 @@ export async function stopBackend(): Promise<void> {
     try {
       rmSync(sandbox, { recursive: true, force: true })
     } catch {
-      /* tmpdir cleanup is best-effort */
+      /* Sandbox cleanup is best-effort. */
     }
     sandbox = null
   }

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,12 @@ def should_defer_cron(job_name: str, service_id: str, *, max_defer_secs: float =
         return True
 
 
-def yield_to_api(*, max_wait_secs: float = 1.0, poll_interval: float = 0.1) -> float:
+def yield_to_api(
+    *,
+    max_wait_secs: float = 1.0,
+    poll_interval: float = 0.1,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> float:
     """Cooperative yield: if API requests are in flight, sleep briefly to
     let them make progress before the caller resumes.
 
@@ -101,10 +107,11 @@ def yield_to_api(*, max_wait_secs: float = 1.0, poll_interval: float = 0.1) -> f
     """
     if active_request_count() == 0:
         return 0.0
+    sleep = sleep_fn or time.sleep
     deadline = time.monotonic() + max_wait_secs
     slept = 0.0
     while time.monotonic() < deadline:
-        time.sleep(poll_interval)
+        sleep(poll_interval)
         slept += poll_interval
         if active_request_count() == 0:
             return slept

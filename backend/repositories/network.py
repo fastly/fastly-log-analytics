@@ -7,6 +7,7 @@ from typing import Any
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
@@ -470,6 +471,9 @@ def get_health(
         _leader_temp_name: list[str | None] = [None]
 
         def _build_temp_results() -> tuple[list[str], list[Any], list[Any], list[Any]]:
+            if not filters and not svcconfig.is_durable_serving_mode(src):
+                timer.mark("network:temp_skipped_unfiltered", _time.perf_counter())
+                return [], [], [], []
             _t0 = _time.perf_counter()
             temp_name = runner.create_filtered_temp_table(
                 all_net_cols, list(actual_cols), table_name, where_clause, params

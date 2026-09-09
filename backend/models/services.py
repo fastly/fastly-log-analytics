@@ -21,6 +21,7 @@ class ServiceCronSync(BaseModel):
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    rollup_retention_months: int | None = None
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
 
@@ -144,6 +145,7 @@ class CronSettingsPartial(BaseModel):
     data_retention_days: int | None = None
     rum_retention_days: int | None = None
     cache_retention_days: int | None = None
+    rollup_retention_months: int | None = None
     # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
     # the scheduler's expire job). keep_snapshot_days drives metadata.json size
     # and therefore per-commit cost; expire_interval_mins is how often it's

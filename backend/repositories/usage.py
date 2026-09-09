@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import duckdb
 
+from backend import config as svcconfig
 from backend.repositories._base import QueryRunner, _safe_table
 from backend.repositories._sql import usage as SQL
 
@@ -70,7 +71,12 @@ def get_log_activity(
     from backend.core.rollups._common import _hour_bundled_root, quote_path_list
     from backend.utils.date_utils import parse_iso_utc
 
-    interval_map = {"hour": "1 hour", "day": "1 day"}
+    durable_serving = svcconfig.is_durable_serving_mode(src)
+    interval_map = (
+        {"second": "1 second", "minute": "1 minute", "hour": "1 hour", "day": "1 day"}
+        if durable_serving
+        else {"hour": "1 hour", "day": "1 day"}
+    )
     interval = interval_map.get(by)
     if not interval:
         return _log_activity_fallback(src, start_str, end_str, by)
@@ -79,6 +85,9 @@ def get_log_activity(
     et = parse_iso_utc(end_str)
     if st is None or et is None or et <= st:
         return _log_activity_fallback(src, start_str, end_str, by)
+
+    if durable_serving:
+        return _log_activity_durable(src, st, et, by)
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
@@ -147,6 +156,60 @@ def get_log_activity(
         "data": points,
         "total_rows": total_rows,
         "total_bytes": total_bytes,
+        "granularity": by,
+        "_debug_queries": [],
+        "_debug_calls": [],
+    }
+
+
+def _log_activity_durable(
+    src: dict,
+    st,
+    et,
+    by: str,
+) -> dict:
+    """Read log activity from durable DuckLake when local rollups are absent."""
+    from backend.core.duckdb import get_connection
+
+    interval = {"second": "1 second", "minute": "1 minute", "hour": "1 hour", "day": "1 day"}[by]
+    table = _safe_table(src["name"])
+    con = get_connection(source=src, read_only=True)
+    try:
+        actual_cols = {row[0] for row in con.execute(f"DESCRIBE {table}").fetchall()}
+    except Exception:
+        actual_cols = {"resp_bytes"}
+    bytes_expr = "SUM(resp_bytes)" if "resp_bytes" in actual_cols else "0"
+    sql = (
+        f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS bucket, "
+        f"COUNT(*) AS total, "
+        f"COALESCE({bytes_expr}, 0) AS total_bytes "
+        f"FROM {table} "
+        f"WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp < CAST(? AS TIMESTAMPTZ) "
+        f"GROUP BY 1 ORDER BY 1"
+    )
+    try:
+        rows = con.execute(sql, [st.isoformat(), et.isoformat()]).fetchall()
+    finally:
+        con.close()
+
+    fmt = {
+        "second": "%Y-%m-%dT%H:%M:%S",
+        "minute": "%Y-%m-%dT%H:%M",
+        "hour": "%Y-%m-%dT%H:00",
+        "day": "%Y-%m-%d",
+    }[by]
+    points = [
+        {
+            "time": row[0].strftime(fmt),
+            "row_count": int(row[1]),
+            "bytes": int(row[2] or 0),
+        }
+        for row in rows
+    ]
+    return {
+        "data": points,
+        "total_rows": sum(point["row_count"] for point in points),
+        "total_bytes": sum(point["bytes"] for point in points),
         "granularity": by,
         "_debug_queries": [],
         "_debug_calls": [],

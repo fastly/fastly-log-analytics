@@ -1,4 +1,4 @@
-.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e
+.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -270,7 +270,7 @@ ci:
 	$(MAKE) gen-types
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
-	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci
+	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci deploy-validate stray-file-gate
 	$(MAKE) e2e
 
 # ── v2.0 cleanup targets ──────────────────────────────────────────────────────
@@ -291,6 +291,103 @@ security-regression:
 # OTEL_EXPORTER=console spam mode (the 2026-06-10 prod-stdout-flood incident).
 otel-guard:
 	bash scripts/check_no_console_otel.sh
+
+# ── Local multipod stack ──────────────────────────────────────────────────────
+# The local stack is BOTH compose files; omitting the observability one drops
+# Grafana/Prometheus/Tempo and their exporters.
+COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
+
+CLICKHOUSE_COMPOSE := $(COMPOSE_STACK) -f docker-compose.clickhouse-prototype.yml
+.PHONY: clickhouse-prototype-up clickhouse-prototype-down clickhouse-prototype-schema
+clickhouse-prototype-up:
+	docker compose $(CLICKHOUSE_COMPOSE) up -d --wait --no-deps clickhouse
+
+# The CLI is baked into a separate init image; do not restart the serving backend.
+clickhouse-prototype-schema:
+	docker compose $(CLICKHOUSE_COMPOSE) build clickhouse-schema-init
+	docker compose $(CLICKHOUSE_COMPOSE) run --rm clickhouse-schema-init
+
+# Stop only the serving index; preserve its volume and the DuckLake baseline.
+clickhouse-prototype-down:
+	docker compose $(CLICKHOUSE_COMPOSE) stop clickhouse
+
+# Explicit loopback/configuration/consent arguments are required by the driver.
+.PHONY: clickhouse-prototype-benchmark
+clickhouse-prototype-benchmark:
+	uv run python -m tests.load.clickhouse_serving_benchmark $(BENCHMARK_ARGS)
+# App services whose image bakes in the source tree. Only configs/, data/ and
+# cache/ are bind-mounted, so a .py edit is invisible until the image is
+# rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
+#
+# metadata-schema-init belongs here even though it is a one-shot: it has its
+# own `build:` block, so compose gives it its OWN image rather than reusing
+# the backend's. Omitting it meant `up` started it from a stale image and it
+# died with ModuleNotFoundError on a module that had just been added.
+COMPOSE_APP := backend worker beat frontend metadata-schema-init
+
+# Rebuild the app images and recreate those containers. Use after ANY code
+# change. --force-recreate is what picks up new images and changed env.
+stack-restart:
+	docker compose $(COMPOSE_STACK) build $(COMPOSE_APP)
+	docker compose $(COMPOSE_STACK) up -d --force-recreate $(COMPOSE_APP)
+	@$(MAKE) --no-print-directory stack-health
+
+# Bring the stack up / apply compose or env changes. No rebuild, so code edits
+# are NOT picked up — use stack-restart for those.
+stack-up:
+	docker compose $(COMPOSE_STACK) up -d
+	@$(MAKE) --no-print-directory stack-health
+
+# Stop the containers, keeping volumes (never `down -v` — that drops Postgres,
+# which now holds both the metadata and the DuckLake catalog).
+stack-down:
+	docker compose $(COMPOSE_STACK) down
+
+stack-ps:
+	docker compose $(COMPOSE_STACK) ps
+
+stack-logs:
+	docker compose $(COMPOSE_STACK) logs -f --tail=100 $(COMPOSE_APP)
+
+# Wait for the API to answer, then print deep health. A `degraded` reading with
+# "Process interrupted by server restart" right after a recreate is just the
+# in-flight cron that got killed; it clears on the next successful tick.
+stack-health:
+	@printf 'waiting for the API'; \
+	for i in $$(seq 1 30); do \
+		if curl -fsS http://localhost/api/health >/dev/null 2>&1; then printf ' up\n'; break; fi; \
+		printf '.'; sleep 2; \
+	done
+	@# NOT -f here: deep health answers 503 when a service is degraded, and
+	@# -f would turn that meaningful body into "not answering".
+	@curl -sS 'http://localhost/api/health?deep=1' 2>/dev/null \
+		| python3 -m json.tool 2>/dev/null \
+		|| echo 'API not answering — try: make stack-logs'
+
+# Deploy-surface validation. `docker compose config -q` parses + validates the
+# multipod compose (no daemon needed); helm lint + template validate the chart
+# when helm is installed (GH runners ship it; skipped with a note otherwise).
+# Mirrors the "Deploy config validation" step in ci.yml.
+deploy-validate:
+	docker compose -f docker-compose.multipod.yml config -q
+	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
+	@if command -v helm >/dev/null 2>&1; then \
+		helm lint deploy/chart/fastly-log-analytics && \
+		helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null; \
+	else \
+		echo "helm not installed; skipping chart lint/template"; \
+	fi
+
+# Stray-artifact gate: fails if any *.bak file or a ROOT-level openapi.json is
+# tracked (frontend/openapi.json is the canonical generated spec; a root copy
+# is always editor/session debris). Mirrors the "Stray file gate" step in ci.yml.
+stray-file-gate:
+	@stray="$$(git ls-files '*.bak' 'openapi.json')"; \
+	if [ -n "$$stray" ]; then \
+		echo "ERROR: stray files are tracked (delete them or add to .gitignore):"; \
+		echo "$$stray"; \
+		exit 1; \
+	fi
 
 # Architectural baseline snapshot. Captures LOC, large files,
 # TODO/FIXME markers, # Security: comment count, and mypy ignore
