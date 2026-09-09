@@ -135,6 +135,22 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
 
     Returns ``{"hour": str, "new_files": int, "duration_ms": float}`` for
     the caller (the cron job) to log/summarize.
+
+    Crash-safety guarantee: a crash *before* the ``os.replace`` below is
+    fully safe — neither the persisted rollup nor the watermark changed,
+    so the next tick re-lists and re-folds in exactly the same "new" files.
+    That guarantee does NOT extend past the rename: once ``os.replace``
+    succeeds, the persisted rollup already reflects ``new_files``, but the
+    watermark write is a separate syscall a few lines below it. A crash in
+    that narrow rename→watermark-write gap leaves the watermark stale, so
+    the next tick would re-list those same files as "new" and double-count
+    them on top of the already-updated rollup. This is an accepted residual
+    risk, not a bug to fix by reordering: swapping to
+    watermark-then-rollup-write would trade a rare, bounded, self-healing
+    double-count (at most one tick's worth of files, wiped out at the next
+    real hour rollover by :func:`gc_stale_partial_hours`) for silent data
+    loss (a watermark that advances past files whose contribution never
+    made it into the persisted rollup, with no signal anything was missed).
     """
     t0 = time.perf_counter()
     active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
@@ -181,14 +197,16 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
         per_field_selects = [_build_copy_query(table_ident, f, where_sql) for f in safe_fields]
         increment_sql = " UNION ALL ".join(f"({s})" for s in per_field_selects)
 
-        existing_rows = read_partial_hour_all_fields(source, active_hour)
+        # Fold the already-persisted rollup straight in via read_parquet,
+        # same as new_files above — avoids round-tripping through Python
+        # tuples and hand-escaped SQL literals when the file itself is
+        # already right there to read directly.
+        existing_path = _all_fields_path(source, active_hour)
         existing_sql = ""
-        if existing_rows:
-            values_sql = ", ".join(
-                f"('{f.replace(chr(39), chr(39) * 2)}', '{v.replace(chr(39), chr(39) * 2)}', {c})"
-                for f, v, c in existing_rows
+        if os.path.isfile(existing_path):
+            existing_sql = (
+                f" UNION ALL SELECT field, value, count FROM read_parquet({quote_path_list([existing_path])})"
             )
-            existing_sql = f" UNION ALL SELECT * FROM (VALUES {values_sql}) AS t(field, value, count)"
 
         merged_sql = f"""
             SELECT field, value, CAST(count AS BIGINT) AS count FROM (
@@ -212,10 +230,18 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
     max_mtime = max((os.path.getmtime(p) for p in new_files), default=watermark)
     _write_partial_hour_watermark(source, active_hour, max_mtime)
 
+    duration_ms = (time.perf_counter() - t0) * 1000
+    logger.debug(
+        "[partial_hour] %s: merged %d new file(s) into hour=%s (%.1fms)",
+        service_id,
+        len(new_files),
+        active_hour,
+        duration_ms,
+    )
     return {
         "hour": active_hour,
         "new_files": len(new_files),
-        "duration_ms": (time.perf_counter() - t0) * 1000,
+        "duration_ms": duration_ms,
     }
 
 
