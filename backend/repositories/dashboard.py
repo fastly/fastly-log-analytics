@@ -326,7 +326,13 @@ def get_aggregates(
     from backend.core.duckdb import _cache_dir as _cache_dir_for_rollups
 
     rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
-    use_rollups = not filters and os.path.isdir(rollup_dir) and not svcconfig.is_durable_serving_mode(src)
+
+    from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
+
+    _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(
+        src.get("service_id") or src.get("name") or ""
+    )
+    use_rollups = not filters and os.path.isdir(rollup_dir) and not _durable_blocked
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.
     #   - Fully-contained UTC days: served from the per-day compacted rollup.

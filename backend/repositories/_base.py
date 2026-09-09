@@ -17,12 +17,23 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from backend import config as svcconfig
+from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
 from backend.core.rollups._common import quote_path_list
 
 if TYPE_CHECKING:
     from datetime import datetime
 
 _logger = logging.getLogger(__name__)
+
+
+def _rc_service_id(src: dict) -> str:
+    # Every _base.py call site has `src`/`self.src` shaped as the source
+    # dict `get_source_for_service` returns — `service_id` is always
+    # present; `name` is a display fallback for older/local configs during
+    # the transition, matching the fallback already used elsewhere in this
+    # file (e.g. `self.src.get("name") or self.src.get("service_id")`).
+    return src.get("service_id") or src.get("name") or ""
+
 
 # Rate-limit table for empty-rollup warnings — (service_id, field) → monotonic
 # timestamp of last warning. Bounded growth by capping; reset on the next
@@ -225,7 +236,7 @@ def collect_hourly_bundle_paths(
     import os
     from datetime import UTC, datetime, timedelta
 
-    if svcconfig.is_durable_serving_mode(src):
+    if svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src)):
         # Rollups are pod-local accelerators.  A durable serving replica
         # cannot treat a missing local tree as evidence that the durable
         # DuckLake table is empty or partially covered.
@@ -1260,7 +1271,7 @@ class QueryRunner:
         from backend.core.rollups import _is_safe_ident, _safe_table_for
         from backend.utils.date_utils import parse_iso_utc
 
-        if svcconfig.is_durable_serving_mode(self.src):
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
             # The result shape is retained for existing callers, but an
             # empty tuple is explicitly an unavailable rollup result.  Each
             # serving path must then run its DuckLake-backed raw fallback.
@@ -2482,7 +2493,7 @@ class QueryRunner:
         but the ranking is preserved for the URLs that dominate the
         panel.
         """
-        if svcconfig.is_durable_serving_mode(self.src):
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
             return None
 
         import os
@@ -2607,7 +2618,7 @@ class QueryRunner:
 
         from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
 
-        if svcconfig.is_durable_serving_mode(self.src):
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
             return None
 
         hour_root = _hour_bundled_root(self.src)
@@ -4230,7 +4241,7 @@ class QueryRunner:
         from backend.utils.date_utils import parse_iso_utc
         from backend.utils.hll import HyperLogLog
 
-        if svcconfig.is_durable_serving_mode(self.src):
+        if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
             return {}, {}
 
         def _phase(name: str, ms: float) -> None:
