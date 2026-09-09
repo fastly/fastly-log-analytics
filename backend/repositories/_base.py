@@ -2237,7 +2237,20 @@ class QueryRunner:
             # the same metric-derivation logic as the rollup branch so the
             # buckets align exactly.
             live_start = max(st, active_hour_dt)
-            live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
+            # Only "requests" has a compensating partial-rollup merge below
+            # (the other metrics' num/den semantics differ per-metric and
+            # aren't derivable from partial_rows' plain (field, value, count)
+            # shape). Narrowing live_start for those metrics without a
+            # compensating clause would silently drop the
+            # [original_live_start, watermark) range from BOTH branches —
+            # the rollup branch never covers it (still-open hour) and the
+            # narrowed live branch would skip it too. So non-"requests"
+            # metrics keep scanning their full original live range,
+            # unchanged from before partial-hour support existed.
+            if chart_metric == "requests":
+                live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
+            else:
+                partial_rows = []
             live_end = et
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
@@ -2283,14 +2296,13 @@ class QueryRunner:
             )
 
             if partial_rows:
-                # partial_rows is (field, value, count) for ALL rolled-up
-                # fields; this chart only needs the specific metric field(s)
-                # `parts` derives from — sum count across every row whose
-                # field matches the chart's underlying column. When
-                # chart_metric == "requests" this is just every partial_rows
-                # row regardless of field (a plain row count), matching
-                # `parts['num_rollup']`'s COUNT(*) semantics for that metric.
-                partial_total = sum(c for _, _, c in partial_rows) if chart_metric == "requests" else 0
+                # partial_rows is only ever non-empty when chart_metric ==
+                # "requests" (see the narrowing gate above) — every other
+                # metric's num/den semantics aren't derivable from
+                # partial_rows' plain (field, value, count) shape, so this
+                # is just every partial_rows row summed, matching
+                # `parts['num_rollup']`'s COUNT(*) semantics for "requests".
+                partial_total = sum(c for _, _, c in partial_rows)
                 if partial_total:
                     partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
                     select_clauses.append(

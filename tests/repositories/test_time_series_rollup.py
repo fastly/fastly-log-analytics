@@ -411,3 +411,65 @@ class TestPartialHourMergeIntoRollupReaders:
 
         assert total is not None, "reader fell back to raw — partial-hour wiring likely broke the live SQL"
         assert total == 602, f"expected 602 (600 closed + 1 partial + 1 live), got {total}"
+
+    def test_non_requests_metric_keeps_full_live_scan_when_partial_hour_exists(self, rollup_layout):
+        """REGRESSION (Task 8 review round 1): only "requests" has a
+        compensating partial-rollup merge. Before this fix, live_start was
+        narrowed for EVERY chart_metric whenever a partial-hour rollup
+        watermark existed — for "5xx"/"4xx"/"hit_rate" (no compensating
+        merge), that silently dropped the
+        [original_live_start, watermark) range from BOTH the rollup branch
+        (still-open hour, not covered) and the narrowed live branch
+        (skipped) — real data loss, not just "no active-hour boost".
+
+        This pins that a non-"requests" metric's live branch keeps scanning
+        the FULL original live range regardless of whether a partial-hour
+        rollup happens to exist for the active hour.
+        """
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
+
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        # A partial-hour rollup watermark exists for the active hour (the
+        # steady-state case) — this alone must NOT narrow live_start for a
+        # metric with no compensating merge.
+        watermark_instant = active_start + timedelta(minutes=10)
+        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+
+        before_watermark_row = active_start + timedelta(minutes=5)  # status 500 -> counts as 5xx
+        after_watermark_row = active_start + timedelta(minutes=20)  # status 200 -> does not
+
+        con = duckdb.connect()
+        table_name = "live_5xx_regression_table"
+        con.execute(
+            f"CREATE TABLE {table_name} AS SELECT * FROM (VALUES "
+            f"(TIMESTAMPTZ '{before_watermark_row.isoformat()}', 500), "
+            f"(TIMESTAMPTZ '{after_watermark_row.isoformat()}', 200)) "
+            f"AS t(timestamp, status)"
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="5xx",
+            interval="1 hour",
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name=table_name,
+            where_clause="1=1",
+            params=[],
+        )
+
+        assert rows is not None, "reader fell back to raw unexpectedly"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        # 1 of 2 active-hour rows is 5xx -> 50.0%. Pre-fix (unconditional
+        # narrowing), the before_watermark_row would have been silently
+        # excluded from the live scan with nothing compensating for it,
+        # yielding 0.0 instead of 50.0.
+        assert by_time[active_start] == 50.0, (
+            f"expected 50.0 (1 of 2 active-hour rows is 5xx) — a value of 0.0 means the "
+            f"before-watermark 5xx row was dropped by an unconditional narrowing, got {by_time}"
+        )
