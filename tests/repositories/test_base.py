@@ -696,6 +696,97 @@ class TestExecuteTopNBatchPerFieldLimits:
             f"This is the silent ImportError regression. Got: {country_counts}"
         )
 
+    def test_execute_top_n_rollups_merges_partial_hour_rollup_rows(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """The partial-hour speed layer (Task 4: backend/core/rollups/partial_hour.py)
+        pre-aggregates rows for the currently-open hour outside the normal
+        live-scan table. execute_top_n_rollups must merge its rows into the
+        result on top of whatever the live-hour scan itself finds — proving
+        the Task 7 reader-integration seam actually wires the two together.
+
+        The partial rollup is built via ``ph.merge_partial_hour`` against a
+        real per-field hourly parquet fixture (the actual writer), not
+        hand-crafted, so this test can't drift from the real writer schema.
+        """
+        from datetime import timedelta
+
+        import duckdb as _duckdb
+
+        from backend.core.rollups import partial_hour as ph
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        active_hour = active_dt.strftime("%Y-%m-%d-%H")
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+            ],
+        )
+        # _create_active_hour_temp_direct's hourly-partition branch would
+        # otherwise read directly from the SAME cache_dir/data/timestamp_hour=
+        # <hour> directory this test writes the partial-hour source fixture
+        # into below, conflating "what execute_top_n_rollups' own live scan
+        # finds on disk" with "what merge_partial_hour folded into the
+        # partial rollup". Force it to skip (same technique as this task's
+        # Step 1 unit test) so the live scan instead goes through
+        # create_filtered_temp_table against the in-memory logs_pht table,
+        # keeping the two sources cleanly separate for this test's asserts.
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda self, *a, **kw: None)
+        (tmp_path / "rollups" / "hour").mkdir(parents=True)
+
+        # Real per-field hourly parquet fixture feeding the actual
+        # merge_partial_hour writer, so the partial rollup this test asserts
+        # on is built the same way the cron job builds it in prod.
+        hourly_dir = tmp_path / "data" / f"timestamp_hour={active_hour}"
+        hourly_dir.mkdir(parents=True)
+        con = _duckdb.connect(":memory:")
+        try:
+            con.execute("SET TimeZone='UTC';")
+            con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR)")
+            con.executemany(
+                "INSERT INTO t VALUES (?, ?)",
+                [
+                    (active_dt + timedelta(minutes=1), "DE"),
+                    (active_dt + timedelta(minutes=1), "DE"),
+                ],
+            )
+            con.execute(f"COPY t TO '{hourly_dir / 'batch1.parquet'}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+
+        stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
+        assert stats["new_files"] == 1
+
+        # Live-hour scan table: rows placed comfortably after "now" (the
+        # merge's watermark, effectively real wall-clock time) so the
+        # narrowed live_start from Task 7's seam doesn't exclude them —
+        # this isolates "did the partial rows get merged in" from "did
+        # narrowing the live window drop legitimate live rows".
+        in_memory_duckdb.execute("CREATE TABLE logs_pht (timestamp TIMESTAMPTZ, country VARCHAR)")
+        now = datetime.now(UTC)
+        in_memory_duckdb.execute(
+            "INSERT INTO logs_pht VALUES (?, 'US'), (?, 'US')",
+            [now + timedelta(minutes=1), now + timedelta(minutes=1)],
+        )
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        st = active_dt.isoformat()
+        et = (active_dt + timedelta(hours=1)).isoformat()
+        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+        in_memory_duckdb.execute("DROP TABLE logs_pht")
+
+        country_counts = {value: count for (field, value, count) in rows if field == "country"}
+        assert country_counts.get("US") == 2, f"live-hour scan rows missing: {country_counts}"
+        assert country_counts.get("DE") == 2, (
+            f"partial-hour rollup rows were not merged into execute_top_n_rollups: {country_counts}"
+        )
+
     def test_execute_top_n_rollups_live_skips_nonrendered_identifier_fields(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):

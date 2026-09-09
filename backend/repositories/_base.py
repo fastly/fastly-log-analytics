@@ -1193,6 +1193,30 @@ class QueryRunner:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
         return temp_name
 
+    def _partial_hour_adjusted_live_start(self, naive_live_start, active_hour_token: str):
+        """Returns ``(adjusted_live_start, partial_rows)`` for the active-hour
+        live-scan callers: if a partial-hour rollup exists for
+        ``active_hour_token``, narrow the live scan to start at its
+        watermark instead of ``naive_live_start`` and hand back its
+        pre-aggregated ``(field, value, count)`` rows to merge in. If no
+        partial rollup exists yet (cold start, or the merge job hasn't
+        ticked since the hour began), returns the unmodified
+        ``naive_live_start`` and an empty row list — today's behavior."""
+        from datetime import UTC, datetime
+
+        from backend.core.rollups.partial_hour import (
+            read_partial_hour_all_fields,
+            read_partial_hour_watermark,
+        )
+
+        watermark = read_partial_hour_watermark(self.src, active_hour_token)
+        if watermark <= 0.0:
+            return naive_live_start, []
+        watermark_dt = datetime.fromtimestamp(watermark, tz=UTC)
+        adjusted = max(naive_live_start, watermark_dt)
+        partial_rows = read_partial_hour_all_fields(self.src, active_hour_token)
+        return adjusted, partial_rows
+
     @contextlib.contextmanager
     def temp_table(
         self,
@@ -1676,6 +1700,7 @@ class QueryRunner:
         # We also need to get the live active hour stats from the base table
         _t_live = time.perf_counter()
         live_res: list[tuple] = []
+        partial_rows: list[tuple] = []
         # Defined here so the partial-day block below can reuse them
         # without re-fetching if the active-hour block populated them.
         # Callers (dashboard repo) already computed these once for the
@@ -1750,6 +1775,7 @@ class QueryRunner:
                         if f not in custom_fields:
                             continue
                     live_topn_fields.append(f)
+                live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_str)
                 _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
                 if tmp_name is None:
@@ -1958,6 +1984,9 @@ class QueryRunner:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
         for field, value, count in heal_res:
+            bucket = by_field.setdefault(field, {})
+            bucket[value] = bucket.get(value, 0) + count
+        for field, value, count in partial_rows:
             bucket = by_field.setdefault(field, {})
             bucket[value] = bucket.get(value, 0) + count
 
