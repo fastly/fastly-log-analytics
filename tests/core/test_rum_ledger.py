@@ -42,7 +42,7 @@ def _empty_list_fos(*args, **kwargs):
 
 def test_discover_rum_prefix_defaults_to_rum_raw_and_inserts_ledger_rows():
     """discover_rum_prefix must LIST raw/rum/ (never plain raw/request/) and dispatch
-    convert_rum — not convert — for every newly discovered file."""
+    convert_batch_rum_files — not convert — for every newly discovered file."""
     service_id = "test-celery-rum-svc"
     object_key = "raw/rum/year=2026/month=08/day=27/hour=10/minute=05/beacons.json.gz"
 
@@ -65,9 +65,9 @@ def test_discover_rum_prefix_defaults_to_rum_raw_and_inserts_ledger_rows():
             "backend.core.duckdb.get_source_for_service", return_value={"name": "test", "bucket": "test-bucket"}
         ):
             with patch("backend.core.ingest.list_fos_files", side_effect=mock_list_fos_files):
-                with patch("backend.core.ingest.convert_rum.delay") as mock_convert_rum_delay:
+                with patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay:
                     discovered = discover_rum_prefix(service_id)
-                    mock_convert_rum_delay.assert_called_once_with(service_id, object_key)
+                    mock_convert_rum_delay.assert_called_once_with(service_id, [object_key])
 
     assert discovered == 1
     assert captured_kwargs["prefix_subpath"] == "raw/rum/"
@@ -436,12 +436,12 @@ def test_sweep_rum_ledger_reclaims_stale_claim_and_redispatches_convert_rum():
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_convert_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay,
                     patch("backend.core.ingest.convert.delay") as mock_convert_delay,
                     patch("backend.core.ingest.convert_batch_files.delay") as mock_convert_batch_delay,
                 ):
                     summary = sweep_rum_ledger_once(service_id)
-                    mock_convert_rum_delay.assert_called_once_with(service_id, object_key)
+                    mock_convert_rum_delay.assert_called_once_with(service_id, [object_key])
                     mock_convert_delay.assert_not_called()
                     mock_convert_batch_delay.assert_not_called()
 
@@ -481,10 +481,10 @@ def test_sweep_rum_ledger_does_not_touch_regular_log_rows():
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_convert_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay,
                 ):
                     summary = sweep_rum_ledger_once(service_id)
-                    mock_convert_rum_delay.assert_called_once_with(service_id, rum_key)
+                    mock_convert_rum_delay.assert_called_once_with(service_id, [rum_key])
 
     assert summary["reclaimed"] == 1
     regular_row = cur.execute(
@@ -510,7 +510,7 @@ def test_sweep_rum_ledger_skips_redispatch_when_queue_holds_backlog():
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 50}, True)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_convert_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay,
                 ):
                     summary = sweep_rum_ledger_once(service_id)
 
@@ -536,7 +536,7 @@ def test_sweep_rum_ledger_waits_for_retry_due_time():
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_delay,
                 ):
                     summary = sweep_rum_ledger_once(service_id)
 

@@ -512,7 +512,7 @@ def test_discover_rum_prefix_returns_zero_when_the_list_yields_no_result():
     with patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}):
         with patch("backend.core.duckdb.get_source_for_service", return_value={"name": "t", "bucket": BUCKET}):
             with patch("backend.core.ingest.list_fos_files", side_effect=_null_list_fos):
-                with patch("backend.core.ingest.convert_rum.delay") as mock_delay:
+                with patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_delay:
                     assert discover_rum_prefix(SERVICE_ID) == 0
                     mock_delay.assert_not_called()
 
@@ -533,7 +533,7 @@ def test_discover_rum_prefix_does_not_redispatch_an_already_known_key():
     with patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}):
         with patch("backend.core.duckdb.get_source_for_service", return_value={"name": "t", "bucket": BUCKET}):
             with patch("backend.core.ingest.list_fos_files", side_effect=_list_one):
-                with patch("backend.core.ingest.convert_rum.delay") as mock_delay:
+                with patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_delay:
                     assert discover_rum_prefix(SERVICE_ID) == 0
                     mock_delay.assert_not_called()
 
@@ -569,7 +569,7 @@ def test_sweep_rum_ledger_fails_closed_when_the_broker_check_raises():
                         "backend.celery_status.celery_queue_depths",
                         side_effect=Exception("broker unreachable"),
                     ),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_rum_delay,
                     patch("backend.core.ingest.convert_batch_files.delay") as mock_batch_delay,
                 ):
                     summary = sweep_rum_ledger_once(SERVICE_ID)
@@ -602,12 +602,12 @@ def test_sweep_rum_ledger_scopes_to_the_source_prefix():
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_rum_delay,
                 ):
                     summary = sweep_rum_ledger_once(SERVICE_ID)
 
     assert summary["reclaimed"] == 1
-    mock_rum_delay.assert_called_once_with(SERVICE_ID, prefixed)
+    mock_rum_delay.assert_called_once_with(SERVICE_ID, [prefixed])
     assert _ledger_row(con, unprefixed)["status"] == "claimed"
 
 
@@ -629,7 +629,7 @@ def test_sweep_rum_ledger_leaves_terminal_rows_alone(status):
             with patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos):
                 with (
                     patch("backend.celery_status.celery_queue_depths", return_value=({}, False)),
-                    patch("backend.core.ingest.convert_rum.delay") as mock_rum_delay,
+                    patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_rum_delay,
                 ):
                     summary = sweep_rum_ledger_once(SERVICE_ID)
 

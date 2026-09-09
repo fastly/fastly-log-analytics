@@ -125,6 +125,7 @@ def test_every_ledger_task_is_registered_under_its_module_path():
         "backend.core.ingest.sweep_ledger": ingest.sweep_ledger,
         "backend.core.ingest.dispatch_rum_minute": ingest.dispatch_rum_minute,
         "backend.core.ingest.convert_rum": ingest.convert_rum,
+        "backend.core.ingest.convert_batch_rum_files": ingest.convert_batch_rum_files,
         "backend.core.ingest.sweep_rum_ledger": ingest.sweep_rum_ledger,
         "backend.core.ingest.commit_batch": ingest.commit_batch,
     }

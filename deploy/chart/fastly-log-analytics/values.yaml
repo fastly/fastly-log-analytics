@@ -157,6 +157,10 @@ config:
   # wildcard lets any direct client spoof X-Forwarded-For and be classified
   # loopback-admin.
   trustedProxyIps: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  # Adds debug fields (query timings, SQL, etc.) to API responses. Off by
+  # default -- production responses must not leak SQL/internal timings to
+  # analysts. Only turn on for a trusted admin-only debugging session.
+  debugResponses: false
   # Empty by default (safest for a chart going to arbitrary clusters) --
   # the frontend's SSR/proxy calls to the backend travel over the pod
   # network, not loopback, so with this unset every browser session

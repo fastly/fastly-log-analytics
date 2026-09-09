@@ -2252,8 +2252,8 @@ def sweep_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     Excludes ``raw/rum/`` object keys — those are ``sweep_rum_ledger_once``'s
     job. Without this exclusion, a stale RUM row could get reclaimed/
     redispatched here first and misrouted to ``convert_batch_files.delay``
-    (the regular-log parser) instead of ``convert_rum.delay``, corrupting the
-    ``logs`` table with misparsed beacon data.
+    (the regular-log parser) instead of ``convert_batch_rum_files.delay``,
+    corrupting the ``logs`` table with misparsed beacon data.
     """
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
@@ -2417,11 +2417,14 @@ def discover_rum_prefix(service_id: str, prefix_subpath: str | None = None, star
             newly_discovered.append(object_key)
     con.commit()
 
-    for object_key in newly_discovered:
-        convert_rum.delay(service_id, object_key)
+    for i in range(0, len(newly_discovered), LEDGER_CONVERT_BATCH_SIZE):
+        convert_batch_rum_files.delay(service_id, newly_discovered[i : i + LEDGER_CONVERT_BATCH_SIZE])
     if newly_discovered:
         logger.info(
-            "[ledger] %s: discovered %d new RUM file(s), dispatched convert_rum", service_id, len(newly_discovered)
+            "[ledger] %s: discovered %d new RUM file(s), dispatched %d convert_batch_rum_files batch(es)",
+            service_id,
+            len(newly_discovered),
+            math.ceil(len(newly_discovered) / LEDGER_CONVERT_BATCH_SIZE),
         )
     return len(newly_discovered)
 
@@ -2898,6 +2901,226 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
     return _ledger_mark_committed(con_meta, service_id, object_key, lease_generation)
 
 
+def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
+    """Batched sibling of ``convert_rum_object``: claim N ledger rows,
+    download them all, and land every row in ONE DuckLake transaction per
+    table (``client_vitals``, ``client_errors``) instead of one ATTACH +
+    commit per file.
+
+    Unlike ``convert_batch_objects``, RUM parsing was already per-file
+    Python (``_parse_rum_beacon_file``), not a single ``read_json_auto``
+    over the whole batch — so batching here means accumulating each file's
+    already-parsed rows (tagged with their own ``_source_file``) and
+    writing once, not changing how parsing itself works. Confirmed live:
+    per-file ATTACH+commit was the bottleneck (7-28s per ~1000-line file
+    vs. convert_batch_files landing 10x that many request-log files in
+    ~2s combined) — RUM discovery dispatching one ``convert_rum`` message
+    per file, unlike regular-log discovery's ``LEDGER_CONVERT_BATCH_SIZE``
+    chunking, was the actual cause.
+    """
+    import duckdb as _duckdb
+    import pyarrow as pa
+
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.ducklake_admission import ducklake_write_admission
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
+    from backend.core.metadata.base import get_con
+
+    summary: dict[str, int] = {
+        "requested": len(object_keys),
+        "claimed": 0,
+        "not_claimed": 0,
+        "committed": 0,
+        "dead_letter": 0,
+        "failed": 0,
+    }
+    if not object_keys:
+        return summary
+
+    con_meta = get_con(service_id)
+    cur = con_meta.cursor()
+
+    claimed_generations = _ledger_claim_batch(con_meta, service_id, object_keys, worker_id)
+    claimed_keys = list(claimed_generations)
+    summary["claimed"] = len(claimed_generations)
+    summary["not_claimed"] = len(object_keys) - len(claimed_generations)
+    if not claimed_generations:
+        return summary
+
+    src = get_source_for_service(service_id)
+    if src is None:
+        for object_key in claimed_keys:
+            _ledger_record_failure(
+                con_meta, service_id, object_key, "no source registered for service", claimed_generations[object_key]
+            )
+        summary["failed"] = len(claimed_keys)
+        return summary
+
+    bucket = src.get("bucket", "")
+    active: list[str] = list(claimed_keys)
+    duckdb_con = None
+    admission_cm = ducklake_write_admission(service_id)
+    admission_entered = False
+    try:
+        fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
+        duckdb_con = _duckdb.connect()
+        _configure_fos(duckdb_con, src)
+        admission_cm.__enter__()
+        admission_entered = True
+        if not _ducklake_attach(duckdb_con, src, read_only=False):
+            raise RuntimeError("DuckLake read-write attach failed")
+
+        vitals_table = ducklake_table_name(src, table_name="client_vitals")
+        errors_table = ducklake_table_name(src, table_name="client_errors")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s3_to_local, _ = _download_chunk_to_local(fos, [f"s3://{bucket}/{k}" for k in claimed_keys], tmpdir)
+
+            files: list[tuple[str, str, str]] = []
+            for object_key in claimed_keys:
+                s3_path = f"s3://{bucket}/{object_key}"
+                local_file = s3_to_local.get(s3_path)
+                if local_file:
+                    files.append((local_file, s3_path, object_key))
+                    continue
+                active.remove(object_key)
+                gone = False
+                try:
+                    fos.head_object(Bucket=bucket, Key=object_key)
+                except Exception as head_err:
+                    err = str(head_err)
+                    gone = "404" in err or "Not Found" in err or "NoSuchKey" in err
+                if gone:
+                    cur.execute(
+                        "UPDATE ingest_ledger SET status='dead_letter', "
+                        "last_error='object missing from FOS (already ingested+deleted, or expired)', "
+                        "error_kind='object_missing', next_attempt_at=NULL "
+                        "WHERE service_id=? AND object_key=? AND status='claimed' "
+                        "AND lease_generation=?",
+                        (service_id, object_key, claimed_generations[object_key]),
+                    )
+                    con_meta.commit()
+                    if cur.rowcount:
+                        summary["dead_letter"] += 1
+                    logger.info("[ledger] %s: RUM %s gone from FOS — dead_letter", service_id, object_key)
+                else:
+                    _ledger_record_failure(
+                        con_meta,
+                        service_id,
+                        object_key,
+                        "download failed (object still exists — transient)",
+                        claimed_generations[object_key],
+                    )
+                    summary["failed"] += 1
+
+            if not files:
+                return summary
+
+            all_vitals: list[dict] = []
+            vitals_sources: list[str] = []
+            all_errors: list[dict] = []
+            errors_sources: list[str] = []
+            source_files: list[str] = []
+            file_sizes: dict[str, int] = {}
+            per_file_counts: dict[str, tuple[int, int]] = {}
+            for local_file, s3_path, object_key in files:
+                vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
+                all_vitals.extend(vitals_rows)
+                vitals_sources.extend([s3_path] * len(vitals_rows))
+                all_errors.extend(errors_rows)
+                errors_sources.extend([s3_path] * len(errors_rows))
+                source_files.append(s3_path)
+                file_sizes[object_key] = os.path.getsize(local_file)
+                per_file_counts[object_key] = (len(vitals_rows), len(errors_rows))
+                if corrupt_lines:
+                    try:
+                        _quarantine_rum_corrupt_lines(
+                            fos, src, object_key, corrupt_lines, len(vitals_rows) + len(errors_rows)
+                        )
+                    except Exception as qe:
+                        logger.warning("[ledger] %s: RUM quarantine failed for %s: %s", service_id, object_key, qe)
+
+            source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
+
+            def _write_table_batch(table_name: str, rows: list[dict], sources: list[str], schema) -> None:
+                if not rows:
+                    return
+                arrow_tbl = pa.Table.from_pylist(rows, schema=schema)
+                arrow_tbl = arrow_tbl.append_column("_source_file", pa.array(sources, type=pa.string()))
+                duckdb_con.register("_rum_stage", arrow_tbl)
+                try:
+                    table_exists = bool(
+                        duckdb_con.execute(
+                            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                            (table_name,),
+                        ).fetchone()
+                    )
+                    if not table_exists:
+                        duckdb_con.execute(f"CREATE TABLE lake.{table_name} AS SELECT * FROM _rum_stage")
+                    else:
+                        existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table_name}").fetchall()}
+                        if "_source_file" not in existing_cols:
+                            duckdb_con.execute(f'ALTER TABLE lake.{table_name} ADD COLUMN "_source_file" VARCHAR')
+                        duckdb_con.execute("BEGIN TRANSACTION")
+                        try:
+                            duckdb_con.execute(
+                                f"DELETE FROM lake.{table_name} WHERE _source_file IN ({source_files_sql})"
+                            )
+                            duckdb_con.execute(f"INSERT INTO lake.{table_name} BY NAME SELECT * FROM _rum_stage")
+                            duckdb_con.execute("COMMIT")
+                        except Exception:
+                            try:
+                                duckdb_con.execute("ROLLBACK")
+                            except Exception:
+                                pass
+                            raise
+                finally:
+                    duckdb_con.unregister("_rum_stage")
+
+            _write_table_batch(vitals_table, all_vitals, vitals_sources, CLIENT_VITALS_ARROW_SCHEMA)
+            _write_table_batch(errors_table, all_errors, errors_sources, CLIENT_ERRORS_ARROW_SCHEMA)
+
+            try:
+                metadata_db.insert_ingested_files(
+                    service_id,
+                    [
+                        (object_key, per_file_counts.get(object_key, (0, 0))[0], file_sizes.get(object_key, 0))
+                        for _lf, _sp, object_key in files
+                    ],
+                    table_name="client_vitals",
+                )
+                metadata_db.insert_ingested_files(
+                    service_id,
+                    [
+                        (object_key, per_file_counts.get(object_key, (0, 0))[1], file_sizes.get(object_key, 0))
+                        for _lf, _sp, object_key in files
+                    ],
+                    table_name="client_errors",
+                )
+            except Exception as ie:
+                logger.warning(
+                    "[ledger] %s: RUM ingested_files bookkeeping failed for %d file(s): %s", service_id, len(files), ie
+                )
+    except Exception as e:
+        for object_key in active:
+            _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
+        summary["failed"] += len(active)
+        return summary
+    finally:
+        if admission_entered:
+            admission_cm.__exit__(None, None, None)
+        if duckdb_con is not None:
+            duckdb_con.close()
+
+    for object_key in active:
+        summary["committed"] += int(
+            _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key]) == "committed"
+        )
+    return summary
+
+
 def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     """RUM counterpart of ``sweep_ledger_once``, scoped to ``raw/rum/``
     object keys via an explicit ``LIKE`` filter.
@@ -2906,7 +3129,7 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     its own hot path (regular-log reclaim/redispatch) must stay untouched.
     Scoping this copy's queries to the RUM keyspace — and the mirrored
     ``NOT LIKE`` exclusion on ``sweep_ledger_once``'s own queries — keeps
-    each sweep's redispatch calling the correct task (``convert_rum.delay``
+    each sweep's redispatch calling the correct task (``convert_batch_rum_files.delay``
     here, ``convert_batch_files.delay`` there) for every row it touches, so a stale RUM
     row can never get picked up and misparsed by the regular-log sweep.
     """
@@ -2947,8 +3170,7 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     # shares the q.ingest depth check since RUM converts route to the same
     # queue as regular-log converts.
     pending = len(stuck) + len(reclaimed)
-    # RUM still dispatches one object per message (there is no RUM batch task).
-    pending_messages = pending
+    pending_messages = math.ceil(pending / LEDGER_CONVERT_BATCH_SIZE) if pending else 0
     redispatched = 0
     if pending:
         broker_ok = False
@@ -2960,13 +3182,12 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
         except Exception:
             queue_depth = 0
         if broker_ok and queue_depth < pending_messages:
-            for object_key in reclaimed:
-                convert_rum.delay(service_id, object_key)
-            for object_key in stuck:
-                convert_rum.delay(service_id, object_key)
+            pending_keys = reclaimed + stuck
+            for i in range(0, pending, LEDGER_CONVERT_BATCH_SIZE):
+                convert_batch_rum_files.delay(service_id, pending_keys[i : i + LEDGER_CONVERT_BATCH_SIZE])
             redispatched = pending
             logger.info(
-                "[ledger] %s: RUM sweeper re-dispatched %d pending row(s) (messages=%d, reclaimed=%d, queue_depth=%d)",
+                "[ledger] %s: RUM sweeper re-dispatched %d pending row(s) (batches=%d, reclaimed=%d, queue_depth=%d)",
                 service_id,
                 pending,
                 pending_messages,
@@ -3036,6 +3257,12 @@ def dispatch_rum_minute(self, service_id: str, minute_prefix: str):
 def convert_rum(self, service_id: str, object_key: str):
     with _celery_ingest_scope("ledger_rum_convert", service_id):
         return convert_rum_object(service_id, object_key, self.request.id or "rum-worker")
+
+
+@app.task(name="backend.core.ingest.convert_batch_rum_files", bind=True)
+def convert_batch_rum_files(self, service_id: str, object_keys: list[str]):
+    with _celery_ingest_scope("ledger_rum_convert_batch", service_id):
+        return convert_batch_rum_objects(service_id, object_keys, self.request.id or "rum-worker")
 
 
 @app.task(name="backend.core.ingest.sweep_rum_ledger", bind=True)

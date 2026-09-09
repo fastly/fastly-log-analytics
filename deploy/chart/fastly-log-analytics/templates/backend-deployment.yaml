@@ -62,6 +62,10 @@ spec:
               value: {{ .Values.config.duckdbMemoryLimit | quote }}
             - name: DUCKDB_THREADS
               value: {{ .Values.config.duckdbThreads | quote }}
+            {{- if .Values.config.debugResponses }}
+            - name: DEBUG_RESPONSES
+              value: "true"
+            {{- end }}
             # Pinned proxy trust — the backend refuses to boot on `*`.
             - name: TRUSTED_PROXY_IPS
               value: {{ .Values.config.trustedProxyIps | quote }}

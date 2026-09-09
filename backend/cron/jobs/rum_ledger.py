@@ -39,8 +39,9 @@ logger = logging.getLogger("backend.scheduler")
 
 @cron_task("cron_rum_discovery", job_name="rum_discovery")
 def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
-    """Discover new ``raw/rum/`` beacon files and dispatch one ``convert_rum``
-    per file. Runs inline (this job already executes on a worker via
+    """Discover new ``raw/rum/`` beacon files and dispatch batched
+    ``convert_batch_rum_files`` calls covering them. Runs inline (this job
+    already executes on a worker via
     RedBeat in external mode) so the cron_runs row carries the real
     per-tick outcome instead of a fake instant success.
 
