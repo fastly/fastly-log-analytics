@@ -61,6 +61,8 @@ spec:
               value: {{ .Values.config.sseBackplane | quote }}
             - name: DUCKDB_MEMORY_LIMIT
               value: {{ .Values.config.duckdbMemoryLimit | quote }}
+            - name: DUCKDB_THREADS
+              value: {{ .Values.config.duckdbThreads | quote }}
             {{- if .Values.observability.enabled }}
             - name: OTEL_EXPORTER
               value: "otlp"

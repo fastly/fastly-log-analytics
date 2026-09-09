@@ -13,6 +13,11 @@ spec:
   # Beat must be a singleton — RedBeat locks in the broker, but running two
   # schedulers on purpose is never correct.
   replicas: 1
+  # See backend-deployment.yaml's identical comment: a surged second replica
+  # during RollingUpdate is exactly the "two schedulers" case this is
+  # singleton to avoid.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-beat

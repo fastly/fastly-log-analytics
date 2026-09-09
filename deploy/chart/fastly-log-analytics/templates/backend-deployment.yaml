@@ -11,6 +11,14 @@ spec:
   # process-exclusive, so a second backend pod 503s every data request.
   # See docs/adr/18-serving-tier-single-pod.md.
   replicas: 1
+  # Default RollingUpdate surges a second pod before killing the first --
+  # for the reason above that's not a brief overlap, it's a guaranteed
+  # 503/lock-error window on every upgrade (confirmed live: also deadlocks
+  # entirely on a resource-tight cluster, since the surge pod can't schedule
+  # and the old one never scales down to free room for it). Recreate kills
+  # the old pod first.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-backend
@@ -52,6 +60,8 @@ spec:
               value: {{ .Values.config.sseBackplane | quote }}
             - name: DUCKDB_MEMORY_LIMIT
               value: {{ .Values.config.duckdbMemoryLimit | quote }}
+            - name: DUCKDB_THREADS
+              value: {{ .Values.config.duckdbThreads | quote }}
             # Pinned proxy trust — the backend refuses to boot on `*`.
             - name: TRUSTED_PROXY_IPS
               value: {{ .Values.config.trustedProxyIps | quote }}
@@ -97,6 +107,13 @@ spec:
                   value: localhost
             initialDelaySeconds: 15
             periodSeconds: 30
+            # A live query can legitimately take several seconds under real
+            # data volume (confirmed: /api/dashboard/bundle at 1.5-5s during
+            # a scaling test) -- the default 1s timeout/3-failure threshold
+            # kills a pod that's slow, not dead. 5s x 5 gives it real headroom
+            # before treating it as unresponsive.
+            timeoutSeconds: 5
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /api/health
@@ -106,6 +123,8 @@ spec:
                   value: localhost
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

@@ -171,6 +171,15 @@ config:
   # same condition: never set this to something a public Ingress can reach.
   localAdminCidrs: ""
   duckdbMemoryLimit: "4GB"
+  # DuckDB sizes its default thread pool off the visible CPU count, which
+  # under a container runtime is the NODE's cores, not this pod's cgroup
+  # limit (resources.limits.cpu above) -- confirmed live: an idle/lightly
+  # loaded pod looked fine, but a query landing concurrently with a cron
+  # tick (local_compact, metric_snapshot, etc. -- all pod-local per ADR-18)
+  # oversubscribed the container's CPU limit badly enough to stall the
+  # single uvicorn process past the liveness probe's timeout. Pin this to
+  # (or just under) resources.requests.cpu so DuckDB can't oversubscribe.
+  duckdbThreads: "2"
   # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
   # which is correct for ingestMode: sync and rejected for ingestMode: celery
   # (which requires postgres:// or postgresql://).

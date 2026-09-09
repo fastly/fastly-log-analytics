@@ -103,3 +103,30 @@ The PVC is ReadWriteOnce, so every pod mounting it is pinned to one node. That
 includes the worker pods in celery mode: scaling workers across nodes needs
 shared storage for `/app/cache` (and is subject to the pod-local-output
 caveats in ADR-18).
+
+## Admin access
+
+The GCE/Compose deploy classifies admin vs. analyst by loopback: Caddy talks
+to uvicorn over `127.0.0.1`, so only that peer (or an SSH tunnel terminating
+there) is trusted (see `backend/utils/remote_access.py`). Nothing in a k8s
+cluster ever arrives over real loopback, so this chart needs the same
+guarantee re-established two different ways depending on how you connect:
+
+- **`kubectl port-forward svc/<release>-backend <port>:8000` direct to the
+  backend** — no config needed. `kubectl port-forward` tunnels into the
+  target pod's own network namespace, so the connection looks like
+  `127.0.0.1` to the app: genuine loopback, admin by default. Use this for
+  `/docs`, `/api/admin/*`, or any direct API call.
+- **`kubectl port-forward svc/<release>-frontend <port>:3000` to browse the
+  UI** — the browser's hop to the frontend is loopback-equivalent the same
+  way, but the frontend's own SSR then calls the backend over the *real*
+  in-cluster pod network (frontend pod -> backend Service), which is not
+  loopback. Without `config.localAdminCidrs` set to the cluster's actual pod
+  CIDR (`kubectl get nodes -o jsonpath='{.items[0].spec.podCIDR}'`), that hop
+  is classified remote/analyst — PII-masked, blocked from admin endpoints —
+  even though nothing is publicly exposed. Set it and the UI gets full admin
+  access through the same port-forward.
+
+`config.localAdminCidrs` is refused outright if it's wider than a `/16` or
+not a private range (see the guard in `remote_access.py`) — scope it to the
+cluster's actual pod CIDR, never something broader.

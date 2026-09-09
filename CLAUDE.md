@@ -115,6 +115,10 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
     persistence swaps it for `emptyDir` and loses the service registry (`/app/configs`) on every restart.
   - Misconfiguration (celery mode missing its Postgres/broker DSNs) fails at `helm template`/install time
     via `templates/validate.yaml`, not as a CrashLoop — pinned by `tests/chart/test_helm.py`.
+  - **Admin access is two `kubectl port-forward`s, not an SSH tunnel** — port-forwarding straight to the
+    backend is admin by default, but browsing the UI via the frontend needs `config.localAdminCidrs` set
+    to the cluster's pod CIDR or SSR-to-backend calls classify as remote/analyst. See the chart README's
+    [Admin access](deploy/chart/fastly-log-analytics/README.md#admin-access) section.
 
 ### Pre-merge / PR readiness
 - **`local-docs/` and `pending-docs/` must be deleted before squash-merging.** They are working notes,
