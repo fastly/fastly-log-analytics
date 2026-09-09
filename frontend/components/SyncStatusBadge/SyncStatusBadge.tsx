@@ -16,12 +16,6 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { useElapsedTime } from '@/hooks/useElapsedTime'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
 
 // The live "X ago" text node now lives in the shared `@/components/TimeAgo`
 // (text-only leaf so the surrounding header chrome stays stable between
@@ -101,7 +95,7 @@ function SyncStatusBadgeInner() {
   // Mounted in the always-present header so the channels stay open across
   // navigation; /logs + /admin read from the warm cache for free.
   // The analyst path keeps its own single projected stream (log-extents).
-  const analystStreamState = useHeaderBadgeStream(streamsEnabled && isAnalyst)
+  useHeaderBadgeStream(streamsEnabled && isAnalyst)
 
   // system-metrics only feeds the admin-overview cards (SystemHealthCard,
   // OperationsOverview teasers, MetadataStorageCard, SystemStatus) — add it
@@ -119,12 +113,7 @@ function SyncStatusBadgeInner() {
     if (sharePageMounted) ch.push('share')
     return ch
   }, [adminPageMounted, sharePageMounted])
-  const adminStreamState = useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
-
-  // The active stream's connection state — picks whichever side is gated on
-  // for the current session (admin OR analyst), defaults to idle when both
-  // are off (e.g. /share-login).
-  const liveStreamState = isAnalyst ? analystStreamState.state : adminStreamState.state
+  useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
 
   // Bootstrap fallback for analyst sessions — /api/sync-status is
   // admin-only (RemoteAccessMiddleware blocks analysts → 403), so
@@ -179,17 +168,6 @@ function SyncStatusBadgeInner() {
   if (!activeServiceId) return null
   if (!status && !headerBadge) return null
 
-  // SSE live dot. Green = stream open, amber = (re)connecting, hidden = idle.
-  // Sized to match the existing badges (px-2 py-0.5 / h-5-ish). aria-live
-  // off because the surrounding badges already announce sync state; this
-  // is a visual at-a-glance affordance and shouldn't spam SR users.
-  const liveDotTitle =
-    liveStreamState === 'open' ? 'Live updates connected'
-    : liveStreamState === 'connecting' ? 'Connecting to live updates…'
-    : liveStreamState === 'reconnecting' ? 'Reconnecting to live updates…'
-    : null
-  const showLiveDot = liveDotTitle !== null
-
   const activeSvc = bootstrap?.services?.find(s => s.service_id === activeServiceId)
   const isRumEnabled = activeSvc?.rum_enabled ?? false
 
@@ -211,7 +189,6 @@ function SyncStatusBadgeInner() {
 
   const renderStreamRow = (
     label: string,
-    showDot: boolean,
     latestTs: string | null | undefined,
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
@@ -220,41 +197,10 @@ function SyncStatusBadgeInner() {
   ) => {
     return (
       <div key={label} className="flex items-center gap-1 min-w-0 text-[10px]">
-        {/* Column 0: Live Dot (fixed w-3 to preserve grid alignment even if empty) */}
-        <span className="w-3 flex-shrink-0 inline-flex items-center justify-center">
-          {showDot ? (
-            <Tooltip>
-              <TooltipTrigger render={
-                <span
-                  tabIndex={0}
-                  role="status"
-                  aria-label={liveDotTitle ?? ''}
-                  className="inline-flex items-center justify-center h-2.5 w-2.5 rounded-full hover:bg-muted/60 flex-shrink-0"
-                >
-                  <span className="relative flex h-1 w-1">
-                    {liveStreamState === 'open' ? (
-                      <>
-                        <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
-                        <span className="relative inline-flex h-1 w-1 rounded-full bg-emerald-500" />
-                      </>
-                    ) : (
-                      <>
-                        <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
-                        <span className="relative inline-flex h-1 w-1 rounded-full bg-amber-500" />
-                      </>
-                    )}
-                  </span>
-                </span>
-              } />
-              <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
-            </Tooltip>
-          ) : null}
-        </span>
-
-        {/* Column 1: Label (fixed w-[58px]) */}
+        {/* Column 0: Label (fixed w-[58px]) */}
         <span className="w-[58px] flex-shrink-0 font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
 
-        {/* Column 2: Latest Log TimeAgo (fixed w-[124px] + tabular-nums) */}
+        {/* Column 1: Latest Log TimeAgo (fixed w-[124px] + tabular-nums) */}
         {latestTs ? (
           <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center gap-1">
             <span className="text-muted-foreground/80 font-normal">latest:</span>
@@ -267,14 +213,14 @@ function SyncStatusBadgeInner() {
           </span>
         )}
 
-        {/* Column 3: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
+        {/* Column 2: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
         {totalRows != null && totalRows > 0 ? (
           <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
         ) : (
           <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2">—</span>
         )}
 
-        {/* Column 4: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
+        {/* Column 3: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
         {lastSyncTs ? (
           <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] inline-flex items-center justify-start gap-1 tabular-nums">
             <span className="text-muted-foreground/80">sync:</span>
@@ -297,10 +243,9 @@ function SyncStatusBadgeInner() {
   return (
     <div className="hidden md:flex flex-col gap-0.5 mr-2 animate-in fade-in zoom-in-95">
       <div className="flex flex-col gap-0.5">
-        {/* REQUEST logs row with live dot */}
+        {/* REQUEST logs row */}
         {renderStreamRow(
           'REQUEST',
-          showLiveDot,
           requestLatestLogAt,
           requestTotal,
           requestLastSyncAt,
@@ -308,10 +253,9 @@ function SyncStatusBadgeInner() {
           lastSync?.started_at,
         )}
 
-        {/* RUM logs row with live dot */}
+        {/* RUM logs row */}
         {isRumEnabled && renderStreamRow(
           'RUM',
-          showLiveDot,
           rumMetrics?.latest_log_at,
           rumMetrics?.total_rows,
           rumMetrics?.last_sync_at,
