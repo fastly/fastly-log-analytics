@@ -197,7 +197,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           label = 'raw RUM logs';
         } else if (task === 'ngwaf_sync') {
           label = count === 1 ? 'bot record' : 'bot records';
-        } else if (task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer') {
+        } else if (task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer' || task === 'partial_hour_merge') {
           return <span className="text-muted-foreground">—</span>
         }
 
@@ -217,7 +217,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         }
 
         const task = row.original.task
-        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact' || task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer') {
+        if (task === 'optimize' || task === 'commit' || task === 'rum_commit' || task === 'local_compact' || task === 'expire_snapshots' || task === 'rollup_compact_daily' || task === 'rollup_hour_heal' || task === 'metadata_cleanup' || task === 'insights_prewarmer' || task === 'partial_hour_merge') {
           return <span className="text-muted-foreground">—</span>
         }
 

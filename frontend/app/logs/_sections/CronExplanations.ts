@@ -15,6 +15,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
   insights_prewarmer: 'Every 4 min. Pre-runs the default-selection insights query and warms the response cache so /insights returns warm (~80-130 ms) instead of cold-scanning the parquet (~3 s).',
   rollup_compact_daily: 'Daily 02:00 UTC. Consolidates closed-day per-hour rollup parquet into per-day files (local writes only).',
   rollup_hour_heal: 'Hourly at :05. Rebuilds rollup hour-bundles for closed hours the per-sync recompute missed.',
+  partial_hour_merge: 'Every 30s. Incrementally merges newly-landed buffer/active-hour files into the partial-hour rollup, shrinking the live scan of the currently-open hour to just the tail since the last tick.',
   ledger_sweep: 'Every 15 min (Celery mode). Crash net for the ingest ledger: reclaims stale worker claims, re-dispatches stuck files, and diffs a 4h lookback LIST against the ledger.',
 }
 
@@ -28,6 +29,7 @@ export const CRON_DISPLAY_NAMES: Record<string, string> = {
   expire_snapshots: 'Expire Snapshots',
   rollup_compact_daily: 'Rollup Compact',
   rollup_hour_heal: 'Rollup Heal',
+  partial_hour_merge: 'Partial-Hour Merge',
   ledger_sweep: 'Ledger Sweep',
   insights_prewarmer: 'Insights Prewarmer',
   metadata_cleanup: 'Metadata Cleanup',
@@ -49,7 +51,7 @@ export const CRON_GROUPS = [
   },
   {
     title: 'Rollups & Caching',
-    tasks: ['rollup_compact_daily', 'rollup_hour_heal', 'insights_prewarmer'],
+    tasks: ['rollup_compact_daily', 'rollup_hour_heal', 'insights_prewarmer', 'partial_hour_merge'],
   },
   {
     title: 'Metadata & Enrichments',
