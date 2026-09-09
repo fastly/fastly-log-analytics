@@ -72,6 +72,12 @@ describe('request header timestamp', () => {
     expect(screen.queryByText(oldTimestamp)).not.toBeInTheDocument()
   })
 
+  it('does not render a stale-log dot beside the latest timestamp', async () => {
+    mountBadge()
+    await waitFor(() => expect(screen.getByText(oldTimestamp)).toBeInTheDocument())
+    expect(screen.queryByRole('img', { name: /Latest log is/ })).not.toBeInTheDocument()
+  })
+
   it('accepts an older canonical extent from a replacement snapshot', async () => {
     mocks.status.mockReturnValue({ data: { request: { latest_log_at: requestTimestamp } } })
     const { rerender } = mountBadge()

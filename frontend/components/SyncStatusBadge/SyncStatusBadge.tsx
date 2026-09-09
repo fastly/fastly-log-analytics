@@ -14,8 +14,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useElapsedTime } from '@/hooks/useElapsedTime'
-import { useNowMs } from '@/hooks/useNowSeconds'
-import { useMounted } from '@/hooks/useMounted'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -39,36 +37,6 @@ function HeaderLiveTimer({ startedAt }: { startedAt: string }) {
   const elapsed = useElapsedTime(startedAt)
   const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
   return <span className="font-mono text-blue-500 tabular-nums font-medium animate-pulse">{fmt}</span>
-}
-
-// SRE-07: standing escalation for a pure ingest stall. The "Latest Log" badge
-// is on every page's header, but it only showed a neutral "X ago" — a stall
-// (orphan-row / OOM-restart / FOS-slow modes where data simply stops landing)
-// escalated nothing here; the only "stalled" classifier lived on the
-// must-navigate /admin/usage-log chart. This text-leaf owns the 1 Hz tick (so
-// the surrounding badge chrome stays stable) and shows an amber dot once the
-// newest log is >1h old (well past normal Fastly delivery lag) → red at >3h.
-// Plain `title` attr, not a nested Tooltip — the badge is already a tooltip
-// trigger; mirrors the existing last-sync-error dot.
-function StalenessDot({ timestamp }: { timestamp: string }) {
-  const now = useNowMs()
-  const mounted = useMounted()
-  if (!mounted) return null
-  const ageMs = now - new Date(timestamp).getTime()
-  if (!(ageMs > 3_600_000)) return null
-  const ageH = ageMs / 3_600_000
-  const crit = ageH >= 3
-  const label = `Latest log is ${ageH.toFixed(1)}h old — ingestion may be stalled`
-  return (
-    <span
-      role="img"
-      aria-label={label}
-      title={label}
-      className={`ml-1.5 ${crit ? 'text-red-500' : 'text-amber-500'}`}
-    >
-      ●
-    </span>
-  )
 }
 
 export function SyncStatusBadge() {
@@ -247,7 +215,6 @@ function SyncStatusBadgeInner() {
     latestTs: string | null | undefined,
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
-    showStaleness: boolean = true,
     isRunning: boolean = false,
     startedAt: string | null | undefined = null,
   ) => {
@@ -292,7 +259,6 @@ function SyncStatusBadgeInner() {
           <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center gap-1">
             <span className="text-muted-foreground/80 font-normal">latest:</span>
             <TimeAgo timestamp={latestTs} />
-            {showStaleness && <StalenessDot timestamp={latestTs} />}
           </span>
         ) : (
           <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap inline-flex items-center gap-1">
@@ -338,7 +304,6 @@ function SyncStatusBadgeInner() {
           requestLatestLogAt,
           requestTotal,
           requestLastSyncAt,
-          true,
           lastSync?.status === 'running',
           lastSync?.started_at,
         )}
@@ -350,7 +315,6 @@ function SyncStatusBadgeInner() {
           rumMetrics?.latest_log_at,
           rumMetrics?.total_rows,
           rumMetrics?.last_sync_at,
-          true,
         )}
       </div>
 
