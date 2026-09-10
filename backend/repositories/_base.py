@@ -297,17 +297,25 @@ def _find_missing_bundle_hours(
     ``bundled_root`` — a writer-coverage gap the caller should live-heal,
     not silently treat as zero.
 
-    Bounded by ``cap`` (keeps the most RECENT missing hours when there are
-    more than ``cap`` — a pathological window with many gaps should heal
-    the hours closest to "now", where the writer is most likely still
-    catching up, not the oldest ones that may indicate a deeper problem).
+    Bounded by ``cap``: mirrors ``execute_top_n_rollups``'s own heal, which
+    bounds the WALK ITSELF via ``heal_floor_dt = active_dt -
+    timedelta(hours=cap)`` (clamped up to ``st`` when the window starts more
+    recently) rather than walking the whole ``[st, et)`` window and
+    truncating after — on a window near the 366-day max this file already
+    allows, an unbounded walk would double the directory-stat cost
+    ``collect_hourly_bundle_paths`` already pays for the same window on
+    every request that hits a writer gap.
     """
     import os
     from datetime import UTC, datetime, timedelta
 
-    active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    active_hour_str = active_dt.strftime("%Y-%m-%d-%H")
+    heal_floor_dt = active_dt - timedelta(hours=cap)
+    if st > heal_floor_dt:
+        heal_floor_dt = st
     missing: list[str] = []
-    cursor = st.replace(minute=0, second=0, microsecond=0)
+    cursor = heal_floor_dt.replace(minute=0, second=0, microsecond=0)
     while cursor < et:
         hour_str = cursor.strftime("%Y-%m-%d-%H")
         if hour_str >= active_hour_str:
@@ -316,7 +324,7 @@ def _find_missing_bundle_hours(
         if not os.path.isfile(path):
             missing.append(hour_str)
         cursor += timedelta(hours=1)
-    return missing[-cap:] if len(missing) > cap else missing
+    return missing
 
 
 def _compact_sql_for_debug(sql: str) -> str:

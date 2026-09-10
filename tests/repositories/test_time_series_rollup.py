@@ -568,3 +568,35 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             f"expected 600 (H1 bundle) + 5 (healed H2) = 605, got {total} — "
             f"the missing-hour heal did not run, undercounting the writer-coverage gap hour."
         )
+
+    def test_walk_is_bounded_by_cap_not_by_full_window(self, rollup_layout, tmp_path):
+        """REGRESSION (fix round 1): the walk itself must be bounded by
+        ``cap`` hours back from "now" — not walk the entire [st, et) window
+        and truncate the result afterward. A window spanning far more than
+        ``cap`` hours (e.g. a 10-day dashboard range with cap=48) must never
+        stat hours older than the cap floor; if it does, this test's older
+        "no bundle" hours would incorrectly show up as `missing`.
+        """
+        from backend.repositories._base import _find_missing_bundle_hours
+
+        bundled, _per_field, _cache_dir = rollup_layout
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        cap = 48
+
+        # Window spans 10 days — far more than cap — with NO bundles
+        # written anywhere. A correct, cap-bounded walk only ever visits
+        # the most recent `cap` closed hours, so `missing` must be exactly
+        # `cap` hours long and none of them older than the floor.
+        st = active_dt - timedelta(days=10)
+        et = active_dt
+
+        missing = _find_missing_bundle_hours(st, et, str(bundled), "time_series.parquet", cap=cap)
+
+        floor_dt = active_dt - timedelta(hours=cap)
+        assert len(missing) == cap, f"expected exactly {cap} missing hours (walk bounded by cap), got {len(missing)}"
+        oldest_missing_dt = datetime.strptime(missing[0], "%Y-%m-%d-%H").replace(tzinfo=UTC)
+        assert oldest_missing_dt >= floor_dt, (
+            f"walk visited an hour ({missing[0]}) older than the cap floor "
+            f"({floor_dt.strftime('%Y-%m-%d-%H')}) — the walk is scanning the full window "
+            f"instead of being bounded by cap."
+        )
