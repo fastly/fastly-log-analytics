@@ -371,17 +371,34 @@ class TestPartialHourMergeIntoRollupReaders:
         assert stats["new_files"] == 1
 
     def _write_buffer_rows(self, cache_dir: str, *timestamps: datetime) -> None:
+        """Write buffer rows and pin the file's mtime to the LATEST of the
+        given timestamps (never the real wall-clock "now").
+
+        _create_active_hour_temp_direct prunes buffer files by mtime (a
+        file finalized before `live_start - skew margin` cannot hold rows
+        >= live_start — see backend/repositories/_base.py). Using the real
+        wall-clock mtime made this test's pass/fail depend on what minute
+        of the real hour it happened to run in: if the suite ran within the
+        first few minutes of an hour, the file's real mtime could fall
+        BELOW the margin floor and get pruned entirely, silently dropping
+        the "not yet merged" row and undercounting — a genuine, observed
+        flake (601 instead of 602), not a hypothetical one. Pinning the
+        mtime to the row's own timestamp makes the fixture deterministic
+        regardless of wall-clock timing.
+        """
+        import os
+
         buffer_dir = Path(cache_dir) / "buffer"
         buffer_dir.mkdir(parents=True, exist_ok=True)
         values_sql = ", ".join(f"(TIMESTAMPTZ '{ts.isoformat()}')" for ts in timestamps)
+        out_path = buffer_dir / "live.parquet"
         con = duckdb.connect()
         try:
-            con.execute(
-                f"COPY (SELECT * FROM (VALUES {values_sql}) AS t(timestamp)) "
-                f"TO '{buffer_dir / 'live.parquet'}' (FORMAT PARQUET)"
-            )
+            con.execute(f"COPY (SELECT * FROM (VALUES {values_sql}) AS t(timestamp)) TO '{out_path}' (FORMAT PARQUET)")
         finally:
             con.close()
+        mtime = max(ts.timestamp() for ts in timestamps)
+        os.utime(out_path, (mtime, mtime))
 
     def test_time_series_merges_partial_hour_without_double_counting(self, rollup_layout):
         bundled, per_field, cache_dir = rollup_layout
