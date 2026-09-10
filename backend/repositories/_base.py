@@ -290,6 +290,35 @@ def collect_hourly_bundle_paths(
     return paths, crosses_active
 
 
+def _find_missing_bundle_hours(
+    st, et, bundled_root: str, bundle_filename: str, cap: int = _MISSING_HOUR_HEAL_CAP
+) -> list[str]:
+    """Closed hours in [st, et) with no ``bundle_filename`` file under
+    ``bundled_root`` — a writer-coverage gap the caller should live-heal,
+    not silently treat as zero.
+
+    Bounded by ``cap`` (keeps the most RECENT missing hours when there are
+    more than ``cap`` — a pathological window with many gaps should heal
+    the hours closest to "now", where the writer is most likely still
+    catching up, not the oldest ones that may indicate a deeper problem).
+    """
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    missing: list[str] = []
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
+        if not os.path.isfile(path):
+            missing.append(hour_str)
+        cursor += timedelta(hours=1)
+    return missing[-cap:] if len(missing) > cap else missing
+
+
 def _compact_sql_for_debug(sql: str) -> str:
     """Replace explicit ``read_parquet([...long file list...])`` literals
     with ``read_parquet([N files])`` for transport in the debug-panel
@@ -2230,6 +2259,40 @@ class QueryRunner:
                 f"GROUP BY 1"
             )
 
+        # Missing-hour live heal: a CLOSED hour in [st, et) with no
+        # time_series bundle at all is a writer-coverage gap, not proof of
+        # zero traffic — collect_hourly_bundle_paths silently SKIPS such an
+        # hour rather than raising, so without this the hour just
+        # contributes nothing to the chart (see execute_top_n_rollups's own
+        # "Missing-hour live heal" for the sibling fix; that reader already
+        # had this heal, this one didn't). Uses a literal, unparameterized
+        # where-clause against the raw base table — mirrors the pattern
+        # above, sidestepping bound-parameter bookkeeping across UNION ALL
+        # branches since none of this SQL needs them.
+        missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        if missing_hours:
+            from backend.core.rollups import _safe_table_for
+
+            heal_base_table = _safe_table_for(self.src)
+            if heal_base_table:
+                heal_start_dt = max(datetime.strptime(missing_hours[0], "%Y-%m-%d-%H").replace(tzinfo=UTC), st)
+                heal_end_dt = min(
+                    datetime.strptime(missing_hours[-1], "%Y-%m-%d-%H").replace(tzinfo=UTC) + timedelta(hours=1), et
+                )
+                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+                heal_where = (
+                    f"timestamp >= '{heal_start_dt.isoformat()}' "
+                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
+                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+                )
+                select_clauses.append(
+                    f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
+                    f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
+                    f"FROM {heal_base_table} "
+                    f"WHERE {heal_where} "
+                    f"GROUP BY 1"
+                )
+
         direct_live_tmp: str | None = None
         live_needs_params = False
         if crosses_active:
@@ -2419,6 +2482,27 @@ class QueryRunner:
                 f"WHERE bucket >= TIMESTAMPTZ '{st_tz}' "
                 f"  AND bucket < TIMESTAMPTZ '{et_tz}'"
             )
+
+        # Missing-hour live heal: see try_time_series_from_rollup's sibling
+        # comment — a CLOSED hour with no time_series bundle is a
+        # writer-coverage gap, not zero traffic.
+        missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        if missing_hours:
+            from backend.core.rollups import _safe_table_for
+
+            heal_base_table = _safe_table_for(self.src)
+            if heal_base_table:
+                heal_start_dt = max(datetime.strptime(missing_hours[0], "%Y-%m-%d-%H").replace(tzinfo=UTC), st)
+                heal_end_dt = min(
+                    datetime.strptime(missing_hours[-1], "%Y-%m-%d-%H").replace(tzinfo=UTC) + timedelta(hours=1), et
+                )
+                hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+                heal_where = (
+                    f"timestamp >= '{heal_start_dt.isoformat()}' "
+                    f"AND timestamp < '{heal_end_dt.isoformat()}' "
+                    f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+                )
+                select_clauses.append(f"SELECT COUNT(*) AS num FROM {heal_base_table} WHERE {heal_where}")
 
         direct_live_tmp: str | None = None
         live_needs_params = False

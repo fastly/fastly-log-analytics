@@ -473,3 +473,98 @@ class TestPartialHourMergeIntoRollupReaders:
             f"expected 50.0 (1 of 2 active-hour rows is 5xx) — a value of 0.0 means the "
             f"before-watermark 5xx row was dropped by an unconditional narrowing, got {by_time}"
         )
+
+
+class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
+    """REGRESSION (2026-09-09, verified live): unlike ``execute_top_n_rollups``
+    (which live-heals a CLOSED hour with no rollup bundle), the time_series
+    and count readers silently SKIP such an hour via
+    ``collect_hourly_bundle_paths`` — contributing zero for it instead of
+    live-healing. On a real deployment with a 9/24-hour writer-coverage gap,
+    top-N panels stayed correct (they heal) while the traffic chart showed
+    ``[]`` and the total-requests count showed ``0``, despite real traffic
+    existing in those gap hours.
+
+    Each test writes one CLOSED hour with a real rollup bundle (H1) and one
+    CLOSED hour with NO bundle and NO per-field marker at all (H2) — a pure
+    writer-coverage gap, not the mid-build case that already triggers
+    ``collect_hourly_bundle_paths``'s "return None" fallback. H2's rows exist
+    only in the raw base table (``logs_<service>``), so a correct reader must
+    live-heal H2 to include them.
+    """
+
+    def test_time_series_heals_missing_bundle_hour(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        h1_start = active_start - timedelta(hours=2)
+        h2_start = active_start - timedelta(hours=1)
+        h1_str = h1_start.strftime("%Y-%m-%d-%H")
+
+        # H1: normal, fully-bundled closed hour.
+        _write_bundle(bundled, h1_str, total_requests=600)
+        _write_per_field_marker(per_field, "requests", h1_str)
+
+        # H2: writer-coverage gap — no bundle, no per-field marker either.
+        # Its rows exist only in the raw base table.
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?), (?), (?)",
+            [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=h1_start.isoformat(),
+            end_time=(h2_start + timedelta(hours=1)).isoformat(),
+            table_name="not_used",
+            where_clause="1=1",
+            params=[],
+        )
+        con.close()
+
+        assert rows is not None, "reader fell back to raw unexpectedly"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        assert by_time.get(h2_start) == 5, (
+            f"H2 (writer-coverage gap hour) contributed {by_time.get(h2_start)!r} instead of 5 — "
+            f"the missing-hour heal did not run. Full response: {by_time}"
+        )
+        assert sum(by_time.values()) == 605, f"expected 600 (H1) + 5 (healed H2) = 605, got {by_time}"
+
+    def test_count_heals_missing_bundle_hour(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        h1_start = active_start - timedelta(hours=2)
+        h2_start = active_start - timedelta(hours=1)
+        h1_str = h1_start.strftime("%Y-%m-%d-%H")
+
+        _write_bundle(bundled, h1_str, total_requests=600)
+        _write_per_field_marker(per_field, "requests", h1_str)
+
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?), (?), (?)",
+            [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=h1_start.isoformat(),
+            end_time=(h2_start + timedelta(hours=1)).isoformat(),
+            table_name="not_used",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+        con.close()
+
+        assert total is not None, "reader fell back to raw unexpectedly"
+        assert total == 605, (
+            f"expected 600 (H1 bundle) + 5 (healed H2) = 605, got {total} — "
+            f"the missing-hour heal did not run, undercounting the writer-coverage gap hour."
+        )
