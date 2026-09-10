@@ -147,7 +147,9 @@ def _initialize_service(cfg: dict):
                     try:
                         from backend.core.rollups.recompute import backfill_missing_hour_bundles
 
-                        backfill_missing_hour_bundles(sid, src, lookback_days=30)
+                        coverage = backfill_missing_hour_bundles(sid, src, lookback_days=30)
+                        if not coverage.get("coverage_verified", False):
+                            raise RuntimeError("rollup coverage scan did not complete")
                         from backend.core.rollup_readiness import mark_rollup_coverage_ready
 
                         mark_rollup_coverage_ready(sid)

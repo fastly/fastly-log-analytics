@@ -89,19 +89,6 @@ def _run_partial_hour_merge(service_id: str) -> None:
                 job_name="partial_hour_merge",
                 event={"type": "status", "message": summary},
             )
-        elif run_id is not None:
-            # M2 (final whole-branch review): at a 30s cadence a no-op tick
-            # is the overwhelmingly common case (~2,880/day/service) and
-            # would otherwise dominate the Cron tab's recent-runs list.
-            # Drop the row log_cron_run just wrote for it — a healthy
-            # service's absence from cron_runs is itself distinguishable
-            # from a crash via this job's last successful heartbeat.
-            try:
-                from backend.core import metadata as metadata_db
-
-                metadata_db.delete_cron_run(service_id, run_id)
-            except Exception:
-                pass
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(

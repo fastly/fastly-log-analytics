@@ -223,6 +223,8 @@ def collect_hourly_bundle_paths(
     et,
     bundled_root: str,
     bundle_filename: str,
+    *,
+    allow_all_fields_coverage: bool = False,
 ) -> tuple[list[str], bool] | None:
     """Walk ``[st, et)`` by UTC hour, return ``(paths, crosses_active)``.
 
@@ -238,7 +240,11 @@ def collect_hourly_bundle_paths(
     The two callsites used to maintain identical walk logic with
     cross-referenced "mirrors X" comments; the dual maintenance is now
     one helper. The per-field listdir is done inline (callers do not
-    pre-supply it).
+    pre-supply it). ``allow_all_fields_coverage`` is limited to the scalar
+    time-series readers, where an ``all_fields.parquet`` file proves the
+    hour-bundling pass reached the hour even when the time-series bundle is
+    absent. The missing-hour check still distinguishes an empty sentinel
+    from a non-empty bundle and heals the latter.
     """
     import os
     from datetime import UTC, datetime, timedelta
@@ -288,6 +294,11 @@ def collect_hourly_bundle_paths(
             break
         path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
         if not os.path.isfile(path):
+            if allow_all_fields_coverage and os.path.isfile(
+                os.path.join(bundled_root, f"hour={hour_str}", "all_fields.parquet")
+            ):
+                cursor += timedelta(hours=1)
+                continue
             if _hour_had_any_data(hour_str):
                 return None
             cursor += timedelta(hours=1)
@@ -298,11 +309,20 @@ def collect_hourly_bundle_paths(
 
 
 def _find_missing_bundle_hours(
-    st, et, bundled_root: str, bundle_filename: str, cap: int = _MISSING_HOUR_HEAL_CAP
+    st,
+    et,
+    bundled_root: str,
+    bundle_filename: str,
+    cap: int = _MISSING_HOUR_HEAL_CAP,
+    coverage_bundle_filename: str | None = None,
 ) -> list[str]:
     """Closed hours in [st, et) with no ``bundle_filename`` file under
     ``bundled_root`` — a writer-coverage gap the caller should live-heal,
-    not silently treat as zero.
+    not silently treat as zero. When ``coverage_bundle_filename`` is
+    provided, an hour with that file is considered covered even if the
+    requested bundle is absent. This is used by scalar time-series readers
+    because an empty ``all_fields.parquet`` sentinel proves the hour was
+    checked and has zero traffic, even though it has no time-series rows.
 
     Bounded by ``cap``: mirrors ``execute_top_n_rollups``'s own heal, which
     bounds the WALK ITSELF via ``heal_floor_dt = active_dt -
@@ -328,7 +348,12 @@ def _find_missing_bundle_hours(
         if hour_str >= active_hour_str:
             break
         path = os.path.join(bundled_root, f"hour={hour_str}", bundle_filename)
-        if not os.path.isfile(path):
+        coverage_path = (
+            os.path.join(bundled_root, f"hour={hour_str}", coverage_bundle_filename)
+            if coverage_bundle_filename
+            else None
+        )
+        if not os.path.isfile(path) and (coverage_path is None or not _is_empty_bundle(coverage_path)):
             missing.append(hour_str)
         cursor += timedelta(hours=1)
     return missing
@@ -371,6 +396,40 @@ def _count_expected_closed_hours(st, et, active_hour_str: str) -> int:
         if hour_str >= active_hour_str:
             break
         count += 1
+        cursor += timedelta(hours=1)
+    return count
+
+
+def _is_empty_bundle(path: str) -> bool:
+    """Return whether a parquet bundle is the verified-empty sentinel."""
+    import os
+
+    if not os.path.isfile(path):
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        return pq.read_metadata(path).num_rows == 0
+    except Exception:
+        return False
+
+
+def _count_covered_closed_hours(st, et, bundled_root: str, active_hour_str: str, bundle_filename: str) -> int:
+    """Count closed hours with a data bundle or a verified-empty sentinel."""
+    import os
+    from datetime import timedelta
+
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    count = 0
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        hour_dir = os.path.join(bundled_root, f"hour={hour_str}")
+        if os.path.isfile(os.path.join(hour_dir, bundle_filename)) or _is_empty_bundle(
+            os.path.join(hour_dir, "all_fields.parquet")
+        ):
+            count += 1
         cursor += timedelta(hours=1)
     return count
 
@@ -2338,7 +2397,14 @@ class QueryRunner:
         # rollup path would undercount, so we fall back to raw.
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        collected = collect_hourly_bundle_paths(
+            self.src,
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            allow_all_fields_coverage=True,
+        )
         if collected is None:
             return None
         rollup_paths, crosses_active = collected
@@ -2383,7 +2449,13 @@ class QueryRunner:
         # where-clause against the raw base table — mirrors the pattern
         # above, sidestepping bound-parameter bookkeeping across UNION ALL
         # branches since none of this SQL needs them.
-        missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        missing_hours = _find_missing_bundle_hours(
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            coverage_bundle_filename="all_fields.parquet",
+        )
         # C2 (final whole-branch review, part 2): _find_missing_bundle_hours
         # is capped (default 48h) — a genuine writer-coverage gap OLDER than
         # the cap would otherwise be silently un-served (collect_hourly_
@@ -2394,7 +2466,10 @@ class QueryRunner:
         # detects that case with zero extra disk I/O (rollup_paths already
         # walked the full window above).
         expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
-        if expected_closed_hours - len(rollup_paths) > len(missing_hours):
+        covered_closed_hours = _count_covered_closed_hours(
+            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
+        )
+        if expected_closed_hours - covered_closed_hours > len(missing_hours):
             return None
         if missing_hours:
             from backend.core.rollups import _safe_table_for
@@ -2589,7 +2664,14 @@ class QueryRunner:
 
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         active_hour_dt = datetime.strptime(active_hour_str, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-        collected = collect_hourly_bundle_paths(self.src, st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        collected = collect_hourly_bundle_paths(
+            self.src,
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            allow_all_fields_coverage=True,
+        )
         if collected is None:
             return None
         rollup_paths, crosses_active = collected
@@ -2613,12 +2695,21 @@ class QueryRunner:
         # Missing-hour live heal: see try_time_series_from_rollup's sibling
         # comment — a CLOSED hour with no time_series bundle is a
         # writer-coverage gap, not zero traffic.
-        missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        missing_hours = _find_missing_bundle_hours(
+            st,
+            et,
+            bundled_root,
+            TIME_SERIES_BUNDLE_FILENAME,
+            coverage_bundle_filename="all_fields.parquet",
+        )
         # C2 (final whole-branch review, part 2): see try_time_series_from_
         # rollup's sibling comment — refuse rather than silently serve a
         # window with a genuine gap older than the heal cap.
         expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
-        if expected_closed_hours - len(rollup_paths) > len(missing_hours):
+        covered_closed_hours = _count_covered_closed_hours(
+            st, et, bundled_root, active_hour_str, TIME_SERIES_BUNDLE_FILENAME
+        )
+        if expected_closed_hours - covered_closed_hours > len(missing_hours):
             return None
         if missing_hours:
             from backend.core.rollups import _safe_table_for

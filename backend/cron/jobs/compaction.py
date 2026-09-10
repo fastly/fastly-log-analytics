@@ -192,10 +192,11 @@ def _run_rollup_hour_heal(service_id: str) -> None:
     before the boundary) never retrigger — diagnosed 2026-07-06 as top-N
     cards silently missing every closed hour of the current day on the
     low-traffic service. Reuses the idempotent
-    ``backfill_missing_hour_bundles`` self-heal with a 1-day lookback:
-    one listdir + one GROUP-BY-hour view scan when nothing is missing,
-    so the steady-state tick is cheap. The daily compaction job keeps
-    its 30-day deep pass.
+    ``backfill_missing_hour_bundles`` self-heal. Once durable-mode startup
+    coverage is ready, it uses a 1-day lookback so the steady-state tick is
+    cheap. If startup coverage is not ready yet, the first successful heal
+    uses the full 30-day horizon before enabling durable rollup reads. The
+    daily compaction job keeps its 30-day deep pass.
 
     LOCAL-only writes (rollup parquet under cache/) — no FOS traffic, so
     it is safe under the dev kill switch alongside local_compact /
@@ -229,19 +230,21 @@ def _run_rollup_hour_heal(service_id: str) -> None:
 
     start_time = time.time()
     try:
-        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=1)
+        durable_mode = svcconfig.is_durable_serving_mode(src)
+        if durable_mode:
+            from backend.core.rollup_readiness import rollup_coverage_ready
+
+            coverage_ready = rollup_coverage_ready(service_id)
+        else:
+            coverage_ready = True
+        lookback_days = 1 if coverage_ready else 30
+        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=lookback_days)
         duration = time.time() - start_time
-        # C2 (final whole-branch review): a successful heal pass is the
-        # same real coverage-establishing call (backfill_missing_hour_
-        # bundles) main.py's startup catch-up uses to raise this flag —
-        # unlike partial_hour_merge's 30s tick (which this flag is no
-        # longer wired to), this genuinely means the local closed-hour
-        # rollup tree reflects a real backfill pass. Self-heals a failed/
-        # timed-out startup catch-up within the hour, same intent as the
-        # removed wiring, via the correct job this time. Best-effort and
-        # gated to durable-serving services only — matches main.py's own
-        # posture (never a 500, never a silent undercount if this fails).
-        if svcconfig.is_durable_serving_mode(src):
+        # Durable mode only becomes trusted after a full-horizon pass. A
+        # failed or timed-out startup catch-up therefore self-heals on the
+        # next hourly tick without enabling readers from a one-day partial
+        # cache.
+        if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
             try:
                 from backend.core.rollup_readiness import mark_rollup_coverage_ready
 

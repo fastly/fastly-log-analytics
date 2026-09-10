@@ -68,11 +68,8 @@ def test_run_partial_hour_merge_filters_out_live_topn_skip_fields(monkeypatch):
     assert skip_field not in merged_fields
 
 
-def test_run_partial_hour_merge_drops_cron_runs_row_for_noop_tick(monkeypatch):
-    """M2 (final whole-branch review): a no-op tick (the overwhelmingly
-    common case at 30s cadence) still finalizes through log_cron_run (so
-    the job_runs lease is released the same way a real tick's is), but the
-    resulting cron_runs row is then deleted rather than left to accumulate."""
+def test_run_partial_hour_merge_keeps_cron_runs_row_for_noop_tick(monkeypatch):
+    """A no-op tick still records a successful heartbeat for the Cron UI."""
     from backend.cron.jobs.partial_hour import _run_partial_hour_merge
 
     fake_src = {"service_id": "svc-a", "name": "svc-a"}
@@ -97,7 +94,7 @@ def test_run_partial_hour_merge_drops_cron_runs_row_for_noop_tick(monkeypatch):
 
     mock_log.assert_called_once()
     assert mock_log.call_args.kwargs.get("status") == "success" or mock_log.call_args[0][3] == "success"
-    mock_delete.assert_called_once_with("svc-a", "run-1")
+    mock_delete.assert_not_called()
 
 
 def test_run_partial_hour_merge_keeps_cron_runs_row_when_files_merged(monkeypatch):

@@ -16,7 +16,7 @@ def test_initialize_service_marks_coverage_ready_for_durable_service():
         patch("backend.config.is_durable_serving_mode", return_value=True),
         patch(
             "backend.core.rollups.recompute.backfill_missing_hour_bundles",
-            return_value={"missing": 0, "bundled": 0},
+            return_value={"missing": 0, "bundled": 0, "coverage_verified": True},
         ) as mock_backfill,
     ):
         from backend.main import _initialize_service

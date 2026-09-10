@@ -56,6 +56,33 @@ def _write_per_field_marker(per_field_root: Path, field: str, hour_str: str) -> 
     (per_field_root / f"field={field}" / f"hour={hour_str}").mkdir(parents=True, exist_ok=True)
 
 
+def _write_empty_all_fields_sentinel(bundled_root: Path, hour_str: str) -> None:
+    """Create the verified-empty bundle written for a zero-traffic hour."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hour_dir = bundled_root / f"hour={hour_str}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
+    pq.write_table(pa.table({"field": [], "value": [], "count": []}, schema=schema), hour_dir / "all_fields.parquet")
+
+
+def _write_nonempty_all_fields_bundle(bundled_root: Path, hour_str: str) -> None:
+    """Create a normal non-empty all-fields bundle without time-series data."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hour_dir = bundled_root / f"hour={hour_str}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {"field": ["country"], "value": ["US"], "count": [1]},
+            schema=pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())]),
+        ),
+        hour_dir / "all_fields.parquet",
+    )
+
+
 @pytest.fixture
 def rollup_layout(tmp_path):
     """Build a fake rollup layout under tmp_path and return the bundled root."""
@@ -624,6 +651,104 @@ class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
             f"expected 600 (H1 bundle) + 5 (healed H2) = 605, got {total} — "
             f"the missing-hour heal did not run, undercounting the writer-coverage gap hour."
         )
+
+    def test_time_series_accepts_verified_empty_hour_beyond_heal_cap(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        empty_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == empty_hour:
+                _write_empty_all_fields_sentinel(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+        )
+
+        assert rows is not None, "a verified-empty hour must not force a raw-scan fallback"
+        assert len(rows) == 49, "the empty sentinel should contribute a zero-valued hour"
+
+    def test_count_accepts_verified_empty_hour_beyond_heal_cap(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        empty_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == empty_hour:
+                _write_empty_all_fields_sentinel(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert total == 49 * 600, "the verified-empty hour must not force a raw-scan fallback"
+
+    def test_nonempty_all_fields_bundle_is_live_healed(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        missing_time_series_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == missing_time_series_hour:
+                _write_nonempty_all_fields_bundle(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?)",
+            [missing_time_series_hour + timedelta(minutes=m) for m in (1, 2, 3)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="logs_test_service",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+        con.close()
+
+        assert total == 49 * 600 + 3
 
     def test_walk_is_bounded_by_cap_not_by_full_window(self, rollup_layout, tmp_path):
         """REGRESSION (fix round 1): the walk itself must be bounded by
