@@ -113,7 +113,12 @@ def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnect
     path = _all_fields_path(source, hour)
     if not os.path.isfile(path):
         return 0
-    sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' LIMIT 1"
+    # value = '' pins this to the ONE row merge_partial_hour's total_select
+    # writes — defense in depth against a colliding custom field also named
+    # TOTAL_FIELD writing OTHER (field, value) rows under the same field key
+    # (the merge-time safe_fields filter already excludes that field, but
+    # this keeps the read robust even if that guard is ever bypassed).
+    sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' AND value = '' LIMIT 1"
     if con is not None:
         row = con.execute(sql).fetchone()
         return int(row[0]) if row else 0
@@ -198,7 +203,11 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
     if not new_files:
         return {"hour": active_hour, "new_files": 0, "duration_ms": (time.perf_counter() - t0) * 1000}
 
-    safe_fields = [f for f in fields if _is_safe_ident(f)]
+    # Excluding TOTAL_FIELD defends against a (admin-controlled, unlikely
+    # but possible) custom field literally named "__total__" — _is_safe_ident
+    # would otherwise accept it, and a per-field row for it would collide
+    # with and corrupt the synthetic total row's own accounting.
+    safe_fields = [f for f in fields if _is_safe_ident(f) and f != TOTAL_FIELD]
     if not safe_fields:
         return {"hour": active_hour, "new_files": 0, "duration_ms": (time.perf_counter() - t0) * 1000}
 

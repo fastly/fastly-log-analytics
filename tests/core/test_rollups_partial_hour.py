@@ -99,6 +99,35 @@ def test_merge_partial_hour_writes_a_total_row_not_per_field_summable(tmp_path):
     assert all(field != ph.TOTAL_FIELD for field, _, _ in per_field_rows)
 
 
+def test_merge_partial_hour_excludes_a_custom_field_named_total_field(tmp_path):
+    """A custom field literally named "__total__" (admin-controlled, but
+    _is_safe_ident's regex would otherwise accept it) must not be merged as
+    a per-field row — that would collide with and corrupt the synthetic
+    total row's own accounting."""
+    src = _make_source(tmp_path)
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    cache_dir = str(tmp_path / "svc-a")
+    hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
+    now = datetime.now(UTC)
+    os.makedirs(hourly_dir, exist_ok=True)
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("SET TimeZone='UTC';")
+        # A hypothetical custom field literally named "__total__" that
+        # HAS its own data column — the case the fix guards against.
+        con.execute('CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR, "__total__" VARCHAR)')
+        con.executemany("INSERT INTO t VALUES (?, ?, ?)", [(now, "US", "x"), (now, "CA", "y")])
+        con.execute(f"COPY t TO '{os.path.join(hourly_dir, 'batch1.parquet')}' (FORMAT PARQUET)")
+    finally:
+        con.close()
+
+    stats = ph.merge_partial_hour("svc-a", src, ["country", ph.TOTAL_FIELD])
+    assert stats["new_files"] == 1
+    assert ph.read_partial_hour_total(src, active_hour) == 2
+    per_field_rows = ph.read_partial_hour_all_fields(src, active_hour)
+    assert dict((v, c) for _, v, c in per_field_rows) == {"US": 1, "CA": 1}
+
+
 def test_read_partial_hour_functions_reuse_caller_connection(tmp_path, monkeypatch):
     """I3 (final whole-branch review): read_partial_hour_all_fields /
     read_partial_hour_total must reuse the caller's DuckDB connection when
