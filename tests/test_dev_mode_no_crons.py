@@ -96,9 +96,14 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sorted(sched._job_ids) == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
+    assert sorted(sched._job_ids) == [
+        "local_compact_svc-x",
+        "partial_hour_merge_svc-x",
+        "rollup_compact_svc-x",
+        "rollup_heal_svc-x",
+    ]
     added = sorted(c.kwargs["id"] for c in add_job.call_args_list)
-    assert added == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
+    assert added == ["local_compact_svc-x", "partial_hour_merge_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
 
 
 def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
@@ -117,9 +122,9 @@ def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sorted(sched._job_ids) == ["local_compact_svc-ro"]
+    assert sorted(sched._job_ids) == ["local_compact_svc-ro", "partial_hour_merge_svc-ro"]
     added = [c.kwargs["id"] for c in add_job.call_args_list]
-    assert added == ["local_compact_svc-ro"]
+    assert added == ["local_compact_svc-ro", "partial_hour_merge_svc-ro"]
 
 
 def test_scheduler_reload_is_a_noop_when_kill_switch_on(monkeypatch):
