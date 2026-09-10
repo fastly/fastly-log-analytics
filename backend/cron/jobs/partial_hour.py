@@ -22,8 +22,8 @@ logger = logging.getLogger("backend.scheduler")
 @cron_task("partial_hour_merge", job_name="partial_hour_merge")
 def _run_partial_hour_merge(service_id: str) -> None:
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
-    from backend.core.rollup_readiness import mark_rollup_coverage_ready
     from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
     from backend.repositories.dashboard import FIELDS
     from backend.utils.active_requests import should_defer_cron
 
@@ -46,19 +46,33 @@ def _run_partial_hour_merge(service_id: str) -> None:
     start_progress(run_id, service_id=service_id, task="partial_hour_merge")
     _display = _display_label(src, service_id)
 
+    logger.info("🕐  [partial-hour] %s: partial-hour merge started.", _display)
+    # Only fields execute_top_n_rollups's own live top-up would bother
+    # aggregating (M1, final whole-branch review) — the full FIELDS list
+    # includes high-cardinality identifier/raw-measurement columns
+    # (_LIVE_TOPN_SKIP_FIELDS) with no top-N panel, so aggregating them
+    # every 30s bought nothing any reader consumes.
+    merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS]
+
     start_time = time.time()
     try:
-        stats = merge_partial_hour(service_id, src, FIELDS)
+        stats = merge_partial_hour(service_id, src, merge_fields)
         removed = gc_stale_partial_hours(src)
         duration = time.time() - start_time
-        # A successful tick (even a no-new-files no-op) proves this pod's
-        # partial-hour writer path is alive, which is a reasonable proxy
-        # for "the closed-hour self-heal path is alive too" — both are
-        # pod-local APScheduler jobs registered together (Task 6). This is
-        # the self-heal fallback the Task 1/2 startup catch-up relies on
-        # when the one-time backfill times out or crashes.
-        mark_rollup_coverage_ready(service_id)
+        # NOTE (C2, final whole-branch review): this tick deliberately does
+        # NOT call mark_rollup_coverage_ready. A successful tick — even a
+        # real one — only proves the partial-hour writer path is alive, not
+        # that this pod's local closed-hour rollup tree reflects a genuine
+        # backfill pass; the 6 durable-mode trust gates need the latter.
+        # That flag is now only raised by main.py's startup catch-up and by
+        # _run_rollup_hour_heal's success path (both call
+        # backfill_missing_hour_bundles, the real coverage-establishing
+        # function).
         summary = f"Merged {stats['new_files']} new file(s) into hour={stats['hour']}; GC'd {removed} stale hour(s)"
+        # Always finalize through log_cron_run first — it releases the
+        # job_runs lease the same way a real tick does, which the NEXT
+        # tick's start_cron_run depends on to avoid spuriously seeing this
+        # one as still "running".
         log_cron_run(
             src,
             "partial_hour_merge",
@@ -75,6 +89,19 @@ def _run_partial_hour_merge(service_id: str) -> None:
                 job_name="partial_hour_merge",
                 event={"type": "status", "message": summary},
             )
+        elif run_id is not None:
+            # M2 (final whole-branch review): at a 30s cadence a no-op tick
+            # is the overwhelmingly common case (~2,880/day/service) and
+            # would otherwise dominate the Cron tab's recent-runs list.
+            # Drop the row log_cron_run just wrote for it — a healthy
+            # service's absence from cron_runs is itself distinguishable
+            # from a crash via this job's last successful heartbeat.
+            try:
+                from backend.core import metadata as metadata_db
+
+                metadata_db.delete_cron_run(service_id, run_id)
+            except Exception:
+                pass
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(

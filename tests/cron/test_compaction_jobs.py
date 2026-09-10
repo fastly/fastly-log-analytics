@@ -295,6 +295,49 @@ def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stu
     assert "2 hour(s) bundled" in kwargs["summary"]
 
 
+def test_rollup_heal_marks_rollup_coverage_ready_under_durable_mode(monkeypatch, stub_source, stub_progress):
+    """C2 (final whole-branch review): a successful heal pass calls
+    backfill_missing_hour_bundles — the SAME real coverage-establishing
+    function main.py's startup catch-up uses — so it's the correct job to
+    (re-)mark durable-mode rollup coverage ready, self-healing a failed or
+    timed-out startup catch-up within the hour."""
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_called_once_with("svc-1")
+
+
+def test_rollup_heal_does_not_mark_ready_when_not_durable_mode(monkeypatch, stub_source, stub_progress):
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
+
+
+def test_rollup_heal_does_not_mark_ready_on_failure(monkeypatch, stub_source, stub_progress):
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles",
+        MagicMock(side_effect=RuntimeError("view refresh failed")),
+    )
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
+
+
 def test_rollup_heal_records_error_on_exception(monkeypatch, stub_source, stub_progress):
     monkeypatch.setattr(
         "backend.core.rollups.backfill_missing_hour_bundles",

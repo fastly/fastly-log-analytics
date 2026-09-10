@@ -201,6 +201,7 @@ def _run_rollup_hour_heal(service_id: str) -> None:
     it is safe under the dev kill switch alongside local_compact /
     rollup_compact.
     """
+    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.rollups import backfill_missing_hour_bundles
     from backend.utils.active_requests import should_defer_cron
@@ -230,6 +231,23 @@ def _run_rollup_hour_heal(service_id: str) -> None:
     try:
         heal = backfill_missing_hour_bundles(service_id, src, lookback_days=1)
         duration = time.time() - start_time
+        # C2 (final whole-branch review): a successful heal pass is the
+        # same real coverage-establishing call (backfill_missing_hour_
+        # bundles) main.py's startup catch-up uses to raise this flag —
+        # unlike partial_hour_merge's 30s tick (which this flag is no
+        # longer wired to), this genuinely means the local closed-hour
+        # rollup tree reflects a real backfill pass. Self-heals a failed/
+        # timed-out startup catch-up within the hour, same intent as the
+        # removed wiring, via the correct job this time. Best-effort and
+        # gated to durable-serving services only — matches main.py's own
+        # posture (never a 500, never a silent undercount if this fails).
+        if svcconfig.is_durable_serving_mode(src):
+            try:
+                from backend.core.rollup_readiness import mark_rollup_coverage_ready
+
+                mark_rollup_coverage_ready(service_id)
+            except Exception as e:
+                logger.warning("[rollup-heal] %s: could not mark rollup coverage ready: %s", service_id, e)
         summary = (
             f"Healed {heal.get('missing', 0)} missing hour(s): "
             f"{heal.get('rebuilt_fields', 0)} field rollup(s) rebuilt, "
