@@ -310,19 +310,65 @@ class TestPartialHourMergeIntoRollupReaders:
     produces the expected total.
     """
 
-    def _write_partial_hour(self, cache_dir: str, hour: str, *, watermark_epoch: float, count: int) -> None:
-        from backend.core.rollups.partial_hour import _all_fields_path, _write_partial_hour_watermark
+    def _merge_partial_hour_via_writer(
+        self,
+        cache_dir: str,
+        active_start: datetime,
+        *,
+        watermark_instant: datetime,
+        service_id: str = "svc-a",
+        fields: tuple[str, ...] = ("country", "method"),
+    ) -> None:
+        """Feed ONE real request (with TWO populated fields) through the
+        actual merge_partial_hour writer so the partial rollup these tests
+        exercise is built the same way the cron job builds it in prod (real
+        per-field rows + a genuine ``__total__`` row) — not a
+        hand-fabricated ``('requests', '', count)`` row a real writer never
+        produces.
 
-        _write_partial_hour_watermark({"_cache_dir_override": cache_dir}, hour, watermark_epoch)
-        path = _all_fields_path({"_cache_dir_override": cache_dir}, hour)
-        con = duckdb.connect()
+        Deliberately populates MORE THAN ONE field for this single request:
+        the C1 bug (final whole-branch review) is summing partial_rows
+        across every field, which is invisible with only one field merged
+        (1 row summed == 1 row read from __total__ either way) and only
+        shows up once more than one field is populated (pre-fix, this
+        single request would be counted twice — once per field).
+
+        Writes the fixture row into the hourly-partition directory (like
+        ``merge_partial_hour``'s own real inputs) with an event timestamp of
+        exactly ``active_start`` (always safely before ``watermark_instant``
+        for any watermark after the hour begins) and pins the file's mtime
+        to ``watermark_instant`` via ``os.utime`` so the writer's own
+        watermark computation (``max(mtime of new_files)``) is deterministic
+        for the test — mirroring how a real file's mtime is just a
+        filesystem timestamp, independent of the row content the C1 fix
+        cares about getting right.
+        """
+        import os
+
+        from backend.core.rollups import partial_hour as ph
+
+        hour = active_start.strftime("%Y-%m-%d-%H")
+        hourly_dir = Path(cache_dir) / "data" / f"timestamp_hour={hour}"
+        hourly_dir.mkdir(parents=True, exist_ok=True)
+        out_path = hourly_dir / "batch1.parquet"
+        cols_sql = ", ".join(f"{f} VARCHAR" for f in fields)
+        placeholders = ", ".join("?" for _ in fields)
+        con = duckdb.connect(":memory:")
         try:
+            con.execute("SET TimeZone='UTC';")
+            con.execute(f"CREATE TABLE t (timestamp TIMESTAMP, {cols_sql})")
             con.execute(
-                f"COPY (SELECT * FROM (VALUES ('requests', '', {count})) "
-                f"AS t(field, value, count)) TO '{path}' (FORMAT PARQUET)"
+                f"INSERT INTO t VALUES (?, {placeholders})",
+                [active_start, *[f"{f}-value" for f in fields]],
             )
+            con.execute(f"COPY t TO '{out_path}' (FORMAT PARQUET)")
         finally:
             con.close()
+        ts = watermark_instant.timestamp()
+        os.utime(out_path, (ts, ts))
+
+        stats = ph.merge_partial_hour(service_id, {"_cache_dir_override": cache_dir}, list(fields))
+        assert stats["new_files"] == 1
 
     def _write_buffer_rows(self, cache_dir: str, *timestamps: datetime) -> None:
         buffer_dir = Path(cache_dir) / "buffer"
@@ -340,24 +386,20 @@ class TestPartialHourMergeIntoRollupReaders:
     def test_time_series_merges_partial_hour_without_double_counting(self, rollup_layout):
         bundled, per_field, cache_dir = rollup_layout
         active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
 
         # One closed hour before the active hour.
         closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
         _write_bundle(bundled, closed_hs, total_requests=600)
         _write_per_field_marker(per_field, "requests", closed_hs)
 
-        # Buffer holds two active-hour rows: one BEFORE the partial rollup's
-        # watermark (already folded into the partial rollup — must NOT be
-        # re-counted by the live direct read) and one AFTER it (not yet
-        # folded — must be picked up live).
+        # The real writer folds in one row at active_start (always before
+        # the watermark below) — this is the "already merged" row. A
+        # second, separate buffer row lands AFTER the watermark and must be
+        # picked up by the narrowed live scan instead.
         watermark_instant = active_start + timedelta(minutes=10)
-        already_merged_row = active_start + timedelta(minutes=5)
         not_yet_merged_row = active_start + timedelta(minutes=20)
-        self._write_buffer_rows(cache_dir, already_merged_row, not_yet_merged_row)
-
-        # Partial rollup already folded in the one row before the watermark.
-        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
+        self._write_buffer_rows(cache_dir, not_yet_merged_row)
 
         runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
         rows = runner.try_time_series_from_rollup(
@@ -387,17 +429,15 @@ class TestPartialHourMergeIntoRollupReaders:
     def test_count_merges_partial_hour_without_double_counting(self, rollup_layout):
         bundled, per_field, cache_dir = rollup_layout
         active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
 
         closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
         _write_bundle(bundled, closed_hs, total_requests=600)
         _write_per_field_marker(per_field, "requests", closed_hs)
 
         watermark_instant = active_start + timedelta(minutes=10)
-        already_merged_row = active_start + timedelta(minutes=5)
         not_yet_merged_row = active_start + timedelta(minutes=20)
-        self._write_buffer_rows(cache_dir, already_merged_row, not_yet_merged_row)
-        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
+        self._write_buffer_rows(cache_dir, not_yet_merged_row)
 
         runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
         total = runner.try_count_from_rollup(
@@ -428,7 +468,6 @@ class TestPartialHourMergeIntoRollupReaders:
         """
         bundled, per_field, cache_dir = rollup_layout
         active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_hour_str = active_start.strftime("%Y-%m-%d-%H")
 
         closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
         _write_bundle(bundled, closed_hs, total_requests=600)
@@ -438,7 +477,7 @@ class TestPartialHourMergeIntoRollupReaders:
         # steady-state case) — this alone must NOT narrow live_start for a
         # metric with no compensating merge.
         watermark_instant = active_start + timedelta(minutes=10)
-        self._write_partial_hour(cache_dir, active_hour_str, watermark_epoch=watermark_instant.timestamp(), count=1)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
 
         before_watermark_row = active_start + timedelta(minutes=5)  # status 500 -> counts as 5xx
         after_watermark_row = active_start + timedelta(minutes=20)  # status 200 -> does not

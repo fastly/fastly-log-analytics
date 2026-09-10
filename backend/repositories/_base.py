@@ -53,6 +53,13 @@ _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 _MISSING_HOUR_HEAL_CAP = 48
 _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
 
+# Clock-skew margin (seconds) for `_create_active_hour_temp_direct`'s buffer
+# mtime pruning: a file finalized before `live_start - margin` cannot hold
+# rows >= live_start. NOT reused for `_partial_hour_adjusted_live_start`'s
+# watermark narrowing (I2, final whole-branch review) — see that method's
+# docstring for why subtracting a margin there is unsafe for this writer.
+_MTIME_SKEW_MARGIN_S = 300
+
 # Fields excluded from the LIVE active-hour top-up in execute_top_n_rollups.
 # The live merge tops up each field's rollup top-N with the current (not-yet-
 # rolled-up) hour, computed at query time. That cost is dominated by per-field
@@ -325,6 +332,47 @@ def _find_missing_bundle_hours(
             missing.append(hour_str)
         cursor += timedelta(hours=1)
     return missing
+
+
+# I5 (final whole-branch review) investigated: execute_top_n_rollups's own
+# missing-hour walk additionally excludes day-compacted days and consults
+# per-field markers, while this function only checks bundle_filename
+# presence. In principle that's a source of disagreement between the two
+# readers — in practice, for this function's only current caller
+# (TIME_SERIES_BUNDLE_FILENAME), it is not: (1) time_series.parquet has NO
+# day-compacted counterpart (it is never in a `compact_closed_days` jobs
+# list), so a day-compaction exclusion check would never find anything to
+# exclude here; (2) hour_bundled/*/time_series.parquet files are never
+# deleted or swept (unlike the per-field `rollups/hour` tree
+# execute_top_n_rollups's walk reads, which IS cleaned up post-bundling) —
+# so "missing" here always means a genuine gap, not a compacted-away
+# source. If this function is ever reused for a bundle_filename that DOES
+# have a day-compacted form, this reasoning must be re-checked.
+
+
+def _count_expected_closed_hours(st, et, active_hour_str: str) -> int:
+    """Pure-arithmetic count of closed hourly buckets in ``[st, et)`` before
+    ``active_hour_str`` — mirrors ``collect_hourly_bundle_paths``'s own
+    hour-stepping walk with zero disk I/O, so its result can be diffed
+    against ``len(rollup_paths)`` to detect a writer-coverage gap that walk
+    silently skipped (no bundle file, no per-field marker) which ALSO falls
+    outside ``_find_missing_bundle_hours``'s heal cap — see C2 (final
+    whole-branch review, part 2): without this check, a genuine gap older
+    than the cap is neither served, nor healed, nor surfaced — the caller
+    would silently serve a truncated window instead of falling back to a
+    raw scan.
+    """
+    from datetime import timedelta
+
+    cursor = st.replace(minute=0, second=0, microsecond=0)
+    count = 0
+    while cursor < et:
+        hour_str = cursor.strftime("%Y-%m-%d-%H")
+        if hour_str >= active_hour_str:
+            break
+        count += 1
+        cursor += timedelta(hours=1)
+    return count
 
 
 def _compact_sql_for_debug(sql: str) -> str:
@@ -1103,7 +1151,7 @@ class QueryRunner:
         # measured via live_active_hour:temp_create). The margin absorbs
         # edge-vs-VM clock skew; correctness only needs "no file whose
         # rows could reach live_start is dropped".
-        mtime_floor = (live_start - _timedelta(seconds=300)).timestamp()
+        mtime_floor = (live_start - _timedelta(seconds=_MTIME_SKEW_MARGIN_S)).timestamp()
 
         # TOMBSTONED buffer parquets MUST be excluded: their rows were
         # already committed into the hourly partitions this read also
@@ -1230,29 +1278,85 @@ class QueryRunner:
             self._shared_active_temps.append((projected_set, live_start, live_end, temp_name))
         return temp_name
 
-    def _partial_hour_adjusted_live_start(self, naive_live_start, active_hour_token: str):
-        """Returns ``(adjusted_live_start, partial_rows)`` for the active-hour
-        live-scan callers: if a partial-hour rollup exists for
-        ``active_hour_token``, narrow the live scan to start at its
-        watermark instead of ``naive_live_start`` and hand back its
-        pre-aggregated ``(field, value, count)`` rows to merge in. If no
-        partial rollup exists yet (cold start, or the merge job hasn't
-        ticked since the hour began), returns the unmodified
-        ``naive_live_start`` and an empty row list — today's behavior."""
+    def _partial_hour_adjusted_live_start(self, naive_live_start, active_hour_token: str, window_end):
+        """Returns ``(adjusted_live_start, partial_rows, partial_total)`` for
+        the active-hour live-scan callers: if a partial-hour rollup exists
+        for ``active_hour_token`` AND the caller's own window
+        (``naive_live_start``..``window_end``) covers it exactly, narrow the
+        live scan to start at its watermark instead of ``naive_live_start``
+        and hand back its pre-aggregated
+        ``(field, value, count)`` rows plus the real request total (read
+        from the writer's synthetic ``__total__`` row — never derive a
+        total by summing ``partial_rows``, see C1 in the final whole-branch
+        review: that counts every request once PER POPULATED FIELD). If no
+        partial rollup exists yet, or the caller's window doesn't cover the
+        partial rollup's span, returns the unmodified ``naive_live_start``,
+        an empty row list, and a zero total — today's (pre-partial-hour)
+        behavior.
+
+        I1 (final whole-branch review): the partial rollup always
+        represents the WHOLE ``[hour_start, watermark)`` span — it has no
+        notion of a caller's own sub-hour window. Using it is only safe
+        when the caller's actual window starts at/before the active hour's
+        start AND ends at/after the watermark; otherwise the caller falls
+        back to its live-scan-only path (already correct for a custom
+        range that doesn't align with the partial rollup's span).
+
+        I2 (final whole-branch review) — investigated, NOT fixed by
+        subtracting a margin from the narrowing boundary; see the long
+        comment below for why that literal reading of the finding is
+        unsafe for this writer, and what's done instead.
+        """
         from datetime import UTC, datetime
 
         from backend.core.rollups.partial_hour import (
             read_partial_hour_all_fields,
+            read_partial_hour_total,
             read_partial_hour_watermark,
         )
 
         watermark = read_partial_hour_watermark(self.src, active_hour_token)
         if watermark <= 0.0:
-            return naive_live_start, []
+            return naive_live_start, [], 0
+
         watermark_dt = datetime.fromtimestamp(watermark, tz=UTC)
+        active_hour_dt = datetime.strptime(active_hour_token, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+
+        if naive_live_start > active_hour_dt or window_end < watermark_dt:
+            return naive_live_start, [], 0
+
+        # I2 investigation (final whole-branch review): the finding's
+        # literal suggestion — narrow to `watermark - skew margin` instead
+        # of `watermark` exactly, so the live scan re-covers a "small
+        # trailing slice" the partial rollup nominally already includes —
+        # is UNSAFE for this writer and was deliberately NOT implemented.
+        # merge_partial_hour aggregates a processed file's ENTIRE row set
+        # via COUNT(*)/GROUP BY, not gated by each row's event timestamp
+        # relative to the file's own mtime; a file can legitimately contain
+        # rows spanning several minutes up to its close time (these are
+        # ingest-pipeline batch files, not one-row-per-flush). Subtracting
+        # even a few minutes from the narrowing boundary would re-scan (and
+        # double-count) real rows from whichever file(s) set the current
+        # watermark, essentially every time a partial rollup exists — not
+        # a rare edge case, since the writer processes a new batch on most
+        # 30s ticks. The invariant that DOES hold, and that this function
+        # already relies on unchanged from before this review: no row in
+        # any PROCESSED file can have an event timestamp after that file's
+        # own mtime, so narrowing to the raw (unmodified) watermark_dt can
+        # never double-count an already-processed row. The actual gap I2
+        # describes — a delivery-lagged row that lands in a file whose
+        # mtime is fresh enough to be "new" next tick but isn't processed
+        # yet THIS tick — is real but already self-heals within one tick
+        # (<=30s at this cadence): the next merge_partial_hour call picks
+        # up that file (via COUNT(*), regardless of its rows' individual
+        # timestamps) and folds it into both the persisted total and the
+        # advanced watermark atomically. That bound matches the feature's
+        # own designed latency floor and needs no additional narrowing
+        # margin to be correct.
         adjusted = max(naive_live_start, watermark_dt)
-        partial_rows = read_partial_hour_all_fields(self.src, active_hour_token)
-        return adjusted, partial_rows
+        partial_rows = read_partial_hour_all_fields(self.src, active_hour_token, con=self.con)
+        partial_total = read_partial_hour_total(self.src, active_hour_token, con=self.con)
+        return adjusted, partial_rows, partial_total
 
     @contextlib.contextmanager
     def temp_table(
@@ -1812,7 +1916,9 @@ class QueryRunner:
                         if f not in custom_fields:
                             continue
                     live_topn_fields.append(f)
-                live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_str)
+                live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
+                    live_start, active_str, live_end
+                )
                 # live_where was built above from the un-narrowed live_start;
                 # rebuild it here so the create_filtered_temp_table fallback
                 # (used when the direct-read path below returns None) scans
@@ -2278,6 +2384,18 @@ class QueryRunner:
         # above, sidestepping bound-parameter bookkeeping across UNION ALL
         # branches since none of this SQL needs them.
         missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        # C2 (final whole-branch review, part 2): _find_missing_bundle_hours
+        # is capped (default 48h) — a genuine writer-coverage gap OLDER than
+        # the cap would otherwise be silently un-served (collect_hourly_
+        # bundle_paths skipped it with no marker present) AND un-healed
+        # (outside the cap), producing a truncated-but-served window instead
+        # of the correct-but-slower raw-scan fallback. Comparing the full
+        # expected hour count against what rollup_paths actually covered
+        # detects that case with zero extra disk I/O (rollup_paths already
+        # walked the full window above).
+        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
+        if expected_closed_hours - len(rollup_paths) > len(missing_hours):
+            return None
         if missing_hours:
             from backend.core.rollups import _safe_table_for
 
@@ -2318,11 +2436,13 @@ class QueryRunner:
             # narrowed live branch would skip it too. So non-"requests"
             # metrics keep scanning their full original live range,
             # unchanged from before partial-hour support existed.
-            if chart_metric == "requests":
-                live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
-            else:
-                partial_rows = []
             live_end = et
+            if chart_metric == "requests":
+                live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
+                    live_start, active_hour_str, live_end
+                )
+            else:
+                partial_total = 0
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
 
@@ -2366,20 +2486,19 @@ class QueryRunner:
                 f"GROUP BY 1"
             )
 
-            if partial_rows:
-                # partial_rows is only ever non-empty when chart_metric ==
+            if partial_total:
+                # partial_total is only ever non-zero when chart_metric ==
                 # "requests" (see the narrowing gate above) — every other
                 # metric's num/den semantics aren't derivable from
-                # partial_rows' plain (field, value, count) shape, so this
-                # is just every partial_rows row summed, matching
-                # `parts['num_rollup']`'s COUNT(*) semantics for "requests".
-                partial_total = sum(c for _, _, c in partial_rows)
-                if partial_total:
-                    partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
-                    select_clauses.append(
-                        f"SELECT TIMESTAMPTZ '{partial_bucket_tz}' AS out_bucket, "
-                        f"       {partial_total} AS num, {partial_total} AS den"
-                    )
+                # partial_rows' plain (field, value, count) shape. Read
+                # from the writer's synthetic __total__ row (C1, final
+                # whole-branch review) — summing partial_rows itself would
+                # count each request once per populated field.
+                partial_bucket_tz = active_hour_dt.astimezone(UTC).isoformat()
+                select_clauses.append(
+                    f"SELECT TIMESTAMPTZ '{partial_bucket_tz}' AS out_bucket, "
+                    f"       {partial_total} AS num, {partial_total} AS den"
+                )
 
         if not select_clauses:
             return []
@@ -2495,6 +2614,12 @@ class QueryRunner:
         # comment — a CLOSED hour with no time_series bundle is a
         # writer-coverage gap, not zero traffic.
         missing_hours = _find_missing_bundle_hours(st, et, bundled_root, TIME_SERIES_BUNDLE_FILENAME)
+        # C2 (final whole-branch review, part 2): see try_time_series_from_
+        # rollup's sibling comment — refuse rather than silently serve a
+        # window with a genuine gap older than the heal cap.
+        expected_closed_hours = _count_expected_closed_hours(st, et, active_hour_str)
+        if expected_closed_hours - len(rollup_paths) > len(missing_hours):
+            return None
         if missing_hours:
             from backend.core.rollups import _safe_table_for
 
@@ -2516,8 +2641,10 @@ class QueryRunner:
         live_needs_params = False
         if crosses_active:
             live_start = max(st, active_hour_dt)
-            live_start, partial_rows = self._partial_hour_adjusted_live_start(live_start, active_hour_str)
             live_end = et
+            live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
+                live_start, active_hour_str, live_end
+            )
             live_st_tz = live_start.astimezone(UTC).isoformat()
             live_et_tz = live_end.astimezone(UTC).isoformat()
 
@@ -2540,8 +2667,11 @@ class QueryRunner:
                 f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
             )
 
-            if partial_rows:
-                select_clauses.append(f"SELECT {sum(c for _, _, c in partial_rows)} AS num")
+            if partial_total:
+                # Read from the writer's synthetic __total__ row (C1, final
+                # whole-branch review) — summing partial_rows itself would
+                # count each request once per populated field.
+                select_clauses.append(f"SELECT {partial_total} AS num")
 
         if not select_clauses:
             return 0

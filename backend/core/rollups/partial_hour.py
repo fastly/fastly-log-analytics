@@ -27,8 +27,12 @@ import shutil
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from ._common import TOP_K, _build_copy_query, _is_safe_ident, parse_hour_token
+
+if TYPE_CHECKING:
+    import duckdb
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +78,53 @@ def _write_partial_hour_watermark(source: dict, hour: str, value: float) -> None
     os.replace(tmp, path)
 
 
-def read_partial_hour_all_fields(source: dict, hour: str) -> list[tuple[str, str, int]]:
+# Synthetic field name for the whole-merge row count written alongside the
+# real per-field rows in all_fields.parquet. NOT subject to the per-field
+# TOP_K truncation (only ever one row) and NOT included when a caller sums
+# per-field rows — summing partial_rows across every real field double/
+# triple/N-counts each request once per populated field (see C1, final
+# whole-branch review); this row is the only correct source for a total.
+TOTAL_FIELD = "__total__"
+
+
+def read_partial_hour_all_fields(
+    source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None
+) -> list[tuple[str, str, int]]:
     path = _all_fields_path(source, hour)
     if not os.path.isfile(path):
         return []
+    sql = f"SELECT field, value, count FROM read_parquet('{path}') WHERE field != '{TOTAL_FIELD}'"
+    if con is not None:
+        rows = con.execute(sql).fetchall()
+        return [(r[0], r[1], int(r[2])) for r in rows]
     import duckdb
 
-    con = duckdb.connect(":memory:")
+    tmp_con = duckdb.connect(":memory:")
     try:
-        rows = con.execute(f"SELECT field, value, count FROM read_parquet('{path}')").fetchall()
+        rows = tmp_con.execute(sql).fetchall()
         return [(r[0], r[1], int(r[2])) for r in rows]
     finally:
-        con.close()
+        tmp_con.close()
+
+
+def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
+    """Return the whole-merge request count for ``hour`` (0 if no partial
+    rollup exists yet, or if it somehow has no ``__total__`` row)."""
+    path = _all_fields_path(source, hour)
+    if not os.path.isfile(path):
+        return 0
+    sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' LIMIT 1"
+    if con is not None:
+        row = con.execute(sql).fetchone()
+        return int(row[0]) if row else 0
+    import duckdb
+
+    tmp_con = duckdb.connect(":memory:")
+    try:
+        row = tmp_con.execute(sql).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        tmp_con.close()
 
 
 def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[str]:
@@ -197,6 +236,18 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
         per_field_selects = [_build_copy_query(table_ident, f, where_sql) for f in safe_fields]
         increment_sql = " UNION ALL ".join(f"({s})" for s in per_field_selects)
 
+        # C1 (final whole-branch review): a plain COUNT(*) over this tick's
+        # new rows, tagged as a synthetic field/value pair that never
+        # collides with a real field name (see TOTAL_FIELD). Readers that
+        # want the true request total must read THIS row, not sum every
+        # per-field row — summing per-field rows counts each request once
+        # PER POPULATED FIELD. Deliberately NOT run through
+        # _build_copy_query: a single aggregate row never needs the
+        # per-value TOP_K/ROW_NUMBER truncation that helper applies.
+        total_select = (
+            f"SELECT '{TOTAL_FIELD}' AS field, '' AS value, COUNT(*) AS count FROM {table_ident} WHERE {where_sql}"
+        )
+
         # Fold the already-persisted rollup straight in via read_parquet,
         # same as new_files above — avoids round-tripping through Python
         # tuples and hand-escaped SQL literals when the file itself is
@@ -213,7 +264,7 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
                 SELECT field, value, SUM(count) AS count,
                        ROW_NUMBER() OVER (PARTITION BY field ORDER BY SUM(count) DESC) AS rn
                 FROM (
-                    SELECT field, value, count FROM ({increment_sql}){existing_sql}
+                    SELECT field, value, count FROM ({increment_sql}){existing_sql} UNION ALL ({total_select})
                 )
                 GROUP BY field, value
             ) WHERE rn <= {TOP_K}

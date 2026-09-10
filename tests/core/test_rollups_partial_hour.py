@@ -28,6 +28,11 @@ def test_all_fields_defaults_to_empty(tmp_path):
     assert ph.read_partial_hour_all_fields(src, "2026-09-09-14") == []
 
 
+def test_total_defaults_to_zero(tmp_path):
+    src = _make_source(tmp_path)
+    assert ph.read_partial_hour_total(src, "2026-09-09-14") == 0
+
+
 def _write_hourly_parquet(path, rows):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = duckdb.connect(":memory:")
@@ -44,6 +49,116 @@ def _write_hourly_parquet(path, rows):
         con.execute(f"COPY t TO '{path}' (FORMAT PARQUET)")
     finally:
         con.close()
+
+
+def _write_multi_field_hourly_parquet(path, rows):
+    """rows: list of (timestamp, country, method) tuples."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute("CREATE TABLE t (timestamp TIMESTAMP, country VARCHAR, method VARCHAR)")
+        con.executemany("INSERT INTO t VALUES (?, ?, ?)", rows)
+        con.execute(f"COPY t TO '{path}' (FORMAT PARQUET)")
+    finally:
+        con.close()
+
+
+def test_merge_partial_hour_writes_a_total_row_not_per_field_summable(tmp_path):
+    """C1 (final whole-branch review, empirically verified): summing
+    read_partial_hour_all_fields's rows across every populated field counts
+    each request once PER POPULATED FIELD, not once. merge_partial_hour must
+    write a separate, correct total that survives this trap."""
+    src = _make_source(tmp_path)
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    cache_dir = str(tmp_path / "svc-a")
+    hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
+
+    now = datetime.now(UTC)
+    # 3 requests, each with BOTH country and method populated.
+    _write_multi_field_hourly_parquet(
+        os.path.join(hourly_dir, "batch1.parquet"),
+        [(now, "US", "GET"), (now, "US", "POST"), (now, "CA", "GET")],
+    )
+
+    stats = ph.merge_partial_hour("svc-a", src, ["country", "method"])
+    assert stats["new_files"] == 1
+
+    # The trap: summing per-field rows gives 3 (country) + 3 (method) = 6,
+    # double the real request count.
+    per_field_rows = ph.read_partial_hour_all_fields(src, active_hour)
+    assert sum(c for _, _, c in per_field_rows) == 6, (
+        "sanity check: summing per-field rows should reproduce the trap this test guards against"
+    )
+
+    # The real total, read correctly, is 3 — not subject to per-field
+    # summation, and not one of the rows read_partial_hour_all_fields
+    # returns (it must not leak the synthetic __total__ field into the
+    # per-field result either).
+    assert ph.read_partial_hour_total(src, active_hour) == 3
+    assert all(field != ph.TOTAL_FIELD for field, _, _ in per_field_rows)
+
+
+def test_read_partial_hour_functions_reuse_caller_connection(tmp_path, monkeypatch):
+    """I3 (final whole-branch review): read_partial_hour_all_fields /
+    read_partial_hour_total must reuse the caller's DuckDB connection when
+    given one, instead of opening a fresh ``:memory:`` connection per call
+    (measured ~16ms overhead per call, paid 3x per dashboard request on the
+    hot path this whole feature exists to speed up)."""
+    src = _make_source(tmp_path)
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    cache_dir = str(tmp_path / "svc-a")
+    hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
+    now = datetime.now(UTC)
+    _write_hourly_parquet(os.path.join(hourly_dir, "batch1.parquet"), [(now, "US"), (now, "CA")])
+    ph.merge_partial_hour("svc-a", src, ["country"])
+
+    real_connect = duckdb.connect
+    connect_calls = []
+
+    def _tracking_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    caller_con = duckdb.connect(":memory:")
+    # Patch the shared `duckdb` module's `connect` AFTER opening the
+    # caller's own connection (so that call isn't itself counted), then any
+    # `import duckdb; duckdb.connect(...)` inside partial_hour.py's fallback
+    # branch — which must NOT run when `con` is supplied — would show up
+    # here too.
+    monkeypatch.setattr(duckdb, "connect", _tracking_connect)
+    try:
+        rows = ph.read_partial_hour_all_fields(src, active_hour, con=caller_con)
+        total = ph.read_partial_hour_total(src, active_hour, con=caller_con)
+    finally:
+        caller_con.close()
+
+    assert dict((v, c) for _, v, c in rows) == {"US": 1, "CA": 1}
+    assert total == 2
+    assert connect_calls == [], (
+        f"expected no fresh duckdb.connect() calls when a connection is supplied, got {connect_calls}"
+    )
+
+
+def test_merge_partial_hour_total_accumulates_across_ticks(tmp_path):
+    src = _make_source(tmp_path)
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    cache_dir = str(tmp_path / "svc-a")
+    hourly_dir = os.path.join(cache_dir, "data", f"timestamp_hour={active_hour}")
+    now = datetime.now(UTC)
+
+    _write_hourly_parquet(os.path.join(hourly_dir, "batch1.parquet"), [(now, "US"), (now, "CA")])
+    ph.merge_partial_hour("svc-a", src, ["country"])
+    assert ph.read_partial_hour_total(src, active_hour) == 2
+
+    time.sleep(0.05)
+    _write_hourly_parquet(os.path.join(hourly_dir, "batch2.parquet"), [(now, "US")])
+    ph.merge_partial_hour("svc-a", src, ["country"])
+    assert ph.read_partial_hour_total(src, active_hour) == 3
+
+    # No-op tick leaves the total unchanged.
+    ph.merge_partial_hour("svc-a", src, ["country"])
+    assert ph.read_partial_hour_total(src, active_hour) == 3
 
 
 def test_merge_partial_hour_is_incremental_and_idempotent(tmp_path):
