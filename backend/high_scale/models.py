@@ -62,14 +62,21 @@ def recommend_retention(
     row_width_bytes: int,
     disk_bytes: int,
     reserve_fraction: float = 0.20,
+    rum_rate: int = 0,
+    enabled_field_count: int = 1,
+    bytes_per_enabled_field: int = 0,
 ) -> RetentionRecommendation:
-    if service_rate <= 0 or row_width_bytes <= 0 or disk_bytes <= 0:
+    if service_rate <= 0 or row_width_bytes <= 0 or disk_bytes <= 0 or rum_rate < 0:
         raise ValueError("service rate, row width, and disk capacity must be positive")
+    if enabled_field_count <= 0 or bytes_per_enabled_field < 0:
+        raise ValueError("enabled field sizing values are invalid")
     if not 0 < reserve_fraction < 1:
         raise ValueError("reserve_fraction must be between 0 and 1")
     protected = int(disk_bytes * reserve_fraction)
     available = disk_bytes - protected
-    bytes_per_second = service_rate * row_width_bytes
+    total_rate = service_rate + rum_rate
+    effective_row_width = row_width_bytes + enabled_field_count * bytes_per_enabled_field
+    bytes_per_second = total_rate * effective_row_width
     hot_seconds = min(86_400, max(3_600, available // max(bytes_per_second * 4, 1)))
     warm_seconds = min(60 * 86_400, max(hot_seconds, available // max(bytes_per_second, 1)))
     return RetentionRecommendation(
