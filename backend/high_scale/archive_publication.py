@@ -20,6 +20,8 @@ class ObjectStore(Protocol):
 
     def exists(self, key: str) -> bool: ...
 
+    def delete(self, key: str) -> None: ...
+
 
 class PublicationState(StrEnum):
     ARTIFACT_VERIFIED = "artifact_verified"
@@ -51,6 +53,9 @@ class InMemoryObjectStore:
     def exists(self, key: str) -> bool:
         return key in self._objects
 
+    def delete(self, key: str) -> None:
+        self._objects.pop(key, None)
+
 
 class S3ObjectStore:
     """S3-compatible object store adapter for FOS and local S3 emulators."""
@@ -77,6 +82,9 @@ class S3ObjectStore:
                 return False
             raise
         return True
+
+    def delete(self, key: str) -> None:
+        self._client.delete_object(Bucket=self._bucket, Key=self._key(key))
 
     def _key(self, key: str) -> str:
         normalized = key.strip("/")
