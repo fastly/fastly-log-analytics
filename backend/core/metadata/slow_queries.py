@@ -30,13 +30,13 @@ _INSERT_SQL = """
         attr_cron_job, attr_cron_run_id, attr_pool_slot,
         error_type, error_message, peak_memory_mb
     ) VALUES (
-        :query_id, :db_type, :service_id, :started_at_utc, :ended_at_utc,
-        :duration_ms, :outcome, :sql_preview, :sql_full, :sql_len,
-        :attr_kind, :attr_label, :attr_principal_id,
-        :attr_caller_qualname, :attr_caller_file,
-        :attr_request_path, :attr_request_id,
-        :attr_cron_job, :attr_cron_run_id, :attr_pool_slot,
-        :error_type, :error_message, :peak_memory_mb
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        ?, ?,
+        ?, ?, ?,
+        ?, ?, ?
     )
 """
 
@@ -77,6 +77,34 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _insert_params(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row["query_id"],
+        row["db_type"],
+        row["service_id"],
+        row["started_at_utc"],
+        row["ended_at_utc"],
+        row["duration_ms"],
+        row["outcome"],
+        row["sql_preview"],
+        row["sql_full"],
+        row["sql_len"],
+        row["attr_kind"],
+        row["attr_label"],
+        row["attr_principal_id"],
+        row["attr_caller_qualname"],
+        row["attr_caller_file"],
+        row["attr_request_path"],
+        row["attr_request_id"],
+        row["attr_cron_job"],
+        row["attr_cron_run_id"],
+        row["attr_pool_slot"],
+        row["error_type"],
+        row["error_message"],
+        row["peak_memory_mb"],
+    )
+
+
 def _schedule_flush() -> None:
     global _flush_timer
     if _flush_timer is not None:
@@ -109,7 +137,7 @@ def _flush_all(*, only_service: str | None = None) -> None:
     for service_id, rows in pending.items():
         try:
             con = get_con(service_id)
-            con.executemany(_INSERT_SQL, rows)
+            con.executemany(_INSERT_SQL, [_insert_params(row) for row in rows])
             con.commit()
         except Exception:
             pass

@@ -62,10 +62,10 @@ def _sample_cron_duration() -> None:
                 con = get_con(service_id)
                 rows = con.execute(
                     """
-                    SELECT task, duration_seconds
+                    SELECT task, duration_s
                     FROM cron_runs
                     WHERE status IN ('success', 'error')
-                      AND duration_seconds IS NOT NULL
+                      AND duration_s IS NOT NULL
                       AND id IN (
                           SELECT max(id) FROM cron_runs
                           WHERE status IN ('success', 'error')
@@ -75,7 +75,7 @@ def _sample_cron_duration() -> None:
                 ).fetchall()
                 for r in rows:
                     task = r["task"]
-                    secs = r["duration_seconds"]
+                    secs = r["duration_s"]
                     if task and secs is not None:
                         _safe_record("cron_duration_ms", float(secs) * 1000.0, service_id=service_id, task=task)
             except Exception as e:
@@ -119,6 +119,33 @@ def _sample_active_queries() -> None:
         _safe_record("active_query_count", float(summary.get("active_total", 0)))
     except Exception as e:
         logger.debug("[metric_snapshot] active_query sample failed: %s", e)
+
+
+def _sample_ducklake_admission() -> None:
+    try:
+        from backend.core.ducklake_admission import get_admission_stats
+
+        for service_id, stats in get_admission_stats().items():
+            acquisitions = stats.get("acquisitions", 0.0)
+            if acquisitions <= 0:
+                continue
+            _safe_record(
+                "ducklake_admission_wait_avg_ms",
+                stats.get("wait_ms_total", 0.0) / acquisitions,
+                service_id=service_id,
+            )
+            _safe_record(
+                "ducklake_admission_hold_avg_ms",
+                stats.get("hold_ms_total", 0.0) / acquisitions,
+                service_id=service_id,
+            )
+            _safe_record(
+                "ducklake_admission_timeouts",
+                stats.get("timeouts", 0.0),
+                service_id=service_id,
+            )
+    except Exception as e:
+        logger.debug("[metric_snapshot] ducklake_admission sample failed: %s", e)
 
 
 def _sample_os_vitals() -> None:
@@ -212,6 +239,7 @@ def _run_metric_snapshot() -> None:
     _sample_cron_duration()
     _sample_ingest_lag()
     _sample_active_queries()
+    _sample_ducklake_admission()
     _sample_os_vitals()
     _sample_celery_queues()
     _sample_celery_workers()

@@ -8,7 +8,19 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.core.ducklake_admission import DuckLakeAdmissionTimeout, ducklake_write_admission
+from backend.core.ducklake_admission import (
+    DuckLakeAdmissionTimeout,
+    _reset_for_tests,
+    ducklake_write_admission,
+    get_admission_stats,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_admission_state():
+    _reset_for_tests()
+    yield
+    _reset_for_tests()
 
 
 def test_local_admission_serializes_same_service():
@@ -33,6 +45,10 @@ def test_local_admission_serializes_same_service():
     release.set()
     worker.join(timeout=2)
     assert order == ["first"]
+    stats = get_admission_stats()["admission-local"]
+    assert stats["acquisitions"] == 1
+    assert stats["timeouts"] == 1
+    assert stats["hold_ms_total"] >= 0
 
 
 def test_different_services_do_not_share_local_admission():
@@ -79,3 +95,14 @@ def test_postgres_admission_takes_and_releases_advisory_lock():
     assert calls[0][0] == "SELECT pg_try_advisory_lock(?)"
     assert calls[1][0] == "SELECT pg_advisory_unlock(?)"
     assert calls[0][1] == calls[1][1]
+
+
+def test_admission_stats_capture_wait_and_hold_time():
+    with ducklake_write_admission("admission-stats"):
+        time.sleep(0.005)
+
+    stats = get_admission_stats()["admission-stats"]
+    assert stats["acquisitions"] == 1
+    assert stats["timeouts"] == 0
+    assert stats["wait_ms_total"] >= 0
+    assert stats["hold_ms_total"] >= 5

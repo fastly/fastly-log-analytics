@@ -59,6 +59,19 @@ def test_failed_observation_does_not_publish_or_discard_last_success(observer_st
     assert "request_metrics.refresh_failed" in caplog.text
 
 
+def test_failed_observation_backs_off_before_retrying(observer_state, monkeypatch):
+    observer, _, _, _ = observer_state
+    refresh = MagicMock(side_effect=RuntimeError("unavailable"))
+    monkeypatch.setattr(module, "refresh_durable_request_metrics", refresh)
+    monkeypatch.setattr(module, "FAILURE_BACKOFF_BASE_S", 10.0)
+
+    observer.reconcile()
+    observer.reconcile()
+
+    assert refresh.call_count == 1
+    assert observer._failure_backoff_s["test-service"] == 20.0
+
+
 def test_concurrent_passes_coalesce_without_overlapping(observer_state, monkeypatch):
     observer, _, _, calls = observer_state
     entered, release = threading.Event(), threading.Event()

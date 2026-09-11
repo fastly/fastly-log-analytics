@@ -22,6 +22,8 @@ class DuckLakeAdmissionTimeout(TimeoutError):
 
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
+_stats: dict[str, dict[str, float]] = {}
+_stats_guard = threading.Lock()
 
 
 def _local_lock(service_id: str) -> threading.RLock:
@@ -33,6 +35,21 @@ def _advisory_key(service_id: str) -> int:
     # PostgreSQL advisory locks take signed BIGINT values.
     value = int.from_bytes(hashlib.sha256(service_id.encode()).digest()[:8], "big", signed=False)
     return value - (1 << 64) if value >= (1 << 63) else value
+
+
+def _record_stat(service_id: str, key: str, value: float = 1.0) -> None:
+    with _stats_guard:
+        bucket = _stats.setdefault(
+            service_id,
+            {"acquisitions": 0.0, "timeouts": 0.0, "wait_ms_total": 0.0, "hold_ms_total": 0.0},
+        )
+        bucket[key] += value
+
+
+def get_admission_stats() -> dict[str, dict[str, float]]:
+    """Return cumulative writer-admission counters for diagnostics."""
+    with _stats_guard:
+        return {service_id: dict(values) for service_id, values in _stats.items()}
 
 
 @contextmanager
@@ -48,13 +65,17 @@ def ducklake_write_admission(
     fencing writers in separate worker processes/pods.
     """
     lock = _local_lock(service_id)
+    wait_started = time.monotonic()
     if not lock.acquire(timeout=max(0.0, timeout_s)):
+        _record_stat(service_id, "timeouts")
         raise DuckLakeAdmissionTimeout(f"DuckLake writer admission timed out for {service_id}")
+    _record_stat(service_id, "wait_ms_total", (time.monotonic() - wait_started) * 1000.0)
 
     pg_con = None
     advisory = False
     deadline = time.monotonic() + max(0.0, timeout_s)
     key = _advisory_key(service_id)
+    hold_started = time.monotonic()
     try:
         from backend.core.metadata.pg_connection import get_pg_thread_connection, is_postgres
 
@@ -67,6 +88,7 @@ def ducklake_write_admission(
                     break
                 time.sleep(_POLL_S)
             if not advisory:
+                _record_stat(service_id, "timeouts")
                 raise DuckLakeAdmissionTimeout(f"DuckLake advisory lock timed out for {service_id}")
         yield
     finally:
@@ -76,8 +98,12 @@ def ducklake_write_admission(
             except Exception:
                 logger.exception("Failed to release DuckLake advisory lock for %s", service_id)
         lock.release()
+        _record_stat(service_id, "acquisitions")
+        _record_stat(service_id, "hold_ms_total", (time.monotonic() - hold_started) * 1000.0)
 
 
 def _reset_for_tests() -> None:
     with _locks_guard:
         _locks.clear()
+    with _stats_guard:
+        _stats.clear()

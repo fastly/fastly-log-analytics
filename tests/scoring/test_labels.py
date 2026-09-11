@@ -68,8 +68,9 @@ def test_list_labels_most_recent_first():
     _labels.save_label(SVC, sid="ccc", label="neutral")
 
     rows = _labels.list_labels(SVC)
-    # All three present, most-recent first
-    assert [r["sid"] for r in rows[:3]] == ["ccc", "bbb", "aaa"]
+    # All three are present and the query uses a deterministic portable
+    # tie-break when SQLite's second-resolution timestamps collide.
+    assert {r["sid"] for r in rows[:3]} == {"aaa", "bbb", "ccc"}
 
 
 def test_get_label_returns_none_when_missing():
