@@ -53,6 +53,7 @@ class AggregateStore:
         self._counts: dict[tuple[str, str], int] = defaultdict(int)
         self._status_counts: dict[str, Counter[str]] = defaultdict(Counter)
         self._top_values: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        self._minute_counts: dict[tuple[str, str], Counter[datetime]] = defaultdict(Counter)
         self._watermarks: dict[tuple[str, str], ServingWatermark] = {}
 
     def apply(self, batch: EventBatch) -> AggregateReceipt:
@@ -66,6 +67,9 @@ class AggregateStore:
         key = (batch.service_id, batch.domain)
         self._counts[key] += len(batch.events)
         for event in batch.events:
+            timestamp = _event_timestamp(event)
+            if timestamp is not None:
+                self._minute_counts[key][timestamp.replace(second=0, microsecond=0)] += 1
             if batch.domain == "request":
                 status = str(event.get("status_code", "unknown"))
                 self._status_counts[batch.service_id][status] += 1
@@ -95,6 +99,9 @@ class AggregateStore:
 
     def status_counts(self, service_id: str) -> dict[str, int]:
         return dict(self._status_counts[service_id])
+
+    def minute_counts(self, service_id: str, domain: str) -> dict[datetime, int]:
+        return dict(self._minute_counts[(service_id, domain)])
 
     def response(self, service_id: str, domain: str, *, now: datetime | None = None) -> AggregateResponse:
         if (service_id, domain) not in self._watermarks:
@@ -127,3 +134,12 @@ def _dimension_for(domain: str) -> str:
         "rum_errors": "error_message",
         "cmcd": "cmcd_session",
     }.get(domain, "")
+
+
+def _event_timestamp(event: dict[str, Any]) -> datetime | None:
+    value = event.get("timestamp")
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    return None

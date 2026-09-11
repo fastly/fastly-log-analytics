@@ -43,3 +43,14 @@ def test_response_exposes_watermark_and_freshness_metadata() -> None:
     assert response.coverage == 1.0
     assert response.freshness_lag_seconds == 60
     assert response.watermark.last_visible_event_id == "1"
+
+
+def test_minute_counts_are_separate_for_each_domain() -> None:
+    store = AggregateStore()
+    timestamp = "2026-09-01T00:01:42Z"
+    store.apply(batch("request", "request", [{"event_id": "1", "timestamp": timestamp}]))
+    store.apply(batch("rum", "rum_vitals", [{"event_id": "r1", "timestamp": timestamp}]))
+
+    minute = datetime(2026, 9, 1, 0, 1, tzinfo=UTC)
+    assert store.minute_counts("svc", "request") == {minute: 1}
+    assert store.minute_counts("svc", "rum_vitals") == {minute: 1}
