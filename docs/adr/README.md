@@ -24,5 +24,6 @@ Each ADR captures one significant design decision — the context, the choice, a
 | [ADR-18](18-serving-tier-single-pod.md) | The Serving Tier Is Single-Pod | **Proposed, known gap** — ingest scales horizontally but the backend does not: `.duckdb` process lock, pod-local parquet under shared bookkeeping, cross-pod lease on pod-local jobs |
 | [ADR-19](19-fos-native-v3-topology.md) | FOS-native v3 Topology | **Accepted for v3.0 design** — Formalizes the 4 explicit planes (landing, ingest, durable catalog, serving) and FOS as the source of truth |
 | [ADR-20](20-clickhouse-serving-plane.md) | Reject This ClickHouse Dashboard Serving Prototype | **Decided** — measured latency/saturation gates failed; DuckLake-only dashboard routing, bounded diagnostic index/replay tooling retained; Kubernetes gate not passed |
+| [ADR-21](21-high-scale-serving-architecture.md) | High-Scale Ownership and Recovery Gate | **Phase 0 accepted** — executable ownership, archive, migration, and recovery contracts; runtime mode not enabled |
 
 For the broader system overview see [../ARCHITECTURE.md](../ARCHITECTURE.md); for implementation patterns and known traps see [../../AGENTS.md](../../AGENTS.md).
