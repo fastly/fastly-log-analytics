@@ -25,10 +25,14 @@ def _sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _event_digest(events: list[dict[str, Any]]) -> str:
+def event_digest(events: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
+    keys = set().union(*(event.keys() for event in events))
     digest = hashlib.sha256()
     for event in events:
-        digest.update((json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode())
+        canonical = {key: event.get(key) for key in keys}
+        digest.update(
+            (json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        )
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -60,14 +64,16 @@ def write_archive_checkpoint(
 
     output_root = Path(root)
     output_root.mkdir(parents=True, exist_ok=True)
-    event_digest = _event_digest(events)
+    keys = set().union(*(event.keys() for event in events))
+    canonical_events = [{key: event.get(key) for key in keys} for event in events]
+    artifact_digest = event_digest(canonical_events)
     source_token = hashlib.sha256(f"{source.object_key}:{source.checksum}".encode()).hexdigest()[:16]
     artifact_name = f"{service_id}-{domain}-{source_token}.parquet"
     artifact_path = output_root / artifact_name
     with tempfile.NamedTemporaryFile(dir=output_root, suffix=".parquet", delete=False) as temp:
         temp_path = Path(temp.name)
     try:
-        table = pa.Table.from_pylist(events)
+        table = pa.Table.from_pylist(canonical_events)
         pq.write_table(table, temp_path)
         os.replace(temp_path, artifact_path)
     finally:
@@ -79,8 +85,10 @@ def write_archive_checkpoint(
         checksum=artifact_checksum,
         size_bytes=artifact_path.stat().st_size,
         row_count=len(events),
-        byte_count=sum(len(json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode()) for event in events),
-        canonical_digest=event_digest,
+        byte_count=sum(
+            len(json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode()) for event in canonical_events
+        ),
+        canonical_digest=artifact_digest,
         schema_version=schema_version,
         transform_version=transform_version,
     )

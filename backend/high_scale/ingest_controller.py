@@ -102,6 +102,17 @@ class HighScaleIngestController:
         )
         if not decoded.events:
             raise ValueError("source object contains no accepted records")
+        archive_rows = [dict(event, _record_kind="event") for event in decoded.events]
+        archive_rows.extend(
+            {
+                "_record_kind": "dead_letter",
+                "source_object_key": item.source_object_key,
+                "line_ordinal": item.line_ordinal,
+                "raw_line_base64": item.raw_line_base64,
+                "reason": item.reason,
+            }
+            for item in decoded.dead_letters
+        )
 
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
@@ -110,7 +121,7 @@ class HighScaleIngestController:
                 service_id=service_id,
                 domain=domain,
                 source=archive_source,
-                events=list(decoded.events),
+                events=archive_rows,
                 archive_epoch=self._archive_epoch,
                 schema_version=self._schema_version,
                 transform_version=self._transform_version,

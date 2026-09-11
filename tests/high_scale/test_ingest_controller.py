@@ -1,6 +1,8 @@
 import gzip
 from datetime import UTC, datetime, timedelta
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
@@ -13,6 +15,7 @@ from backend.high_scale.publication import (
     InMemoryBatchManifestStore,
     InsertReceipt,
 )
+from backend.high_scale.replay import replay_manifest
 
 
 class _ClickHouse:
@@ -57,6 +60,11 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
     assert objects.exists(f"archive/manifests/{result.manifest.manifest_id}.commit")
     assert ledger.count() == 1
     assert clickhouse.batches[0].rows[0]["event_id"]
+    archived_rows = pq.read_table(
+        pa.BufferReader(ArchivePublication(objects).read_artifact(result.manifest))
+    ).to_pylist()
+    assert len(archived_rows) == 2
+    assert any(row.get("_record_kind") == "dead_letter" for row in archived_rows)
 
     replay = controller.ingest(
         service_id="svc",
@@ -69,6 +77,16 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
     )
     assert replay.publication.duplicate is True
     assert len(clickhouse.batches) == 1
+
+    rebuilt = _ClickHouse()
+    replay_result = replay_manifest(
+        result.manifest,
+        ArchivePublication(objects),
+        ClickHousePublication(InMemoryBatchManifestStore(), rebuilt),
+    )
+    assert replay_result.rows_read == 1
+    assert len(rebuilt.batches) == 1
+    assert rebuilt.batches[0].rows[0]["event_id"] == clickhouse.batches[0].rows[0]["event_id"]
 
     deletion = DeletionController(objects, ArchivePublication(objects), ledger)
     with pytest.raises(ValueError, match="grace period"):
