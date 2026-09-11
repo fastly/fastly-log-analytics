@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from backend.high_scale.aggregates import AggregateStore, EventBatch
 
 
@@ -54,3 +56,14 @@ def test_minute_counts_are_separate_for_each_domain() -> None:
     minute = datetime(2026, 9, 1, 0, 1, tzinfo=UTC)
     assert store.minute_counts("svc", "request") == {minute: 1}
     assert store.minute_counts("svc", "rum_vitals") == {minute: 1}
+
+
+def test_invalid_timestamp_does_not_consume_batch_id() -> None:
+    store = AggregateStore()
+    invalid = batch("bad", "request", [{"event_id": "1", "timestamp": "not-a-time"}])
+
+    with pytest.raises(ValueError):
+        store.apply(invalid)
+
+    valid = batch("bad", "request", [{"event_id": "1"}])
+    assert store.apply(valid).applied is True

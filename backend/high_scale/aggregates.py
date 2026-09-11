@@ -63,11 +63,11 @@ class AggregateStore:
             return AggregateReceipt(batch.batch_id, False, 0, True)
         if batch.owner_epoch < 0:
             raise ValueError("owner epoch must be non-negative")
+        timestamps = tuple(_event_timestamp(event) for event in batch.events)
         self._batches.add(batch.batch_id)
         key = (batch.service_id, batch.domain)
         self._counts[key] += len(batch.events)
-        for event in batch.events:
-            timestamp = _event_timestamp(event)
+        for event, timestamp in zip(batch.events, timestamps):
             if timestamp is not None:
                 self._minute_counts[key][timestamp.replace(second=0, microsecond=0)] += 1
             if batch.domain == "request":
