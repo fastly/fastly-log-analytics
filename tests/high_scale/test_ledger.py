@@ -51,3 +51,15 @@ def test_archive_acknowledgement_and_delete_are_fenced(ledger: HighScaleLedger) 
     assert auth.archive_manifest_id == "manifest-1"
     with pytest.raises(ArchiveNotVerified):
         ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=4)
+
+
+def test_archived_malformed_rows_do_not_block_acknowledgement(ledger: HighScaleLedger) -> None:
+    ledger.discover("svc", "request", "raw/request/a.gz", "sha256:a")
+    claim = ledger.claim("raw/request/a.gz", "worker")
+    ledger.record_counts("raw/request/a.gz", accepted_rows=2, malformed_rows=1)
+    ledger.mark_appended("raw/request/a.gz", claim.lease_generation)
+    ledger.mark_archived("raw/request/a.gz", claim.lease_generation, "manifest-1", 3)
+
+    ledger.acknowledge("raw/request/a.gz", "manifest-1")
+
+    assert ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=3)

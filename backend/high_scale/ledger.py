@@ -150,7 +150,7 @@ class HighScaleLedger:
         ).fetchone()
         if row is None:
             raise KeyError(object_key)
-        if row["status"] != "archived" or row["archive_manifest_id"] != manifest_id or row["malformed_rows"]:
+        if row["status"] != "archived" or row["archive_manifest_id"] != manifest_id:
             raise ArchiveNotVerified(f"archive is not complete for {object_key}")
         self._con.execute("UPDATE source_objects SET status='acknowledged' WHERE object_key=?", (object_key,))
         self._con.commit()
