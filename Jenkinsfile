@@ -18,8 +18,8 @@
 // doesn't already default to repo-root context, this will fail on the
 // frontend build; check shared-pipeline-lib's actual step signature before
 // trusting this to build correctly.
-def backendImage = 'fastly-docker/fastly/fastly-log-analytics-backend'
-def frontendImage = 'fastly-docker/fastly/fastly-log-analytics-frontend'
+def backendImage = 'devly/fastly-log-analytics-backend'
+def frontendImage = 'devly/fastly-log-analytics-frontend'
 
 def cache = true
 def buildContainers = false
