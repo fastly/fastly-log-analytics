@@ -161,6 +161,11 @@ class ArchivePublication:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return False
 
+    def read_artifact(self, manifest: ArchiveManifest) -> bytes:
+        if not self.is_replayable(manifest.manifest_id):
+            raise ValueError("archive manifest is not replayable")
+        return self._store.get(_artifact_key(manifest.artifact.uri))
+
 
 def _artifact_key(uri: str) -> str:
     parsed = urlparse(uri)
