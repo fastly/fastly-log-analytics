@@ -257,6 +257,7 @@ markers = [
     # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
     "security_regression: tests covering a verified security fix; CI gates on count",
     "slow: tests intentionally excluded from the fast default suite — run with `pytest -m slow`",
+    "postgres_integration: tests requiring HIGH_SCALE_POSTGRES_TEST_DSN",
     "terraform_cli: tests that shell out to the real terraform binary (heavyweight subprocess; run serially in their own step, excluded from the -n auto pool)",
 ]
 # Test-only suppression: FastAPI's TestClient runs requests in worker
