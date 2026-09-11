@@ -52,12 +52,12 @@ _flush_timer: threading.Timer | None = None
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "query_id": row["query_id"],
-        "db_type": row["db_type"],
+        "db_type": row.get("db_type") or "unknown",
         "service_id": row.get("service_id"),
-        "started_at_utc": row["started_at_utc"],
-        "ended_at_utc": row["ended_at_utc"],
-        "duration_ms": row["duration_ms"],
-        "outcome": row["outcome"],
+        "started_at_utc": row.get("started_at_utc") or 0.0,
+        "ended_at_utc": row.get("ended_at_utc") or 0.0,
+        "duration_ms": row.get("duration_ms") or 0.0,
+        "outcome": row.get("outcome") or "unknown",
         "sql_preview": row.get("sql_preview") or "",
         "sql_full": row.get("sql_full"),
         "sql_len": row.get("sql_len") or 0,
@@ -137,7 +137,7 @@ def _flush_all(*, only_service: str | None = None) -> None:
     for service_id, rows in pending.items():
         try:
             con = get_con(service_id)
-            con.executemany(_INSERT_SQL, [_insert_params(row) for row in rows])
+            con.executemany(_INSERT_SQL, [_insert_params(_normalise_row(row)) for row in rows])
             con.commit()
         except Exception:
             pass
