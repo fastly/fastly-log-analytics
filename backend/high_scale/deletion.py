@@ -53,3 +53,4 @@ class DeletionController:
             current_owner_epoch=current_owner_epoch,
         )
         self._store.delete(manifest.source.object_key)
+        self._ledger.mark_source_deleted(manifest.source.object_key, manifest.manifest_id)

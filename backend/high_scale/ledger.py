@@ -155,6 +155,20 @@ class HighScaleLedger:
         self._con.execute("UPDATE source_objects SET status='acknowledged' WHERE object_key=?", (object_key,))
         self._con.commit()
 
+    def mark_source_deleted(self, object_key: str, manifest_id: str) -> None:
+        row = self._con.execute(
+            "SELECT status,archive_manifest_id FROM source_objects WHERE object_key=?",
+            (object_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(object_key)
+        if row["status"] == "source_deleted" and row["archive_manifest_id"] == manifest_id:
+            return
+        if row["status"] != "acknowledged" or row["archive_manifest_id"] != manifest_id:
+            raise ArchiveNotVerified(f"source deletion was not acknowledged for {object_key}")
+        self._con.execute("UPDATE source_objects SET status='source_deleted' WHERE object_key=?", (object_key,))
+        self._con.commit()
+
     def authorize_source_delete(
         self,
         object_key: str,

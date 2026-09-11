@@ -48,6 +48,7 @@ def test_source_deletion_requires_archive_and_owner_fence() -> None:
         DeletionController(store, publication, ledger).delete_source(manifest, current_owner_epoch=3, now=now)
 
         assert not store.exists(source.object_key)
+        ledger.mark_source_deleted(source.object_key, manifest.manifest_id)
     finally:
         ledger.close()
 
