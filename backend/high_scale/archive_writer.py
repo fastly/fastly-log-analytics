@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,8 @@ def write_archive_checkpoint(
     transform_version: str,
     coverage_start: datetime,
     coverage_end: datetime,
+    retention_seconds: int = 0,
+    deletion_grace_seconds: int = 900,
 ) -> ArchiveManifest:
     if source.service_id != service_id or source.domain != domain:
         raise ValueError("source identity does not match archive batch")
@@ -53,6 +55,8 @@ def write_archive_checkpoint(
         raise ValueError("archive coverage end precedes coverage start")
     if archive_epoch < 0:
         raise ValueError("archive epoch must be non-negative")
+    if retention_seconds < 0 or deletion_grace_seconds < 0:
+        raise ValueError("retention and deletion grace periods must be non-negative")
 
     output_root = Path(root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -91,8 +95,9 @@ def write_archive_checkpoint(
         artifact=artifact,
         coverage_start=coverage_start.astimezone(UTC),
         coverage_end=coverage_end.astimezone(UTC),
-        retention_deadline=coverage_end.astimezone(UTC),
-        deletion_authorization_deadline=coverage_end.astimezone(UTC),
+        retention_deadline=coverage_end.astimezone(UTC) + timedelta(seconds=retention_seconds),
+        deletion_authorization_deadline=coverage_end.astimezone(UTC)
+        + timedelta(seconds=retention_seconds + deletion_grace_seconds),
         archive_epoch=archive_epoch,
     )
     manifest.validate()

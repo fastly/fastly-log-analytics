@@ -19,9 +19,12 @@ def test_archive_checkpoint_is_verified_and_replayable(tmp_path) -> None:
         transform_version="normalize.v1",
         coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
         coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        retention_seconds=3600,
+        deletion_grace_seconds=900,
     )
     verify_archive_checkpoint(manifest)
     assert manifest.artifact.row_count == 2
+    assert manifest.deletion_authorization_deadline > manifest.retention_deadline
     assert (tmp_path / f"{manifest.manifest_id}.manifest.json").is_file()
 
 
