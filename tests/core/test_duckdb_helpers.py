@@ -26,6 +26,38 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+def test_load_httpfs_prefers_cached_extension_without_installing():
+    import backend.core.duckdb as db_mod
+
+    con = MagicMock()
+    db_mod._httpfs_installed = False
+
+    db_mod._load_httpfs(con)
+
+    con.execute.assert_called_once_with("LOAD httpfs;")
+    assert db_mod._httpfs_installed is True
+
+
+def test_load_httpfs_installs_when_cached_extension_is_missing():
+    import duckdb
+
+    import backend.core.duckdb as db_mod
+
+    con = MagicMock()
+    con.execute.side_effect = [duckdb.IOException("missing extension"), None, None]
+    db_mod._httpfs_installed = False
+
+    db_mod._load_httpfs(con)
+
+    assert [call.args[0] for call in con.execute.call_args_list] == [
+        "LOAD httpfs;",
+        "INSTALL httpfs;",
+        "LOAD httpfs;",
+    ]
+    assert db_mod._httpfs_installed is True
+
+
 # ── _safe_iso (datetime → ISO-Z) ─────────────────────────────────────────
 
 

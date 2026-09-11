@@ -45,21 +45,110 @@ sys.path.insert(0, ".")
 from backend.provision.log_paths import analytics_log_path  # noqa: E402
 
 COUNTRIES = ["US", "GB", "DE", "JP", "BR", "IN", "AU", "FR", "CA", "NL"]
+HOSTS = ["www.example.com", "api.example.com", "img.example.com"]
+BACKENDS = ["origin-primary", "origin-secondary"]
+POPS = ["IAD", "LHR", "NRT", "SYD", "SFO"]
 METHODS = ["GET", "GET", "GET", "GET", "POST", "HEAD"]
+PROTOS = ["2.0", "2.0", "3.0", "1.1"]
 STATUSES = [200, 200, 200, 200, 304, 404, 500]
 CACHE_STATUSES = ["HIT", "HIT", "HIT", "MISS", "PASS"]
+TRANSPORTS = ["tcp", "tcp", "quic"]
+DIGESTS = ["digest-a", "digest-b", "digest-c"]
+TLS_FINGERPRINTS = ["ja3-synthetic-a", "ja3-synthetic-b"]
+ORIGIN_IPS = ["203.0.113.10", "203.0.113.11"]
+IMAGE_FORMATS = ["jpeg", "webp", "avif"]
+USER_AGENTS = [
+    "Mozilla/5.0 (synthetic Chrome)",
+    "Mozilla/5.0 (synthetic Safari)",
+    "synthetic-monitor/1.0",
+]
+REFERERS = ["https://www.example.com/", "https://search.example.com/", "https://news.example.com/"]
+REGIONS = ["CA", "NY", "TX", "ON", "BE"]
+PROXY_TYPES = ["VPN", "VPN", "DCH", "DCH"]
+PROXY_DESCRIPTIONS = ["synthetic-vpn", "synthetic-vpn", "synthetic-datacenter", "synthetic-datacenter"]
+CONTENT_ENCODINGS = ["br", "gzip", "identity"]
+SERVER_REGIONS = ["NA", "EU", "APAC"]
+CONNECTION_SPEEDS = ["broadband", "cable", "mobile"]
+CONNECTION_TYPES = ["residential", "commercial", "cellular"]
 
 
 def _synthetic_line(ts: datetime, service_id: str) -> dict:
+    status = random.choice(STATUSES)
+    method = random.choice(METHODS)
     return {
         "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ip": f"198.51.100.{random.randint(1, 254)}",
+        "host": random.choice(HOSTS),
         "url": f"/synthetic/{random.randint(1, 5000)}",
-        "method": random.choice(METHODS),
-        "status": random.choice(STATUSES),
+        "method": method,
+        "proto": random.choice(PROTOS),
+        "ua": random.choice(USER_AGENTS),
+        "referer": random.choice(REFERERS),
+        "status": status,
         "country": random.choice(COUNTRIES),
-        "bytes_sent": random.randint(200, 150_000),
-        "cache_status": random.choice(CACHE_STATUSES),
+        "city": random.choice(["San Francisco", "New York", "Toronto", "London", "Tokyo"]),
+        "region": random.choice(REGIONS),
+        "cache": random.choice(CACHE_STATUSES),
+        "ttl": random.randint(60, 86_400),
+        "age": random.randint(0, 3_600),
+        "hits": random.randint(1, 10_000),
+        "digest": random.choice(DIGESTS),
+        "backend": random.choice(BACKENDS),
+        "edge": random.choice([True, True, True, False]),
+        "pop": random.choice(POPS),
+        "server_region": random.choice(SERVER_REGIONS),
+        "tls": random.choice(["1.2", "1.3"]),
+        "is_ipv6": random.choice([False, False, False, True]),
+        "conn_requests": random.randint(1, 32),
+        "lat": round(random.uniform(-60, 60), 4),
+        "lon": round(random.uniform(-150, 150), 4),
+        "metro": random.randint(500, 900),
+        "asn": random.randint(1_000, 65_000),
+        "tcp_rtt": random.randint(8, 180_000),
+        "transport": random.choice(TRANSPORTS),
+        "ploss": round(random.uniform(0, 0.03), 6),
+        "rtt_min": random.randint(5, 120_000),
+        "rtt_var": random.randint(1, 20_000),
+        "retrans": random.randint(0, 5),
+        "bw": random.randint(1_000_000, 100_000_000),
+        "elapsed": random.randint(2_000, 450_000),
+        "ttfb": round(random.uniform(0.002, 0.45), 6),
+        "req_bytes": 0 if method in {"GET", "HEAD"} else random.randint(64, 16_384),
+        "req_header_bytes": random.randint(300, 2_500),
+        "resp_bytes": random.randint(200, 150_000),
+        "resp_header_content_encoding": random.choice(CONTENT_ENCODINGS),
+        "p_type": random.choice(PROXY_TYPES),
+        "p_desc": random.choice(PROXY_DESCRIPTIONS),
+        "c_speed": random.choice(CONNECTION_SPEEDS),
+        "c_type": random.choice(CONNECTION_TYPES),
+        "delivery_rate": random.randint(500_000, 80_000_000),
+        "data_segs_out": random.randint(10, 10_000),
+        "ja3": random.choice(TLS_FINGERPRINTS),
+        "ja4": random.choice(["ja4-synthetic-a", "ja4-synthetic-b"]),
+        "tls_ciphers_sha": random.choice(["cipher-synthetic-a", "cipher-synthetic-b"]),
+        "cookie_session": f"session-{random.randint(1, 10_000)}",
+        "waf": False,
+        "waf_resp": 200,
+        "waf_ms": 0,
+        "waf_sig": "synthetic-none",
+        "waf_req_id": f"waf-{random.randint(1, 10_000)}",
+        "q_rtt": random.randint(8, 180_000),
+        "q_rtt_var": random.randint(1, 20_000),
+        "q_lost": random.randint(0, 3),
+        "q_cwnd": random.randint(10_000, 2_000_000),
+        "ottfb": random.randint(1_000, 300_000),
+        "ottlb": random.randint(2_000, 500_000),
+        "oconnect_ms": random.randint(1, 100),
+        "ost": status,
+        "obytes": random.randint(200, 150_000),
+        "oip": random.choice(ORIGIN_IPS),
+        "oretries": random.randint(0, 2),
+        "rid": f"rid-{random.randint(1, 10_000)}",
+        "prid": f"prid-{random.randint(1, 10_000)}",
+        "io_input_bytes": random.randint(10_000, 500_000),
+        "io_output_bytes": random.randint(5_000, 400_000),
+        "io_input_format": random.choice(IMAGE_FORMATS),
+        "io_output_format": random.choice(IMAGE_FORMATS),
         "service_id": service_id,
     }
 

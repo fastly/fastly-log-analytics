@@ -3826,7 +3826,7 @@ class QueryRunner:
             f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
             f"  rtt_p50_us                                                         AS rtt_med_us,"
             f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
-            f"  rtt_p50_us - COALESCE(rtt_min_p50_us, rtt_p50_us)                AS rtt_congestion_us,"
+            f"  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
             f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
             f"  rtt_var_p50_us                                                     AS jitter_us,"
             f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"

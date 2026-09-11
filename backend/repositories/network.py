@@ -188,6 +188,11 @@ def _health_score(
     return round((1.0 - weighted) * 100, 1)
 
 
+def _rtt_congestion_expr() -> str:
+    """Subtract unsigned RTT columns without allowing UINT underflow."""
+    return "APPROX_QUANTILE(CAST(COALESCE(tcp_rtt, 0) AS BIGINT) - CAST(COALESCE(rtt_min, 0) AS BIGINT), 0.5)"
+
+
 def get_health(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -335,7 +340,7 @@ def get_health(
     ploss_expr = "AVG(ploss)" if has_ploss else "NULL"
     rtt_min_expr = "APPROX_QUANTILE(rtt_min, 0.5)" if has_rtt_min else "NULL"
     rtt_var_expr = "APPROX_QUANTILE(rtt_var, 0.5)" if has_rtt_var else "NULL"
-    congestion_expr = "APPROX_QUANTILE(COALESCE(tcp_rtt, 0) - COALESCE(rtt_min, 0), 0.5)" if has_rtt_min else "NULL"
+    congestion_expr = _rtt_congestion_expr() if has_rtt_min else "NULL"
 
     # ── Rollup fast path ────────────────────────────────────────────────────
     # Try the per-hour heatmap + geo rollup readers BEFORE building the temp

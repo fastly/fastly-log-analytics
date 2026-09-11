@@ -12,6 +12,7 @@ from backend.repositories.network import (
     _has_signal,
     _health_score,
     _response_cache_key,
+    _rtt_congestion_expr,
     get_health,
     get_quality,
 )
@@ -207,6 +208,41 @@ def test_get_health_strips_asn_filter_when_map_asn_specified(in_memory_duckdb, t
     )
     # The early-returns we tested above aren't hit — we get a real response
     assert "available" not in out or out.get("available") is not False
+
+
+def test_get_health_handles_unsigned_rtt_subtraction(in_memory_duckdb, test_service_source):
+    """RTT values are unsigned in the ingest schema, but congestion can be negative."""
+    table = _safe_table(test_service_source["name"])
+    in_memory_duckdb.execute(
+        f"""
+        CREATE TABLE {table} (
+            timestamp TIMESTAMP,
+            asn UINTEGER,
+            tcp_rtt UINTEGER,
+            rtt_min UINTEGER,
+            rtt_var UINTEGER,
+            ploss FLOAT,
+            country VARCHAR,
+            status INTEGER,
+            cache VARCHAR,
+            elapsed UBIGINT,
+            resp_bytes UBIGINT
+        )
+        """
+    )
+    in_memory_duckdb.execute(
+        f"""
+        INSERT INTO {table}
+        SELECT
+            TIMESTAMP '2026-09-10 20:00:00' + INTERVAL (i * 10) SECOND,
+            7922, 76570, 96261, 100, 0.01, 'US', 200, 'HIT', 100000, 50000
+        FROM range(10) AS r(i)
+        """
+    )
+
+    result = in_memory_duckdb.execute(f"SELECT {_rtt_congestion_expr()} FROM {table}").fetchone()
+
+    assert result == (-19691,)
 
 
 # ── get_quality: early-return paths ─────────────────────────────────────────

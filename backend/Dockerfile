@@ -35,6 +35,12 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
+# Pre-install DuckDB's platform-specific extensions while the build
+# environment has network access. Runtime pods may not be able to reach
+# extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
+RUN /app/.venv/bin/python -c \
+    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('iceberg', 'avro', 'httpfs', 'parquet', 'ducklake')]; con.close()"
+
 # --- Production Stage ---
 FROM python:3.13-slim-bookworm AS runner
 
@@ -114,6 +120,7 @@ RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer \
 
 # Copy the virtual environment from the builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 
 # Copy only the necessary backend files and root modules
 # This avoids pulling in the entire frontend/ directory

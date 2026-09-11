@@ -203,18 +203,26 @@ _fos_secret_fingerprints: weakref.WeakKeyDictionary[duckdb.DuckDBPyConnection, t
 
 
 def _load_httpfs(con: duckdb.DuckDBPyConnection):
-    """Install (once) and load httpfs, serialised to prevent concurrent-init heap corruption.
+    """Load httpfs, installing once only when the image cache lacks it.
 
     DuckDB's process-level extension registry is not thread-safe during initialisation.
     Two connections calling LOAD httpfs simultaneously corrupts global state and causes
     an Abort trap / malloc heap corruption on macOS.  Holding the lock for both
-    INSTALL and LOAD eliminates that race.
+    INSTALL and LOAD eliminates that race. Prefer LOAD so runtime pods do not
+    need network access when the extension was baked into the image.
     """
     global _httpfs_installed
     with _httpfs_lock:
         if not _httpfs_installed:
-            con.execute("INSTALL httpfs;")
-            _httpfs_installed = True
+            try:
+                con.execute("LOAD httpfs;")
+            except duckdb.Error:
+                con.execute("INSTALL httpfs;")
+                _httpfs_installed = True
+                con.execute("LOAD httpfs;")
+            else:
+                _httpfs_installed = True
+            return
         try:
             con.execute("LOAD httpfs;")
         except duckdb.InvalidInputException as e:
