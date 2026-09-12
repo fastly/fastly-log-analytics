@@ -4,7 +4,7 @@ import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.pagination import KeysetCursor
-from backend.high_scale.query_service import query_request_facts
+from backend.high_scale.query_service import query_request_facts, query_rum_facts
 
 
 class _Client:
@@ -99,3 +99,31 @@ def test_request_facts_reject_invalid_window_and_limit() -> None:
             watermark=_watermark(),
             limit=501,
         )
+
+
+def test_rum_domains_use_separate_fact_tables_and_watermarks() -> None:
+    client = _Client([_row(1, "event-1")])
+    watermark = _watermark()
+    watermark = ServingWatermark(
+        watermark.service_id,
+        "rum_vitals",
+        watermark.owner_epoch,
+        watermark.coverage_start,
+        watermark.coverage_end,
+        watermark.last_accepted_cursor,
+        watermark.last_archived_event_id,
+        watermark.last_visible_event_id,
+        watermark.exact,
+    )
+
+    query_rum_facts(
+        client,
+        service_id="svc",
+        domain="rum_vitals",
+        start=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+        end=datetime(2026, 9, 11, 21, 0, tzinfo=UTC),
+        cursor_secret=b"secret",
+        watermark=watermark,
+    )
+
+    assert "FROM rum_vitals_facts" in client.sql
