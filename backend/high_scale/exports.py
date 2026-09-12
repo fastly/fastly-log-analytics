@@ -152,5 +152,18 @@ class ExportManager:
         return ExportJob(job.job_id, job.state, job.rows_written, job.bytes_written, job.payload, job.error)
 
 
+_default_manager: ExportManager | None = None
+_default_manager_lock = threading.Lock()
+
+
+def get_export_manager() -> ExportManager:
+    """Return the process-local bounded manager used by the HTTP surface."""
+    global _default_manager
+    with _default_manager_lock:
+        if _default_manager is None:
+            _default_manager = ExportManager()
+        return _default_manager
+
+
 class _ExportCancelled(Exception):
     pass

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.request_telemetry import RequestTelemetry
 from backend.high_scale.archive_models import ServingWatermark
+from backend.high_scale.exports import ExportManager, get_export_manager
 from backend.high_scale.registry import HighScaleService, HighScaleServiceRegistry
 from backend.main import app
 from backend.utils.remote_access import TimeBounds
@@ -111,6 +112,61 @@ def test_rum_facts_route_registered():
 
 def test_cmcd_facts_route_registered():
     assert "/api/high-scale/services/{service_id}/cmcd-facts" in app.openapi()["paths"]
+
+
+def test_export_routes_registered():
+    paths = app.openapi()["paths"]
+    assert "/api/high-scale/services/{service_id}/exports" in paths
+    assert "/api/high-scale/services/{service_id}/exports/{export_id}" in paths
+    assert "/api/high-scale/services/{service_id}/exports/{export_id}/cancel" in paths
+
+
+def test_admin_can_request_and_read_export(client, test_service_source, monkeypatch):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    manager = ExportManager(max_workers=1, max_rows=10, max_bytes=10_000)
+    monkeypatch.setattr("backend.routers.high_scale.metadata.record_audit", lambda *args, **kwargs: None)
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    app.dependency_overrides[get_export_manager] = lambda: manager
+    try:
+        response = client.post(
+            f"/api/high-scale/services/{test_service_source['service_id']}/exports",
+            json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
+        )
+        assert response.status_code == 200, response.text
+        export_id = response.json()["export_id"]
+        status = client.get(f"/api/high-scale/services/{test_service_source['service_id']}/exports/{export_id}")
+        assert status.status_code == 200, status.text
+        assert status.json()["state"] == "completed"
+        assert status.json()["rows_written"] == 2
+    finally:
+        manager.shutdown()
+
+
+def test_export_cancel_is_admin_only(client, test_service_source, monkeypatch):
+    from fastapi import HTTPException
+
+    from backend.deps import require_admin
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    manager = ExportManager(max_workers=1)
+    monkeypatch.setattr("backend.routers.high_scale.metadata.record_audit", lambda *args, **kwargs: None)
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    app.dependency_overrides[get_export_manager] = lambda: manager
+
+    def reject_non_admin():
+        raise HTTPException(status_code=403, detail={"error": "admin_only"})
+
+    app.dependency_overrides[require_admin] = reject_non_admin
+    try:
+        response = client.post(
+            f"/api/high-scale/services/{test_service_source['service_id']}/exports",
+            json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
+        )
+        assert response.status_code == 403
+    finally:
+        manager.shutdown()
+        app.dependency_overrides.pop(require_admin, None)
 
 
 def test_admin_can_query_request_facts(client, test_service_source):

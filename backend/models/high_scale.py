@@ -50,3 +50,23 @@ class HighScaleRumFactResponse(BaseResponse):
     rows: list[dict[str, Any]]
     metadata: QueryResponseMetadataResponse
     next_cursor: str | None
+
+
+ExportDomain = Literal["request", "rum_vitals", "rum_errors", "cmcd"]
+
+
+class HighScaleExportRequest(HighScaleRequestFactRequest):
+    domain: ExportDomain = "request"
+
+
+class HighScaleExportResponse(BaseResponse):
+    export_id: str
+    service_id: str
+    state: Literal["queued", "running", "completed", "cancelled", "failed", "expired"]
+    rows_written: int
+    bytes_written: int
+    error: str | None
+
+
+class HighScaleExportCancelResponse(HighScaleExportResponse):
+    cancelled: bool
