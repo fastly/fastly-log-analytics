@@ -150,7 +150,10 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # function body is covered.
     with _attach_lock:
         try:
-            con.execute("INSTALL ducklake; LOAD ducklake;")
+            try:
+                con.execute("LOAD ducklake;")
+            except Exception:
+                con.execute("INSTALL ducklake; LOAD ducklake;")
         except Exception as e:
             logger.warning("[ducklake] %s: failed to INSTALL/LOAD ducklake extension: %s", service_id, e)
             return False
