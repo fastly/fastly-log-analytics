@@ -16,6 +16,7 @@ import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
 import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";
 import { queryKeys } from "@/lib/query-keys";
 import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
+import { shouldLoadRumScript } from "@/lib/rum-script";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -75,7 +76,8 @@ export default async function RootLayout({
   // its own injected <script>/<link> tags; we have to pass it manually to
   // next-themes (its theme-bootstrap inline script doesn't read the
   // header) so the strict script-src nonce policy doesn't drop it.
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
+  const requestHeaders = await headers();
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
 
   // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
   // useBootstrap (and every hook that reads bootstrap.* via
@@ -149,6 +151,11 @@ export default async function RootLayout({
     // header.
     dehydratedState = dehydrate(client);
   }
+  const loadRumScript = shouldLoadRumScript({
+    host: requestHeaders.get("host"),
+    proxiedByCaddy: requestHeaders.get("x-proxied-by-caddy") === "true",
+    rumEnabled: isRumEnabled,
+  });
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -165,13 +172,7 @@ export default async function RootLayout({
             enabled — an unconditional emit makes every page load proxy
             /js/rum.js to the backend, which fails (ECONNRESET log spam)
             or 404s on services without RUM. */}
-        {isRumEnabled && (
-          <script
-            src="/js/rum.js"
-            nonce={nonce}
-            async
-          />
-        )}
+        {loadRumScript && <script src="/js/rum.js" nonce={nonce} async />}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden

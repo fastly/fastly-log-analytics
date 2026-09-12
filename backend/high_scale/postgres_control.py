@@ -102,6 +102,21 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
 CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx
     ON high_scale_archive_manifests (service_id, source_key);
 
+CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
+    batch_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
+    lease_until TIMESTAMPTZ NOT NULL,
+    lease_generation BIGINT NOT NULL DEFAULT 1 CHECK (lease_generation > 0),
+    state TEXT NOT NULL CHECK (state IN ('claimed', 'completed', 'released')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE INDEX IF NOT EXISTS high_scale_batch_claims_lease_idx
+    ON high_scale_batch_claims (service_id, state, lease_until);
+
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),
@@ -151,6 +166,19 @@ class SourceClaim:
     object_id: str
     claimed: bool
     lease_generation: int
+
+
+@dataclass(frozen=True)
+class BatchClaim:
+    batch_id: str
+    service_id: str
+    domain: str
+    worker_id: str
+    owner_epoch: int
+    lease_until: datetime
+    lease_generation: int
+    claimed: bool
+    state: str
 
 
 @dataclass(frozen=True)
@@ -481,6 +509,137 @@ class PostgresControlPlane:
             next_status="appended",
         )
 
+    def claim_batch(
+        self,
+        batch_id: str,
+        service_id: str,
+        domain: str,
+        worker_id: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        now: datetime | None = None,
+    ) -> BatchClaim:
+        """Atomically claim a publication batch across workers and processes."""
+
+        _require_text(batch_id, "batch_id")
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        _require_text(worker_id, "worker_id")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        lease_until = observed + timedelta(seconds=lease_seconds)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if owner.current_owner != expected_owner:
+                raise ValueError("owner does not match batch claim fence")
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, worker_id, owner_epoch,
+                       lease_until, lease_generation, state
+                FROM high_scale_batch_claims
+                WHERE batch_id=%s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_batch_claims
+                        (batch_id, service_id, domain, worker_id, owner_epoch, lease_until, state)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'claimed')
+                    """,
+                    (batch_id, service_id, domain, worker_id, expected_owner_epoch, lease_until),
+                )
+                return BatchClaim(
+                    batch_id,
+                    service_id,
+                    domain,
+                    worker_id,
+                    expected_owner_epoch,
+                    lease_until,
+                    1,
+                    True,
+                    "claimed",
+                )
+            claim = _batch_claim_from_row(row)
+            if claim.service_id != service_id or claim.domain != domain:
+                raise ValueError("batch identity does not match existing claim")
+            if claim.state == "completed":
+                return claim
+            if claim.worker_id != worker_id and claim.lease_until > observed:
+                return claim
+            generation = claim.lease_generation + 1
+            connection.execute(
+                """
+                UPDATE high_scale_batch_claims
+                SET worker_id=%s, owner_epoch=%s, lease_until=%s,
+                    lease_generation=%s, state='claimed', updated_at=clock_timestamp()
+                WHERE batch_id=%s
+                """,
+                (worker_id, expected_owner_epoch, lease_until, generation, batch_id),
+            )
+            return BatchClaim(
+                batch_id,
+                service_id,
+                domain,
+                worker_id,
+                expected_owner_epoch,
+                lease_until,
+                generation,
+                True,
+                "claimed",
+            )
+
+    def complete_batch(
+        self,
+        batch_id: str,
+        *,
+        worker_id: str,
+        expected_owner_epoch: int,
+    ) -> BatchClaim:
+        with self.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, worker_id, owner_epoch,
+                       lease_until, lease_generation, state
+                FROM high_scale_batch_claims
+                WHERE batch_id=%s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(batch_id)
+            claim = _batch_claim_from_row(row)
+            if claim.worker_id != worker_id or claim.owner_epoch != expected_owner_epoch:
+                raise ValueError("batch completion fence does not match claim")
+            if claim.state == "completed":
+                return claim
+            connection.execute(
+                """
+                UPDATE high_scale_batch_claims
+                SET state='completed', updated_at=clock_timestamp()
+                WHERE batch_id=%s AND worker_id=%s AND owner_epoch=%s
+                """,
+                (batch_id, worker_id, expected_owner_epoch),
+            )
+            return BatchClaim(
+                claim.batch_id,
+                claim.service_id,
+                claim.domain,
+                claim.worker_id,
+                claim.owner_epoch,
+                claim.lease_until,
+                claim.lease_generation,
+                True,
+                "completed",
+            )
+
     def register_archive_manifest(
         self,
         manifest: ArchiveManifest,
@@ -604,7 +763,7 @@ class PostgresControlPlane:
                     updated_at=clock_timestamp()
                 WHERE object_id=%s
                 """,
-                (source.object_id, source.object_id),
+                (manifest_id, source.object_id),
             )
 
     def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None:
@@ -849,6 +1008,20 @@ def _source_from_row(row: Mapping[str, Any] | Any) -> SourceObjectRecord:
         None if _row_value(row, "owner_epoch", 12) is None else int(_row_value(row, "owner_epoch", 12)),
         int(_row_value(row, "malformed_rows", 13)),
         int(_row_value(row, "accepted_rows", 14)),
+    )
+
+
+def _batch_claim_from_row(row: Mapping[str, Any] | Any) -> BatchClaim:
+    return BatchClaim(
+        batch_id=str(_row_value(row, "batch_id", 0)),
+        service_id=str(_row_value(row, "service_id", 1)),
+        domain=str(_row_value(row, "domain", 2)),
+        worker_id=str(_row_value(row, "worker_id", 3)),
+        owner_epoch=int(_row_value(row, "owner_epoch", 4)),
+        lease_until=_row_value(row, "lease_until", 5),
+        lease_generation=int(_row_value(row, "lease_generation", 6)),
+        claimed=str(_row_value(row, "state", 7)) == "claimed",
+        state=str(_row_value(row, "state", 7)),
     )
 
 

@@ -52,6 +52,9 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "rum_vitals_facts",
         "rum_error_facts",
         "cmcd_projection_facts",
+        "rum_vitals_aggregates",
+        "rum_error_aggregates",
+        "cmcd_aggregates",
     }
 )
 CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
@@ -89,6 +92,10 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "error_file",
         "projection_key",
         "request_count",
+        "event_count",
+        "error_count",
+        "session_count",
+        "value_sum",
         "bucket_start",
         "dimension",
         "value",
@@ -240,6 +247,15 @@ class ClickHouseClient:
         quoted_columns = ", ".join(f"`{c}`" for c in columns)
         sql = f"INSERT INTO `{table}` ({quoted_columns}) FORMAT JSONCompactEachRow"
         self._request("insert", sql=sql, content=content, rows_written=len(rows))
+
+    def delete_batch_rows(self, table: str, batch_id: str) -> None:
+        """Synchronously remove a failed high-scale batch before a retry."""
+        if table not in CLICKHOUSE_HIGH_SCALE_TABLES:
+            raise ValueError("ClickHouse table is not internally allowlisted")
+        self.execute(
+            f"ALTER TABLE `{table}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
+            {"batch_id": batch_id},
+        )
 
     def health(self) -> dict:
         """Exercise authenticated database access; unavailable is an explicit exception."""

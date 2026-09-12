@@ -184,6 +184,21 @@ def test_empty_insert_is_noop(clients):
     client.insert_rows(ch.CLICKHOUSE_FACT_TABLE, ["country"], [])
 
 
+def test_delete_batch_rows_binds_uuid_parameter_type(clients):
+    seen = {}
+
+    def handler(request):
+        seen.update(query_form(request))
+        return httpx.Response(200, content=b"")
+
+    clients(handler).delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
+
+    assert seen["query"] == [
+        "ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"
+    ]
+    assert seen["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"]
+
+
 @pytest.mark.parametrize("failure", ["timeout", "connect", "server", "redirect", "invalid_json"])
 def test_errors_are_explicit_sanitized_and_never_retried(clients, failure, caplog):
     calls = []
