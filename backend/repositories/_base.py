@@ -4294,11 +4294,24 @@ class QueryRunner:
         st, et = win
 
         rollup_paths = self._collect_rollup_paths(st, et, SECURITY_CONN_REUSE_BUNDLE_FILENAME)
-        if rollup_paths is None:
-            return None
+        use_all_fields = rollup_paths is None
+        if use_all_fields:
+            from backend.core.rollups._common import DAY_BUNDLE_FILENAME
+
+            rollup_paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+            if rollup_paths is None:
+                return None
+        assert rollup_paths is not None
 
         paths_sql = quote_path_list(rollup_paths)
-        sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
+        if use_all_fields:
+            sql = (
+                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                "WHERE field = 'conn_requests' GROUP BY value"
+            )
+        else:
+            sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
@@ -4309,6 +4322,14 @@ class QueryRunner:
 
         counts: dict[str, int] = {}
         for bucket, cnt in rows:
+            if use_all_fields:
+                try:
+                    numeric = int(float(bucket))
+                except (TypeError, ValueError):
+                    continue
+                bucket = (
+                    "1" if numeric == 1 else "2–5" if 2 <= numeric <= 5 else "6–20" if 6 <= numeric <= 20 else "21+"
+                )
             label = self._CONN_REUSE_TO_DASHBOARD_BUCKET.get(bucket, bucket)
             counts[label] = counts.get(label, 0) + int(cnt or 0)
 
@@ -4343,6 +4364,79 @@ class QueryRunner:
         extras = [b for b in counts if b not in self._CONN_REQUESTS_BUCKET_ORDER]
         top = [{"value": b, "count": counts[b]} for b in known + extras]
         return {"top": top, "total": sum(counts.values())}
+
+    def try_virtual_field_top_n_from_rollup(
+        self,
+        virtual_id: str,
+        backing_col: str,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        actual_cols: list[str] | set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Serve a CSV-backed virtual field from the all-fields rollups."""
+        if has_filters or not start_time or not end_time:
+            return None
+
+        from backend.core.rollups._common import DAY_BUNDLE_FILENAME
+        from backend.utils.date_utils import parse_iso_utc
+
+        st = parse_iso_utc(start_time)
+        et = parse_iso_utc(end_time)
+        if st is None or et is None:
+            return None
+        paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
+        if paths is None:
+            return None
+
+        paths_sql = quote_path_list(paths)
+        try:
+            rows = self.execute(
+                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                "WHERE field = ? GROUP BY value ORDER BY c DESC",
+                [virtual_id],
+            ).fetchall()
+        except duckdb.Error:
+            return None
+
+        counts: dict[str, int] = {}
+        for value, count in rows:
+            counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
+
+        from datetime import UTC, datetime, timedelta
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        live_start = max(active_dt, st)
+        live_end = min(active_dt + timedelta(hours=1), et)
+        if live_start < live_end:
+            cols = actual_cols if actual_cols is not None else self.get_schema_cols()
+            if backing_col in cols:
+                tmp = self._create_active_hour_temp_direct([backing_col], cols, live_start, live_end)
+                if tmp is None:
+                    return None
+                try:
+                    live_rows = self.execute(
+                        f"SELECT trim(signal) AS value, COUNT(*) AS c "
+                        f"FROM (SELECT unnest(string_split(\"{backing_col}\", ',')) AS signal "
+                        f'FROM "{tmp}" WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != \'\') '
+                        "WHERE trim(signal) != '' GROUP BY value"
+                    ).fetchall()
+                except duckdb.Error:
+                    return None
+                finally:
+                    self.release_active_direct_temp(tmp)
+                for value, count in live_rows:
+                    counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
+
+        total = sum(counts.values())
+        top = [
+            {"value": value, "count": count}
+            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+            if value != "__other__"
+        ][:10]
+        return {"top": top, "total": total}
 
     def try_ngwaf_top_bots_from_rollup(
         self,

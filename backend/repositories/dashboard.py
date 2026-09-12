@@ -754,6 +754,18 @@ def get_aggregates(
             if backing_col not in actual_cols:
                 results[virtual_id] = {"top": [], "total": 0}
                 return
+            if use_rollups:
+                rolled = runner.try_virtual_field_top_n_from_rollup(
+                    virtual_id,
+                    backing_col,
+                    start_time,
+                    end_time,
+                    has_filters=bool(filters),
+                    actual_cols=actual_cols,
+                )
+                if rolled is not None:
+                    results[virtual_id] = rolled
+                    return
             # Query the BASE table, not the temp: the temp's narrow
             # projection no longer carries waf_sig / edge_score_reason
             # (the virtual-field rollup serves them on the hot path).

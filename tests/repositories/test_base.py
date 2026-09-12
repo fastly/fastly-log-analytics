@@ -99,6 +99,43 @@ class TestIsStaleViewError:
 
 
 class TestQueryRunner:
+    def test_conn_requests_hist_uses_all_fields_rollup_when_specialized_bundle_is_missing(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = tmp_path / "all_fields.parquet"
+        pq.write_table(
+            pa.table(
+                {
+                    "field": ["conn_requests", "conn_requests", "conn_requests"],
+                    "value": ["1", "7", "22"],
+                    "count": [3, 2, 4],
+                }
+            ),
+            path,
+        )
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        paths = iter([None, [str(path)]])
+        monkeypatch.setattr(runner, "_collect_rollup_paths", lambda *args, **kwargs: next(paths))
+
+        result = runner.try_conn_requests_hist_from_rollup(
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            has_filters=False,
+            actual_cols=["conn_requests"],
+        )
+
+        assert result == {
+            "top": [
+                {"value": "1", "count": 3},
+                {"value": "6–20", "count": 2},
+                {"value": "21+", "count": 4},
+            ],
+            "total": 9,
+        }
+
     def test_execute_tracks_query(self, in_memory_duckdb, test_service_source):
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         initial_count = len(runner.debug_queries)

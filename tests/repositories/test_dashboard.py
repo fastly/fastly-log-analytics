@@ -1534,6 +1534,62 @@ def test_get_aggregates_rollup_path_builds_no_temp_and_serves_conn_requests_roll
     assert result["data"]["conn_requests"] == sentinel
 
 
+def test_get_aggregates_rollup_empty_virtual_field_does_not_scan_base_table(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    import os
+
+    from backend.repositories import dashboard as dash
+    from backend.repositories._base import QueryRunner
+
+    table_name = _safe_table(test_service_source["name"])
+    insert_mock_logs(in_memory_duckdb, table_name, generate_mock_logs(test_service_source, num_logs=20))
+
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path: str) -> bool:
+        if path.endswith(os.path.join("rollups", "hour")):
+            return True
+        return real_isdir(path)
+
+    monkeypatch.setattr(dash.os.path, "isdir", fake_isdir)
+    monkeypatch.setattr(
+        QueryRunner,
+        "execute_top_n_rollups",
+        lambda self, fields, s, e, limit=10, per_field_limits=None, **kw: ([], fields),
+    )
+    virtual_calls: list[str] = []
+
+    def _stub_virtual(self, virtual_id, backing_col, start_time, end_time, *, has_filters, actual_cols=None):
+        virtual_calls.append(virtual_id)
+        return {"top": [], "total": 0}
+
+    monkeypatch.setattr(QueryRunner, "try_virtual_field_top_n_from_rollup", _stub_virtual)
+    real_execute = QueryRunner.execute
+    base_scan_sql: list[str] = []
+
+    def _spy_execute(self, sql, params=None):
+        if "string_split" in sql:
+            base_scan_sql.append(sql)
+        return real_execute(self, sql, params)
+
+    monkeypatch.setattr(QueryRunner, "execute", _spy_execute)
+
+    result = dash.get_aggregates(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-02T00:00:00Z",
+        filters={},
+        chart_interval="1 minute",
+        chart_metric="requests",
+    )
+
+    assert "waf_sig_ind" in virtual_calls
+    assert base_scan_sql == []
+    assert result["data"]["waf_sig_ind"] == {"top": [], "total": 0}
+
+
 def test_get_aggregates_conn_requests_rollup_miss_falls_back_to_base_scan(
     in_memory_duckdb, test_service_source, monkeypatch
 ):
