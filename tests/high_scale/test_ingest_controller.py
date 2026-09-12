@@ -97,6 +97,42 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
         )
 
 
+def test_all_malformed_source_is_archived_without_serving_rows() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=ArchivePublication(objects),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+
+    result = controller.ingest(
+        service_id="svc",
+        domain="request",
+        object_key="raw/request/malformed.gz",
+        checksum="sha256:malformed",
+        payload=gzip.compress(b"not-json\n"),
+    )
+
+    assert result.decoded.accepted_rows == 0
+    assert result.decoded.quarantined_rows == 1
+    assert result.publication.rows_visible == 0
+    archived_rows = pq.read_table(
+        pa.BufferReader(ArchivePublication(objects).read_artifact(result.manifest))
+    ).to_pylist()
+    assert len(archived_rows) == 1
+    assert archived_rows[0]["_record_kind"] == "dead_letter"
+    assert archived_rows[0]["line_ordinal"] == 0
+    assert archived_rows[0]["raw_line_base64"] == "bm90LWpzb24="
+    assert archived_rows[0]["source_object_key"] == "raw/request/malformed.gz"
+    assert archived_rows[0]["reason"]
+
+
 def test_controller_refuses_sources_owned_by_another_data_plane() -> None:
     ownership = OwnershipStore()
     ledger = HighScaleLedger()

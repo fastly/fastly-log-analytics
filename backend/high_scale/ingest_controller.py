@@ -101,8 +101,8 @@ class HighScaleIngestController:
             accepted_rows=decoded.accepted_rows,
             malformed_rows=decoded.quarantined_rows,
         )
-        if not decoded.events:
-            raise ValueError("source object contains no accepted records")
+        if not decoded.events and not decoded.dead_letters:
+            raise ValueError("source object contains no accepted records or dead letters")
         archive_rows = [dict(event, _record_kind="event") for event in decoded.events]
         archive_rows.extend(
             {
