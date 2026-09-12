@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from backend.core import field_registry as lf
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import fastly
+from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import (
     region_endpoint,
 )
@@ -629,6 +630,16 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         yield {"type": "status", "message": "⚙️ Step 8/8: Finalizing service configuration..."}
         step(8, total, "Finalizing configuration")
         write_service_config(state)
+
+        # FASTLY_MOCK_MODE provides mock Fastly/FOS control-plane calls for
+        # browser journeys, but it does not provide a real object-storage
+        # catalog for DuckDB/PyIceberg initialization. Avoid entering that
+        # network-backed path in mock runs so the SSE stream can terminate.
+        if is_mock_mode():
+            yield {"type": "status", "message": "⚠ Skipping Iceberg initialization in mock mode."}
+            yield {"type": "progress", "current": 8, "total": total}
+            yield {"type": "done", "message": "🎉 Provisioning complete!"}
+            return
 
         try:
             from backend.core import duckdb as db
