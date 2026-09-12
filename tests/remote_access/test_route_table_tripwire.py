@@ -66,6 +66,7 @@ _HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 # a public repo (see infra-leak-sweep).
 _PATH_PARAM_SUBSTITUTIONS = {
     "service_id": "svc1",
+    "domain": "rum_vitals",
     "alert_id": "alert1",
     "invite_id": "invite1",
     "session_id": "sess1",
@@ -247,6 +248,8 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/web-vitals"),
     ("POST", "/api/ux-events"),
     ("POST", "/api/high-scale/services/{service_id}/request-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
+    ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),
 }
 
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES
