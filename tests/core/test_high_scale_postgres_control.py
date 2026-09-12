@@ -162,6 +162,31 @@ def test_claim_fences_stale_owner_epoch_before_source_update() -> None:
     assert len(connection.execute.call_args_list) == 1
 
 
+def test_cursor_advancement_is_owner_epoch_fenced() -> None:
+    store, _, connection = _fake_store()
+    current = _owner_row(owner="high_scale", epoch=4, cursor="cursor-1")
+    updated = _owner_row(owner="high_scale", epoch=4, cursor="cursor-2")
+    cursors = [MagicMock(), MagicMock(), MagicMock()]
+    cursors[0].fetchone.return_value = current
+    cursors[2].fetchone.return_value = updated
+    connection.execute.side_effect = cursors
+
+    result = store.advance_source_cursor(
+        "svc",
+        "cursor-2",
+        expected_owner="high_scale",
+        expected_owner_epoch=4,
+    )
+
+    assert result.source_cursor == "cursor-2"
+    assert connection.execute.call_args_list[1].args[1] == (
+        "cursor-2",
+        "svc",
+        4,
+        "high_scale",
+    )
+
+
 def test_cutover_increments_epoch_and_preserves_previous_owner() -> None:
     store, _, connection = _fake_store()
     current = _owner_row(drained=True)

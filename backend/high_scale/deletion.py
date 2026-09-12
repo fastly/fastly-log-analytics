@@ -19,6 +19,15 @@ class NoReplayLease:
         return False
 
 
+class OwnerRecord(Protocol):
+    current_owner: str
+    owner_epoch: int
+
+
+class OwnershipChecker(Protocol):
+    def get(self, service_id: str) -> OwnerRecord: ...
+
+
 class DeletionController:
     def __init__(
         self,
@@ -26,11 +35,13 @@ class DeletionController:
         publication: ArchivePublication,
         ledger: HighScaleLedger,
         replay_leases: ReplayLeaseChecker | None = None,
+        ownership: OwnershipChecker | None = None,
     ) -> None:
         self._store = store
         self._publication = publication
         self._ledger = ledger
         self._replay_leases = replay_leases or NoReplayLease()
+        self._ownership = ownership
 
     def delete_source(
         self,
@@ -41,6 +52,10 @@ class DeletionController:
     ) -> None:
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         manifest.validate()
+        if self._ownership is not None:
+            owner = self._ownership.get(manifest.source.service_id)
+            if owner.current_owner != "high_scale" or owner.owner_epoch != current_owner_epoch:
+                raise ValueError("high-scale deletion is not authorized for this owner epoch")
         if observed < manifest.deletion_authorization_deadline:
             raise ValueError("source deletion grace period has not elapsed")
         if self._replay_leases.active(manifest.manifest_id):

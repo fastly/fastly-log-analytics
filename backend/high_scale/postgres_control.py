@@ -214,6 +214,41 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             return self._owner(connection, service_id)
 
+    def advance_source_cursor(
+        self,
+        service_id: str,
+        source_cursor: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> OwnerEpochRecord:
+        _require_text(source_cursor, "source_cursor")
+        _require_text(expected_owner, "expected_owner")
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            _check_epoch(current, expected_owner_epoch)
+            if current.current_owner != expected_owner:
+                raise ValueError("owner does not match cursor fence")
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET source_cursor=%s, updated_at=clock_timestamp()
+                WHERE service_id=%s AND owner_epoch=%s AND current_owner=%s
+                """,
+                (source_cursor, service_id, expected_owner_epoch, expected_owner),
+            )
+            return self._owner(connection, service_id)
+
+    def source(self, service_id: str, object_key: str) -> SourceObjectRecord:
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s",
+                (service_id, object_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(object_key)
+            return _source_from_row(row)
+
     def begin_drain(self, service_id: str, *, expected_owner: str) -> OwnerEpochRecord:
         _require_text(expected_owner, "expected_owner")
         with self.transaction() as connection:

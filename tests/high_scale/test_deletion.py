@@ -7,6 +7,7 @@ from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, 
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
 from backend.high_scale.ledger import HighScaleLedger
+from backend.high_scale.ownership import OwnershipStore
 
 
 def test_source_deletion_requires_archive_and_owner_fence() -> None:
@@ -63,6 +64,23 @@ def test_source_deletion_is_blocked_before_deadline() -> None:
                 _manifest(), current_owner_epoch=3, now=datetime(2026, 9, 1, tzinfo=UTC)
             )
     finally:
+        ledger.close()
+
+
+def test_source_deletion_rejects_non_high_scale_owner() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    ownership.initialize("svc", owner="standard", source_cursor="cursor-0")
+    try:
+        with pytest.raises(ValueError, match="not authorized"):
+            DeletionController(
+                InMemoryObjectStore(),
+                ArchivePublication(InMemoryObjectStore()),
+                ledger,
+                ownership=ownership,
+            ).delete_source(_manifest(), current_owner_epoch=1)
+    finally:
+        ownership.close()
         ledger.close()
 
 

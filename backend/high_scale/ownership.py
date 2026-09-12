@@ -61,6 +61,31 @@ class OwnershipStore:
             raise KeyError(service_id)
         return self._record(row)
 
+    def advance_cursor(
+        self,
+        service_id: str,
+        source_cursor: str,
+        *,
+        expected_owner: str,
+        expected_epoch: int,
+    ) -> OwnershipRecord:
+        if not source_cursor:
+            raise ValueError("source cursor is required")
+        self._con.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.get(service_id)
+            if current.current_owner != expected_owner or current.owner_epoch != expected_epoch:
+                raise ValueError("owner epoch does not match cursor fence")
+            self._con.execute(
+                "UPDATE service_ownership SET source_cursor=? WHERE service_id=?",
+                (source_cursor, service_id),
+            )
+            self._con.commit()
+        except Exception:
+            self._con.rollback()
+            raise
+        return self.get(service_id)
+
     def begin_drain(self, service_id: str, *, expected_owner: str) -> OwnershipRecord:
         self._con.execute("BEGIN IMMEDIATE")
         try:

@@ -24,6 +24,7 @@ class SourceObject:
     checksum: str
     size_bytes: int
     version: str | None
+    status: str = "discovered"
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,10 @@ class HighScaleLedger:
     def count(self) -> int:
         return int(self._con.execute("SELECT count(*) FROM source_objects").fetchone()[0])
 
+    def source(self, object_key: str) -> SourceObject | None:
+        row = self._con.execute("SELECT * FROM source_objects WHERE object_key=?", (object_key,)).fetchone()
+        return None if row is None else self._source(row)
+
     def _transition_claim(self, object_key: str, generation: int, status: str, *, current_status: str) -> None:
         cur = self._con.execute(
             "UPDATE source_objects SET status=?,lease_until=NULL WHERE object_key=? "
@@ -212,4 +217,5 @@ class HighScaleLedger:
             row["checksum"],
             row["size_bytes"],
             row["version"],
+            row["status"],
         )
