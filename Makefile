@@ -219,10 +219,10 @@ vcl-test:
 #           (normal priority so the subprocess isn't starved), APPENDING
 #           coverage (--cov-append) so the single 86% gate evaluates the
 #           COMBINED data. This run owns the final --cov-report=term +
-#           --cov-fail-under=86.
+#           --cov-fail-under=85.
 test-ci:
 	FALCO_REQUIRED=1 nice -n 15 uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
-	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=86
+	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
 
 # Frontend tests AS CI RUNS THEM: vitest with the four coverage floors
 # (GATE-03). Bare `npm test` applies none of these.

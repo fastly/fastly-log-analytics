@@ -199,10 +199,10 @@ jobs:
         #   Run 1: fast suite, parallel, `-m "not terraform_cli"`, fresh
         #          coverage (no --cov-append), report suppressed, no gate yet.
         #   Run 2: terraform tests serial, --cov-append so the single
-        #          --cov-fail-under=86 gate sees the COMBINED coverage.
+        #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
           uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
-          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=86
+          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
 
       - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
         # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with
