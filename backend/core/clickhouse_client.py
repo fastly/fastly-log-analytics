@@ -44,7 +44,62 @@ CLICKHOUSE_FACT_COLUMNS = (
     "url",
     "conn_requests",
 )
-CLICKHOUSE_ALLOWED_COLUMNS = frozenset(CLICKHOUSE_FACT_COLUMNS)
+CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
+    {
+        "high_scale_batch_publications",
+        "request_facts",
+        "request_aggregates",
+        "rum_vitals_facts",
+        "rum_error_facts",
+        "cmcd_projection_facts",
+    }
+)
+CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
+    {
+        "batch_id",
+        "service_id",
+        "domain",
+        "generation",
+        "batch_digest",
+        "expected_rows",
+        "visible_rows",
+        "quorum_acked",
+        "publication_state",
+        "manifest_version",
+        "updated_at",
+        "event_id",
+        "event_timestamp",
+        "ingest_timestamp",
+        "source_object_key",
+        "source_object_version",
+        "line_ordinal",
+        "transform_version",
+        "country",
+        "client_ip",
+        "url",
+        "custom_fields",
+        "cmcd",
+        "client_id",
+        "request_event_id",
+        "metric_name",
+        "metric_value",
+        "metric_rating",
+        "pathname",
+        "error_message",
+        "error_file",
+        "projection_key",
+        "request_count",
+        "bucket_start",
+        "dimension",
+        "value",
+    }
+)
+CLICKHOUSE_ALLOWED_TABLES = frozenset({CLICKHOUSE_FACT_TABLE}) | CLICKHOUSE_HIGH_SCALE_TABLES
+CLICKHOUSE_ALLOWED_COLUMNS = frozenset(CLICKHOUSE_FACT_COLUMNS) | CLICKHOUSE_HIGH_SCALE_COLUMNS
+CLICKHOUSE_TABLE_COLUMNS = {
+    CLICKHOUSE_FACT_TABLE: frozenset(CLICKHOUSE_FACT_COLUMNS),
+    **{table: CLICKHOUSE_HIGH_SCALE_COLUMNS for table in CLICKHOUSE_HIGH_SCALE_TABLES},
+}
 _PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PARAM_ESCAPES = {
     ord("\\"): "\\\\",
@@ -168,7 +223,7 @@ class ClickHouseClient:
             raise ValueError("ClickHouse table is not internally allowlisted")
         if (
             not columns
-            or any(c not in CLICKHOUSE_ALLOWED_COLUMNS for c in columns)
+            or any(c not in CLICKHOUSE_TABLE_COLUMNS[table] for c in columns)
             or len(set(columns)) != len(columns)
         ):
             raise ValueError("ClickHouse columns must be unique internal identifiers")
