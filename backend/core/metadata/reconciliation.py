@@ -81,6 +81,18 @@ _SLOW_QUERIES_TABLE = "slow_queries"
 _USAGE_LOG_TABLE = "usage_log"
 
 
+def _retention_timestamp_expr(ts_col: str, postgres: bool) -> str:
+    """Return the timestamp expression used by a retention predicate."""
+    if postgres:
+        return f"CAST({ts_col} AS TIMESTAMPTZ)"
+    return ts_col
+
+
+def _table_uses_postgres(table: str, postgres: bool) -> bool:
+    """Return whether retention SQL should use the Postgres dialect."""
+    return postgres and table != _USAGE_LOG_TABLE
+
+
 def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
     """Open the per-service usage_log file if it exists; else None.
 
@@ -310,6 +322,7 @@ def cleanup_metadata(
         # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
         # between commits instead of queuing for the full duration.
         _BATCH = 5_000
+        table_postgres = _table_uses_postgres(table, postgres)
         try:
             total_n = 0
             while True:
@@ -317,7 +330,7 @@ def cleanup_metadata(
                     # Unix-epoch REAL cutoff for slow_queries — see
                     # ``_SLOW_QUERIES_TABLE`` comment above.
                     cutoff_epoch = _t.time() - days_int * 86400
-                    if postgres:
+                    if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
                             (cutoff_epoch, _BATCH),
@@ -329,11 +342,12 @@ def cleanup_metadata(
                             (cutoff_epoch, _BATCH),
                         )
                 else:
-                    if postgres:
+                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN "
                             f"(SELECT ctid FROM {table} "
-                            f"WHERE {ts_col} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
                             (days_int, _BATCH),
                         )
                     else:

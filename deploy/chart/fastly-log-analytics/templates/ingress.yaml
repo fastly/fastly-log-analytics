@@ -31,7 +31,7 @@ spec:
       http:
         paths:
           # Backend paths — mirrors the Caddyfile @api matcher
-          # (/api/* /js/* /rum-beacon). /docs and /openapi.json are
+          # (/api/* /js/* ). /docs and /openapi.json are
           # deliberately NOT exposed publicly.
           - path: /api
             pathType: Prefix
@@ -47,7 +47,6 @@ spec:
                 name: {{ include "fastly-log-analytics.fullname" $ }}-backend
                 port:
                   number: 8000
-          - path: /rum-beacon
             pathType: Prefix
             backend:
               service:

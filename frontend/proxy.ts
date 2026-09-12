@@ -29,7 +29,7 @@ import { ACTIVE_SERVICE_COOKIE } from './lib/active-service-cookie'
 const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/logs']
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 
-// Same-origin /api/*, /js/*, /rum-beacon proxying for the production/
+// Same-origin /api/*, /js/* proxying for the production/
 // standalone build (dev mode fetches the backend directly cross-origin,
 // see getApiBase() and this file's CSP connect-src comment below, so this
 // path is never hit there). Used to live as next.config.ts's `rewrites()`,
@@ -101,7 +101,7 @@ export function proxy(request: NextRequest) {
 
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses.
-  if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p)) || pathname === '/rum-beacon') {
+  if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p))) {
     return NextResponse.rewrite(new URL(`${apiProxyTarget()}${pathname}${search}`))
   }
 

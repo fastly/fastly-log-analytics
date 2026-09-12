@@ -94,7 +94,6 @@ _UNAUTH_ANALYST_PATHS = {
     # Public RUM assets and beacon endpoints
     "/js/rum.js",
     "/js/faro-sdk.js",
-    "/rum-beacon",
     "/api/web-vitals",
     "/api/ux-events",
 }
@@ -304,11 +303,9 @@ _ADMIN_TOKEN_EXEMPT_PATHS = {
     # second-factor gate on the admin loopback branch.
     "/api/web-vitals",
     "/api/ux-events",
-    "/api/services/rum-beacon",
     # Public RUM assets and beacon endpoints
     "/js/rum.js",
     "/js/faro-sdk.js",
-    "/rum-beacon",
 }
 
 
