@@ -44,3 +44,9 @@ class HighScaleRequestFactResponse(BaseResponse):
     rows: list[dict[str, Any]]
     metadata: QueryResponseMetadataResponse
     next_cursor: str | None
+
+
+class HighScaleRumFactResponse(BaseResponse):
+    rows: list[dict[str, Any]]
+    metadata: QueryResponseMetadataResponse
+    next_cursor: str | None

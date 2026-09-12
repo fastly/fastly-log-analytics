@@ -47,7 +47,36 @@ def _service(service_id="test-service-id"):
             },
         ]
     )
-    return HighScaleService(service_id, client, b"test-secret", watermark)
+    rum_watermark = ServingWatermark(
+        service_id,
+        "rum_vitals",
+        1,
+        watermark.coverage_start,
+        watermark.coverage_end,
+        "cursor",
+        "rum-event-2",
+        "rum-event-2",
+        True,
+    )
+    cmcd_watermark = ServingWatermark(
+        service_id,
+        "cmcd",
+        1,
+        watermark.coverage_start,
+        watermark.coverage_end,
+        "cursor",
+        "cmcd-event-2",
+        "cmcd-event-2",
+        True,
+    )
+    return HighScaleService(
+        service_id,
+        client,
+        b"test-secret",
+        watermark,
+        {"rum_vitals": rum_watermark},
+        cmcd_watermark,
+    )
 
 
 def _registry(service=None):
@@ -74,6 +103,14 @@ def _analyst_context(source, con):
 
 def test_request_facts_route_registered():
     assert "/api/high-scale/services/{service_id}/request-facts" in app.openapi()["paths"]
+
+
+def test_rum_facts_route_registered():
+    assert "/api/high-scale/services/{service_id}/rum-facts/{domain}" in app.openapi()["paths"]
+
+
+def test_cmcd_facts_route_registered():
+    assert "/api/high-scale/services/{service_id}/cmcd-facts" in app.openapi()["paths"]
 
 
 def test_admin_can_query_request_facts(client, test_service_source):
@@ -155,3 +192,42 @@ def test_request_facts_rejects_invalid_cursor(client, test_service_source):
 
     assert response.status_code == 400
     assert response.json()["detail"]["error"] == "bad_request"
+
+
+def test_rum_facts_queries_configured_domain(client, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    response = client.post(
+        f"/api/high-scale/services/{test_service_source['service_id']}/rum-facts/rum_vitals",
+        json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"]["watermark"]["domain"] == "rum_vitals"
+
+
+def test_rum_facts_rejects_unconfigured_domain(client, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    response = client.post(
+        f"/api/high-scale/services/{test_service_source['service_id']}/rum-facts/rum_errors",
+        json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "high_scale_domain_not_configured"
+
+
+def test_cmcd_facts_queries_configured_domain(client, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    response = client.post(
+        f"/api/high-scale/services/{test_service_source['service_id']}/cmcd-facts",
+        json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"]["watermark"]["domain"] == "cmcd"

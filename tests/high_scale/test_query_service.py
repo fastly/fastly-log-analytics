@@ -4,7 +4,7 @@ import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.pagination import KeysetCursor
-from backend.high_scale.query_service import query_request_facts, query_rum_facts
+from backend.high_scale.query_service import query_cmcd_facts, query_request_facts, query_rum_facts
 
 
 class _Client:
@@ -127,3 +127,31 @@ def test_rum_domains_use_separate_fact_tables_and_watermarks() -> None:
     )
 
     assert "FROM rum_vitals_facts" in client.sql
+
+
+def test_cmcd_facts_use_projection_identity_for_keyset() -> None:
+    client = _Client([_row(1, "projection-1")])
+    watermark = _watermark()
+    watermark = ServingWatermark(
+        watermark.service_id,
+        "cmcd",
+        watermark.owner_epoch,
+        watermark.coverage_start,
+        watermark.coverage_end,
+        watermark.last_accepted_cursor,
+        watermark.last_archived_event_id,
+        watermark.last_visible_event_id,
+        watermark.exact,
+    )
+
+    query_cmcd_facts(
+        client,
+        service_id="svc",
+        start=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+        end=datetime(2026, 9, 11, 21, 0, tzinfo=UTC),
+        cursor_secret=b"secret",
+        watermark=watermark,
+    )
+
+    assert "FROM cmcd_projection_facts" in client.sql
+    assert "projection_key AS event_id" in client.sql

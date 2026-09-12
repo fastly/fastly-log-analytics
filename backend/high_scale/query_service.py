@@ -109,6 +109,35 @@ def query_rum_facts(
     )
 
 
+def query_cmcd_facts(
+    client: QueryClient,
+    *,
+    service_id: str,
+    start: datetime,
+    end: datetime,
+    cursor_secret: bytes,
+    watermark: ServingWatermark,
+    limit: int = MAX_PAGE_SIZE,
+    cursor: str | None = None,
+    now: datetime | None = None,
+) -> RequestFactPage:
+    return _query_facts(
+        client,
+        service_id=service_id,
+        domain="cmcd",
+        table="cmcd_projection_facts",
+        columns="request_event_id, cmcd",
+        event_column="projection_key",
+        start=start,
+        end=end,
+        cursor_secret=cursor_secret,
+        watermark=watermark,
+        limit=limit,
+        cursor=cursor,
+        now=now,
+    )
+
+
 def _query_facts(
     client: QueryClient,
     *,
@@ -123,6 +152,7 @@ def _query_facts(
     limit: int,
     cursor: str | None,
     now: datetime | None,
+    event_column: str = "event_id",
 ) -> RequestFactPage:
     if not service_id:
         raise ValueError("service_id is required")
@@ -150,19 +180,19 @@ def _query_facts(
     if decoded:
         params.update({"cursor_timestamp": decoded.timestamp, "cursor_event_id": decoded.event_id})
         cursor_clause = (
-            " AND (event_timestamp > {cursor_timestamp:DateTime64(3)} "
+            f" AND (event_timestamp > {{cursor_timestamp:DateTime64(3)}} "
             "OR (event_timestamp = {cursor_timestamp:DateTime64(3)} "
-            "AND event_id > {cursor_event_id:UUID}))"
+            f"AND {event_column} > {{cursor_event_id:UUID}}))"
         )
     rows = client.execute(
-        f"SELECT event_id, event_timestamp AS timestamp, service_id, {columns} "
+        f"SELECT {event_column} AS event_id, event_timestamp AS timestamp, service_id, {columns} "
         f"FROM {table} "
         "WHERE service_id={service_id:String} "
         "AND event_timestamp >= {start:DateTime64(3)} "
         "AND event_timestamp < {end:DateTime64(3)} "
         "AND publication_state = 'visible'"
         f"{cursor_clause} "
-        "ORDER BY event_timestamp ASC, event_id ASC "
+        f"ORDER BY event_timestamp ASC, {event_column} ASC "
         "LIMIT {limit:UInt32}",
         params,
     )

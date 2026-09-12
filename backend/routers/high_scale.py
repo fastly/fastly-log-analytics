@@ -11,12 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.share_db.validation import mask_ip
-from backend.high_scale.query_service import query_request_facts
+from backend.high_scale.query_service import query_cmcd_facts, query_request_facts, query_rum_facts
 from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.errors import DEFAULT_ERROR_RESPONSES, ErrorEnvelope
 from backend.models.high_scale import (
     HighScaleRequestFactRequest,
     HighScaleRequestFactResponse,
+    HighScaleRumFactResponse,
     QueryResponseMetadataResponse,
     ServingWatermarkResponse,
 )
@@ -78,6 +79,153 @@ def request_facts(
     metadata = page.metadata
     return HighScaleRequestFactResponse.with_telemetry(
         rows=rows,
+        next_cursor=page.next_cursor,
+        metadata=QueryResponseMetadataResponse(
+            status=metadata.status,
+            exact=metadata.exact,
+            coverage=metadata.coverage,
+            freshness_lag_seconds=metadata.freshness_lag_seconds,
+            watermark=ServingWatermarkResponse(
+                service_id=metadata.watermark.service_id,
+                domain=metadata.watermark.domain,
+                owner_epoch=metadata.watermark.owner_epoch,
+                coverage_start=metadata.watermark.coverage_start,
+                coverage_end=metadata.watermark.coverage_end,
+                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
+                last_archived_event_id=metadata.watermark.last_archived_event_id,
+                last_visible_event_id=metadata.watermark.last_visible_event_id,
+                exact=metadata.watermark.exact,
+            ),
+            approximation_error=metadata.approximation_error,
+            error=metadata.error,
+        ),
+    )
+
+
+@router.post(
+    "/services/{service_id}/rum-facts/{domain}",
+    response_model=HighScaleRumFactResponse,
+)
+@query_errors()
+def rum_facts(
+    domain: str,
+    req: HighScaleRequestFactRequest,
+    ctx: RequestContext = Depends(build_request_context),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+):
+    if domain not in {"rum_vitals", "rum_errors"}:
+        raise HTTPException(status_code=404, detail=make_error("not_found", "RUM domain not found"))
+    service = registry.resolve(ctx.service_id)
+    if service is None:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
+        )
+    if service.service_id != ctx.service_id:
+        raise HTTPException(
+            status_code=409,
+            detail=make_error(
+                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
+            ),
+        )
+
+    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
+    start = parse_iso_utc(start_raw)
+    end = parse_iso_utc(end_raw)
+    if start is None or end is None:
+        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+
+    try:
+        watermark = service.watermark_for(domain)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_domain_not_configured", "RUM domain is not configured for this service"),
+        ) from None
+    page = query_rum_facts(
+        service.client,
+        service_id=ctx.service_id,
+        domain=domain,
+        start=start,
+        end=end,
+        cursor_secret=service.cursor_secret,
+        watermark=watermark,
+        limit=req.limit,
+        cursor=req.cursor,
+    )
+    rows = [dict(row) for row in page.rows]
+    if mask_ips_for(ctx.analyst_session):
+        for row in rows:
+            value = row.get("client_ip")
+            if isinstance(value, str):
+                row["client_ip"] = mask_ip(value)
+    metadata = page.metadata
+    return HighScaleRumFactResponse.with_telemetry(
+        rows=rows,
+        next_cursor=page.next_cursor,
+        metadata=QueryResponseMetadataResponse(
+            status=metadata.status,
+            exact=metadata.exact,
+            coverage=metadata.coverage,
+            freshness_lag_seconds=metadata.freshness_lag_seconds,
+            watermark=ServingWatermarkResponse(
+                service_id=metadata.watermark.service_id,
+                domain=metadata.watermark.domain,
+                owner_epoch=metadata.watermark.owner_epoch,
+                coverage_start=metadata.watermark.coverage_start,
+                coverage_end=metadata.watermark.coverage_end,
+                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
+                last_archived_event_id=metadata.watermark.last_archived_event_id,
+                last_visible_event_id=metadata.watermark.last_visible_event_id,
+                exact=metadata.watermark.exact,
+            ),
+            approximation_error=metadata.approximation_error,
+            error=metadata.error,
+        ),
+    )
+
+
+@router.post(
+    "/services/{service_id}/cmcd-facts",
+    response_model=HighScaleRequestFactResponse,
+)
+@query_errors()
+def cmcd_facts(
+    req: HighScaleRequestFactRequest,
+    ctx: RequestContext = Depends(build_request_context),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+):
+    service = registry.resolve(ctx.service_id)
+    if service is None:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
+        )
+    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
+    start = parse_iso_utc(start_raw)
+    end = parse_iso_utc(end_raw)
+    if start is None or end is None:
+        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+    try:
+        watermark = service.watermark_for("cmcd")
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_domain_not_configured", "CMCD is not configured for this service"),
+        ) from None
+    page = query_cmcd_facts(
+        service.client,
+        service_id=ctx.service_id,
+        start=start,
+        end=end,
+        cursor_secret=service.cursor_secret,
+        watermark=watermark,
+        limit=req.limit,
+        cursor=req.cursor,
+    )
+    metadata = page.metadata
+    return HighScaleRequestFactResponse.with_telemetry(
+        rows=[dict(row) for row in page.rows],
         next_cursor=page.next_cursor,
         metadata=QueryResponseMetadataResponse(
             status=metadata.status,
