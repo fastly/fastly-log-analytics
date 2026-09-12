@@ -288,3 +288,12 @@ observability:
       image: danihodovic/celery-exporter:0.11.3
       # BYO broker URL -- same instance as secrets.celeryBrokerUrl.
       brokerUrl: "redis://valkey-master:6379/0"
+
+# Portable high-scale application plane. Disabled by default so standard and
+# high_throughput render exactly their existing workload set. Enabling this
+# local subchart adds only the ingest/archive/query/replay/control-plane
+# application workloads and their policies. ClickHouse and Keeper remain
+# external operator-owned dependencies; connection details belong in an
+# existing Secret rather than in chart values.
+highScale:
+  enabled: false

@@ -35,3 +35,14 @@ The slice is complete only when the replay budget is measured end-to-end,
 freshness and coverage watermarks are exposed, the exact/approximate status is
 reported, and the migration fence can abort without leaving two authoritative
 pipelines. Local validation must not mutate Elevation or customer services.
+
+## Portable packaging boundary
+
+The application-only Helm packaging slice is intentionally separate from this
+runtime evidence gate. `highScale.enabled` adds independently schedulable
+ingest, archive, query, replay, and control-plane workloads plus their
+identities, Secrets, resource limits, disruption budgets, network policies, and
+scheduling-fairness settings. It does not enable a runtime mode or install
+ClickHouse/Keeper. Those stateful systems remain owned by one externally
+selected operator/chart, and runtime startup remains a later vertical-slice
+deliverable.

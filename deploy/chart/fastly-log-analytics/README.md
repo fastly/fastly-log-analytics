@@ -69,6 +69,31 @@ High-throughput mode uses durable serving. In this mode backend
 requests use ephemeral read-only DuckDB connections over the shared Postgres
 DuckLake catalog and do not open a native per-service DuckDB file.
 
+## Optional high-scale application plane
+
+The chart also contains an opt-in `highScale` application subchart. It is a
+portable packaging slice for five independently schedulable workloads:
+`ingest`, `archive`, `query`, `replay`, and `control-plane`. It adds
+Deployment, PodDisruptionBudget, NetworkPolicy, ServiceAccount, optional
+Secret, resource, and workload-fairness configuration:
+
+```sh
+helm install fla ./deploy/chart/fastly-log-analytics \
+  --set highScale.enabled=true \
+  --set highScale.secret.existingName=fla-high-scale-connections
+```
+
+The subchart is deliberately disabled by default, and enabling it does not
+change `config.deploymentMode`, existing startup commands, or the standard /
+`high_throughput` workload set. Supply the application image and per-workload
+commands through `highScale.image` / `highScale.workloads`; empty command and
+argument lists preserve the image's normal entrypoint.
+
+ClickHouse and Keeper are **not** installed by this chart. Select and operate
+one external ClickHouse/Keeper operator or chart, then grant the workloads
+access through an operator-managed Secret and the `highScale.networkPolicy`
+egress rules. No Elevation-specific values or operator CRDs are included.
+
 ## Misconfiguration is a template-time error
 
 `backend/config.py::validate_deployment_mode()` refuses to boot a backend or

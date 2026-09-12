@@ -1,0 +1,84 @@
+{{- range $workload, $config := .Values.workloads }}
+{{- if $config.enabled }}
+{{- $root := $ }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "high-scale.workloadName" (dict "root" $root "workload" $workload) }}
+  labels:
+    {{- include "high-scale.workloadLabels" (dict "root" $root "workload" $workload) | nindent 4 }}
+spec:
+  replicas: {{ $config.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $workload }}
+  template:
+    metadata:
+      labels:
+        {{- include "high-scale.workloadLabels" (dict "root" $root "workload" $workload) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "high-scale.serviceAccountName" $root }}
+      {{- with $root.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.workloadFairness.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $root.Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.workloadFairness.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if $root.Values.workloadFairness.podAntiAffinity.required }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+                  app.kubernetes.io/instance: {{ $root.Release.Name }}
+              topologyKey: {{ $root.Values.workloadFairness.podAntiAffinity.topologyKey }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+                    app.kubernetes.io/instance: {{ $root.Release.Name }}
+                topologyKey: {{ $root.Values.workloadFairness.podAntiAffinity.topologyKey }}
+          {{- end }}
+      {{- end }}
+      {{- with $root.Values.workloadFairness.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $workload }}
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          {{- with $root.Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $config.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $config.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $root.Values.secret.existingName $root.Values.secret.create }}
+          envFrom:
+            - secretRef:
+                name: {{ default (printf "%s-connections" (include "high-scale.fullname" $root)) $root.Values.secret.existingName }}
+          {{- end }}
+          resources:
+            {{- toYaml (default $root.Values.resources $config.resources) | nindent 12 }}
+---
+{{- end }}
+{{- end }}

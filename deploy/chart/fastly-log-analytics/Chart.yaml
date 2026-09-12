@@ -4,3 +4,12 @@ description: Fastly Log Analytics Dashboard and Ingest Pipeline
 type: application
 version: 3.0.0-beta1
 appVersion: "3.0.0-beta1"
+dependencies:
+  # The portable high-scale application plane is deliberately opt-in. Its
+  # ClickHouse/Keeper endpoints are supplied by an external operator/chart;
+  # this chart owns only application workloads and their policy scaffolding.
+  - name: high-scale
+    alias: highScale
+    version: 0.1.0
+    repository: file://charts/high-scale
+    condition: highScale.enabled

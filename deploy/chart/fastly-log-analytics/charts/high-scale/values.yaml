@@ -1,0 +1,96 @@
+# This subchart is enabled through the parent chart's highScale.enabled flag.
+# It packages application workloads only. ClickHouse/Keeper remain owned by
+# the operator/chart selected by the platform team and are reached through
+# operator-provided Services and Secrets.
+enabled: false
+
+image:
+  repository: fastly-log-analytics-high-scale
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+secret:
+  # Prefer an operator-managed Secret in production. The chart never invents
+  # ClickHouse/Keeper connection values.
+  existingName: ""
+  create: false
+  stringData: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+# Fairness is intentionally expressed as scheduling policy, not as an
+# application/runtime mode. Operators can tune these per environment without
+# changing the existing standard/high_throughput startup paths.
+workloadFairness:
+  priorityClassName: ""
+  topologySpreadConstraints: []
+  podAntiAffinity:
+    enabled: true
+    topologyKey: kubernetes.io/hostname
+    required: false
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  allowClusterDns: true
+  ingressFrom: []
+  egressTo: []
+
+workloads:
+  ingest:
+    enabled: true
+    replicas: 2
+    command: []
+    args: []
+    resources: {}
+  archive:
+    enabled: true
+    replicas: 2
+    command: []
+    args: []
+    resources: {}
+  query:
+    enabled: true
+    replicas: 2
+    command: []
+    args: []
+    resources: {}
+  replay:
+    enabled: true
+    replicas: 1
+    command: []
+    args: []
+    resources: {}
+  control-plane:
+    enabled: true
+    replicas: 2
+    command: []
+    args: []
+    resources: {}

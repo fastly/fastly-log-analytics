@@ -29,7 +29,7 @@ claimed by the replacement.
 | DuckDB files/local buffers | preserve for current modes | not a high-scale serving dependency |
 | RBAC, masking, audit, telemetry | reuse/extend | service tenancy remains mandatory |
 | ADR-20 ClickHouse evaluator | retain as diagnostic evidence | not a serving dispatcher |
-| application Helm chart | preserve current chart | ClickHouse/Keeper ownership must be one selected external operator/chart |
+| application Helm chart | preserve current chart; optional `highScale` subchart packages ingest/archive/query/replay/control-plane workloads, policies, PDBs, identities, resources, and fairness settings | ClickHouse/Keeper ownership must be one selected external operator/chart; no operator CRDs or Elevation-specific values |
 
 ## Gate evidence
 
@@ -45,3 +45,13 @@ Before runtime enablement, attach evidence for:
 
 No source deletion, production deployment, Elevation mutation, or current-mode
 retirement is authorized by this document.
+
+## Portable packaging slice
+
+The Helm chart now carries an opt-in application-only `highScale` subchart.
+It is disabled by default and does not register `high_scale` as a runtime
+mode: standard and `high_throughput` continue to render and start unchanged.
+The slice deliberately leaves image entrypoints and commands configurable,
+because runtime startup and the high-scale data-plane implementation remain
+out of scope for this phase. External ClickHouse/Keeper Services and
+operator-managed connection Secrets are the integration boundary.

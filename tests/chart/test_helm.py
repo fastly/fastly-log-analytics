@@ -320,3 +320,64 @@ def test_no_worker_scaledobject_without_a_worker_fleet():
 
     assert not [doc for doc in docs if doc["kind"] == "ScaledObject"]
     assert all("worker" not in name for name in _autoscaler_targets(docs))
+
+
+# ── Optional high-scale application packaging ───────────────────────────────
+
+
+def _high_scale_docs(*extra: str) -> list[dict]:
+    return _render("highScale.enabled=true", *extra)
+
+
+def test_high_scale_is_disabled_without_opt_in():
+    docs = _render()
+    assert not [doc for doc in docs if "high-scale" in doc["metadata"]["name"]]
+    assert {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"} == {
+        "test-release-fastly-log-analytics-backend",
+        "test-release-fastly-log-analytics-frontend",
+    }
+
+
+def test_high_scale_renders_only_application_workloads_and_invariants():
+    docs = _high_scale_docs(
+        "highScale.image.repository=example.invalid/fla-high-scale",
+        "highScale.image.tag=test",
+        "highScale.secret.existingName=fla-high-scale-connections",
+    )
+    deployments = {
+        doc["metadata"]["name"]: doc
+        for doc in docs
+        if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]
+    }
+    assert {doc["metadata"]["labels"]["app.kubernetes.io/component"] for doc in deployments.values()} == {
+        "ingest",
+        "archive",
+        "query",
+        "replay",
+        "control-plane",
+    }
+    assert len([doc for doc in docs if doc["kind"] == "PodDisruptionBudget"]) == 5
+    assert len([doc for doc in docs if doc["kind"] == "NetworkPolicy"]) == 5
+    assert not [doc for doc in docs if doc["kind"] in {"ClickHouseCluster", "KeeperCluster"}]
+    assert not [doc for doc in docs if doc["kind"] == "Secret"]
+
+    for deployment in deployments.values():
+        pod = deployment["spec"]["template"]["spec"]
+        assert pod["serviceAccountName"].endswith("-high-scale")
+        assert pod["containers"][0]["image"] == "example.invalid/fla-high-scale:test"
+        assert pod["containers"][0]["resources"]["requests"]["cpu"] == "250m"
+        assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+        # Packaging must not silently select an application runtime mode.
+        assert not any(entry["name"] == "DEPLOYMENT_MODE" for entry in pod["containers"][0].get("env", []))
+        assert pod["containers"][0]["envFrom"][0]["secretRef"]["name"] == "fla-high-scale-connections"
+
+
+def test_high_scale_can_disable_a_workload_and_secret_creation_is_explicit():
+    docs = _high_scale_docs(
+        "highScale.workloads.replay.enabled=false",
+        "highScale.secret.create=true",
+        "highScale.secret.stringData.CLICKHOUSE_URL=external-service",
+    )
+    assert len([doc for doc in docs if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]]) == 4
+    secret = next(doc for doc in docs if doc["kind"] == "Secret")
+    assert secret["stringData"]["CLICKHOUSE_URL"] == "external-service"
