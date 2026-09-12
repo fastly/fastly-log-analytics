@@ -145,8 +145,6 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Safe to load anonymously (no credentials required).
     ("GET", "/js/rum.js"),
     ("GET", "/js/faro-sdk.js"),
-    ("GET", "/rum-beacon"),
-    ("POST", "/rum-beacon"),
     # Reference / catalog data: no per-service secrets, needed to drive the
     # analyst UI's filter and field pickers.
     ("GET", "/api/log-fields/catalog"),

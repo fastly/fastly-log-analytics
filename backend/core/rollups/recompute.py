@@ -499,8 +499,12 @@ def backfill_missing_hour_bundles(
         # — query through ``information_schema`` to find it rather than
         # guess (the name is derived from source["name"]/svc_name, not
         # source["service_id"]).
+        from backend.core.duckdb import _safe_table_name
+
+        view_name = _safe_table_name(source.get("name") or service_id)
         view_row = con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'logs_%' LIMIT 1"
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+            [view_name],
         ).fetchone()
         if view_row is None:
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
