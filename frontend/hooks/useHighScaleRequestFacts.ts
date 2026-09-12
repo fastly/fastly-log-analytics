@@ -50,12 +50,9 @@ export function useHighScaleRequestFacts({
         limit: pageSize,
         cursor,
       }
-      // The backend route includes service_id in its URL, while the current
-      // generated operation models it as a dependency query parameter.
       const { data, error } = await client.POST(REQUEST_FACTS_PATH, {
         params: {
-          path: { service_id: serviceId } as never,
-          query: { service_id: serviceId },
+          path: { service_id: serviceId },
         },
         body,
         signal,

@@ -61,6 +61,90 @@ export const handlers = [
   ),
 
   http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/request-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'request',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/rum-facts/:domain`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'rum_vitals',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/cmcd-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'cmcd',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.get(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id/cancel`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'cancelled', cancelled: true }),
+  ),
   http.get(`${API_BASE}/api/admin/clickhouse/status`, ({ request }) =>
     HttpResponse.json({
       service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',
