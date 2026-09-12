@@ -36,10 +36,10 @@ class _Controller:
         if self.fail_once:
             self.fail_once = False
             raise RuntimeError("lost acknowledgement")
-        claim = self.ledger.claim(key, "worker")
-        self.ledger.mark_appended(key, claim.lease_generation)
-        self.ledger.mark_archived(key, claim.lease_generation, "manifest-1", 1)
-        self.ledger.acknowledge(key, "manifest-1")
+        claim = self.ledger.claim("svc", key, "worker")
+        self.ledger.mark_appended("svc", key, claim.lease_generation)
+        self.ledger.mark_archived("svc", key, claim.lease_generation, "manifest-1", 1)
+        self.ledger.acknowledge("svc", key, "manifest-1")
 
 
 def _coordinator(*, owner: str = "high_scale", fail_once: bool = False):
@@ -100,7 +100,7 @@ def test_failed_acknowledgement_can_be_retried_after_lease_recovery() -> None:
 
     first = coordinator.run_page(service_id="svc", domain="request")
     assert first.failed == 1
-    source = ledger.source("raw/one.gz")
+    source = ledger.source("svc", "raw/one.gz")
     assert source is not None and source.status == "discovered"
 
     second = coordinator.run_page(service_id="svc", domain="request")

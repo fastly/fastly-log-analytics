@@ -182,6 +182,8 @@ def export_status(
     try:
         job = manager.get(export_id)
     except KeyError:
+        with _export_owners_lock:
+            _export_owners.pop(export_id, None)
         raise HTTPException(status_code=404, detail=make_error("export_not_found", "Export not found")) from None
     return _export_response(service_id, job)
 
@@ -208,6 +210,8 @@ def cancel_export(
         cancelled = manager.cancel(export_id)
         job = manager.get(export_id)
     except KeyError:
+        with _export_owners_lock:
+            _export_owners.pop(export_id, None)
         raise HTTPException(status_code=404, detail=make_error("export_not_found", "Export not found")) from None
     if cancelled:
         metadata.record_audit(

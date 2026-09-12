@@ -118,7 +118,47 @@ def test_schema_is_explicit_and_transactional() -> None:
     assert "CREATE TABLE IF NOT EXISTS high_scale_ownership" in ddl
     assert "CREATE TABLE IF NOT EXISTS high_scale_source_objects" in ddl
     assert "CREATE TABLE IF NOT EXISTS high_scale_archive_manifests" in ddl
+    assert "CREATE TABLE IF NOT EXISTS high_scale_batch_claims" in ddl
     assert "CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations" in ddl
+
+
+def test_batch_claim_is_fenced_and_starts_at_generation_one() -> None:
+    store, _, connection = _fake_store()
+    owner_row = _owner_row(owner="high_scale")
+    connection.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=owner_row)),
+        MagicMock(fetchone=MagicMock(return_value=None)),
+        MagicMock(),
+    ]
+
+    claim = store.claim_batch(
+        "batch-1",
+        "svc",
+        "request",
+        "worker-1",
+        expected_owner="high_scale",
+        expected_owner_epoch=1,
+        now=datetime(2026, 9, 11, 12, tzinfo=UTC),
+    )
+
+    assert claim.claimed is True
+    assert claim.lease_generation == 1
+    assert claim.state == "claimed"
+
+
+def test_batch_claim_rejects_wrong_owner_epoch() -> None:
+    store, _, connection = _fake_store()
+    connection.execute.return_value.fetchone.return_value = _owner_row(owner="standard", epoch=2)
+
+    with pytest.raises(ValueError, match="owner"):
+        store.claim_batch(
+            "batch-1",
+            "svc",
+            "request",
+            "worker-1",
+            expected_owner="high_scale",
+            expected_owner_epoch=1,
+        )
 
 
 def test_claim_returns_existing_lease_without_stealing_it() -> None:

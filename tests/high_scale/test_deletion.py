@@ -17,9 +17,9 @@ def test_source_deletion_requires_archive_and_owner_fence() -> None:
     try:
         source = ArchiveSourceObject("svc", "request", "raw/request/a.gz", "sha256:source", 4, "v1")
         ledger.discover("svc", "request", source.object_key, source.checksum, size_bytes=4, version="v1")
-        claim = ledger.claim(source.object_key, "worker")
-        ledger.record_counts(source.object_key, accepted_rows=1, malformed_rows=0)
-        ledger.mark_appended(source.object_key, claim.lease_generation)
+        claim = ledger.claim(source.service_id, source.object_key, "worker")
+        ledger.record_counts(source.service_id, source.object_key, accepted_rows=1, malformed_rows=0)
+        ledger.mark_appended(source.service_id, source.object_key, claim.lease_generation)
         now = datetime(2026, 9, 4, tzinfo=UTC)
         manifest = ArchiveManifest(
             "manifest-1",
@@ -43,13 +43,13 @@ def test_source_deletion_requires_archive_and_owner_fence() -> None:
         artifact = b"data"
         store.put(source.object_key, b"raw")
         publication.publish(manifest, artifact)
-        ledger.mark_archived(source.object_key, claim.lease_generation, manifest.manifest_id, 3)
-        ledger.acknowledge(source.object_key, manifest.manifest_id)
+        ledger.mark_archived(source.service_id, source.object_key, claim.lease_generation, manifest.manifest_id, 3)
+        ledger.acknowledge(source.service_id, source.object_key, manifest.manifest_id)
 
         DeletionController(store, publication, ledger).delete_source(manifest, current_owner_epoch=3, now=now)
 
         assert not store.exists(source.object_key)
-        ledger.mark_source_deleted(source.object_key, manifest.manifest_id)
+        ledger.mark_source_deleted(source.service_id, source.object_key, manifest.manifest_id)
     finally:
         ledger.close()
 

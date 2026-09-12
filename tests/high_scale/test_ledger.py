@@ -25,8 +25,8 @@ def test_changed_source_identity_is_rejected(ledger: HighScaleLedger) -> None:
 
 def test_claim_recovery_increments_lease_generation(ledger: HighScaleLedger) -> None:
     ledger.discover("svc", "request", "raw/request/a.gz", "sha256:a")
-    first = ledger.claim("raw/request/a.gz", "worker-a", lease_seconds=0)
-    second = ledger.claim("raw/request/a.gz", "worker-b", lease_seconds=30)
+    first = ledger.claim("svc", "raw/request/a.gz", "worker-a", lease_seconds=0)
+    second = ledger.claim("svc", "raw/request/a.gz", "worker-b", lease_seconds=30)
     assert first.claimed is True
     assert second.claimed is True
     assert second.lease_generation == first.lease_generation + 1
@@ -34,32 +34,32 @@ def test_claim_recovery_increments_lease_generation(ledger: HighScaleLedger) -> 
 
 def test_source_cannot_be_deleted_before_verified_archive(ledger: HighScaleLedger) -> None:
     ledger.discover("svc", "request", "raw/request/a.gz", "sha256:a")
-    claim = ledger.claim("raw/request/a.gz", "worker")
-    ledger.mark_appended("raw/request/a.gz", claim.lease_generation)
+    claim = ledger.claim("svc", "raw/request/a.gz", "worker")
+    ledger.mark_appended("svc", "raw/request/a.gz", claim.lease_generation)
     with pytest.raises(ArchiveNotVerified):
-        ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=1)
+        ledger.authorize_source_delete("svc", "raw/request/a.gz", "manifest-1", current_owner_epoch=1)
 
 
 def test_archive_acknowledgement_and_delete_are_fenced(ledger: HighScaleLedger) -> None:
     ledger.discover("svc", "request", "raw/request/a.gz", "sha256:a")
-    claim = ledger.claim("raw/request/a.gz", "worker")
-    ledger.record_counts("raw/request/a.gz", accepted_rows=2, malformed_rows=0)
-    ledger.mark_appended("raw/request/a.gz", claim.lease_generation)
-    ledger.mark_archived("raw/request/a.gz", claim.lease_generation, "manifest-1", 3)
-    ledger.acknowledge("raw/request/a.gz", "manifest-1")
-    auth = ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=3)
+    claim = ledger.claim("svc", "raw/request/a.gz", "worker")
+    ledger.record_counts("svc", "raw/request/a.gz", accepted_rows=2, malformed_rows=0)
+    ledger.mark_appended("svc", "raw/request/a.gz", claim.lease_generation)
+    ledger.mark_archived("svc", "raw/request/a.gz", claim.lease_generation, "manifest-1", 3)
+    ledger.acknowledge("svc", "raw/request/a.gz", "manifest-1")
+    auth = ledger.authorize_source_delete("svc", "raw/request/a.gz", "manifest-1", current_owner_epoch=3)
     assert auth.archive_manifest_id == "manifest-1"
     with pytest.raises(ArchiveNotVerified):
-        ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=4)
+        ledger.authorize_source_delete("svc", "raw/request/a.gz", "manifest-1", current_owner_epoch=4)
 
 
 def test_archived_malformed_rows_do_not_block_acknowledgement(ledger: HighScaleLedger) -> None:
     ledger.discover("svc", "request", "raw/request/a.gz", "sha256:a")
-    claim = ledger.claim("raw/request/a.gz", "worker")
-    ledger.record_counts("raw/request/a.gz", accepted_rows=2, malformed_rows=1)
-    ledger.mark_appended("raw/request/a.gz", claim.lease_generation)
-    ledger.mark_archived("raw/request/a.gz", claim.lease_generation, "manifest-1", 3)
+    claim = ledger.claim("svc", "raw/request/a.gz", "worker")
+    ledger.record_counts("svc", "raw/request/a.gz", accepted_rows=2, malformed_rows=1)
+    ledger.mark_appended("svc", "raw/request/a.gz", claim.lease_generation)
+    ledger.mark_archived("svc", "raw/request/a.gz", claim.lease_generation, "manifest-1", 3)
 
-    ledger.acknowledge("raw/request/a.gz", "manifest-1")
+    ledger.acknowledge("svc", "raw/request/a.gz", "manifest-1")
 
-    assert ledger.authorize_source_delete("raw/request/a.gz", "manifest-1", current_owner_epoch=3)
+    assert ledger.authorize_source_delete("svc", "raw/request/a.gz", "manifest-1", current_owner_epoch=3)

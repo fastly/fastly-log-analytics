@@ -179,6 +179,8 @@ class ClickHouseClient(Protocol):
 
     def insert(self, batch: HighScaleBatch) -> InsertReceipt: ...
 
+    def delete_batch_rows(self, table: str, batch_id: str) -> None: ...
+
 
 class ClickHouseBatchAdapter:
     """Adapt high-scale batches to the allowlisted ClickHouse HTTP client.
@@ -220,11 +222,13 @@ class ClickHouseBatchAdapter:
         expected = len(batch.rows)
         existing_rows = self._count_rows(table, batch, batch_uuid)
         if existing_rows not in (0, expected):
+            self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:
             self._client.insert_rows(table, list(_DOMAIN_COLUMNS[batch.domain]), mapped_rows)
             existing_rows = self._count_rows(table, batch, batch_uuid)
         if existing_rows != expected:
+            self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
 
         self._insert_publication(

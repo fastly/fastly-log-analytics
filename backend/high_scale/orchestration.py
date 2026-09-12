@@ -130,8 +130,6 @@ class HighScaleWorkerCoordinator:
 
         for source in objects:
             self._discover(service_id, domain, source, current_owner, epoch)
-        self._advance_cursor(service_id, page.next_cursor, current_owner, epoch)
-
         processed = duplicates = failed = 0
         for source in objects:
             outcome = self._process_source(
@@ -148,6 +146,8 @@ class HighScaleWorkerCoordinator:
                 duplicates += 1
             else:
                 failed += 1
+        if failed == 0:
+            self._advance_cursor(service_id, page.next_cursor, current_owner, epoch)
         return PageRun(listing_cursor, page.next_cursor, len(objects), processed, duplicates, failed)
 
     def process_source(
@@ -267,7 +267,7 @@ class HighScaleWorkerCoordinator:
             except KeyError:
                 source = None
         elif hasattr(self._ledger, "source"):
-            source = self._ledger.source(object_key)
+            source = self._ledger.source(service_id, object_key)
         elif hasattr(self._ledger, "get_source"):
             source = self._ledger.get_source(service_id, object_key)
         return getattr(source, "status", None) in {"appended", "archived", "acknowledged", "source_deleted"}
@@ -308,7 +308,7 @@ class HighScaleLeaseSweeper:
         self._worker._require_high_scale(owner.current_owner, service_id)
         retried = replayed = skipped = 0
         for source in objects:
-            record = self._ledger.source(source.object_key) if hasattr(self._ledger, "source") else None
+            record = self._ledger.source(service_id, source.object_key) if hasattr(self._ledger, "source") else None
             status = getattr(record, "status", None)
             if status in {"acknowledged", "source_deleted"}:
                 skipped += 1
@@ -320,7 +320,7 @@ class HighScaleLeaseSweeper:
                     continue
                 self._replay(manifest_id)
                 if hasattr(self._ledger, "acknowledge"):
-                    self._ledger.acknowledge(source.object_key, manifest_id)
+                    self._ledger.acknowledge(service_id, source.object_key, manifest_id)
                 replayed += 1
                 continue
             try:

@@ -144,11 +144,21 @@ class ExportManager:
             return job
 
     def _expire_locked(self, now: datetime) -> None:
+        expired_ids: list[str] = []
         for job in self._jobs.values():
             if now >= job.expires_at and job.state not in {ExportState.EXPIRED, ExportState.CANCELLED}:
                 job.cancel_event.set()
                 job.state = ExportState.EXPIRED
                 job.payload = None
+            elif now >= job.expires_at + self._ttl and job.state in {
+                ExportState.EXPIRED,
+                ExportState.CANCELLED,
+                ExportState.COMPLETED,
+                ExportState.FAILED,
+            }:
+                expired_ids.append(job.job_id)
+        for job_id in expired_ids:
+            del self._jobs[job_id]
 
     @staticmethod
     def _snapshot(job: _MutableJob) -> ExportJob:

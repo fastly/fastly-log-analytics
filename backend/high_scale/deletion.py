@@ -63,9 +63,14 @@ class DeletionController:
         if not self._publication.is_replayable(manifest.manifest_id):
             raise ValueError("source deletion requires a replayable archive")
         self._ledger.authorize_source_delete(
+            manifest.source.service_id,
             manifest.source.object_key,
             manifest.manifest_id,
             current_owner_epoch=current_owner_epoch,
         )
         self._store.delete(manifest.source.object_key)
-        self._ledger.mark_source_deleted(manifest.source.object_key, manifest.manifest_id)
+        self._ledger.mark_source_deleted(
+            manifest.source.service_id,
+            manifest.source.object_key,
+            manifest.manifest_id,
+        )

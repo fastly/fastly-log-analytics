@@ -103,11 +103,12 @@ class HighScaleLedger:
             self._con.execute("SELECT * FROM source_objects WHERE object_id=?", (object_id,)).fetchone()
         )
 
-    def claim(self, object_key: str, owner: str, *, lease_seconds: float = 300.0) -> ClaimResult:
+    def claim(self, service_id: str, object_key: str, owner: str, *, lease_seconds: float = 300.0) -> ClaimResult:
         now = time.time()
         row = self._con.execute(
-            "SELECT object_id,status,lease_until,lease_generation FROM source_objects WHERE object_key=?",
-            (object_key,),
+            "SELECT object_id,status,lease_until,lease_generation FROM source_objects "
+            "WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
         ).fetchone()
         if row is None:
             raise KeyError(object_key)
@@ -122,44 +123,49 @@ class HighScaleLedger:
         self._con.commit()
         return ClaimResult(row["object_id"], True, generation)
 
-    def record_counts(self, object_key: str, *, accepted_rows: int, malformed_rows: int) -> None:
+    def record_counts(self, service_id: str, object_key: str, *, accepted_rows: int, malformed_rows: int) -> None:
         if min(accepted_rows, malformed_rows) < 0:
             raise ValueError("ledger counts must be non-negative")
         self._con.execute(
-            "UPDATE source_objects SET accepted_rows=?,malformed_rows=? WHERE object_key=?",
-            (accepted_rows, malformed_rows, object_key),
+            "UPDATE source_objects SET accepted_rows=?,malformed_rows=? WHERE service_id=? AND object_key=?",
+            (accepted_rows, malformed_rows, service_id, object_key),
         )
         self._con.commit()
 
-    def mark_appended(self, object_key: str, lease_generation: int) -> None:
-        self._transition_claim(object_key, lease_generation, "appended", current_status="claimed")
+    def mark_appended(self, service_id: str, object_key: str, lease_generation: int) -> None:
+        self._transition_claim(service_id, object_key, lease_generation, "appended", current_status="claimed")
 
-    def mark_archived(self, object_key: str, lease_generation: int, manifest_id: str, owner_epoch: int) -> None:
+    def mark_archived(
+        self, service_id: str, object_key: str, lease_generation: int, manifest_id: str, owner_epoch: int
+    ) -> None:
         if not manifest_id or owner_epoch < 0:
             raise ValueError("archive manifest and owner epoch are required")
-        self._transition_claim(object_key, lease_generation, "archived", current_status="appended")
+        self._transition_claim(service_id, object_key, lease_generation, "archived", current_status="appended")
         self._con.execute(
-            "UPDATE source_objects SET archive_manifest_id=?,owner_epoch=? WHERE object_key=?",
-            (manifest_id, owner_epoch, object_key),
+            "UPDATE source_objects SET archive_manifest_id=?,owner_epoch=? WHERE service_id=? AND object_key=?",
+            (manifest_id, owner_epoch, service_id, object_key),
         )
         self._con.commit()
 
-    def acknowledge(self, object_key: str, manifest_id: str) -> None:
+    def acknowledge(self, service_id: str, object_key: str, manifest_id: str) -> None:
         row = self._con.execute(
-            "SELECT status,archive_manifest_id,malformed_rows FROM source_objects WHERE object_key=?",
-            (object_key,),
+            "SELECT status,archive_manifest_id,malformed_rows FROM source_objects WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
         ).fetchone()
         if row is None:
             raise KeyError(object_key)
         if row["status"] != "archived" or row["archive_manifest_id"] != manifest_id:
             raise ArchiveNotVerified(f"archive is not complete for {object_key}")
-        self._con.execute("UPDATE source_objects SET status='acknowledged' WHERE object_key=?", (object_key,))
+        self._con.execute(
+            "UPDATE source_objects SET status='acknowledged' WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
+        )
         self._con.commit()
 
-    def mark_source_deleted(self, object_key: str, manifest_id: str) -> None:
+    def mark_source_deleted(self, service_id: str, object_key: str, manifest_id: str) -> None:
         row = self._con.execute(
-            "SELECT status,archive_manifest_id FROM source_objects WHERE object_key=?",
-            (object_key,),
+            "SELECT status,archive_manifest_id FROM source_objects WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
         ).fetchone()
         if row is None:
             raise KeyError(object_key)
@@ -167,19 +173,24 @@ class HighScaleLedger:
             return
         if row["status"] != "acknowledged" or row["archive_manifest_id"] != manifest_id:
             raise ArchiveNotVerified(f"source deletion was not acknowledged for {object_key}")
-        self._con.execute("UPDATE source_objects SET status='source_deleted' WHERE object_key=?", (object_key,))
+        self._con.execute(
+            "UPDATE source_objects SET status='source_deleted' WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
+        )
         self._con.commit()
 
     def authorize_source_delete(
         self,
+        service_id: str,
         object_key: str,
         archive_manifest_id: str,
         *,
         current_owner_epoch: int,
     ) -> DeletionAuthorization:
         row = self._con.execute(
-            "SELECT object_id,status,archive_manifest_id,owner_epoch FROM source_objects WHERE object_key=?",
-            (object_key,),
+            "SELECT object_id,status,archive_manifest_id,owner_epoch FROM source_objects "
+            "WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
         ).fetchone()
         if (
             row is None
@@ -193,15 +204,20 @@ class HighScaleLedger:
     def count(self) -> int:
         return int(self._con.execute("SELECT count(*) FROM source_objects").fetchone()[0])
 
-    def source(self, object_key: str) -> SourceObject | None:
-        row = self._con.execute("SELECT * FROM source_objects WHERE object_key=?", (object_key,)).fetchone()
+    def source(self, service_id: str, object_key: str) -> SourceObject | None:
+        row = self._con.execute(
+            "SELECT * FROM source_objects WHERE service_id=? AND object_key=?",
+            (service_id, object_key),
+        ).fetchone()
         return None if row is None else self._source(row)
 
-    def _transition_claim(self, object_key: str, generation: int, status: str, *, current_status: str) -> None:
+    def _transition_claim(
+        self, service_id: str, object_key: str, generation: int, status: str, *, current_status: str
+    ) -> None:
         cur = self._con.execute(
-            "UPDATE source_objects SET status=?,lease_until=NULL WHERE object_key=? "
+            "UPDATE source_objects SET status=?,lease_until=NULL WHERE service_id=? AND object_key=? "
             "AND status=? AND lease_generation=?",
-            (status, object_key, current_status, generation),
+            (status, service_id, object_key, current_status, generation),
         )
         if cur.rowcount != 1:
             raise RuntimeError(f"stale or missing claim for {object_key}")

@@ -77,7 +77,7 @@ class HighScaleIngestController:
             size_bytes=len(payload) if size_bytes is None else size_bytes,
             version=version,
         )
-        claim = self._ledger.claim(object_key, self._worker_id)
+        claim = self._ledger.claim(service_id, object_key, self._worker_id)
         if not claim.claimed:
             raise RuntimeError(f"source object is leased by another worker: {object_key}")
 
@@ -96,6 +96,7 @@ class HighScaleIngestController:
             domain=domain,
         )
         self._ledger.record_counts(
+            service_id,
             object_key,
             accepted_rows=decoded.accepted_rows,
             malformed_rows=decoded.quarantined_rows,
@@ -141,6 +142,9 @@ class HighScaleIngestController:
             )
             self._archive.publish(manifest, artifact)
 
+        current_owner = self._ownership.get(service_id)
+        if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
+            raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
         batch = HighScaleBatch(
             batch_id=f"{service_id}:{domain}:{source.object_id}",
             service_id=service_id,
@@ -149,12 +153,13 @@ class HighScaleIngestController:
             rows=tuple(decoded.events),
         )
         publication = self._serving.publish(batch)
-        self._ledger.mark_appended(object_key, claim.lease_generation)
+        self._ledger.mark_appended(service_id, object_key, claim.lease_generation)
         self._ledger.mark_archived(
+            service_id,
             object_key,
             claim.lease_generation,
             manifest.manifest_id,
             owner.owner_epoch,
         )
-        self._ledger.acknowledge(object_key, manifest.manifest_id)
+        self._ledger.acknowledge(service_id, object_key, manifest.manifest_id)
         return IngestResult(source, decoded, manifest, publication)

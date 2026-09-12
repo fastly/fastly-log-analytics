@@ -40,6 +40,26 @@ class AggregateResponse:
     freshness_lag_seconds: float
     exact: bool
     approximation_error: float | None
+    counters: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class AggregateRequest:
+    service_id: str
+    domain: str
+    start: datetime | None = None
+    end: datetime | None = None
+    dimension: str | None = None
+
+    def validate(self) -> None:
+        if not self.service_id.strip():
+            raise ValueError("service id is required")
+        if self.domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        if (self.start is None) != (self.end is None):
+            raise ValueError("aggregate range must include both start and end")
+        if self.start is not None and self.end is not None and self.start > self.end:
+            raise ValueError("aggregate range is inverted")
 
 
 class AggregateStore:
@@ -52,6 +72,7 @@ class AggregateStore:
         self._batches: set[str] = set()
         self._counts: dict[tuple[str, str], int] = defaultdict(int)
         self._status_counts: dict[str, Counter[str]] = defaultdict(Counter)
+        self._counters: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
         self._top_values: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
         self._minute_counts: dict[tuple[str, str], Counter[datetime]] = defaultdict(Counter)
         self._watermarks: dict[tuple[str, str], ServingWatermark] = {}
@@ -74,12 +95,21 @@ class AggregateStore:
                 status = str(event.get("status_code", "unknown"))
                 self._status_counts[batch.service_id][status] += 1
                 self._top_values[(batch.service_id, "url")][str(event.get("url", ""))] += 1
+                self._counters[(batch.service_id, batch.domain)]["requests"] += 1
+                self._counters[(batch.service_id, batch.domain)][f"status:{status}"] += 1
+                status_class = f"{status[:1]}xx" if len(status) >= 1 and status[:1].isdigit() else "unknown"
+                self._counters[(batch.service_id, batch.domain)][f"status_class:{status_class}"] += 1
             elif batch.domain == "rum_vitals":
                 self._top_values[(batch.service_id, "metric_name")][str(event.get("metric_name", ""))] += 1
+                self._counters[(batch.service_id, batch.domain)]["beacons"] += 1
             elif batch.domain == "rum_errors":
                 self._top_values[(batch.service_id, "error_message")][str(event.get("error_message", ""))] += 1
+                self._counters[(batch.service_id, batch.domain)]["errors"] += 1
             elif batch.domain == "cmcd":
                 self._top_values[(batch.service_id, "cmcd_session")][str(event.get("sid", ""))] += 1
+                self._counters[(batch.service_id, batch.domain)]["events"] += 1
+                if event.get("sid"):
+                    self._counters[(batch.service_id, batch.domain)]["sessions"] += 1
         event_id = str(batch.events[-1].get("event_id")) if batch.events else None
         self._watermarks[key] = ServingWatermark(
             service_id=batch.service_id,
@@ -99,6 +129,11 @@ class AggregateStore:
 
     def status_counts(self, service_id: str) -> dict[str, int]:
         return dict(self._status_counts[service_id])
+
+    def counters(self, service_id: str, domain: str) -> dict[str, int]:
+        if domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        return dict(self._counters[(service_id, domain)])
 
     def minute_counts(self, service_id: str, domain: str) -> dict[datetime, int]:
         return dict(self._minute_counts[(service_id, domain)])
@@ -124,6 +159,34 @@ class AggregateStore:
             freshness,
             True,
             None,
+            tuple(self._counters[(service_id, domain)].most_common()),
+        )
+
+    def query_triage_aggregate(
+        self,
+        request: AggregateRequest,
+        *,
+        now: datetime | None = None,
+    ) -> AggregateResponse:
+        request.validate()
+        response = self.response(request.service_id, request.domain, now=now)
+        if request.dimension is None:
+            return response
+        values = tuple(
+            (value, count)
+            for value, count in self._top_values[(request.service_id, request.dimension)].most_common(self._top_n_limit)
+        )
+        return AggregateResponse(
+            service_id=response.service_id,
+            domain=response.domain,
+            request_count=response.request_count,
+            top_values=values,
+            coverage=response.coverage,
+            watermark=response.watermark,
+            freshness_lag_seconds=response.freshness_lag_seconds,
+            exact=response.exact,
+            approximation_error=response.approximation_error,
+            counters=response.counters,
         )
 
 
