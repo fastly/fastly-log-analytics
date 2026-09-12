@@ -67,6 +67,7 @@ _HTTP_METHODS = ("get", "post", "put", "patch", "delete")
 _PATH_PARAM_SUBSTITUTIONS = {
     "service_id": "svc1",
     "domain": "rum_vitals",
+    "export_id": "export1",
     "alert_id": "alert1",
     "invite_id": "invite1",
     "session_id": "sess1",
@@ -194,6 +195,7 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Network pop-health & security threat-intel (read-only analytical endpoints)
     ("GET", "/api/network/pop-health"),
     ("GET", "/api/security/threat-intel"),
+    ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
     # ── FLAGGED FOR TRIAGE ───────────────────────────────────────────────
     # The 2026-08 RBAC audit found these four analyst-reachable with NO
     # explicit classification anywhere (not in a blocked-prefix/subpath/
@@ -250,6 +252,8 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/high-scale/services/{service_id}/request-facts"),
     ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
     ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),
+    ("POST", "/api/high-scale/services/{service_id}/exports"),
+    ("POST", "/api/high-scale/services/{service_id}/exports/{export_id}/cancel"),
 }
 
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES
