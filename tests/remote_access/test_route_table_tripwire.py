@@ -246,6 +246,7 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/value/summary"),
     ("POST", "/api/web-vitals"),
     ("POST", "/api/ux-events"),
+    ("POST", "/api/high-scale/services/{service_id}/request-facts"),
 }
 
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES

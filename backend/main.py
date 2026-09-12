@@ -1048,6 +1048,7 @@ from backend.routers import (
     cmcd,
     control_room,
     dashboard,
+    high_scale,
     insights,
     network,
     origin,
@@ -1061,6 +1062,7 @@ from backend.routers import (
 )
 
 app.include_router(dashboard.router)
+app.include_router(high_scale.router)
 app.include_router(insights.router)
 app.include_router(sessions.router)
 app.include_router(query.router)

@@ -278,6 +278,16 @@ Precomputes per-hour Top-N aggregates for the dashboard's most-asked fields (ip,
 ### Response Telemetry Middleware ([backend/utils/telemetry_response_middleware.py](backend/utils/telemetry_response_middleware.py))
 Backstop for endpoints that return a plain `dict` instead of going through `BaseResponse.with_telemetry`. Inspects JSON object responses, injects `_debug_queries` / `_debug_calls` / `_debug_sqlite` / `_is_cached` from the contextvar collectors if missing (`_debug_sqlite` is snapshot-copied BEFORE `get_tracked_calls()`, which can itself run a SQLite SELECT that would append mid-injection). **Must be added INNER to `CompressMiddleware`** (i.e. `add_middleware(TelemetryResponseBodyMiddleware)` BEFORE `add_middleware(CompressMiddleware)`) so it sees the raw JSON, not br/zstd/gzip-encoded bytes. Skips streaming responses, non-dict bodies, and already-instrumented responses. Debug keys are per-request opt-in: the frontend API client sends `x-debug-responses: 1` when the DiagnosticsPanel toggle is on (keys are STRIPPED otherwise), and SSR's own upstream fetch mirrors the toggle via the `fla.debugResponses` cookie ([frontend/lib/debug-cookie.ts](frontend/lib/debug-cookie.ts), read in [frontend/lib/ssr/_transport.ts](frontend/lib/ssr/_transport.ts)) — the Debug Panel's SQLite/DuckDB views are page-scoped per-response captures, not global ring buffers. Gated on `DEBUG_RESPONSES`; failure modes are silent + non-blocking.
 
+### Isolated High-Scale Request Facts ([backend/routers/high_scale.py](backend/routers/high_scale.py))
+`POST /api/high-scale/services/{service_id}/request-facts` is an explicit
+high-scale-only read surface backed by `backend/high_scale/query_service.py`.
+It is not selected by `DEPLOYMENT_MODE` and does not alter standard or
+high-throughput routing. A service must be explicitly bound through the
+injectable `HighScaleServiceRegistry`; unregistered services are refused.
+The route uses `RequestContext` tenancy and analyst time clamping, masks
+`client_ip` under the existing invite PII policy, and returns signed keyset
+pagination plus `QueryResponseMetadata`.
+
 ### Live Query Monitor ([backend/core/query_registry.py](backend/core/query_registry.py), [backend/routers/admin_queries.py](backend/routers/admin_queries.py), [frontend/app/admin/queries/](frontend/app/admin/queries/))
 Real-time view of every executing DuckDB + SQLite query — attribution (analyst / admin / cron / system), caller `file:line`, pool slot, duration ticking up live, kind-aware Kill button that calls `con.interrupt()`. Page at `/admin/queries`, admin-only via `RemoteAccessMiddleware`. Polling at 300 ms; the Active panel promotes "completed in the last 10 s" rows as faded entries with an outcome badge so typical-traffic (p50 ≈ 0.2 ms, max ≈ 29 ms) queries are visible. Notable Slow Queries panel filters the completed-history ring buffer by threshold (100ms / 500ms / 1s / 2s / 5s), sorted slowest first. Queries above the persistence threshold are also written to a per-service `slow_queries` table ([backend/core/metadata/slow_queries.py](backend/core/metadata/slow_queries.py), in `metadata.db`) stamped with the request correlation id (`rid`, also emitted in the access log), so the panel can answer "what was slow yesterday?" across restarts.
 

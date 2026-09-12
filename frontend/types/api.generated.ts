@@ -99,6 +99,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/high-scale/services/{service_id}/request-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request Facts */
+        post: operations["request_facts_api_high_scale_services__service_id__request_facts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/insights": {
         parameters: {
             query?: never;
@@ -7402,6 +7419,47 @@ export interface components {
             } | null;
             celery?: components["schemas"]["HealthCeleryStats"] | null;
         };
+        /** HighScaleRequestFactRequest */
+        HighScaleRequestFactRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Limit
+             * @default 500
+             */
+            limit: number;
+            /** Cursor */
+            cursor?: string | null;
+        };
+        /** HighScaleRequestFactResponse */
+        HighScaleRequestFactResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Rows */
+            rows: {
+                [key: string]: unknown;
+            }[];
+            metadata: components["schemas"]["QueryResponseMetadataResponse"];
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
         /** IOFormatBreakdown */
         IOFormatBreakdown: {
             /** Format */
@@ -10114,6 +10172,25 @@ export interface components {
              */
             explain: boolean;
         };
+        /** QueryResponseMetadataResponse */
+        QueryResponseMetadataResponse: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "complete" | "partial" | "queued" | "running" | "failed";
+            /** Exact */
+            exact: boolean;
+            /** Coverage */
+            coverage: number;
+            /** Freshness Lag Seconds */
+            freshness_lag_seconds: number;
+            watermark: components["schemas"]["ServingWatermarkResponse"];
+            /** Approximation Error */
+            approximation_error: number | null;
+            /** Error */
+            error: string | null;
+        };
         /** RawRequest */
         RawRequest: {
             /**
@@ -11740,6 +11817,27 @@ export interface components {
             }[];
             /** Services */
             services: components["schemas"]["ServiceConfig"][];
+        };
+        /** ServingWatermarkResponse */
+        ServingWatermarkResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Domain */
+            domain: string;
+            /** Owner Epoch */
+            owner_epoch: number;
+            /** Coverage Start */
+            coverage_start: string | null;
+            /** Coverage End */
+            coverage_end: string | null;
+            /** Last Accepted Cursor */
+            last_accepted_cursor: string | null;
+            /** Last Archived Event Id */
+            last_archived_event_id: string | null;
+            /** Last Visible Event Id */
+            last_visible_event_id: string | null;
+            /** Exact */
+            exact: boolean;
         };
         /** Session */
         Session: {
@@ -13508,6 +13606,126 @@ export interface operations {
             };
             /** @description Not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    request_facts_api_high_scale_services__service_id__request_facts_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HighScaleRequestFactRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HighScaleRequestFactResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service binding conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
