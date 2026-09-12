@@ -6,6 +6,7 @@ import threading
 from typing import Any
 
 from backend import config
+from backend.utils.date_utils import parse_iso_utc
 
 QUERY_TIMEOUT_S = 30.0
 _refresh_lock = threading.Lock()
@@ -112,12 +113,31 @@ def refresh_durable_request_metrics(
             if rum is None:
                 rum = (extra_status or {}).get("rum", current.get("rum"))
             rum = dict(rum or {})
-            rum["last_sync_at"] = (
-                rum.get("last_sync_at")
-                or cron.get("rum_discovery", {}).get("started_at")
-                or cron.get("rum_sync", {}).get("started_at")
-                or cron.get("ledger_rum_sweep", {}).get("started_at")
-            )
+            rum.setdefault("last_sync_at", None)
+            rum_cron_times: list[str] = []
+            for task in (
+                cron.get("rum_discovery", {}),
+                cron.get("rum_sync", {}),
+                cron.get("ledger_rum_sweep", {}),
+            ):
+                started_at = task.get("started_at")
+                if isinstance(started_at, str):
+                    rum_cron_times.append(started_at)
+            if rum_cron_times:
+
+                def cron_timestamp(value: str) -> float:
+                    parsed = parse_iso_utc(value)
+                    return parsed.timestamp() if parsed is not None else float("-inf")
+
+                latest_rum_cron = max(
+                    rum_cron_times,
+                    key=cron_timestamp,
+                )
+                current_rum_sync = rum.get("last_sync_at")
+                current_rum_dt = parse_iso_utc(current_rum_sync) if current_rum_sync else None
+                latest_rum_cron_dt = parse_iso_utc(latest_rum_cron)
+                if current_rum_dt is None or (latest_rum_cron_dt is not None and latest_rum_cron_dt > current_rum_dt):
+                    rum["last_sync_at"] = latest_rum_cron
             rum_rows = (rum or {}).get("total_rows") or 0
             earliest = row[1].isoformat() if row[1] is not None else None
             latest = row[2].isoformat() if row[2] is not None else None

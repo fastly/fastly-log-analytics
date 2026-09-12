@@ -125,6 +125,19 @@ def test_observation_reads_durable_rum_extents(durable_metrics):
     assert config.get_status(source["name"])["rum"] == observed["rum"]
 
 
+def test_observation_refreshes_rum_sync_time_from_latest_cron_run(durable_metrics):
+    source, replace_rows, cron, _ = durable_metrics
+    status = config.get_status(source["name"])
+    status["rum"]["last_sync_at"] = "2026-09-07T00:00:00Z"
+    config.update_status(source["name"], status)
+    cron["rum_sync"] = {"started_at": "2026-09-12T15:00:00Z"}
+    replace_rows([datetime(2026, 9, 7, 12, tzinfo=UTC)])
+
+    observed = request_metrics.refresh_durable_request_metrics(source)
+
+    assert observed["rum"]["last_sync_at"] == "2026-09-12T15:00:00Z"
+
+
 def test_observation_accepts_backward_extent_reset_and_idle_cron(durable_metrics):
     source, replace_rows, cron, _ = durable_metrics
     latest = datetime(2026, 9, 7, tzinfo=UTC)
