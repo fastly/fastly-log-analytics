@@ -5,6 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from backend.core.high_scale_contracts import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
 from backend.high_scale.ingest_controller import HighScaleIngestController
@@ -25,6 +26,57 @@ class _ClickHouse:
     def insert(self, batch):
         self.batches.append(batch)
         return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+
+
+class _PostgresControl:
+    def __init__(self) -> None:
+        self.owner_record = type("Owner", (), {"current_owner": "high_scale", "owner_epoch": 1})()
+        self.calls: list[str] = []
+        self.archive_state = type("State", (), {"state": ArchiveState.ARTIFACT_UPLOADING})()
+
+    def owner(self, service_id: str):
+        return self.owner_record
+
+    def discover_source(self, service_id: str, domain: str, object_key: str, checksum: str, **kwargs: object):
+        self.calls.append("discover")
+        return type(
+            "Source",
+            (),
+            {
+                "object_id": "object-1",
+                "service_id": service_id,
+                "domain": domain,
+                "object_key": object_key,
+                "checksum": checksum,
+                "size_bytes": 16,
+                "version": "v1",
+            },
+        )()
+
+    def claim_source(self, service_id: str, object_key: str, worker_id: str, **kwargs: object):
+        self.calls.append("claim")
+        return type("Claim", (), {"claimed": True, "lease_generation": 1})()
+
+    def record_source_counts(self, service_id: str, object_key: str, **kwargs: object) -> None:
+        self.calls.append("counts")
+
+    def register_archive_manifest(self, manifest, *, owner_epoch: int):
+        self.calls.append("register_manifest")
+        return self.archive_state
+
+    def transition_archive_manifest(self, manifest_id: str, **kwargs: object):
+        self.calls.append("transition_manifest")
+        self.archive_state.state = kwargs["next_state"]
+        return self.archive_state
+
+    def mark_source_appended(self, service_id: str, object_key: str, **kwargs: object) -> None:
+        self.calls.append("appended")
+
+    def mark_source_archived(self, service_id: str, object_key: str, **kwargs: object) -> None:
+        self.calls.append("archived")
+
+    def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None:
+        self.calls.append("acknowledged")
 
 
 def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
@@ -153,3 +205,40 @@ def test_controller_refuses_sources_owned_by_another_data_plane() -> None:
             checksum="sha256:source",
             payload=b'{"url":"/ok"}\n',
         )
+
+
+def test_controller_can_use_postgres_control_plane_for_durable_state() -> None:
+    control = _PostgresControl()
+    clickhouse = _ClickHouse()
+    controller = HighScaleIngestController(
+        ownership=control,  # type: ignore[arg-type]
+        ledger=HighScaleLedger(),
+        control_plane=control,  # type: ignore[arg-type]
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+
+    result = controller.ingest(
+        service_id="svc",
+        domain="request",
+        object_key="raw/request/one.gz",
+        checksum="sha256:source",
+        payload=gzip.compress(b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok"}\n'),
+        version="v1",
+        now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
+    )
+
+    assert result.source.object_id == "object-1"
+    assert control.calls == [
+        "discover",
+        "claim",
+        "counts",
+        "register_manifest",
+        "transition_manifest",
+        "transition_manifest",
+        "transition_manifest",
+        "appended",
+        "archived",
+        "acknowledged",
+    ]

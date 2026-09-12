@@ -11,6 +11,7 @@ from backend.high_scale.ownership import OwnershipStore
 
 MAX_SOURCE_PAGE_SIZE = 500
 DEFAULT_SOURCE_PAGE_SIZE = 100
+INITIAL_SOURCE_CURSOR = "__initial__"
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ class S3SourceObjectLister:
             "Prefix": self._key(domain_prefix),
             "PaginationConfig": {"PageSize": page_size},
         }
-        if cursor:
+        if cursor and cursor != INITIAL_SOURCE_CURSOR:
             request["PaginationConfig"]["StartingToken"] = cursor
         page = next(iter(paginator.paginate(**request)))
         objects = tuple(

@@ -201,6 +201,9 @@ class ClickHouseBatchAdapter:
         with self._batch_lock(batch_uuid):
             return self._insert_locked(batch, batch_uuid)
 
+    def delete_batch_rows(self, table: str, batch_id: str) -> None:
+        self._client.delete_batch_rows(table, batch_id)
+
     def _insert_locked(self, batch: HighScaleBatch, batch_uuid: str) -> InsertReceipt:
         table = _DOMAIN_TABLES.get(batch.domain)
         if table is None or table not in CLICKHOUSE_HIGH_SCALE_TABLES:

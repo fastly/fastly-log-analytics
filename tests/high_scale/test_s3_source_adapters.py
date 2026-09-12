@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.high_scale.source_discovery import S3SourceObjectLister, S3SourceObjectReader
+from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR, S3SourceObjectLister, S3SourceObjectReader
 
 
 class _Body:
@@ -66,3 +66,12 @@ def test_s3_reader_reads_the_exact_listed_key() -> None:
 
     assert reader.read_source_object("svc", "request", "tenant/raw/request/one.gz") == b"payload"
     assert client.get_object_calls == [{"Bucket": "archive-bucket", "Key": "tenant/raw/request/one.gz"}]
+
+
+def test_s3_lister_treats_initial_cursor_as_start_of_bucket() -> None:
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects("svc", "request", page_size=25, cursor=INITIAL_SOURCE_CURSOR)
+
+    assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
