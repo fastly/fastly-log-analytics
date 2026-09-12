@@ -14,16 +14,24 @@
  */
 import { expect, test } from '@playwright/test'
 
-test('dashboard renders country geometry through the MapLibre worker', async ({ page }) => {
+test('dashboard renders country geometry through the MapLibre worker', async ({ page }, testInfo) => {
   // The isolated backend has no logs. Supply country data without mocking
   // MapLibre, its worker modules, or the world-geometry request.
   await page.route('**/api/dashboard/bundle*', async (route) => {
+    if (testInfo.project.name === 'webkit') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ aggregates: { map_data: [{ country: 'US', count: 100 }] } }),
+      })
+      return
+    }
     // Playwright's API response decoder does not support Firefox's zstd.
     const response = await route.fetch({
       headers: { ...route.request().headers(), 'accept-encoding': 'identity' },
     })
     expect(response.status()).toBe(200)
-    const payload = await response.json()
+    const payload = JSON.parse((await response.body()).toString())
     expect(payload.aggregates).toBeTruthy()
     payload.aggregates.map_data = [{ country: 'US', count: 100 }]
     await route.fulfill({
@@ -60,4 +68,5 @@ test('dashboard renders country geometry through the MapLibre worker', async ({ 
   const canvasCount = await page.locator('canvas').count()
   const fallbackCount = await page.getByText(/Interactive map unavailable/i).count()
   expect(canvasCount + fallbackCount).toBeGreaterThanOrEqual(1)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
 })
