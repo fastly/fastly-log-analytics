@@ -71,9 +71,11 @@ DuckLake catalog and do not open a native per-service DuckDB file.
 
 ## Optional high-scale application plane
 
-The chart also contains an opt-in `highScale` application subchart. It is a
-portable packaging slice for five independently schedulable workloads:
-`ingest`, `archive`, `query`, `replay`, and `control-plane`. It adds
+The chart also contains an opt-in `highScale` application subchart. The
+currently executable workload is the continuous FOS-to-archive-to-ClickHouse
+`ingest` worker. Archive, query, replay, and control-plane workload stanzas
+remain available for later standalone entrypoints but are disabled until those
+processes exist. The subchart adds
 Deployment, PodDisruptionBudget, NetworkPolicy, ServiceAccount, optional
 Secret, resource, and workload-fairness configuration:
 
@@ -85,9 +87,10 @@ helm install fla ./deploy/chart/fastly-log-analytics \
 
 The subchart is deliberately disabled by default, and enabling it does not
 change `config.deploymentMode`, existing startup commands, or the standard /
-`high_throughput` workload set. Supply the application image and per-workload
-commands through `highScale.image` / `highScale.workloads`; empty command and
-argument lists preserve the image's normal entrypoint.
+`high_throughput` workload set. The enabled ingest workload runs
+`python -m backend.high_scale.worker` continuously. Supply the application
+image and override workload arguments through `highScale.image` /
+`highScale.workloads` when needed.
 
 ClickHouse and Keeper are **not** installed by this chart. Select and operate
 one external ClickHouse/Keeper operator or chart, then grant the workloads

@@ -1,5 +1,8 @@
 {{- range $workload, $config := .Values.workloads }}
 {{- if $config.enabled }}
+{{- if and (ne $workload "ingest") (not $config.command) }}
+{{- fail (printf "high-scale workload %s requires an explicit command" $workload) }}
+{{- end }}
 {{- $root := $ }}
 apiVersion: apps/v1
 kind: Deployment

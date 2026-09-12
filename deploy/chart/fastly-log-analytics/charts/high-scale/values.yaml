@@ -67,29 +67,32 @@ workloads:
   ingest:
     enabled: true
     replicas: 2
-    command: []
+    command: ["python", "-m", "backend.high_scale.worker"]
     args: []
     resources: {}
   archive:
-    enabled: true
+    # The archive/replay/control-plane entrypoints are not implemented as
+    # standalone processes yet. Keep them disabled rather than starting the
+    # image's API command under the wrong workload identity.
+    enabled: false
     replicas: 2
     command: []
     args: []
     resources: {}
   query:
-    enabled: true
+    enabled: false
     replicas: 2
     command: []
     args: []
     resources: {}
   replay:
-    enabled: true
+    enabled: false
     replicas: 1
     command: []
     args: []
     resources: {}
   control-plane:
-    enabled: true
+    enabled: false
     replicas: 2
     command: []
     args: []

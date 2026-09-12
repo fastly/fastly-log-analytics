@@ -349,15 +349,9 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
         for doc in docs
         if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]
     }
-    assert {doc["metadata"]["labels"]["app.kubernetes.io/component"] for doc in deployments.values()} == {
-        "ingest",
-        "archive",
-        "query",
-        "replay",
-        "control-plane",
-    }
-    assert len([doc for doc in docs if doc["kind"] == "PodDisruptionBudget"]) == 5
-    assert len([doc for doc in docs if doc["kind"] == "NetworkPolicy"]) == 5
+    assert {doc["metadata"]["labels"]["app.kubernetes.io/component"] for doc in deployments.values()} == {"ingest"}
+    assert len([doc for doc in docs if doc["kind"] == "PodDisruptionBudget"]) == 1
+    assert len([doc for doc in docs if doc["kind"] == "NetworkPolicy"]) == 1
     assert not [doc for doc in docs if doc["kind"] in {"ClickHouseCluster", "KeeperCluster"}]
     assert not [doc for doc in docs if doc["kind"] == "Secret"]
 
@@ -372,12 +366,40 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
         assert pod["containers"][0]["envFrom"][0]["secretRef"]["name"] == "fla-high-scale-connections"
 
 
+def test_high_scale_ingest_runs_continuous_worker_without_placeholder_workloads():
+    docs = _high_scale_docs(
+        "highScale.secret.existingName=fla-high-scale-connections",
+    )
+    deployments = {
+        doc["metadata"]["name"]: doc
+        for doc in docs
+        if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]
+    }
+
+    assert {doc["metadata"]["labels"]["app.kubernetes.io/component"] for doc in deployments.values()} == {"ingest"}
+    ingest = next(iter(deployments.values()))
+    assert ingest["spec"]["template"]["spec"]["containers"][0]["command"] == [
+        "python",
+        "-m",
+        "backend.high_scale.worker",
+    ]
+
+
+def test_high_scale_rejects_unimplemented_workload_without_command():
+    error = _render_error(
+        "highScale.enabled=true",
+        "highScale.workloads.archive.enabled=true",
+        "highScale.secret.existingName=fla-high-scale-connections",
+    )
+    assert "high-scale workload archive requires an explicit command" in error
+
+
 def test_high_scale_can_disable_a_workload_and_secret_creation_is_explicit():
     docs = _high_scale_docs(
         "highScale.workloads.replay.enabled=false",
         "highScale.secret.create=true",
         "highScale.secret.stringData.CLICKHOUSE_URL=external-service",
     )
-    assert len([doc for doc in docs if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]]) == 4
+    assert len([doc for doc in docs if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]]) == 1
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
     assert secret["stringData"]["CLICKHOUSE_URL"] == "external-service"

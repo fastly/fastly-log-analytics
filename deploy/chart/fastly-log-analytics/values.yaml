@@ -291,9 +291,10 @@ observability:
 
 # Portable high-scale application plane. Disabled by default so standard and
 # high_throughput render exactly their existing workload set. Enabling this
-# local subchart adds only the ingest/archive/query/replay/control-plane
-# application workloads and their policies. ClickHouse and Keeper remain
-# external operator-owned dependencies; connection details belong in an
-# existing Secret rather than in chart values.
+# local subchart adds the executable high-scale ingest worker and its policies.
+# Archive, query, replay, and control-plane stanzas remain disabled until their
+# standalone entrypoints exist. ClickHouse and Keeper remain external
+# operator-owned dependencies; connection details belong in an existing Secret
+# rather than in chart values.
 highScale:
   enabled: false
