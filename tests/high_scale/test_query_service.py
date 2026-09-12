@@ -51,6 +51,7 @@ def test_request_facts_use_visibility_fence_and_keyset_cursor() -> None:
     )
 
     assert "publication_state = 'visible'" in client.sql
+    assert "high_scale_batch_publications FINAL" in client.sql
     assert page.rows == (client.rows[0],)
     assert page.next_cursor
     decoded = KeysetCursor.decode(page.next_cursor, b"secret")

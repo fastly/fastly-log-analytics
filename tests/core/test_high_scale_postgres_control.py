@@ -335,7 +335,12 @@ def test_postgres_control_plane_end_to_end() -> None:
             expected_owner="standard",
             expected_owner_epoch=owner.owner_epoch,
         )
-        store.mark_source_appended(service_id, source.object_key, lease_generation=claim.lease_generation)
+        store.mark_source_appended(
+            service_id,
+            source.object_key,
+            lease_generation=claim.lease_generation,
+            expected_owner_epoch=owner.owner_epoch,
+        )
         store.register_archive_manifest(manifest, owner_epoch=owner.owner_epoch)
         for current, next_state in (
             (ArchiveState.ARTIFACT_UPLOADING, ArchiveState.ARTIFACT_VERIFIED),

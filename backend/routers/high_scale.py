@@ -225,10 +225,13 @@ def cancel_export(
 )
 @query_errors()
 def request_facts(
+    service_id: str,
     req: HighScaleRequestFactRequest,
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
+    if service_id != ctx.service_id:
+        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
     service = registry.resolve(ctx.service_id)
     if service is None:
         raise HTTPException(
@@ -298,11 +301,14 @@ def request_facts(
 )
 @query_errors()
 def rum_facts(
+    service_id: str,
     domain: str,
     req: HighScaleRequestFactRequest,
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
+    if service_id != ctx.service_id:
+        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
     if domain not in {"rum_vitals", "rum_errors"}:
         raise HTTPException(status_code=404, detail=make_error("not_found", "RUM domain not found"))
     service = registry.resolve(ctx.service_id)
@@ -381,10 +387,13 @@ def rum_facts(
 )
 @query_errors()
 def cmcd_facts(
+    service_id: str,
     req: HighScaleRequestFactRequest,
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
+    if service_id != ctx.service_id:
+        raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
     service = registry.resolve(ctx.service_id)
     if service is None:
         raise HTTPException(

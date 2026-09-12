@@ -121,6 +121,9 @@ class ExportManager:
                 if job.bytes_written > self._max_bytes:
                     raise ValueError("export byte limit exceeded")
             with self._lock:
+                if job.cancel_event.is_set() or job.state is not ExportState.RUNNING:
+                    job.payload = None
+                    return
                 job.payload = bytes(output)
                 job.state = ExportState.COMPLETED
         except _ExportCancelled:

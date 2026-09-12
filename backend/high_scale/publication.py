@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -190,14 +191,20 @@ class ClickHouseBatchAdapter:
 
     def __init__(self, client: HttpClickHouseClient) -> None:
         self._client = client
+        self._batch_locks: dict[str, threading.Lock] = {}
+        self._batch_locks_guard = threading.Lock()
 
     def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+        batch_uuid = _batch_uuid(batch)
+        with self._batch_lock(batch_uuid):
+            return self._insert_locked(batch, batch_uuid)
+
+    def _insert_locked(self, batch: HighScaleBatch, batch_uuid: str) -> InsertReceipt:
         table = _DOMAIN_TABLES.get(batch.domain)
         if table is None or table not in CLICKHOUSE_HIGH_SCALE_TABLES:
             raise ValueError(f"unsupported high-scale domain: {batch.domain}")
         if not batch.rows:
             raise ValueError("high-scale batch must contain at least one row")
-        batch_uuid = _batch_uuid(batch)
         mapped_rows = _rows_for_domain(batch, batch_uuid)
         existing = self._existing_publication(batch, batch_uuid)
         if existing is not None:
@@ -228,6 +235,11 @@ class ClickHouseBatchAdapter:
             visible_rows=expected,
         )
         return InsertReceipt(batch.batch_id, expected, batch.digest)
+
+    def _batch_lock(self, batch_uuid: str):
+        with self._batch_locks_guard:
+            lock = self._batch_locks.setdefault(batch_uuid, threading.Lock())
+        return lock
 
     def _existing_publication(self, batch: HighScaleBatch, batch_uuid: str) -> dict[str, Any] | None:
         rows = self._client.execute(

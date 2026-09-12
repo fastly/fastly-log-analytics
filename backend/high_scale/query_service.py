@@ -172,6 +172,7 @@ def _query_facts(
 
     params: dict[str, Any] = {
         "service_id": service_id,
+        "domain": domain,
         "start": start_utc,
         "end": end_utc,
         "limit": limit + 1,
@@ -191,6 +192,11 @@ def _query_facts(
         "AND event_timestamp >= {start:DateTime64(3)} "
         "AND event_timestamp < {end:DateTime64(3)} "
         "AND publication_state = 'visible'"
+        "AND batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={domain:String} "
+        "AND publication_state = 'visible'"
+        ")"
         f"{cursor_clause} "
         f"ORDER BY event_timestamp ASC, {event_column} ASC "
         "LIMIT {limit:UInt32}",

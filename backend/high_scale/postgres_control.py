@@ -464,11 +464,19 @@ class PostgresControlPlane:
                 (accepted_rows, malformed_rows, source.object_id, expected_owner_epoch),
             )
 
-    def mark_source_appended(self, service_id: str, object_key: str, *, lease_generation: int) -> None:
+    def mark_source_appended(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        lease_generation: int,
+        expected_owner_epoch: int,
+    ) -> None:
         self._transition_source(
             service_id,
             object_key,
             lease_generation=lease_generation,
+            expected_owner_epoch=expected_owner_epoch,
             expected_status="claimed",
             next_status="appended",
         )
@@ -732,22 +740,29 @@ class PostgresControlPlane:
         object_key: str,
         *,
         lease_generation: int,
+        expected_owner_epoch: int,
         expected_status: str,
         next_status: str,
     ) -> None:
         if expected_status not in _SOURCE_STATES or next_status not in _SOURCE_STATES:
             raise ValueError("unknown source state")
         with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
             source = self._locked_source(connection, service_id, object_key)
-            if source.status != expected_status or source.lease_generation != lease_generation:
+            if (
+                source.status != expected_status
+                or source.lease_generation != lease_generation
+                or source.owner_epoch != expected_owner_epoch
+            ):
                 raise RuntimeError(f"stale or missing claim for {object_key}")
             connection.execute(
                 """
                 UPDATE high_scale_source_objects
                 SET status=%s, lease_until=NULL, updated_at=clock_timestamp()
-                WHERE object_id=%s AND status=%s AND lease_generation=%s
+                WHERE object_id=%s AND status=%s AND lease_generation=%s AND owner_epoch=%s
                 """,
-                (next_status, source.object_id, expected_status, lease_generation),
+                (next_status, source.object_id, expected_status, lease_generation, expected_owner_epoch),
             )
 
     @staticmethod

@@ -1348,6 +1348,15 @@
         "operationId": "request_facts_api_high_scale_services__service_id__request_facts_post",
         "parameters": [
           {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
             "name": "service",
             "in": "query",
             "required": false,
@@ -1545,6 +1554,15 @@
         "operationId": "rum_facts_api_high_scale_services__service_id__rum_facts__domain__post",
         "parameters": [
           {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
             "name": "domain",
             "in": "path",
             "required": true,
@@ -1740,6 +1758,15 @@
         "summary": "Cmcd Facts",
         "operationId": "cmcd_facts_api_high_scale_services__service_id__cmcd_facts_post",
         "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
           {
             "name": "service",
             "in": "query",

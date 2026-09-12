@@ -14207,7 +14207,9 @@ export interface operations {
                 "x-fastly-service-id"?: string | null;
                 "x-service-id"?: string | null;
             };
-            path?: never;
+            path: {
+                service_id: string;
+            };
             cookie?: never;
         };
         requestBody: {
@@ -14328,6 +14330,7 @@ export interface operations {
                 "x-service-id"?: string | null;
             };
             path: {
+                service_id: string;
                 domain: string;
             };
             cookie?: never;
@@ -14440,7 +14443,9 @@ export interface operations {
                 "x-fastly-service-id"?: string | null;
                 "x-service-id"?: string | null;
             };
-            path?: never;
+            path: {
+                service_id: string;
+            };
             cookie?: never;
         };
         requestBody: {
