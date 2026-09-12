@@ -87,6 +87,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from backend import config as svcconfig
 from backend.core import clickhouse_client, clickhouse_observer, request_telemetry
 from backend.core import duckdb as _db
+from backend.high_scale.registry import get_high_scale_service_registry
+from backend.high_scale.registry_bootstrap import register_high_scale_services_from_environment
 
 
 def _initialize_service(cfg: dict):
@@ -597,6 +599,12 @@ async def _application_lifespan(app: FastAPI):
     if clickhouse is not None:
         await asyncio.to_thread(clickhouse.health)
         clickhouse_observer.start_clickhouse_observer()
+    registered_high_scale = register_high_scale_services_from_environment(
+        get_high_scale_service_registry(),
+        client=clickhouse,
+    )
+    if registered_high_scale:
+        logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
 
     # Verify dependencies
     try:

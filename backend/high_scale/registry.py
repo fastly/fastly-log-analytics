@@ -68,6 +68,6 @@ class HighScaleServiceRegistry:
 _registry = HighScaleServiceRegistry()
 
 
-def get_high_scale_service_registry() -> HighScaleServiceRegistryProtocol:
+def get_high_scale_service_registry() -> HighScaleServiceRegistry:
     """FastAPI dependency for explicit high-scale service bindings."""
     return _registry
