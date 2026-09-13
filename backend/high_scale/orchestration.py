@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.source_discovery import (
     MAX_SOURCE_PAGE_SIZE,
+    TERMINAL_SOURCE_CURSOR_PREFIX,
     SourceObjectDescriptor,
     SourceObjectLister,
 )
@@ -146,9 +147,15 @@ class HighScaleWorkerCoordinator:
                 duplicates += 1
             else:
                 failed += 1
+        next_cursor = page.next_cursor
+        if next_cursor is None:
+            if objects:
+                next_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+            elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
+                next_cursor = listing_cursor
         if failed == 0:
-            self._advance_cursor(service_id, page.next_cursor, current_owner, epoch)
-        return PageRun(listing_cursor, page.next_cursor, len(objects), processed, duplicates, failed)
+            self._advance_cursor(service_id, next_cursor, current_owner, epoch)
+        return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed)
 
     def process_source(
         self,

@@ -7,7 +7,11 @@ import pytest
 from backend.high_scale.ledger import HighScaleLedger
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator
 from backend.high_scale.ownership import OwnershipStore
-from backend.high_scale.source_discovery import SourceObjectDescriptor, SourceObjectPage
+from backend.high_scale.source_discovery import (
+    TERMINAL_SOURCE_CURSOR_PREFIX,
+    SourceObjectDescriptor,
+    SourceObjectPage,
+)
 
 
 @dataclass
@@ -17,6 +21,16 @@ class _Lister:
     def list_source_objects(self, service_id: str, domain: str, *, page_size: int, cursor: str | None):
         assert page_size == 2
         return self.page
+
+
+@dataclass
+class _TerminalAwareLister:
+    pages: dict[str | None, SourceObjectPage]
+    cursors: list[str | None]
+
+    def list_source_objects(self, service_id: str, domain: str, *, page_size: int, cursor: str | None):
+        self.cursors.append(cursor)
+        return self.pages[cursor]
 
 
 class _Reader:
@@ -106,3 +120,37 @@ def test_failed_acknowledgement_can_be_retried_after_lease_recovery() -> None:
     second = coordinator.run_page(service_id="svc", domain="request")
     assert second.processed == 1
     assert controller.calls == 2
+
+
+def test_final_page_persists_terminal_cursor_for_new_objects_only() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    lister = _TerminalAwareLister(
+        {
+            "cursor-0": SourceObjectPage(
+                (SourceObjectDescriptor("raw/one.gz", "sha256:one", 4, "v1"),),
+                None,
+            ),
+            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/one.gz": SourceObjectPage((), None),
+        },
+        [],
+    )
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=_Reader(),
+        controller=_Controller(ledger),  # type: ignore[arg-type]
+        ownership=ownership,
+        ledger=ledger,
+        worker_id="worker",
+        page_size=2,
+    )
+
+    first = coordinator.run_page(service_id="svc", domain="request")
+    second = coordinator.run_page(service_id="svc", domain="request")
+
+    terminal_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/one.gz"
+    assert first.next_cursor == terminal_cursor
+    assert second.next_cursor == terminal_cursor
+    assert lister.cursors == ["cursor-0", terminal_cursor]
+    assert ownership.get("svc").source_cursor == terminal_cursor

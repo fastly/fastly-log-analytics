@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR, S3SourceObjectLister, S3SourceObjectReader
+from backend.high_scale.source_discovery import (
+    INITIAL_SOURCE_CURSOR,
+    TERMINAL_SOURCE_CURSOR_PREFIX,
+    S3SourceObjectLister,
+    S3SourceObjectReader,
+)
 
 
 class _Body:
@@ -75,3 +80,19 @@ def test_s3_lister_treats_initial_cursor_as_start_of_bucket() -> None:
     lister.list_source_objects("svc", "request", page_size=25, cursor=INITIAL_SOURCE_CURSOR)
 
     assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
+
+
+def test_s3_lister_uses_start_after_for_terminal_cursor() -> None:
+    client = _Client()
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    lister.list_source_objects(
+        "svc",
+        "request",
+        page_size=25,
+        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz",
+    )
+
+    request = client.paginator.requests[0]
+    assert request["PaginationConfig"] == {"PageSize": 25}
+    assert request["StartAfter"] == "raw/request/last.gz"
