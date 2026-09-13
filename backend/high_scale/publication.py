@@ -480,6 +480,19 @@ class InMemoryBatchManifestStore:
         self._manifests[manifest.batch_id] = manifest
 
 
+class PostgresBatchManifestStore:
+    """Durable manifest storage backed by the high-scale control plane."""
+
+    def __init__(self, control_plane: Any) -> None:
+        self._control_plane = control_plane
+
+    def get(self, batch_id: str) -> BatchManifest | None:
+        return self._control_plane.get_batch_manifest(batch_id)
+
+    def put(self, manifest: BatchManifest) -> None:
+        self._control_plane.put_batch_manifest(manifest)
+
+
 class ClickHousePublication:
     def __init__(self, manifests: BatchManifestStore, client: ClickHouseClient) -> None:
         self._manifests = manifests

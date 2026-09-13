@@ -18,7 +18,7 @@ from backend.high_scale.config import from_environment
 from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.orchestration import HighScaleWorkerCoordinator, PageRun
 from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, InMemoryBatchManifestStore
+from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
 from backend.high_scale.source_discovery import S3SourceObjectLister, S3SourceObjectReader
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     if clickhouse_settings is None:
         raise RuntimeError("high-scale worker requires CLICKHOUSE_ENABLED=true")
     clickhouse = ClickHouseClient(clickhouse_settings)
-    serving = ClickHousePublication(InMemoryBatchManifestStore(), ClickHouseBatchAdapter(clickhouse))
+    serving = ClickHousePublication(PostgresBatchManifestStore(control), ClickHouseBatchAdapter(clickhouse))
 
     coordinators: list[HighScaleWorkerCoordinator] = []
     for service_id in service_ids:

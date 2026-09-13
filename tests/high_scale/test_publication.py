@@ -3,6 +3,7 @@ from uuid import UUID
 import pytest
 
 from backend.high_scale.publication import (
+    BatchManifest,
     ClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
@@ -10,6 +11,7 @@ from backend.high_scale.publication import (
     InsertReceipt,
     LostAcknowledgement,
     PartialInsert,
+    PostgresBatchManifestStore,
     PublicationStatus,
 )
 
@@ -69,6 +71,41 @@ def test_partial_insert_never_becomes_visible() -> None:
 
     assert publication.is_visible("batch-1") is False
     assert store.get("batch-1").status is PublicationStatus.PENDING
+
+
+class _DurableManifestControl:
+    def __init__(self) -> None:
+        self.manifests = {}
+
+    def get_batch_manifest(self, batch_id: str):
+        return self.manifests.get(batch_id)
+
+    def put_batch_manifest(self, manifest) -> None:
+        self.manifests[manifest.batch_id] = manifest
+
+
+def test_postgres_manifest_store_survives_store_recreation() -> None:
+    control = _DurableManifestControl()
+    first_store = PostgresBatchManifestStore(control)
+    first_store.put(
+        BatchManifest(
+            batch_id="batch-1",
+            service_id="svc",
+            domain="request",
+            generation="epoch-4",
+            digest="sha256:batch",
+            expected_rows=2,
+            status=PublicationStatus.VISIBLE,
+            visible_rows=2,
+        )
+    )
+
+    recreated_store = PostgresBatchManifestStore(control)
+
+    manifest = recreated_store.get("batch-1")
+    assert manifest is not None
+    assert manifest.status is PublicationStatus.VISIBLE
+    assert manifest.visible_rows == 2
 
 
 def test_same_batch_id_with_different_digest_is_rejected() -> None:

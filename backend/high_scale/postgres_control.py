@@ -117,6 +117,18 @@ CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
 CREATE INDEX IF NOT EXISTS high_scale_batch_claims_lease_idx
     ON high_scale_batch_claims (service_id, state, lease_until);
 
+CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
+    batch_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    batch_digest TEXT NOT NULL,
+    expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
+    visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'visible')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),
@@ -638,6 +650,59 @@ class PostgresControlPlane:
                 claim.lease_generation,
                 True,
                 "completed",
+            )
+
+    def get_batch_manifest(self, batch_id: str) -> Any | None:
+        from backend.high_scale.publication import BatchManifest, PublicationStatus
+
+        _require_text(batch_id, "batch_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, generation, batch_digest,
+                       expected_rows, visible_rows, status
+                FROM high_scale_publication_manifests
+                WHERE batch_id=%s
+                """,
+                (batch_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return BatchManifest(
+            batch_id=row[0],
+            service_id=row[1],
+            domain=row[2],
+            generation=row[3],
+            digest=row[4],
+            expected_rows=row[5],
+            status=PublicationStatus(row[7]),
+            visible_rows=row[6],
+        )
+
+    def put_batch_manifest(self, manifest: Any) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO high_scale_publication_manifests (
+                    batch_id, service_id, domain, generation, batch_digest,
+                    expected_rows, visible_rows, status, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())
+                ON CONFLICT (batch_id) DO UPDATE SET
+                    visible_rows=EXCLUDED.visible_rows,
+                    status=EXCLUDED.status,
+                    updated_at=clock_timestamp()
+                """,
+                (
+                    manifest.batch_id,
+                    manifest.service_id,
+                    manifest.domain,
+                    manifest.generation,
+                    manifest.digest,
+                    manifest.expected_rows,
+                    manifest.visible_rows,
+                    manifest.status.value,
+                ),
             )
 
     def register_archive_manifest(
