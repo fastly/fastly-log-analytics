@@ -143,6 +143,7 @@ const SERVICELESS_PATH_PREFIXES = [
   "/api/login",
   "/api/health",
   "/api/debug",
+  "/api/admin/debug-settings", // Global setting editable before a service exists
   "/api/provision",    // fresh-install flow: no active service exists yet —
                        // the wizard (validate/check-config/check-fos/…) MUST
                        // be exempt or step 1 aborts with "No active service".
