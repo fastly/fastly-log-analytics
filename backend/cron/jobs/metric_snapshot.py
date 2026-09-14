@@ -34,6 +34,29 @@ def _safe_record(metric: str, value: float, *, service_id: str | None = None, ta
         metric_snapshots.record_snapshot(metric, value, service_id=service_id, task=task)
     except Exception as e:
         logger.debug("[metric_snapshot] record %s failed: %s", metric, e)
+    try:
+        from backend.core import operational_metrics
+
+        if metric in {"celery_active_tasks", "celery_active_workers"}:
+            operational_metrics.record(metric, value)
+        elif metric.startswith("celery_queue_depth_"):
+            operational_metrics.record(
+                "celery_queue_depth",
+                value,
+                queue=metric.removeprefix("celery_queue_depth_"),
+            )
+        elif metric == "celery_queue_depth":
+            operational_metrics.record(metric, value, queue="all")
+        elif metric == "celery_broker_reachable":
+            operational_metrics.record(metric, value)
+        elif metric.startswith("ingest_ledger_"):
+            operational_metrics.record(
+                "ingest_ledger_rows",
+                value,
+                status=metric.removeprefix("ingest_ledger_"),
+            )
+    except Exception as e:
+        logger.debug("[metric_snapshot] operational metric %s failed: %s", metric, e)
 
 
 def _sample_pool_wait() -> None:
@@ -189,24 +212,28 @@ def _sample_os_vitals() -> None:
 
 def _sample_celery_queues() -> None:
     try:
-        import os
+        from backend.celery_status import KNOWN_QUEUES, celery_queue_depths
 
-        import redis
-
-        broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-        r = redis.Redis.from_url(broker_url)
-        q_keys = r.keys("q.*")
-        queue_keys = [k.decode("utf-8") for k in q_keys if isinstance(k, bytes)] if isinstance(q_keys, list) else []
+        queues, broker_reachable = celery_queue_depths()
+        _safe_record("celery_broker_reachable", 1.0 if broker_reachable else 0.0)
         total_depth = 0.0
-        for q in queue_keys:
-            if r.type(q) == b"list":
-                llen_val = r.llen(q)
-                depth = float(llen_val) if isinstance(llen_val, int) else 0.0
-                total_depth += depth
-                _safe_record(f"celery_queue_depth_{q}", depth)
+        for queue in sorted(set(KNOWN_QUEUES) | set(queues)):
+            depth = float(queues.get(queue, 0))
+            total_depth += depth
+            _safe_record(f"celery_queue_depth_{queue}", depth)
         _safe_record("celery_queue_depth", total_depth)
     except Exception as e:
         logger.debug("[metric_snapshot] celery_queues sample failed: %s", e)
+
+
+def _sample_ingest_ledger() -> None:
+    try:
+        from backend.celery_status import ingest_ledger_summary
+
+        for status, count in ingest_ledger_summary().items():
+            _safe_record(f"ingest_ledger_{status}", float(count))
+    except Exception as e:
+        logger.debug("[metric_snapshot] ingest_ledger sample failed: %s", e)
 
 
 def _sample_celery_workers() -> None:
@@ -242,4 +269,5 @@ def _run_metric_snapshot() -> None:
     _sample_ducklake_admission()
     _sample_os_vitals()
     _sample_celery_queues()
+    _sample_ingest_ledger()
     _sample_celery_workers()
