@@ -539,10 +539,21 @@ def reconcile_cdn_service_state(
         if status_cb:
             status_cb(f"⏳ Finding existing CDN service named '{cdn_service_name}'...")
         existing = find_service_by_name(cdn_service_name, token)
+        if existing and existing.get("id") == logging_service_id:
+            # A customer service may share the requested display name. Never
+            # adopt it as the analytics CDN or allow rollback to delete it.
+            existing = None
+            if status_cb:
+                status_cb(
+                    f"⚠️ Ignoring service {logging_service_id} as CDN candidate; "
+                    "the analytics CDN must be a separate service."
+                )
         if existing:
             cdn_service_id = existing["id"]
             if status_cb:
                 status_cb(f"✓ Found existing CDN service: {cdn_service_id}")
+            if not dry_run:
+                _ensure_cdn_domain(cdn_service_id, domain, token, status_cb=status_cb)
         else:
             if dry_run:
                 if status_cb:
@@ -903,6 +914,39 @@ def _fetch_dictionaries(service_id: str, token: str) -> list[ServiceDictionary]:
     return fastly_integration.fetch_dictionaries(service_id, active_ver, token)
 
 
+def _ensure_cdn_domain(
+    service_id: str, domain: str, token: str, status_cb: Callable[[str], None] | None = None
+) -> None:
+    """Add ``domain`` to a REUSED CDN service if it isn't already attached.
+
+    A service adopted via find-by-name (not freshly created) skips the
+    "Add domain to version 1" step above entirely, since that step only
+    runs in the create branch. Left unchecked, a service originally
+    provisioned under an older cdn_prefix convention (e.g. bucket-name-
+    based) silently keeps that domain forever while config.cdn_url reflects
+    whatever the CURRENT default computes (e.g. service-id-based) — every
+    read through the CDN then 500s with Fastly's "unknown domain" error
+    because the domain in config was never actually registered.
+    """
+    active_ver = fastly_integration.fetch_active_version(service_id, token)
+    if active_ver is None:
+        return
+    existing_domains = fastly("GET", f"/service/{service_id}/version/{active_ver}/domain", token=token)
+    names = {d.get("name", "").lower() for d in existing_domains} if isinstance(existing_domains, list) else set()
+    if domain.lower() in names:
+        return
+    if status_cb:
+        status_cb(f"⏳ Domain '{domain}' missing from existing CDN service; adding...")
+    draft_version = fastly_integration.clone_version(service_id, active_ver, token, f"Add missing domain {domain}")
+    fastly("POST", f"/service/{service_id}/version/{draft_version}/domain", {"name": domain}, token=token)
+    error = _validate_draft(service_id, token, draft_version)
+    if error:
+        raise RuntimeError(f"Failed to validate CDN domain addition for {service_id}: {error}")
+    _activate_draft(service_id, token, draft_version)
+    if status_cb:
+        status_cb(f"✓ Domain '{domain}' added to existing CDN service")
+
+
 def _fetch_active_version(service_id: str, token: str) -> int:
     """Fetch the active version number."""
     ver = fastly_integration.fetch_active_version(service_id, token)
@@ -1106,7 +1150,9 @@ def _apply_diff(
     if has_main_cond:
         if status_cb:
             status_cb("➕ Configuring log analytics condition 'log_analytics_condition'...")
-        cond_parts = ["!segmented_caching.is_inner_req", 'req.url.path != "/rum-beacon"']
+        cond_parts = ["!segmented_caching.is_inner_req"]
+        if desired_state and desired_state.rum_enabled:
+            cond_parts.append('req.url.path != "/rum-beacon"')
         if desired_state:
             scoring_enabled = desired_state.scoring.enabled
             if desired_state.edge_only:
@@ -1138,7 +1184,7 @@ def _apply_diff(
     if has_rum_cond:
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
-        statement = 'req.url.path == "/rum-beacon"'
+        statement = 'req.url.path == "/rum-beacon" && req.method == "POST"'
         if (
             desired_state
             and getattr(desired_state, "rum_custom_condition", None)

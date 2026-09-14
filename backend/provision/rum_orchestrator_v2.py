@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 # Kept as a single source of truth so disable_rum can find them by name to undo cleanly.
 _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
     {
+        "name": "service_id",
+        "label": "Service ID",
+        "description": "Fastly Service ID handling the request.",
+        "vcl_log_expression": "req.service_id",
+        "collection_stage": "beacon",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 22,
+        "enabled": True,
+    },
+    {
         "name": "rum_cid",
         "label": "RUM Session ID",
         "description": "Derived from session scoring sid; per-session correlation key for joining with edge_sid.",
@@ -812,7 +823,7 @@ def disable_rum(
             from backend.provision.fos_setup import delete_fos_prefix
 
             prefix = cfg.get("fos_prefix", "")
-            rum_prefix = f"{prefix.strip('/')}/rum/raw/" if prefix else "rum/raw/"
+            rum_prefix = f"{prefix.strip('/')}/raw/rum/" if prefix else "raw/rum/"
             if status_cb:
                 status_cb("⏳ Deleting RUM cloud files...")
             delete_fos_prefix(

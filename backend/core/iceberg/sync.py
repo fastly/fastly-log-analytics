@@ -23,6 +23,7 @@ import time
 from datetime import UTC, datetime
 
 logger = logging.getLogger("backend.core.iceberg._core")
+_retry_sleep = time.sleep
 
 # Library imports the carved function references.
 
@@ -379,11 +380,11 @@ def sync_data(
                             # Don't retry on auth errors
                             break
                         if attempt < 2:
-                            time.sleep(1)
+                            _retry_sleep(1)
                     except Exception as e:
                         last_err = e
                         if attempt < 2:
-                            time.sleep(1)
+                            _retry_sleep(1)
 
                 if not success:
                     raise RuntimeError(

@@ -189,7 +189,6 @@ def test_update_pre_warms_cache_on_changed_with_format(
         params={
             "period": 120,
             "sample_rate": 25,
-            "prefix": "newpfx",
             "edge_only": True,
             "custom_condition": 'req.http.x == "1"',
             "update_format": True,
@@ -201,7 +200,7 @@ def test_update_pre_warms_cache_on_changed_with_format(
     assert cached is not None, "cache must be pre-warmed, not popped"
     assert cached["period"] == 120
     assert cached["sample_rate"] == 25
-    assert cached["prefix"] == "newpfx"
+    assert cached["prefix"] == ""
     assert cached["edge_only"] is True
     assert cached["custom_condition"] == 'req.http.x == "1"'
     assert cached["format_match"] is True

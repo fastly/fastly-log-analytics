@@ -61,6 +61,175 @@ export const handlers = [
   ),
 
   http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/request-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'request',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/rum-facts/:domain`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'rum_vitals',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/cmcd-facts`, () =>
+    HttpResponse.json({
+      rows: [],
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'cmcd',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      next_cursor: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/aggregates`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      domain: 'request',
+      dimension: 'url',
+      request_count: 0,
+      top_values: [],
+      coverage: 1,
+      freshness_lag_seconds: 0,
+      exact: true,
+      approximation_error: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/queries`, () =>
+    HttpResponse.json({
+      service_id: 'svc-default',
+      domain: 'request',
+      plan: {
+        tier: 'recent_facts',
+        sources: ['clickhouse_facts'],
+        queued: false,
+        bounded: false,
+        max_rows: 500,
+        reason: 'recent raw facts',
+      },
+      rows: [],
+      next_cursor: null,
+      metadata: {
+        status: 'complete',
+        exact: true,
+        coverage: 1,
+        freshness_lag_seconds: 0,
+        watermark: {
+          service_id: 'svc-default',
+          domain: 'request',
+          owner_epoch: 1,
+          coverage_start: null,
+          coverage_end: null,
+          last_accepted_cursor: null,
+          last_archived_event_id: null,
+          last_visible_event_id: null,
+          exact: true,
+        },
+        approximation_error: null,
+        error: null,
+      },
+      job_id: null,
+    }),
+  ),
+  http.get(`${API_BASE}/api/high-scale/services/:service_id/queries/:job_id`, () =>
+    HttpResponse.json({
+      job_id: 'job-default',
+      state: 'completed',
+      rows: [],
+      row_count: 0,
+      output_bytes: 0,
+      truncated: false,
+      error: null,
+      created_at: '2026-01-01T00:00:00Z',
+      expires_at: '2026-01-01T00:15:00Z',
+      terminal_at: '2026-01-01T00:00:01Z',
+    }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/queries/:job_id/cancel`, () =>
+    HttpResponse.json({ job_id: 'job-default', cancelled: true }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.get(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'queued' }),
+  ),
+  http.post(`${API_BASE}/api/high-scale/services/:service_id/exports/:export_id/cancel`, () =>
+    HttpResponse.json({ export_id: 'export-default', service_id: 'svc-default', status: 'cancelled', cancelled: true }),
+  ),
+  http.get(`${API_BASE}/api/admin/clickhouse/status`, ({ request }) =>
+    HttpResponse.json({
+      service_id: new URL(request.url).searchParams.get('service_id') ?? 'svc-default',
+      enabled: false,
+      health: 'disabled',
+      schema_version: null,
+      publication_counts: null,
+      oldest_pending_age_seconds: null,
+      last_published_at: null,
+      active_generation: null,
+      expired_dataset_count: null,
+    }),
+  ),
+  http.post(`${API_BASE}/api/admin/clickhouse/replay`, () =>
+    HttpResponse.json(
+      { detail: { error: 'clickhouse_disabled', message: 'ClickHouse prototype disabled' } },
+      { status: 409 },
+    ),
+  ),
   http.get(`${API_BASE}/api/schema`, ok({ tables: [], custom_fields: [] })),
 
   // ── Log-fields catalog (gates every analytics page) ───────────────
@@ -326,6 +495,7 @@ export const handlers = [
   ),
   http.patch(`${API_BASE}/api/admin/usage-logging`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/commit-iceberg`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/ducklake/migrate`, ok({ ok: true, started: true })),
   http.post(`${API_BASE}/api/admin/ingest-logs`, ok({ ok: true, ingested: 0 })),
   http.get(`${API_BASE}/api/admin/iceberg-info`, () =>
     HttpResponse.json({ snapshots: [], current_snapshot_id: null }),
@@ -349,6 +519,9 @@ export const handlers = [
   http.get(`${API_BASE}/api/cron-runs`, () => HttpResponse.json({ runs: [] })),
   http.get(`${API_BASE}/api/cron-schedule`, () =>
     HttpResponse.json({ schedule: [], next_run_at: null }),
+  ),
+  http.get(`${API_BASE}/api/admin/celery/status`, () =>
+    HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
 
   // ── AppLayout always-on calls (every page render hits these) ─────

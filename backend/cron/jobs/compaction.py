@@ -32,7 +32,32 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("local_compact")
+def _ledger_touched_hours(service_id: str, lookback_s: float) -> set[str]:
+    """Hours ('YYYY-MM-DD-HH', matching strftime %Y-%m-%d-%H) that received
+    ledger commits within ``lookback_s`` — the celery-mode analogue of the
+    sync path's ingest-reported touched_hours. Parsed from the raw object
+    keys' year=/month=/day=/hour= segments."""
+    import re
+
+    from backend.core.metadata.base import get_con
+
+    rows = (
+        get_con(service_id)
+        .execute(
+            "SELECT DISTINCT object_key FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+            (service_id, time.time() - lookback_s),
+        )
+        .fetchall()
+    )
+    hours: set[str] = set()
+    for (key,) in rows:
+        m = re.search(r"year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})", key)
+        if m:
+            hours.add(f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}")
+    return hours
+
+
+@cron_task("local_compact", job_name="local_compact")
 def _run_local_compact(service_id: str) -> None:
     """Frequent job: merge small parquet files in the LOCAL CACHE only.
 
@@ -68,7 +93,7 @@ def _run_local_compact(service_id: str) -> None:
     cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="local_compact")
     _display = _display_label(src, service_id)
-    logger.info("▶️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
+    logger.info("🏎️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
     _log_and_add_progress(
         run_id,
         service_id,
@@ -88,6 +113,29 @@ def _run_local_compact(service_id: str) -> None:
             f"Compacted {partitions} partition(s): merged {merged} small file(s) into "
             f"{partitions} (removed {removed} originals)"
         )
+
+        # Celery-mode rollup seam: converts write straight to the lake — no
+        # cache files land, so the per-sync recompute in jobs/sync.py never
+        # fires and every dashboard panel would raw-scan the lake forever
+        # (exactly what rollups exist to prevent at scale). Derive the hours
+        # that received commits from the ledger and recompute their rollups
+        # here — this job is backend-local, so the rollup writers read the
+        # pod's DuckDB view without cross-process file-lock contention.
+        # recompute_touched_hours excludes the active hour and is idempotent,
+        # so the overlapping 15-min lookback just re-heals late arrivals.
+        from backend import config as svcconfig
+
+        if svcconfig.is_high_throughput_mode(src):
+            try:
+                rollup_hours = _ledger_touched_hours(service_id, lookback_s=15 * 60)
+                if rollup_hours:
+                    from backend.core.rollups.recompute import recompute_touched_hours
+
+                    recompute_touched_hours(service_id, src, rollup_hours)
+                    summary += f"; rollups recomputed for {len(rollup_hours)} ledger hour(s)"
+            except Exception as e:
+                errors = list(errors) + [f"high-throughput rollup recompute failed: {e}"]
+                logger.warning("[local-compact] %s: celery rollup recompute failed: %s", service_id, e)
         if errors:
             err_preview = "\n".join(errors[:3])
             if len(errors) > 3:
@@ -114,7 +162,7 @@ def _run_local_compact(service_id: str) -> None:
             job_name="local_compact",
             event={"type": "status", "message": summary},
         )
-        logger.info("⏹️  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, duration)
+        logger.info("🏁  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, duration)
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(
@@ -133,7 +181,7 @@ def _run_local_compact(service_id: str) -> None:
         end_progress(run_id)
 
 
-@cron_task("rollup_hour_heal")
+@cron_task("rollup_hour_heal", job_name="rollup_hour_heal")
 def _run_rollup_hour_heal(service_id: str) -> None:
     """Hourly job: rebuild hour bundles for closed hours the per-sync
     recompute missed.
@@ -144,15 +192,17 @@ def _run_rollup_hour_heal(service_id: str) -> None:
     before the boundary) never retrigger — diagnosed 2026-07-06 as top-N
     cards silently missing every closed hour of the current day on the
     low-traffic service. Reuses the idempotent
-    ``backfill_missing_hour_bundles`` self-heal with a 1-day lookback:
-    one listdir + one GROUP-BY-hour view scan when nothing is missing,
-    so the steady-state tick is cheap. The daily compaction job keeps
-    its 30-day deep pass.
+    ``backfill_missing_hour_bundles`` self-heal. Once durable-mode startup
+    coverage is ready, it uses a 1-day lookback so the steady-state tick is
+    cheap. If startup coverage is not ready yet, the first successful heal
+    uses the full 30-day horizon before enabling durable rollup reads. The
+    daily compaction job keeps its 30-day deep pass.
 
     LOCAL-only writes (rollup parquet under cache/) — no FOS traffic, so
     it is safe under the dev kill switch alongside local_compact /
     rollup_compact.
     """
+    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.rollups import backfill_missing_hour_bundles
     from backend.utils.active_requests import should_defer_cron
@@ -180,8 +230,27 @@ def _run_rollup_hour_heal(service_id: str) -> None:
 
     start_time = time.time()
     try:
-        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=1)
+        durable_mode = svcconfig.is_durable_serving_mode(src)
+        if durable_mode:
+            from backend.core.rollup_readiness import rollup_coverage_ready
+
+            coverage_ready = rollup_coverage_ready(service_id)
+        else:
+            coverage_ready = True
+        lookback_days = 1 if coverage_ready else 30
+        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=lookback_days)
         duration = time.time() - start_time
+        # Durable mode only becomes trusted after a full-horizon pass. A
+        # failed or timed-out startup catch-up therefore self-heals on the
+        # next hourly tick without enabling readers from a one-day partial
+        # cache.
+        if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
+            try:
+                from backend.core.rollup_readiness import mark_rollup_coverage_ready
+
+                mark_rollup_coverage_ready(service_id)
+            except Exception as e:
+                logger.warning("[rollup-heal] %s: could not mark rollup coverage ready: %s", service_id, e)
         summary = (
             f"Healed {heal.get('missing', 0)} missing hour(s): "
             f"{heal.get('rebuilt_fields', 0)} field rollup(s) rebuilt, "
@@ -198,7 +267,7 @@ def _run_rollup_hour_heal(service_id: str) -> None:
             log_output=_extract_log_text(run_id),
         )
         if heal.get("missing", 0) or heal.get("stamped_empty", 0):
-            logger.info("⏹️  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
+            logger.info("🏁  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(
@@ -219,7 +288,7 @@ def _run_rollup_hour_heal(service_id: str) -> None:
         end_progress(run_id)
 
 
-@cron_task("rollup_compact_daily")
+@cron_task("rollup_compact_daily", job_name="rollup_compact_daily")
 def _run_rollup_compact_daily(service_id: str) -> None:
     """Daily job: consolidate closed-day per-hour rollup parquet into per-day files.
 
@@ -256,7 +325,7 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         return
 
     _display = _display_label(src, service_id)
-    logger.info("▶️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+    logger.info("🏎️  [rollup-compact] %s: Daily rollup compaction started.", _display)
 
     start_time = time.time()
     try:
@@ -486,7 +555,7 @@ def _run_rollup_compact_daily(service_id: str) -> None:
             run_id=run_id,
         )
         logger.info(
-            "⏹️  [rollup-compact] %s: Compacted %d (field, day), bundled %d day(s), healed %d/%d hour bundle(s) in %.1fs.",
+            "🏁  [rollup-compact] %s: Compacted %d (field, day), bundled %d day(s), healed %d/%d hour bundle(s) in %.1fs.",
             _display,
             rebuilt,
             bundled,

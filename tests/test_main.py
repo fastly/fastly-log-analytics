@@ -660,3 +660,42 @@ def test_bounded_shutdown_does_not_raise_when_shutdown_throws():
 
     # Should not raise — the warning log is the only side-effect.
     _bounded_scheduler_shutdown(fake_scheduler, timeout_secs=5.0)
+
+
+# ── _maybe_instrument_asgi ────────────────────────────────────────────────────
+
+
+def test_maybe_instrument_asgi_noop_when_otel_disabled():
+    """The default/test-mode case: OTEL_EXPORTER=none (or pytest) means
+    asgi_instrumentation_enabled() is False, so nothing gets wrapped."""
+    from backend.main import _maybe_instrument_asgi
+
+    fake_app = MagicMock()
+    with (
+        patch("backend.main.request_telemetry.asgi_instrumentation_enabled", return_value=False),
+        patch("backend.main.FastAPIInstrumentor") as mock_instrumentor,
+    ):
+        _maybe_instrument_asgi(fake_app)
+
+    mock_instrumentor.instrument_app.assert_not_called()
+
+
+def test_maybe_instrument_asgi_wraps_app_when_otel_enabled():
+    """When OTel is configured to export, the SDK must be initialised
+    before instrument_app runs (see ensure_initialized's docstring: a
+    process whose first request never calls get_tracer() would otherwise
+    leave FastAPIInstrumentor's spans permanently no-op), and the
+    receive/send child spans must stay excluded so a span-metrics
+    processor doesn't bucket them as their own noisy series."""
+    from backend.main import _maybe_instrument_asgi
+
+    fake_app = MagicMock()
+    with (
+        patch("backend.main.request_telemetry.asgi_instrumentation_enabled", return_value=True),
+        patch("backend.main.request_telemetry.ensure_initialized") as mock_ensure_init,
+        patch("backend.main.FastAPIInstrumentor") as mock_instrumentor,
+    ):
+        _maybe_instrument_asgi(fake_app)
+
+    mock_ensure_init.assert_called_once()
+    mock_instrumentor.instrument_app.assert_called_once_with(fake_app, exclude_spans=["receive", "send"])

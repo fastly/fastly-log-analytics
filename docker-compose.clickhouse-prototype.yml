@@ -1,0 +1,67 @@
+# Local Docker prototype only. Fastly Object Storage and Postgres remain authoritative.
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.4.13
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-fla_prototype}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-fla_prototype}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-prototype_local_only}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    networks:
+      - app-network
+    volumes:
+      - clickhouse-prototype-data:/var/lib/clickhouse
+    mem_limit: 2g
+    cpus: 2
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+  clickhouse-schema-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # Explicit, rerunnable bootstrap; never start the backend or its crons.
+    command: ["python", "-m", "backend.core.clickhouse_schema"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OTEL_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp/v1/metrics
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4318/v1/traces
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_SECURE=false
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla_prototype}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla_prototype}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-prototype_local_only}
+    networks:
+      - app-network
+    restart: "no"
+    volumes:
+      - ./configs:/app/configs:ro
+  backend:
+    environment:
+      - CLICKHOUSE_ENABLED=${CLICKHOUSE_ENABLED:-false}
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_SECURE=false
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla_prototype}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla_prototype}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-prototype_local_only}
+volumes:
+  clickhouse-prototype-data:

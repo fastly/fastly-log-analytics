@@ -127,6 +127,7 @@ def build_where_clause(
     params: list[Any] = []
 
     # Filter out empty or null client IP records (buffer leaks / empty ticks)
+
     if exclude_invalid_ips and actual_cols is not None and "ip" in actual_cols:
         conditions.append("ip IS NOT NULL AND ip != ''")
 
@@ -184,6 +185,20 @@ def build_where_clause(
 
         mode = spec.mode
         values = spec.values
+        if (
+            actual_cols is not None
+            and sql_col not in actual_cols
+            and not (is_bot_name or is_ngwaf_bot_name or is_tunnel_requests or is_signals_individual)
+        ):
+            if sql_col in ("browser", "os", "device"):
+                conditions.append("FALSE")
+                continue
+            if mode == "exclude":
+                pass
+            else:
+                conditions.append("FALSE")
+            continue
+
         if not values:
             continue
 

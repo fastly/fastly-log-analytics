@@ -201,8 +201,8 @@ def test_deep_health_not_fooled_by_briefly_running_sync():
 
 
 def test_deep_health_degrades_on_commit_error():
-    # SRE-05: a commit cron erroring every run (buffer growing, nothing
-    # reaching Iceberg) is task='sync'-invisible — must degrade.
+    # SRE-05: a commit cron erroring every run (buffer growing,
+    # nothing reaching the lake) is discovery-invisible — must degrade.
     code, body = _deep_health([("sync", "success", 2, None), ("commit", "error", 1, "boom")])
     assert code == 503
     svc = body["services"][0]
@@ -216,6 +216,46 @@ def test_deep_health_degrades_on_metadata_sync_error():
     assert code == 503
     assert body["services"][0]["status"] == "degraded"
     assert "metadata_sync cron errored" in body["services"][0]["reason"]
+
+
+def test_deep_health_ignores_metadata_sync_error_in_durable_mode():
+    # Durable read-write services never schedule metadata_sync; an old
+    # failure from before the topology switch must not keep readiness red.
+    from backend.main import health_check
+
+    now = datetime.now(UTC)
+    con = sqlite3.connect(":memory:", check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE ingested_files (source_name TEXT, ingested_at TEXT)")
+    con.execute(
+        "CREATE TABLE cron_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, "
+        "status TEXT, started_at TEXT, error_message TEXT, "
+        "files_downloaded INTEGER DEFAULT 0, rows_ingested INTEGER DEFAULT 0)"
+    )
+    con.execute(
+        "INSERT INTO ingested_files VALUES (?, ?)",
+        ("svc", (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    con.execute(
+        "INSERT INTO cron_runs (task, status, started_at, error_message) VALUES (?, ?, ?, ?)",
+        ("metadata_sync", "error", now.strftime("%Y-%m-%d %H:%M:%S"), "old topology"),
+    )
+    con.execute(
+        "INSERT INTO cron_runs (task, status, started_at) VALUES (?, ?, ?)",
+        ("sync", "success", now.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    con.commit()
+
+    fake_request = MagicMock()
+    with (
+        patch("backend.config.list_service_ids", return_value=["svc"]),
+        patch("backend.config.is_durable_serving_mode", return_value=True),
+        patch("backend.core.metadata.get_con", return_value=con),
+        patch("backend.utils.remote_access.is_request_remote", return_value=False),
+    ):
+        result = health_check(fake_request, deep=True)
+
+    assert result["status"] == "ok"
 
 
 # ── SRE-22: adaptive per-service staleness widening ──────────────────────────

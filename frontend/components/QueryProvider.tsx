@@ -45,7 +45,7 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
         // navigations to a route within 60s skip the network entirely
         // — that's the difference between "click → instant snapshot"
         // vs "click → spinner → repaint" for revisits.
-        staleTime: 60 * 1000,
+        staleTime: 5 * 60 * 1000,
         // gcTime: keep cached data in memory for 5 min after the last
         // subscriber unmounts. Without this React Query drops the
         // cache the moment a page unmounts, so navigating away and

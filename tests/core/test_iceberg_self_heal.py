@@ -24,6 +24,9 @@ class TestIsStaleViewError:
             'IO Error: No files found that match the pattern "cache/foo/batch_abc.parquet"',
             "Catalog Error: Table with name logs_xyz does not exist",
             "No such file or directory: /tmp/buf.parquet",
+            # DuckLake's brief DETACH window during commit/optimize: a
+            # reader mid-checkout hits this exact CatalogException text.
+            'Catalog Error: Table with name "lake.logs" does not exist because schema "lake" does not exist.',
         ],
     )
     def test_recognises_known_messages(self, msg: str) -> None:
@@ -33,6 +36,25 @@ class TestIsStaleViewError:
         assert is_stale_view_error(Exception("Syntax error at line 1")) is False
         assert is_stale_view_error(Exception("Permission denied")) is False
         assert is_stale_view_error(Exception("Connection refused")) is False
+
+    def test_recognises_real_duckdb_exception_from_detached_ducklake_catalog(self) -> None:
+        """Not just a string fixture — a REAL DuckDB error from the exact
+        DuckLake DETACH-then-query race (commit_batch/optimize briefly
+        detach 'lake' on a connection other readers share), confirming the
+        matcher isn't accidentally coupled to a specific error phrasing
+        that a future DuckDB version could change."""
+        import duckdb as _duckdb
+
+        con = _duckdb.connect()
+        con.execute("ATTACH ':memory:' AS lake")
+        con.execute("CREATE TABLE lake.logs (x INT)")
+        con.execute("DETACH lake")
+        try:
+            con.execute("SELECT * FROM lake.logs")
+        except Exception as e:
+            assert is_stale_view_error(e) is True
+        else:
+            pytest.fail("expected querying a detached catalog to raise")
 
 
 class TestExecuteWithStaleViewRetry:

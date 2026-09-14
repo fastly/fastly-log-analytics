@@ -19,6 +19,114 @@ import pytest
 
 
 @pytest.fixture
+def forbidden_clickhouse(monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", "true")
+    adapter = MagicMock(side_effect=AssertionError("archived evaluator reached from dashboard"))
+    client = MagicMock(side_effect=AssertionError("ClickHouse client reached from dashboard"))
+    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_aggregates", adapter)
+    monkeypatch.setattr("backend.repositories.clickhouse_dashboard.get_clickhouse_client", client)
+    monkeypatch.setattr("backend.core.clickhouse_client.get_clickhouse_client", client)
+    monkeypatch.setattr("backend.core.clickhouse_client.ClickHouseClient.execute", client)
+    yield adapter, client
+    adapter.assert_not_called()
+    client.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint", ["aggregates", "bundle"])
+@pytest.mark.parametrize("sections", [None, ["core", "topten"], ["topten"]])
+def test_dashboard_stays_ducklake_when_clickhouse_enabled(
+    client, endpoint, sections, stub_aggregates, stub_top_bots, forbidden_clickhouse
+):
+    body = {
+        "fields": ["country"],
+        "filters": {},
+        "chart_interval": "1 hour",
+        "chart_metric": "requests",
+        "start_time": "2026-09-01T00:00:00Z",
+        "end_time": "2026-09-02T00:00:00Z",
+    }
+    if sections is not None:
+        body["sections"] = sections
+    resp = client.post(
+        f"/api/dashboard/{endpoint}",
+        json=body,
+    )
+    assert resp.status_code == 200, resp.text
+    stub_aggregates.assert_called_once()
+    args = stub_aggregates.call_args.kwargs
+    assert "sections" not in args
+    assert args["include_top_n"] is True
+    for flag in ("include_time_series", "include_conn_requests", "include_map_data"):
+        assert args[flag] is (sections != ["topten"])
+    assert args["fields_filter"] == ["country"]
+    if endpoint == "bundle" and sections is None:
+        stub_top_bots.assert_called_once()
+        assert resp.json()["top_bots"]["bots"] == [{"name": "Googlebot", "count": 42}]
+    else:
+        stub_top_bots.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint", ["aggregates", "bundle"])
+def test_ducklake_receives_analyst_clamp_when_clickhouse_enabled(
+    client,
+    monkeypatch,
+    endpoint,
+    stub_aggregates,
+    in_memory_duckdb,
+    test_service_source,
+    forbidden_clickhouse,
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backend.core.request_context import RequestContext, build_request_context
+    from backend.core.request_telemetry import RequestTelemetry
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+
+    start, end = datetime(2026, 9, 1, 6, tzinfo=UTC), datetime(2026, 9, 1, 8, tzinfo=UTC)
+    ctx = RequestContext(
+        service_id=test_service_source["service_id"],
+        source=test_service_source,
+        con=in_memory_duckdb,
+        telemetry=RequestTelemetry("POST", f"/api/dashboard/{endpoint}"),
+        analyst_session=SimpleNamespace(service_ids=[test_service_source["service_id"]]),
+        time_bounds=TimeBounds(start=start, end=end),
+    )
+    app.dependency_overrides[build_request_context] = lambda: ctx
+    resp = client.post(
+        f"/api/dashboard/{endpoint}",
+        json={
+            "fields": ["country"],
+            "sections": ["core", "topten"],
+            "filters": {},
+            "chart_interval": "1 hour",
+            "chart_metric": "requests",
+            "start_time": "2026-08-01T00:00:00Z",
+            "end_time": "2026-09-02T00:00:00Z",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    stub_aggregates.assert_called_once()
+    args = stub_aggregates.call_args.kwargs
+    assert datetime.fromisoformat(args["start_time"].replace("Z", "+00:00")) == start
+    assert datetime.fromisoformat(args["end_time"].replace("Z", "+00:00")) == end
+    assert args["src"] is test_service_source
+    assert args["con"] is in_memory_duckdb
+    assert "sections" not in args
+
+
+def test_invalid_filter_rejected_before_dispatch(client, monkeypatch, forbidden_clickhouse):
+    dispatch = MagicMock(side_effect=AssertionError("invalid request dispatched"))
+    monkeypatch.setattr("backend.repositories.dashboard.get_aggregates", dispatch)
+    resp = client.post(
+        "/api/dashboard/aggregates", json={"filters": {"country": {"mode": "invalid", "values": ["US"]}}}
+    )
+    assert resp.status_code == 422
+    dispatch.assert_not_called()
+
+
+@pytest.fixture
 def stub_aggregates(monkeypatch):
     """Replace the repository's get_aggregates with a deterministic stub.
 

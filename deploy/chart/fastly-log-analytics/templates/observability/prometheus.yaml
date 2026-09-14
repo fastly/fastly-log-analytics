@@ -1,0 +1,74 @@
+{{- if .Values.observability.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-prometheus-config
+data:
+  prometheus.yml: |-
+{{ .Files.Get "files/observability/prometheus.yml" | indent 4 }}
+  clickhouse.rules.yml: |-
+{{ .Files.Get "files/observability/clickhouse.rules.yml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-prometheus
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: prometheus
+          image: {{ .Values.observability.prometheus.image | quote }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # OTLP ingest for the app's own metrics; remote-write ingest for
+            # Tempo's span-derived RED metrics -- same flags as the
+            # docker-compose observability sidecar.
+            - --web.enable-otlp-receiver
+            - --web.enable-remote-write-receiver
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fastly-log-analytics.fullname" . }}-prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare "prometheus" so tempo.yml's remote_write and Grafana's datasource
+  # URL (both baked into the copied configs, not templated) resolve
+  # correctly -- see files/observability/tempo.yml and
+  # grafana-datasources.yml.
+  name: prometheus
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 9090
+      targetPort: http
+{{- end }}

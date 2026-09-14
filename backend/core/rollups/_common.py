@@ -81,18 +81,18 @@ def _safe_table_for(source: dict) -> str | None:
     Slugifies the same way the dashboard's view-builder does
     (``backend.core.duckdb._safe_table_name``: non-alphanumerics to ``_``,
     lowercased, ``logs_`` prefix) so the rollup COPY/SELECT targets the
-    same view name the dashboard creates. Reads ``service_id`` first (the
-    canonical slug in normalized source dicts) and falls back to ``name``
-    for callers that pass a raw on-disk config — both cases pass through
-    the slugifier identically.
+    same view name the dashboard creates. Reads ``name`` first (matching
+    ``update_iceberg_view``) and falls back to ``service_id`` for callers that
+    pass a raw on-disk config — both cases pass through the slugifier
+    identically.
     """
-    raw = source.get("service_id") or source.get("name") or ""
-    if not raw:
+    slug = source.get("name") or source.get("service_id")
+    if not slug:
         logger.warning("[rollups] no service_id/name in source dict; skipping rollup")
         return None
     from backend.core.duckdb import _safe_table_name
 
-    return _safe_table_name(raw)
+    return _safe_table_name(slug)
 
 
 def _get_fields(src: dict) -> list[str]:
@@ -106,8 +106,16 @@ def _get_fields(src: dict) -> list[str]:
     we now have a dedicated SQL builder (``_build_virtual_field_copy_query``)
     that does the unnest at write time so the dashboard reader doesn't
     have to rescan + unnest the raw window at query time.
+
+    Excludes METRICS-group catalog entries (requests, hit_rate,
+    p95_latency, ...) — those have ``vcl=None``, meaning they're a chart-
+    metric-only synthetic concept with no real per-row column to SELECT.
+    See AGENTS.md Trap #40 for the live incident this fixes.
     """
+    from backend.core.field_registry import Group, in_group
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
+
+    metrics_only_fields = {f.code for f in in_group(Group.METRICS)}
 
     lf_config = src.get("log_fields") or {}
     custom_field_names: list[str] = []
@@ -119,7 +127,9 @@ def _get_fields(src: dict) -> list[str]:
             logger.warning("[rollups] skipping custom field with unsafe name: %r", name)
             continue
         custom_field_names.append(name)
-    actual_fields = [f for f in FIELDS if f not in _VIRTUAL_FIELDS and _is_safe_ident(f)]
+    actual_fields = [
+        f for f in FIELDS if f not in _VIRTUAL_FIELDS and f not in metrics_only_fields and _is_safe_ident(f)
+    ]
     virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
     return actual_fields + virtual_fields + custom_field_names
 

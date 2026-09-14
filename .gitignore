@@ -19,6 +19,7 @@ dist/
 *.cron.lock
 /cache/*
 .claude/*
+.agents/
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
@@ -47,6 +48,9 @@ node_modules/
 # Local Swival tool state (REPL history, per-session audit dirs). Per-user.
 .swival/
 /audit-findings/
+
+# ChatGPT
+.codex/
 
 # Ad-hoc debug screenshots dropped at the repo root by browser-driven
 # verification sessions. Intentional docs/assets/*.png are tracked; these
@@ -120,3 +124,9 @@ compute/scorer/pkg/*
 # Separate Next.js dev cache for the Playwright dev server (port 13004)
 # so its lockfile doesn't collide with the dev shell on 13002.
 /frontend/.next-e2e/
+
+# editor/backup debris
+*.bak
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

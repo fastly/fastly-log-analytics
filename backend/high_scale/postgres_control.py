@@ -1,0 +1,1357 @@
+"""Transactional Postgres control-plane state for the isolated high-scale slice.
+
+This module is intentionally not wired into either active deployment mode.  It
+owns only the durable coordination records that a future high-scale plane
+needs: ownership fencing, source-object leases, archive publication state, and
+source-deletion authorization.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from psycopg_pool import ConnectionPool
+
+from backend.core.high_scale_contracts import ArchiveState, validate_archive_transition
+from backend.core.metadata.pg_connection import get_pg_pool
+from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
+
+SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS high_scale_ownership (
+    service_id TEXT PRIMARY KEY,
+    owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
+    current_owner TEXT NOT NULL,
+    previous_owner TEXT,
+    source_cursor TEXT NOT NULL,
+    drain_complete BOOLEAN NOT NULL DEFAULT FALSE,
+    cutover_committed BOOLEAN NOT NULL DEFAULT FALSE,
+    rollback_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS high_scale_source_cursors (
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    source_cursor TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (service_id, domain),
+    FOREIGN KEY (service_id) REFERENCES high_scale_ownership(service_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS high_scale_source_objects (
+    object_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    version TEXT,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'discovered', 'claimed', 'appended', 'archived', 'acknowledged',
+            'source_deleted', 'source_missing'
+        )
+    ),
+    owner TEXT,
+    lease_until TIMESTAMPTZ,
+    lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    archive_manifest_id TEXT,
+    owner_epoch BIGINT,
+    malformed_rows BIGINT NOT NULL DEFAULT 0 CHECK (malformed_rows >= 0),
+    accepted_rows BIGINT NOT NULL DEFAULT 0 CHECK (accepted_rows >= 0),
+    last_error TEXT,
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (service_id, object_key)
+);
+
+-- Idempotent migration for a table created before 'source_missing'/last_error
+-- existed: CREATE TABLE IF NOT EXISTS above is a no-op against an existing
+-- table, so both need an explicit, repeatable upgrade path. Safe to run
+-- against a fresh table too (ADD COLUMN IF NOT EXISTS is a no-op there; the
+-- CHECK is dropped and recreated identically).
+ALTER TABLE high_scale_source_objects ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE high_scale_source_objects DROP CONSTRAINT IF EXISTS high_scale_source_objects_status_check;
+ALTER TABLE high_scale_source_objects ADD CONSTRAINT high_scale_source_objects_status_check
+    CHECK (
+        status IN (
+            'discovered', 'claimed', 'appended', 'archived', 'acknowledged',
+            'source_deleted', 'source_missing'
+        )
+    );
+
+CREATE INDEX IF NOT EXISTS high_scale_source_objects_claim_idx
+    ON high_scale_source_objects (service_id, status, lease_until);
+
+CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
+    manifest_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    source_checksum TEXT NOT NULL,
+    source_size BIGINT NOT NULL CHECK (source_size >= 0),
+    source_version TEXT,
+    artifact_uri TEXT NOT NULL,
+    artifact_checksum TEXT NOT NULL,
+    artifact_size BIGINT NOT NULL CHECK (artifact_size >= 0),
+    row_count BIGINT NOT NULL CHECK (row_count >= 0),
+    byte_count BIGINT NOT NULL CHECK (byte_count >= 0),
+    canonical_digest TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    transform_version TEXT NOT NULL,
+    coverage_start TIMESTAMPTZ NOT NULL,
+    coverage_end TIMESTAMPTZ NOT NULL,
+    retention_deadline TIMESTAMPTZ NOT NULL,
+    deletion_authorization_deadline TIMESTAMPTZ NOT NULL,
+    archive_epoch BIGINT NOT NULL CHECK (archive_epoch >= 0),
+    owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'artifact_uploading',
+            'artifact_verified',
+            'manifest_prepared',
+            'manifest_committed',
+            'deletion_eligible',
+            'source_deleted'
+        )
+    ),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CHECK (coverage_end >= coverage_start),
+    CHECK (retention_deadline >= coverage_end),
+    CHECK (deletion_authorization_deadline >= retention_deadline)
+);
+
+CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx
+    ON high_scale_archive_manifests (service_id, source_key);
+
+CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
+    batch_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
+    lease_until TIMESTAMPTZ NOT NULL,
+    lease_generation BIGINT NOT NULL DEFAULT 1 CHECK (lease_generation > 0),
+    state TEXT NOT NULL CHECK (state IN ('claimed', 'completed', 'released')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE INDEX IF NOT EXISTS high_scale_batch_claims_lease_idx
+    ON high_scale_batch_claims (service_id, state, lease_until);
+
+CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
+    batch_id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    batch_digest TEXT NOT NULL,
+    expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
+    visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'visible')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
+    object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
+    manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),
+    owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
+    authorized_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    consumed_at TIMESTAMPTZ,
+    PRIMARY KEY (object_id, manifest_id)
+);
+"""
+
+_SOURCE_STATES = frozenset(
+    {"discovered", "claimed", "appended", "archived", "acknowledged", "source_deleted", "source_missing"}
+)
+
+
+@dataclass(frozen=True)
+class OwnerEpochRecord:
+    service_id: str
+    owner_epoch: int
+    current_owner: str
+    previous_owner: str | None
+    source_cursor: str
+    drain_complete: bool
+    cutover_committed: bool
+    rollback_allowed: bool
+
+
+@dataclass(frozen=True)
+class SourceObjectRecord:
+    object_id: str
+    service_id: str
+    domain: str
+    object_key: str
+    checksum: str
+    size_bytes: int
+    version: str | None
+    status: str
+    owner: str | None
+    lease_until: datetime | None
+    lease_generation: int
+    archive_manifest_id: str | None
+    owner_epoch: int | None
+    malformed_rows: int
+    accepted_rows: int
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceClaim:
+    object_id: str
+    claimed: bool
+    lease_generation: int
+
+
+@dataclass(frozen=True)
+class BatchClaim:
+    batch_id: str
+    service_id: str
+    domain: str
+    worker_id: str
+    owner_epoch: int
+    lease_until: datetime
+    lease_generation: int
+    claimed: bool
+    state: str
+
+
+@dataclass(frozen=True)
+class ArchiveManifestRecord:
+    manifest: ArchiveManifest
+    state: ArchiveState
+    owner_epoch: int
+
+
+@dataclass(frozen=True)
+class DeletionAuthorization:
+    object_id: str
+    manifest_id: str
+    owner_epoch: int
+    authorized_at: datetime
+
+
+class PostgresControlPlane:
+    """Postgres-backed control state with explicit transaction boundaries."""
+
+    def __init__(
+        self,
+        *,
+        pool: ConnectionPool | Any | None = None,
+        pool_timeout: float | None = None,
+    ) -> None:
+        self.pool = get_pg_pool() if pool is None else pool
+        self.pool_timeout = pool_timeout
+
+    @contextmanager
+    def transaction(self, *, read_only: bool = False) -> Iterator[Any]:
+        connection_context = (
+            self.pool.connection(timeout=self.pool_timeout) if self.pool_timeout is not None else self.pool.connection()
+        )
+        with connection_context as connection, connection.transaction():
+            if read_only:
+                connection.execute("SET TRANSACTION READ ONLY")
+            yield connection
+
+    def create_schema(self) -> None:
+        with self.transaction() as connection:
+            connection.execute(SCHEMA_DDL)
+
+    def initialize_owner(self, service_id: str, *, owner: str, source_cursor: str) -> OwnerEpochRecord:
+        _require_text(service_id, "service_id")
+        _require_text(owner, "owner")
+        _require_text(source_cursor, "source_cursor")
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO high_scale_ownership (service_id, owner_epoch, current_owner, source_cursor)
+                VALUES (%s, 1, %s, %s)
+                ON CONFLICT (service_id) DO NOTHING
+                """,
+                (service_id, owner, source_cursor),
+            )
+            return self._owner(connection, service_id)
+
+    def owner(self, service_id: str) -> OwnerEpochRecord:
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            return self._owner(connection, service_id)
+
+    def advance_source_cursor(
+        self,
+        service_id: str,
+        source_cursor: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        domain: str | None = None,
+    ) -> OwnerEpochRecord:
+        _require_text(source_cursor, "source_cursor")
+        _require_text(expected_owner, "expected_owner")
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            _check_epoch(current, expected_owner_epoch)
+            if current.current_owner != expected_owner:
+                raise ValueError("owner does not match cursor fence")
+            if domain is not None:
+                _require_text(domain, "domain")
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (service_id, domain) DO UPDATE
+                    SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+                    """,
+                    (service_id, domain, source_cursor),
+                )
+                return current
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET source_cursor=%s, updated_at=clock_timestamp()
+                WHERE service_id=%s AND owner_epoch=%s AND current_owner=%s
+                """,
+                (source_cursor, service_id, expected_owner_epoch, expected_owner),
+            )
+            return self._owner(connection, service_id)
+
+    def source_cursor_for(self, service_id: str, domain: str) -> str:
+        """Return this domain's own persisted cursor, or its own initial
+        cursor if it has never advanced — NEVER the owner-level cursor.
+
+        Different domains list different FOS prefixes (request vs. rum), so
+        a cursor advanced by one domain is not a valid starting point for
+        another: it can reference a key entirely outside the other domain's
+        prefix, which silently starves that domain's discovery forever (a
+        StartAfter outside a lister's Prefix can return zero objects with no
+        error — observed live: a shared owner-level cursor from the request
+        domain left rum_vitals/rum_errors permanently stuck at zero
+        discovered objects). A domain with no cursor of its own must start
+        from its own beginning; the idempotent discover/claim dedup makes
+        that safe.
+        """
+        _require_text(domain, "domain")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT source_cursor
+                FROM high_scale_source_cursors
+                WHERE service_id=%s AND domain=%s
+                """,
+                (service_id, domain),
+            ).fetchone()
+            return str(row[0]) if row is not None else INITIAL_SOURCE_CURSOR
+
+    def source(self, service_id: str, object_key: str) -> SourceObjectRecord:
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key=%s",
+                (service_id, object_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(object_key)
+            return _source_from_row(row)
+
+    def expired_claims(self, service_id: str, domain: str, *, limit: int) -> tuple[SourceObjectRecord, ...]:
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM high_scale_source_objects
+                WHERE service_id=%s AND domain=%s
+                  AND status='claimed'
+                  AND lease_until IS NOT NULL
+                  AND lease_until <= clock_timestamp()
+                ORDER BY lease_until, object_key
+                LIMIT %s
+                """,
+                (service_id, domain, limit),
+            ).fetchall()
+        return tuple(_source_from_row(row) for row in rows)
+
+    def begin_drain(self, service_id: str, *, expected_owner: str) -> OwnerEpochRecord:
+        _require_text(expected_owner, "expected_owner")
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            if current.current_owner != expected_owner or current.cutover_committed:
+                raise ValueError("owner does not match drain fence")
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET drain_complete=FALSE, rollback_allowed=FALSE, updated_at=clock_timestamp()
+                WHERE service_id=%s
+                """,
+                (service_id,),
+            )
+            return self._owner(connection, service_id)
+
+    def mark_drained(self, service_id: str, *, expected_epoch: int, source_cursor: str) -> OwnerEpochRecord:
+        _require_text(source_cursor, "source_cursor")
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            _check_epoch(current, expected_epoch)
+            if current.cutover_committed:
+                raise ValueError("owner epoch does not match drain fence")
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET drain_complete=TRUE, source_cursor=%s, updated_at=clock_timestamp()
+                WHERE service_id=%s
+                """,
+                (source_cursor, service_id),
+            )
+            return self._owner(connection, service_id)
+
+    def commit_cutover(self, service_id: str, *, expected_epoch: int, next_owner: str) -> OwnerEpochRecord:
+        _require_text(next_owner, "next_owner")
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            _check_epoch(current, expected_epoch)
+            if not current.drain_complete or current.cutover_committed:
+                raise ValueError("service is not ready for cutover")
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET owner_epoch=owner_epoch+1, previous_owner=current_owner,
+                    current_owner=%s, cutover_committed=TRUE, rollback_allowed=TRUE,
+                    updated_at=clock_timestamp()
+                WHERE service_id=%s
+                """,
+                (next_owner, service_id),
+            )
+            return self._owner(connection, service_id)
+
+    def rollback(self, service_id: str, *, expected_epoch: int) -> OwnerEpochRecord:
+        with self.transaction() as connection:
+            current = self._locked_owner(connection, service_id)
+            _check_epoch(current, expected_epoch)
+            if not current.rollback_allowed or not current.previous_owner:
+                raise ValueError("rollback fence is not satisfied")
+            connection.execute(
+                """
+                UPDATE high_scale_ownership
+                SET owner_epoch=owner_epoch+1, current_owner=previous_owner,
+                    previous_owner=NULL, cutover_committed=FALSE, rollback_allowed=FALSE,
+                    updated_at=clock_timestamp()
+                WHERE service_id=%s
+                """,
+                (service_id,),
+            )
+            return self._owner(connection, service_id)
+
+    def discover_source(
+        self,
+        service_id: str,
+        domain: str,
+        object_key: str,
+        checksum: str,
+        *,
+        size_bytes: int = 0,
+        version: str | None = None,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> SourceObjectRecord:
+        for value, name in (
+            (service_id, "service_id"),
+            (domain, "domain"),
+            (object_key, "object_key"),
+            (checksum, "checksum"),
+        ):
+            _require_text(value, name)
+        if size_bytes < 0:
+            raise ValueError("size_bytes must be non-negative")
+        _require_text(expected_owner, "expected_owner")
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        object_id = _source_object_id(service_id, domain, object_key, checksum)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if owner.current_owner != expected_owner:
+                raise ValueError("owner does not match source discovery fence")
+            row = connection.execute(
+                """
+                SELECT * FROM high_scale_source_objects
+                WHERE service_id=%s AND object_key=%s
+                FOR UPDATE
+                """,
+                (service_id, object_key),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_source_objects
+                        (object_id, service_id, domain, object_key, checksum, size_bytes, version, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'discovered')
+                    ON CONFLICT (service_id, object_key) DO NOTHING
+                    """,
+                    (object_id, service_id, domain, object_key, checksum, size_bytes, version),
+                )
+                row = connection.execute(
+                    """
+                    SELECT * FROM high_scale_source_objects
+                    WHERE service_id=%s AND object_key=%s
+                    FOR UPDATE
+                    """,
+                    (service_id, object_key),
+                ).fetchone()
+            if row is None:
+                raise RuntimeError("source discovery insert did not produce a row")
+            source = _source_from_row(row)
+            if source.checksum != checksum or source.version != version:
+                raise ValueError(f"source identity changed for {object_key}")
+            # Deliberately NOT checking source.domain != domain: some domain
+            # pairs list the same FOS prefix (rum_vitals/rum_errors both
+            # list raw/rum/), so the same object is legitimately discovered
+            # by more than one domain's page — whichever wins the race
+            # keeps the row's original domain attribution. Mirrors the
+            # SQLite reference ledger (HighScaleLedger.discover), which
+            # never compared domain either. Rejecting this as a "changed
+            # identity" made every subsequent tick of the losing domain's
+            # page raise and abort, permanently starving it — observed live
+            # against real FOS objects during RUM qualification.
+            return source
+
+    def claim_source(
+        self,
+        service_id: str,
+        object_key: str,
+        worker_id: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        now: datetime | None = None,
+    ) -> SourceClaim:
+        _require_text(worker_id, "worker_id")
+        _require_text(expected_owner, "expected_owner")
+        if expected_owner_epoch <= 0 or lease_seconds <= 0:
+            raise ValueError("owner epoch and lease duration must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if owner.current_owner != expected_owner:
+                raise ValueError("owner does not match source claim fence")
+            row = connection.execute(
+                """
+                SELECT * FROM high_scale_source_objects
+                WHERE service_id=%s AND object_key=%s
+                FOR UPDATE
+                """,
+                (service_id, object_key),
+            ).fetchone()
+            if row is None:
+                raise KeyError(object_key)
+            source = _source_from_row(row)
+            if source.status == "source_deleted":
+                raise ValueError(f"source object is already deleted: {object_key}")
+            if source.status not in {"discovered", "claimed"}:
+                raise ValueError(f"source object is not claimable: {object_key}")
+            if source.lease_until is not None and source.lease_until > observed:
+                if source.owner == worker_id:
+                    return SourceClaim(source.object_id, True, source.lease_generation)
+                return SourceClaim(source.object_id, False, source.lease_generation)
+            generation = source.lease_generation + 1
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status='claimed', owner=%s, lease_until=%s,
+                    lease_generation=%s, owner_epoch=%s, updated_at=clock_timestamp()
+                WHERE object_id=%s
+                """,
+                (
+                    worker_id,
+                    observed + timedelta(seconds=lease_seconds),
+                    generation,
+                    expected_owner_epoch,
+                    source.object_id,
+                ),
+            )
+            return SourceClaim(source.object_id, True, generation)
+
+    def mark_source_missing(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        error: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Record a claimed source object as durably, permanently missing.
+
+        Terminal, distinct from a transient failure: used when a read
+        confirms the raw object is gone from storage (e.g. deleted by a
+        legacy raw-deletion path racing high-scale ownership). Idempotent —
+        calling this again on an already-``source_missing`` row is a no-op.
+        Refuses to override an already-archived/acknowledged/deleted row,
+        since those represent real completed work.
+        """
+        _require_text(expected_owner, "expected_owner")
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        if not error:
+            raise ValueError("an error description is required to mark a source missing")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if owner.current_owner != expected_owner:
+                raise ValueError("owner does not match source-missing fence")
+            source = self._locked_source(connection, service_id, object_key)
+            if source.status == "source_missing":
+                return
+            if source.status in {"acknowledged", "source_deleted"}:
+                raise ValueError(f"cannot mark a durably archived source missing: {object_key}")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status='source_missing', last_error=%s, lease_until=NULL, updated_at=%s
+                WHERE object_id=%s
+                """,
+                (error, observed, source.object_id),
+            )
+
+    def record_source_counts(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        accepted_rows: int,
+        malformed_rows: int,
+        expected_owner_epoch: int,
+    ) -> None:
+        if min(accepted_rows, malformed_rows) < 0:
+            raise ValueError("ledger counts must be non-negative")
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            source = self._locked_source(connection, service_id, object_key)
+            if source.status != "claimed" or source.owner_epoch != expected_owner_epoch:
+                raise RuntimeError(f"stale or missing claim for {object_key}")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET accepted_rows=%s, malformed_rows=%s, updated_at=clock_timestamp()
+                WHERE object_id=%s AND status='claimed' AND owner_epoch=%s
+                """,
+                (accepted_rows, malformed_rows, source.object_id, expected_owner_epoch),
+            )
+
+    def mark_source_appended(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        lease_generation: int,
+        expected_owner_epoch: int,
+    ) -> None:
+        self._transition_source(
+            service_id,
+            object_key,
+            lease_generation=lease_generation,
+            expected_owner_epoch=expected_owner_epoch,
+            expected_status="claimed",
+            next_status="appended",
+        )
+
+    def claim_batch(
+        self,
+        batch_id: str,
+        service_id: str,
+        domain: str,
+        worker_id: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        lease_seconds: float = 300.0,
+        now: datetime | None = None,
+    ) -> BatchClaim:
+        """Atomically claim a publication batch across workers and processes."""
+
+        _require_text(batch_id, "batch_id")
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        _require_text(worker_id, "worker_id")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        lease_until = observed + timedelta(seconds=lease_seconds)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if owner.current_owner != expected_owner:
+                raise ValueError("owner does not match batch claim fence")
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, worker_id, owner_epoch,
+                       lease_until, lease_generation, state
+                FROM high_scale_batch_claims
+                WHERE batch_id=%s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_batch_claims
+                        (batch_id, service_id, domain, worker_id, owner_epoch, lease_until, state)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'claimed')
+                    """,
+                    (batch_id, service_id, domain, worker_id, expected_owner_epoch, lease_until),
+                )
+                return BatchClaim(
+                    batch_id,
+                    service_id,
+                    domain,
+                    worker_id,
+                    expected_owner_epoch,
+                    lease_until,
+                    1,
+                    True,
+                    "claimed",
+                )
+            claim = _batch_claim_from_row(row)
+            if claim.service_id != service_id or claim.domain != domain:
+                raise ValueError("batch identity does not match existing claim")
+            if claim.state == "completed":
+                return claim
+            if claim.worker_id != worker_id and claim.lease_until > observed:
+                return claim
+            generation = claim.lease_generation + 1
+            connection.execute(
+                """
+                UPDATE high_scale_batch_claims
+                SET worker_id=%s, owner_epoch=%s, lease_until=%s,
+                    lease_generation=%s, state='claimed', updated_at=clock_timestamp()
+                WHERE batch_id=%s
+                """,
+                (worker_id, expected_owner_epoch, lease_until, generation, batch_id),
+            )
+            return BatchClaim(
+                batch_id,
+                service_id,
+                domain,
+                worker_id,
+                expected_owner_epoch,
+                lease_until,
+                generation,
+                True,
+                "claimed",
+            )
+
+    def complete_batch(
+        self,
+        batch_id: str,
+        *,
+        worker_id: str,
+        expected_owner_epoch: int,
+    ) -> BatchClaim:
+        with self.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, worker_id, owner_epoch,
+                       lease_until, lease_generation, state
+                FROM high_scale_batch_claims
+                WHERE batch_id=%s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(batch_id)
+            claim = _batch_claim_from_row(row)
+            if claim.worker_id != worker_id or claim.owner_epoch != expected_owner_epoch:
+                raise ValueError("batch completion fence does not match claim")
+            if claim.state == "completed":
+                return claim
+            connection.execute(
+                """
+                UPDATE high_scale_batch_claims
+                SET state='completed', updated_at=clock_timestamp()
+                WHERE batch_id=%s AND worker_id=%s AND owner_epoch=%s
+                """,
+                (batch_id, worker_id, expected_owner_epoch),
+            )
+            return BatchClaim(
+                claim.batch_id,
+                claim.service_id,
+                claim.domain,
+                claim.worker_id,
+                claim.owner_epoch,
+                claim.lease_until,
+                claim.lease_generation,
+                True,
+                "completed",
+            )
+
+    def get_batch_manifest(self, batch_id: str) -> Any | None:
+        from backend.high_scale.publication import BatchManifest, PublicationStatus
+
+        _require_text(batch_id, "batch_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT batch_id, service_id, domain, generation, batch_digest,
+                       expected_rows, visible_rows, status
+                FROM high_scale_publication_manifests
+                WHERE batch_id=%s
+                """,
+                (batch_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return BatchManifest(
+            batch_id=row[0],
+            service_id=row[1],
+            domain=row[2],
+            generation=row[3],
+            digest=row[4],
+            expected_rows=row[5],
+            status=PublicationStatus(row[7]),
+            visible_rows=row[6],
+        )
+
+    def put_batch_manifest(self, manifest: Any) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO high_scale_publication_manifests (
+                    batch_id, service_id, domain, generation, batch_digest,
+                    expected_rows, visible_rows, status, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())
+                ON CONFLICT (batch_id) DO UPDATE SET
+                    visible_rows=EXCLUDED.visible_rows,
+                    status=EXCLUDED.status,
+                    updated_at=clock_timestamp()
+                """,
+                (
+                    manifest.batch_id,
+                    manifest.service_id,
+                    manifest.domain,
+                    manifest.generation,
+                    manifest.digest,
+                    manifest.expected_rows,
+                    manifest.visible_rows,
+                    manifest.status.value,
+                ),
+            )
+
+    def register_archive_manifest(
+        self,
+        manifest: ArchiveManifest,
+        *,
+        owner_epoch: int,
+        state: ArchiveState = ArchiveState.ARTIFACT_UPLOADING,
+    ) -> ArchiveManifestRecord:
+        manifest.validate()
+        if owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, manifest.source.service_id)
+            _check_epoch(owner, owner_epoch)
+            connection.execute(
+                """
+                INSERT INTO high_scale_archive_manifests (
+                    manifest_id, service_id, domain, source_key, source_checksum, source_size,
+                    source_version, artifact_uri, artifact_checksum, artifact_size, row_count,
+                    byte_count, canonical_digest, schema_version, transform_version,
+                    coverage_start, coverage_end, retention_deadline,
+                    deletion_authorization_deadline, archive_epoch, owner_epoch, state
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (manifest_id) DO NOTHING
+                """,
+                (
+                    manifest.manifest_id,
+                    manifest.source.service_id,
+                    manifest.source.domain,
+                    manifest.source.object_key,
+                    manifest.source.checksum,
+                    manifest.source.size_bytes,
+                    manifest.source.version,
+                    manifest.artifact.uri,
+                    manifest.artifact.checksum,
+                    manifest.artifact.size_bytes,
+                    manifest.artifact.row_count,
+                    manifest.artifact.byte_count,
+                    manifest.artifact.canonical_digest,
+                    manifest.artifact.schema_version,
+                    manifest.artifact.transform_version,
+                    manifest.coverage_start,
+                    manifest.coverage_end,
+                    manifest.retention_deadline,
+                    manifest.deletion_authorization_deadline,
+                    manifest.archive_epoch,
+                    owner_epoch,
+                    state.value,
+                ),
+            )
+            result = self._archive_manifest(connection, manifest.manifest_id)
+            if result.manifest != manifest or result.owner_epoch != owner_epoch:
+                raise ValueError("archive manifest identity changed")
+            return result
+
+    def transition_archive_manifest(
+        self,
+        manifest_id: str,
+        *,
+        expected_state: ArchiveState,
+        next_state: ArchiveState,
+        expected_owner_epoch: int,
+    ) -> ArchiveManifestRecord:
+        validate_archive_transition(expected_state, next_state)
+        with self.transaction() as connection:
+            result = self._locked_archive_manifest(connection, manifest_id)
+            _check_epoch_value(result.owner_epoch, expected_owner_epoch)
+            if result.state is not expected_state:
+                raise ValueError("archive state does not match transition fence")
+            connection.execute(
+                """
+                UPDATE high_scale_archive_manifests
+                SET state=%s, updated_at=clock_timestamp()
+                WHERE manifest_id=%s AND owner_epoch=%s AND state=%s
+                """,
+                (next_state.value, manifest_id, expected_owner_epoch, expected_state.value),
+            )
+            return self._archive_manifest(connection, manifest_id)
+
+    def archive_manifest(self, manifest_id: str) -> ArchiveManifestRecord:
+        _require_text(manifest_id, "manifest_id")
+        with self.transaction(read_only=True) as connection:
+            return self._archive_manifest(connection, manifest_id)
+
+    def manifests_covering(
+        self, service_id: str, domain: str, start: datetime, end: datetime
+    ) -> tuple[ArchiveManifest, ...]:
+        """List archive manifests whose coverage overlaps ``[start, end)``.
+
+        Used by cold-tier historical queries (:mod:`backend.high_scale.raw_query`)
+        to find which immutable artifacts to scan for a requested time range.
+        Read-only; does not lock rows or care about manifest/source status —
+        an archived-but-not-yet-deleted source and an already-deleted one are
+        equally valid replay sources here.
+        """
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        if end <= start:
+            raise ValueError("manifest coverage range must have end after start")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM high_scale_archive_manifests
+                WHERE service_id = %s AND domain = %s
+                  AND coverage_end > %s AND coverage_start < %s
+                ORDER BY coverage_start
+                """,
+                (service_id, domain, start, end),
+            ).fetchall()
+            return tuple(_archive_from_row(row).manifest for row in rows)
+
+    def deletable_sources(self, service_id: str, *, limit: int = 100) -> tuple[SourceObjectRecord, ...]:
+        """List sources whose archive manifest has passed its deletion grace
+        period and is ready for the deletion sweep to authorize.
+
+        Includes ``manifest_committed`` (not yet promoted to
+        ``deletion_eligible``) so the sweep can perform that promotion
+        itself — see ``HighScaleDeletionSweeper``. Read-only; does not lock
+        rows, since the actual delete path re-verifies and locks everything
+        it touches at delete time.
+        """
+        _require_text(service_id, "service_id")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT o.* FROM high_scale_source_objects o
+                JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id
+                WHERE o.service_id = %s
+                  AND o.status IN ('archived', 'acknowledged')
+                  AND m.state IN ('manifest_committed', 'deletion_eligible')
+                  AND m.deletion_authorization_deadline <= clock_timestamp()
+                ORDER BY o.discovered_at
+                LIMIT %s
+                """,
+                (service_id, limit),
+            ).fetchall()
+            return tuple(_source_from_row(row) for row in rows)
+
+    def mark_source_archived(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        lease_generation: int,
+        manifest_id: str,
+        owner_epoch: int,
+    ) -> None:
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, owner_epoch)
+            source = self._locked_source(connection, service_id, object_key)
+            if (
+                source.status != "appended"
+                or source.lease_generation != lease_generation
+                or source.owner_epoch != owner_epoch
+            ):
+                raise RuntimeError(f"stale or missing claim for {object_key}")
+            manifest = self._locked_archive_manifest(connection, manifest_id)
+            if (
+                manifest.state is not ArchiveState.MANIFEST_COMMITTED
+                or manifest.owner_epoch != owner_epoch
+                or manifest.manifest.source.service_id != service_id
+                or manifest.manifest.source.domain != source.domain
+                or manifest.manifest.source.object_key != object_key
+                or manifest.manifest.source.checksum != source.checksum
+                or manifest.manifest.source.version != source.version
+            ):
+                raise ValueError("archive manifest is not committed for source")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status='archived', lease_until=NULL, archive_manifest_id=%s,
+                    updated_at=clock_timestamp()
+                WHERE object_id=%s
+                """,
+                (manifest_id, source.object_id),
+            )
+
+    def acknowledge_source(self, service_id: str, object_key: str, *, manifest_id: str) -> None:
+        with self.transaction() as connection:
+            source = self._locked_source(connection, service_id, object_key)
+            if source.status != "archived" or source.archive_manifest_id != manifest_id:
+                raise ValueError(f"archive is not complete for {object_key}")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status='acknowledged', updated_at=clock_timestamp()
+                WHERE object_id=%s
+                """,
+                (source.object_id,),
+            )
+
+    def authorize_source_delete(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        replay_lease_active: bool = False,
+        now: datetime | None = None,
+    ) -> DeletionAuthorization:
+        if replay_lease_active:
+            raise ValueError("source deletion blocked by active replay lease")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            source = self._locked_source(connection, service_id, object_key)
+            if (
+                source.status not in {"archived", "acknowledged"}
+                or source.archive_manifest_id != manifest_id
+                or source.owner_epoch != expected_owner_epoch
+            ):
+                raise ValueError(f"source deletion is not authorized for {object_key}")
+            manifest = self._locked_archive_manifest(connection, manifest_id)
+            if manifest.manifest.source.object_key != object_key:
+                raise ValueError("archive manifest does not match source")
+            if manifest.state is not ArchiveState.DELETION_ELIGIBLE:
+                raise ValueError("archive manifest is not deletion eligible")
+            if observed < manifest.manifest.deletion_authorization_deadline:
+                raise ValueError("source deletion grace period has not elapsed")
+            cursor = connection.execute(
+                """
+                INSERT INTO high_scale_deletion_authorizations
+                    (object_id, manifest_id, owner_epoch)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (object_id, manifest_id) DO NOTHING
+                RETURNING object_id, manifest_id, owner_epoch, authorized_at, consumed_at
+                """,
+                (source.object_id, manifest_id, expected_owner_epoch),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT object_id, manifest_id, owner_epoch, authorized_at, consumed_at
+                    FROM high_scale_deletion_authorizations
+                    WHERE object_id=%s AND manifest_id=%s
+                    FOR UPDATE
+                    """,
+                    (source.object_id, manifest_id),
+                ).fetchone()
+            if row is None or _row_value(row, "consumed_at", 4) is not None:
+                raise ValueError("source deletion authorization was already consumed")
+            return DeletionAuthorization(
+                _row_value(row, "object_id", 0),
+                _row_value(row, "manifest_id", 1),
+                int(_row_value(row, "owner_epoch", 2)),
+                _row_value(row, "authorized_at", 3),
+            )
+
+    def mark_source_deleted(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+    ) -> None:
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            source = self._locked_source(connection, service_id, object_key)
+            if source.status == "source_deleted" and source.archive_manifest_id == manifest_id:
+                return
+            if source.status not in {"archived", "acknowledged"} or source.archive_manifest_id != manifest_id:
+                raise ValueError(f"source deletion was not authorized for {object_key}")
+            authorization = connection.execute(
+                """
+                SELECT object_id FROM high_scale_deletion_authorizations
+                WHERE object_id=%s AND manifest_id=%s AND owner_epoch=%s AND consumed_at IS NULL
+                FOR UPDATE
+                """,
+                (source.object_id, manifest_id, expected_owner_epoch),
+            ).fetchone()
+            if authorization is None:
+                raise ValueError(f"source deletion was not authorized for {object_key}")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status='source_deleted', lease_until=NULL, updated_at=clock_timestamp()
+                WHERE object_id=%s
+                """,
+                (source.object_id,),
+            )
+            connection.execute(
+                """
+                UPDATE high_scale_deletion_authorizations
+                SET consumed_at=clock_timestamp()
+                WHERE object_id=%s AND manifest_id=%s AND consumed_at IS NULL
+                """,
+                (source.object_id, manifest_id),
+            )
+            manifest = self._locked_archive_manifest(connection, manifest_id)
+            if manifest.state is ArchiveState.DELETION_ELIGIBLE:
+                connection.execute(
+                    """
+                    UPDATE high_scale_archive_manifests
+                    SET state=%s, updated_at=clock_timestamp()
+                    WHERE manifest_id=%s AND owner_epoch=%s
+                    """,
+                    (ArchiveState.SOURCE_DELETED.value, manifest_id, expected_owner_epoch),
+                )
+
+    def _transition_source(
+        self,
+        service_id: str,
+        object_key: str,
+        *,
+        lease_generation: int,
+        expected_owner_epoch: int,
+        expected_status: str,
+        next_status: str,
+    ) -> None:
+        if expected_status not in _SOURCE_STATES or next_status not in _SOURCE_STATES:
+            raise ValueError("unknown source state")
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            source = self._locked_source(connection, service_id, object_key)
+            if (
+                source.status != expected_status
+                or source.lease_generation != lease_generation
+                or source.owner_epoch != expected_owner_epoch
+            ):
+                raise RuntimeError(f"stale or missing claim for {object_key}")
+            connection.execute(
+                """
+                UPDATE high_scale_source_objects
+                SET status=%s, lease_until=NULL, updated_at=clock_timestamp()
+                WHERE object_id=%s AND status=%s AND lease_generation=%s AND owner_epoch=%s
+                """,
+                (next_status, source.object_id, expected_status, lease_generation, expected_owner_epoch),
+            )
+
+    @staticmethod
+    def _owner(connection: Any, service_id: str) -> OwnerEpochRecord:
+        row = connection.execute("SELECT * FROM high_scale_ownership WHERE service_id=%s", (service_id,)).fetchone()
+        if row is None:
+            raise KeyError(service_id)
+        return _owner_from_row(row)
+
+    @staticmethod
+    def _locked_owner(connection: Any, service_id: str) -> OwnerEpochRecord:
+        row = connection.execute(
+            "SELECT * FROM high_scale_ownership WHERE service_id=%s FOR UPDATE", (service_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(service_id)
+        return _owner_from_row(row)
+
+    @staticmethod
+    def _locked_source(connection: Any, service_id: str, object_key: str) -> SourceObjectRecord:
+        row = connection.execute(
+            """
+            SELECT * FROM high_scale_source_objects
+            WHERE service_id=%s AND object_key=%s
+            FOR UPDATE
+            """,
+            (service_id, object_key),
+        ).fetchone()
+        if row is None:
+            raise KeyError(object_key)
+        return _source_from_row(row)
+
+    @staticmethod
+    def _archive_manifest(connection: Any, manifest_id: str) -> ArchiveManifestRecord:
+        row = connection.execute(
+            "SELECT * FROM high_scale_archive_manifests WHERE manifest_id=%s", (manifest_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(manifest_id)
+        return _archive_from_row(row)
+
+    @staticmethod
+    def _locked_archive_manifest(connection: Any, manifest_id: str) -> ArchiveManifestRecord:
+        row = connection.execute(
+            """
+            SELECT * FROM high_scale_archive_manifests
+            WHERE manifest_id=%s
+            FOR UPDATE
+            """,
+            (manifest_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(manifest_id)
+        return _archive_from_row(row)
+
+
+def _owner_from_row(row: Mapping[str, Any] | Any) -> OwnerEpochRecord:
+    return OwnerEpochRecord(
+        str(_row_value(row, "service_id", 0)),
+        int(_row_value(row, "owner_epoch", 1)),
+        str(_row_value(row, "current_owner", 2)),
+        _row_value(row, "previous_owner", 3),
+        str(_row_value(row, "source_cursor", 4)),
+        bool(_row_value(row, "drain_complete", 5)),
+        bool(_row_value(row, "cutover_committed", 6)),
+        bool(_row_value(row, "rollback_allowed", 7)),
+    )
+
+
+def _source_from_row(row: Mapping[str, Any] | Any) -> SourceObjectRecord:
+    return SourceObjectRecord(
+        str(_row_value(row, "object_id", 0)),
+        str(_row_value(row, "service_id", 1)),
+        str(_row_value(row, "domain", 2)),
+        str(_row_value(row, "object_key", 3)),
+        str(_row_value(row, "checksum", 4)),
+        int(_row_value(row, "size_bytes", 5)),
+        _row_value(row, "version", 6),
+        str(_row_value(row, "status", 7)),
+        _row_value(row, "owner", 8),
+        _row_value(row, "lease_until", 9),
+        int(_row_value(row, "lease_generation", 10)),
+        _row_value(row, "archive_manifest_id", 11),
+        None if _row_value(row, "owner_epoch", 12) is None else int(_row_value(row, "owner_epoch", 12)),
+        int(_row_value(row, "malformed_rows", 13)),
+        int(_row_value(row, "accepted_rows", 14)),
+        _row_value(row, "last_error", 15),
+    )
+
+
+def _batch_claim_from_row(row: Mapping[str, Any] | Any) -> BatchClaim:
+    return BatchClaim(
+        batch_id=str(_row_value(row, "batch_id", 0)),
+        service_id=str(_row_value(row, "service_id", 1)),
+        domain=str(_row_value(row, "domain", 2)),
+        worker_id=str(_row_value(row, "worker_id", 3)),
+        owner_epoch=int(_row_value(row, "owner_epoch", 4)),
+        lease_until=_row_value(row, "lease_until", 5),
+        lease_generation=int(_row_value(row, "lease_generation", 6)),
+        claimed=str(_row_value(row, "state", 7)) == "claimed",
+        state=str(_row_value(row, "state", 7)),
+    )
+
+
+def _archive_from_row(row: Mapping[str, Any] | Any) -> ArchiveManifestRecord:
+    source = ArchiveSourceObject(
+        service_id=str(_row_value(row, "service_id", 1)),
+        domain=str(_row_value(row, "domain", 2)),
+        object_key=str(_row_value(row, "source_key", 3)),
+        checksum=str(_row_value(row, "source_checksum", 4)),
+        size_bytes=int(_row_value(row, "source_size", 5)),
+        version=_row_value(row, "source_version", 6),
+    )
+    artifact = ArchiveArtifact(
+        uri=str(_row_value(row, "artifact_uri", 7)),
+        checksum=str(_row_value(row, "artifact_checksum", 8)),
+        size_bytes=int(_row_value(row, "artifact_size", 9)),
+        row_count=int(_row_value(row, "row_count", 10)),
+        byte_count=int(_row_value(row, "byte_count", 11)),
+        canonical_digest=str(_row_value(row, "canonical_digest", 12)),
+        schema_version=str(_row_value(row, "schema_version", 13)),
+        transform_version=str(_row_value(row, "transform_version", 14)),
+    )
+    manifest = ArchiveManifest(
+        manifest_id=str(_row_value(row, "manifest_id", 0)),
+        source=source,
+        artifact=artifact,
+        coverage_start=_row_value(row, "coverage_start", 15),
+        coverage_end=_row_value(row, "coverage_end", 16),
+        retention_deadline=_row_value(row, "retention_deadline", 17),
+        deletion_authorization_deadline=_row_value(row, "deletion_authorization_deadline", 18),
+        archive_epoch=int(_row_value(row, "archive_epoch", 19)),
+    )
+    return ArchiveManifestRecord(
+        manifest,
+        ArchiveState(str(_row_value(row, "state", 21))),
+        int(_row_value(row, "owner_epoch", 20)),
+    )
+
+
+def _row_value(row: Mapping[str, Any] | Any, key: str, index: int) -> Any:
+    if isinstance(row, Mapping):
+        return row[key]
+    return row[index]
+
+
+def _check_epoch(owner: OwnerEpochRecord, expected_epoch: int) -> None:
+    _check_epoch_value(owner.owner_epoch, expected_epoch)
+
+
+def _check_epoch_value(actual: int, expected: int) -> None:
+    if actual != expected:
+        raise ValueError("owner epoch does not match fence")
+
+
+def _source_object_id(service_id: str, domain: str, object_key: str, checksum: str) -> str:
+    payload = "\0".join((service_id, domain, object_key, checksum)).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _require_text(value: str, name: str) -> None:
+    if not value:
+        raise ValueError(f"{name} is required")

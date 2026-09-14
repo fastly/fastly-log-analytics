@@ -240,6 +240,7 @@ export function runDeploy(args: DeployArgs) {
 // ── runJoin (kicks off analyst join SSE) ──
 export interface JoinArgs {
   config: ProvisionConfig;
+  analystPathASupported: boolean;
   syncIntervalMins: string;
   syncEnabled: boolean;
   icebergMetadataLocation: string;
@@ -255,6 +256,7 @@ export interface JoinArgs {
 export function runJoin(args: JoinArgs) {
   const {
     config,
+    analystPathASupported,
     syncIntervalMins,
     syncEnabled,
     icebergMetadataLocation,
@@ -266,6 +268,7 @@ export function runJoin(args: JoinArgs) {
     reset,
     start,
   } = args;
+  if (!analystPathASupported) return;
   if (
     !config.endpoint_name ||
     !config.cdn_service_name ||

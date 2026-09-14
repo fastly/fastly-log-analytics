@@ -1,0 +1,111 @@
+# This subchart is enabled through the parent chart's highScale.enabled flag.
+# It packages application workloads only. ClickHouse/Keeper remain owned by
+# the operator/chart selected by the platform team and are reached through
+# operator-provided Services and Secrets.
+enabled: false
+
+image:
+  repository: fastly-log-analytics-high-scale
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+secret:
+  # Prefer an operator-managed Secret in production. The chart never invents
+  # ClickHouse/Keeper connection values.
+  existingName: ""
+  create: false
+  stringData: {}
+
+env: []
+
+# A deterministic identity lets a replacement pod recover leases left by the
+# previous pod instead of deriving a new identity from its process ID.
+workerId: ""
+
+sharedState:
+  existingClaim: ""
+  configSubPath: configs
+  dataSubPath: data
+  cacheSubPath: cache
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+# Fairness is intentionally expressed as scheduling policy, not as an
+# application/runtime mode. Operators can tune these per environment without
+# changing the existing standard/high_throughput startup paths.
+workloadFairness:
+  priorityClassName: ""
+  topologySpreadConstraints: []
+  podAntiAffinity:
+    enabled: true
+    topologyKey: kubernetes.io/hostname
+    required: false
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  allowClusterDns: true
+  ingressFrom: []
+  egressTo: []
+
+workloads:
+  ingest:
+    enabled: true
+    replicas: 2
+    command: ["python", "-m", "backend.high_scale.worker"]
+    args: []
+    resources: {}
+  archive:
+    # The archive/replay/control-plane entrypoints are not implemented as
+    # standalone processes yet. Keep them disabled rather than starting the
+    # image's API command under the wrong workload identity.
+    enabled: false
+    replicas: 2
+    command: []
+    args: []
+    resources: {}
+  query:
+    enabled: false
+    replicas: 2
+    command: []
+    args: []
+    resources: {}
+  replay:
+    enabled: false
+    replicas: 1
+    command: []
+    args: []
+    resources: {}
+  control-plane:
+    enabled: false
+    replicas: 2
+    command: []
+    args: []
+    resources: {}

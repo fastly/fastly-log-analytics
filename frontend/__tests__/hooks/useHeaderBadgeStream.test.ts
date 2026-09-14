@@ -81,6 +81,63 @@ afterEach(() => {
 })
 
 describe('useHeaderBadgeStream', () => {
+  it.each([
+    { latest_log_at: null, local_rows: null, request: null, rum: null },
+    {
+      latest_log_at: null,
+      local_rows: 0,
+      request: { latest_log_at: null, total_rows: 0 },
+      rum: { latest_log_at: null, total_rows: 0 },
+    },
+  ])('preserves explicit clears from the stream instead of reviving cached metrics: %j', async (cleared) => {
+    const seed = {
+      settings: { is_remote_analyst: true },
+      header_badge: {
+        latest_log_at: '2026-06-15T22:00:00Z',
+        local_rows: 1000,
+        request: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 900 },
+        rum: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 100 },
+      },
+    }
+    vi.mocked(fetch).mockImplementation(async () =>
+      makeStreamResponse([`data: ${JSON.stringify(cleared)}\r\n\r\n`]),
+    )
+    const qc = makeQueryClient(seed)
+    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
+    await waitFor(() => {
+      expect(qc.getQueryData(['bootstrap'])).toEqual({ ...seed, header_badge: cleared })
+    })
+  })
+
+  it('accepts backwards timestamps while preserving omitted fields in sparse updates', async () => {
+    const seed = {
+      header_badge: {
+        latest_log_at: '2026-06-15T22:00:00Z',
+        local_rows: 1000,
+        request: { latest_log_at: '2026-06-15T22:00:00Z', total_rows: 900 },
+        rum: { latest_log_at: '2026-06-15T21:00:00Z', total_rows: 100 },
+      },
+    }
+    const earlier = '2026-06-14T22:00:00Z'
+    const payload = { latest_log_at: earlier, request: { latest_log_at: earlier } }
+    vi.mocked(fetch).mockImplementation(async () =>
+      makeStreamResponse([`data: ${JSON.stringify(payload)}\r\n\r\n`]),
+    )
+    const qc = makeQueryClient(seed)
+    const { useHeaderBadgeStream } = await import('@/hooks/useHeaderBadgeStream')
+    renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
+    await waitFor(() => {
+      expect(qc.getQueryData(['bootstrap'])).toEqual({
+        header_badge: {
+          ...seed.header_badge,
+          latest_log_at: earlier,
+          request: { ...seed.header_badge.request, latest_log_at: earlier },
+        },
+      })
+    })
+  })
+
   it('merges incoming payload into bootstrap.header_badge', async () => {
     const seed = { settings: { is_remote_analyst: true }, header_badge: { latest_log_at: '2026-06-15T22:00:00Z', local_rows: 1000 } }
     vi.mocked(fetch).mockImplementation(async () =>

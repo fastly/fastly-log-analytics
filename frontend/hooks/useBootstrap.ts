@@ -152,12 +152,10 @@ export function useBootstrap() {
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)
-  const setActiveServiceId = useServiceStore(state => state.setActiveServiceId)
-  const setServices = useServiceStore(state => state.setServices)
-  const setInitialized = useServiceStore(state => state.setInitialized)
 
   useEffect(() => {
     if (!query.data) return
+    const { setServices, setInitialized } = useServiceStore.getState()
     setServices((query.data.services ?? []).map(toService))
     setInitialized(true)
 
@@ -221,7 +219,7 @@ export function useBootstrap() {
     // dependent hooks gated on bootstrap status find data already in
     // their target cache. Moving it here would re-introduce the race
     // where dependent hooks re-render before useEffect runs.
-  }, [query.data, setServices, setInitialized, queryClient])
+  }, [query.data, queryClient])
 
   // `isStale` gates the revert branch below. When true, query.data is a cached
   // snapshot that may predate the live service set (a refetch hasn't yet
@@ -239,7 +237,7 @@ export function useBootstrap() {
       const defaultId = query.data.active_service_id && services.some(s => s.id === query.data!.active_service_id)
         ? query.data.active_service_id
         : services[0]?.id
-      if (defaultId) setActiveServiceId(defaultId)
+      if (defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
     } else if (activeServiceId && !currentServiceExists) {
       // HARDENING: only evict a selected service when the bootstrap snapshot is
       // fresh (just fetched, not a stale cached copy). A stale snapshot can be
@@ -255,9 +253,9 @@ export function useBootstrap() {
           ? query.data.active_service_id
           : services[0]?.id
       ) : null
-      if (activeServiceId !== defaultId) setActiveServiceId(defaultId)
+      if (activeServiceId !== defaultId) useServiceStore.getState().setActiveServiceId(defaultId)
     }
-  }, [query.data, bootstrapIsStale, activeServiceId, setActiveServiceId])
+  }, [query.data, bootstrapIsStale, activeServiceId])
 
   return query
 }

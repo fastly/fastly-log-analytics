@@ -596,7 +596,7 @@ def test_fresh_build_applies_memory_limit_and_threads(monkeypatch):
         result = pool.acquire(src={"name": "test_fresh"}, max_wait=0.5)
 
     assert result is mock_conn
-    # Both pragmas applied
+    # Resource limits applied before the connection enters the pool.
     executed = [c.args[0] for c in mock_conn.execute.call_args_list]
     assert any("memory_limit" in s and "512MB" in s for s in executed)
     assert any("threads" in s and "2" in s for s in executed)

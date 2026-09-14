@@ -1,0 +1,278 @@
+"""Reference incremental aggregates used to define high-scale semantics."""
+
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from backend.high_scale.archive_models import ServingWatermark
+from backend.high_scale.heavy_hitters import BoundedHeavyHitters
+
+# Dimensions whose cardinality is effectively unbounded (one distinct value
+# per request/session is common) and therefore must use a bounded structure
+# rather than an exact Counter, which would grow without limit. Low-
+# cardinality dimensions (metric_name, status code) stay exact.
+_HIGH_CARDINALITY_DIMENSIONS = {"url", "client_ip", "error_message", "cmcd_session"}
+
+
+@dataclass(frozen=True)
+class EventBatch:
+    batch_id: str
+    service_id: str
+    domain: str
+    events: tuple[dict[str, Any], ...]
+    owner_epoch: int
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AggregateReceipt:
+    batch_id: str
+    applied: bool
+    rows_applied: int
+    duplicate: bool
+
+
+@dataclass(frozen=True)
+class AggregateResponse:
+    service_id: str
+    domain: str
+    request_count: int
+    top_values: tuple[tuple[str, int], ...]
+    coverage: float
+    watermark: ServingWatermark
+    freshness_lag_seconds: float
+    exact: bool
+    approximation_error: float | None
+    counters: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class AggregateRequest:
+    service_id: str
+    domain: str
+    start: datetime | None = None
+    end: datetime | None = None
+    dimension: str | None = None
+
+    def validate(self) -> None:
+        if not self.service_id.strip():
+            raise ValueError("service id is required")
+        if self.domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        if (self.start is None) != (self.end is None):
+            raise ValueError("aggregate range must include both start and end")
+        if self.start is not None and self.end is not None and self.start > self.end:
+            raise ValueError("aggregate range is inverted")
+
+
+class AggregateStore:
+    """Idempotent aggregate reference store for local tests and replay logic."""
+
+    def __init__(self, *, top_n_limit: int = 1000, heavy_hitter_capacity: int = 10_000) -> None:
+        if top_n_limit <= 0:
+            raise ValueError("top_n_limit must be positive")
+        if heavy_hitter_capacity <= 0:
+            raise ValueError("heavy_hitter_capacity must be positive")
+        self._top_n_limit = top_n_limit
+        self._heavy_hitter_capacity = heavy_hitter_capacity
+        self._batches: set[str] = set()
+        self._counts: dict[tuple[str, str], int] = defaultdict(int)
+        self._status_counts: dict[str, Counter[str]] = defaultdict(Counter)
+        self._counters: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        self._top_values: dict[tuple[str, str], Counter[str] | BoundedHeavyHitters] = {}
+        self._minute_counts: dict[tuple[str, str], Counter[datetime]] = defaultdict(Counter)
+        self._watermarks: dict[tuple[str, str], ServingWatermark] = {}
+
+    def _top_values_for(self, service_id: str, dimension: str) -> Counter[str] | BoundedHeavyHitters:
+        key = (service_id, dimension)
+        structure = self._top_values.get(key)
+        if structure is None:
+            structure = (
+                BoundedHeavyHitters(capacity=self._heavy_hitter_capacity)
+                if dimension in _HIGH_CARDINALITY_DIMENSIONS
+                else Counter()
+            )
+            self._top_values[key] = structure
+        return structure
+
+    def _record_top_value(self, service_id: str, dimension: str, value: str) -> None:
+        structure = self._top_values_for(service_id, dimension)
+        if isinstance(structure, BoundedHeavyHitters):
+            structure.add(value)
+        else:
+            structure[value] += 1
+
+    def _top_values_snapshot(
+        self, service_id: str, dimension: str, limit: int
+    ) -> tuple[tuple[tuple[str, int], ...], bool, float | None]:
+        structure = self._top_values.get((service_id, dimension))
+        if structure is None:
+            return (), True, None
+        if isinstance(structure, BoundedHeavyHitters):
+            triples = structure.most_common(limit)
+            values = tuple((key, count) for key, count, _error in triples)
+            exact = structure.is_exact
+            max_error = max((error for _key, _count, error in triples), default=0) if not exact else None
+            return values, exact, (float(max_error) if max_error is not None else None)
+        return tuple(structure.most_common(limit)), True, None
+
+    def apply(self, batch: EventBatch) -> AggregateReceipt:
+        if batch.domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        if batch.batch_id in self._batches:
+            return AggregateReceipt(batch.batch_id, False, 0, True)
+        if batch.owner_epoch < 0:
+            raise ValueError("owner epoch must be non-negative")
+        timestamps = tuple(_event_timestamp(event) for event in batch.events)
+        self._batches.add(batch.batch_id)
+        key = (batch.service_id, batch.domain)
+        self._counts[key] += len(batch.events)
+        for event, timestamp in zip(batch.events, timestamps):
+            if timestamp is not None:
+                self._minute_counts[key][timestamp.replace(second=0, microsecond=0)] += 1
+            if batch.domain == "request":
+                status = str(event.get("status_code", "unknown"))
+                self._status_counts[batch.service_id][status] += 1
+                self._record_top_value(batch.service_id, "url", str(event.get("url", "")))
+                self._record_top_value(batch.service_id, "client_ip", str(event.get("client_ip", "")))
+                self._counters[(batch.service_id, batch.domain)]["requests"] += 1
+                self._counters[(batch.service_id, batch.domain)][f"status:{status}"] += 1
+                status_class = f"{status[:1]}xx" if len(status) >= 1 and status[:1].isdigit() else "unknown"
+                self._counters[(batch.service_id, batch.domain)][f"status_class:{status_class}"] += 1
+            elif batch.domain == "rum_vitals":
+                self._record_top_value(batch.service_id, "metric_name", str(event.get("metric_name", "")))
+                self._counters[(batch.service_id, batch.domain)]["beacons"] += 1
+            elif batch.domain == "rum_errors":
+                self._record_top_value(batch.service_id, "error_message", str(event.get("error_message", "")))
+                self._counters[(batch.service_id, batch.domain)]["errors"] += 1
+            elif batch.domain == "cmcd":
+                self._record_top_value(batch.service_id, "cmcd_session", str(event.get("sid", "")))
+                self._counters[(batch.service_id, batch.domain)]["events"] += 1
+                if event.get("sid"):
+                    self._counters[(batch.service_id, batch.domain)]["sessions"] += 1
+        event_id = str(batch.events[-1].get("event_id")) if batch.events else None
+        self._watermarks[key] = ServingWatermark(
+            service_id=batch.service_id,
+            domain=batch.domain,
+            owner_epoch=batch.owner_epoch,
+            coverage_start=batch.coverage_start,
+            coverage_end=batch.coverage_end,
+            last_accepted_cursor=batch.batch_id,
+            last_archived_event_id=event_id,
+            last_visible_event_id=event_id,
+            exact=True,
+        )
+        return AggregateReceipt(batch.batch_id, True, len(batch.events), False)
+
+    def request_count(self, service_id: str) -> int:
+        return self._counts[(service_id, "request")]
+
+    def status_counts(self, service_id: str) -> dict[str, int]:
+        return dict(self._status_counts[service_id])
+
+    def counters(self, service_id: str, domain: str) -> dict[str, int]:
+        if domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        return dict(self._counters[(service_id, domain)])
+
+    def minute_counts(self, service_id: str, domain: str) -> dict[datetime, int]:
+        return dict(self._minute_counts[(service_id, domain)])
+
+    def time_series(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        bucket_seconds: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[tuple[datetime, int], ...]:
+        """Re-bucket stored minute-level counts to any multiple-of-a-minute
+        interval without re-scanning raw events, mirroring the DuckDB rollup
+        readers' ``time_bucket`` re-bucketing contract."""
+        if bucket_seconds <= 0 or bucket_seconds % 60 != 0:
+            raise ValueError("bucket_seconds must be a positive multiple of 60")
+        buckets: dict[datetime, int] = defaultdict(int)
+        for minute, count in self._minute_counts[(service_id, domain)].items():
+            if start is not None and minute < start:
+                continue
+            if end is not None and minute >= end:
+                continue
+            epoch_seconds = int(minute.timestamp())
+            bucket_start = datetime.fromtimestamp(epoch_seconds - epoch_seconds % bucket_seconds, tz=UTC)
+            buckets[bucket_start] += count
+        return tuple(sorted(buckets.items()))
+
+    def response(self, service_id: str, domain: str, *, now: datetime | None = None) -> AggregateResponse:
+        if (service_id, domain) not in self._watermarks:
+            watermark = ServingWatermark(service_id, domain, 0, None, None, None, None, None, True)
+            request_count = 0
+        else:
+            watermark = self._watermarks[(service_id, domain)]
+            request_count = self._counts[(service_id, domain)]
+        watermark.validate()
+        values, exact, approximation_error = self._top_values_snapshot(
+            service_id, _dimension_for(domain), self._top_n_limit
+        )
+        observed = now or datetime.now(UTC)
+        freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+        return AggregateResponse(
+            service_id,
+            domain,
+            request_count,
+            values,
+            1.0,
+            watermark,
+            freshness,
+            exact,
+            approximation_error,
+            tuple(self._counters[(service_id, domain)].most_common()),
+        )
+
+    def query_triage_aggregate(
+        self,
+        request: AggregateRequest,
+        *,
+        now: datetime | None = None,
+    ) -> AggregateResponse:
+        request.validate()
+        response = self.response(request.service_id, request.domain, now=now)
+        if request.dimension is None:
+            return response
+        values, exact, approximation_error = self._top_values_snapshot(
+            request.service_id, request.dimension, self._top_n_limit
+        )
+        return AggregateResponse(
+            service_id=response.service_id,
+            domain=response.domain,
+            request_count=response.request_count,
+            top_values=values,
+            coverage=response.coverage,
+            watermark=response.watermark,
+            freshness_lag_seconds=response.freshness_lag_seconds,
+            exact=exact,
+            approximation_error=approximation_error,
+            counters=response.counters,
+        )
+
+
+def _dimension_for(domain: str) -> str:
+    return {
+        "request": "url",
+        "rum_vitals": "metric_name",
+        "rum_errors": "error_message",
+        "cmcd": "cmcd_session",
+    }.get(domain, "")
+
+
+def _event_timestamp(event: dict[str, Any]) -> datetime | None:
+    value = event.get("timestamp")
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    return None

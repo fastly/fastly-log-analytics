@@ -18,7 +18,7 @@ import atexit
 import threading
 from typing import Any
 
-from backend.core.metadata.base import get_con
+from backend.core.metadata.base import get_con, release_thread_connection
 
 _INSERT_SQL = """
     INSERT INTO slow_queries (
@@ -30,13 +30,13 @@ _INSERT_SQL = """
         attr_cron_job, attr_cron_run_id, attr_pool_slot,
         error_type, error_message, peak_memory_mb
     ) VALUES (
-        :query_id, :db_type, :service_id, :started_at_utc, :ended_at_utc,
-        :duration_ms, :outcome, :sql_preview, :sql_full, :sql_len,
-        :attr_kind, :attr_label, :attr_principal_id,
-        :attr_caller_qualname, :attr_caller_file,
-        :attr_request_path, :attr_request_id,
-        :attr_cron_job, :attr_cron_run_id, :attr_pool_slot,
-        :error_type, :error_message, :peak_memory_mb
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        ?, ?,
+        ?, ?, ?,
+        ?, ?, ?
     )
 """
 
@@ -52,12 +52,12 @@ _flush_timer: threading.Timer | None = None
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "query_id": row["query_id"],
-        "db_type": row["db_type"],
+        "db_type": row.get("db_type") or "unknown",
         "service_id": row.get("service_id"),
-        "started_at_utc": row["started_at_utc"],
-        "ended_at_utc": row["ended_at_utc"],
-        "duration_ms": row["duration_ms"],
-        "outcome": row["outcome"],
+        "started_at_utc": row.get("started_at_utc") or 0.0,
+        "ended_at_utc": row.get("ended_at_utc") or 0.0,
+        "duration_ms": row.get("duration_ms") or 0.0,
+        "outcome": row.get("outcome") or "unknown",
         "sql_preview": row.get("sql_preview") or "",
         "sql_full": row.get("sql_full"),
         "sql_len": row.get("sql_len") or 0,
@@ -75,6 +75,34 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
         "error_message": row.get("error_message"),
         "peak_memory_mb": row.get("peak_memory_mb"),
     }
+
+
+def _insert_params(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row["query_id"],
+        row["db_type"],
+        row["service_id"],
+        row["started_at_utc"],
+        row["ended_at_utc"],
+        row["duration_ms"],
+        row["outcome"],
+        row["sql_preview"],
+        row["sql_full"],
+        row["sql_len"],
+        row["attr_kind"],
+        row["attr_label"],
+        row["attr_principal_id"],
+        row["attr_caller_qualname"],
+        row["attr_caller_file"],
+        row["attr_request_path"],
+        row["attr_request_id"],
+        row["attr_cron_job"],
+        row["attr_cron_run_id"],
+        row["attr_pool_slot"],
+        row["error_type"],
+        row["error_message"],
+        row["peak_memory_mb"],
+    )
 
 
 def _schedule_flush() -> None:
@@ -109,10 +137,12 @@ def _flush_all(*, only_service: str | None = None) -> None:
     for service_id, rows in pending.items():
         try:
             con = get_con(service_id)
-            con.executemany(_INSERT_SQL, rows)
+            con.executemany(_INSERT_SQL, [_insert_params(_normalise_row(row)) for row in rows])
             con.commit()
         except Exception:
             pass
+        finally:
+            release_thread_connection()
 
 
 def insert_slow_query(service_id: str, row: dict[str, Any]) -> None:
@@ -176,8 +206,8 @@ def list_slow_queries(
     """
     _flush_all(only_service=service_id)
     con = get_con(service_id)
-    sql = ["SELECT * FROM slow_queries WHERE started_at_utc >= ?"]
-    args: list[Any] = [since_utc]
+    sql = ["SELECT * FROM slow_queries WHERE service_id = ? AND started_at_utc >= ?"]
+    args: list[Any] = [service_id, since_utc]
     if until_utc is not None:
         sql.append("AND started_at_utc < ?")
         args.append(until_utc)
@@ -209,8 +239,8 @@ def count_slow_queries(
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
-        "SELECT COUNT(*) AS n FROM slow_queries WHERE started_at_utc >= ? AND duration_ms >= ?",
-        (since_utc, threshold_ms),
+        "SELECT COUNT(*) AS n FROM slow_queries WHERE service_id = ? AND started_at_utc >= ? AND duration_ms >= ?",
+        (service_id, since_utc, threshold_ms),
     ).fetchone()
     return int(row["n"] or 0)
 
@@ -222,8 +252,8 @@ def purge_old_slow_queries(service_id: str, *, older_than_utc: float) -> int:
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     cur = con.execute(
-        "DELETE FROM slow_queries WHERE started_at_utc < ?",
-        (older_than_utc,),
+        "DELETE FROM slow_queries WHERE service_id = ? AND started_at_utc < ?",
+        (service_id, older_than_utc),
     )
     con.commit()
     return cur.rowcount or 0
@@ -235,7 +265,8 @@ def slow_queries_storage_stats(service_id: str) -> dict[str, Any]:
     _flush_all(only_service=service_id)
     con = get_con(service_id)
     row = con.execute(
-        "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries"
+        "SELECT COUNT(*) AS n, MIN(started_at_utc) AS oldest, MAX(started_at_utc) AS newest FROM slow_queries WHERE service_id = ?",
+        (service_id,),
     ).fetchone()
     return {
         "row_count": int(row["n"] or 0),

@@ -472,8 +472,8 @@
   
           SELECT
             COUNT(*)                                                                            AS requests,
-            COUNT(*) FILTER (WHERE starts_with("cache", 'MISS'))                                       AS total_misses,
-            COUNT(*) FILTER (WHERE starts_with("cache", 'PASS'))                                       AS total_passes,
+            NULL                                                                      AS total_misses,
+            NULL                                                                      AS total_passes,
             MEDIAN(elapsed) / 1000.0                                                          AS ottfb_p50_ms,
             APPROX_QUANTILE(elapsed, 0.75) / 1000.0                                           AS ottfb_p75_ms,
             APPROX_QUANTILE(elapsed, 0.95) / 1000.0                                           AS ottfb_p95_ms,
@@ -547,7 +547,7 @@
   
                       SELECT nb.bot_name, nb.category, count(*) AS cnt
                       FROM t_origin_tmp t
-                      INNER JOIN ngwaf_top.ngwaf_bots nb USING (waf_req_id)
+                      INNER JOIN temp.ngwaf_top_ngwaf_bots nb USING (waf_req_id)
                       WHERE nb.bot_name IS NOT NULL
                       GROUP BY 1, 2
                       ORDER BY 3 DESC
@@ -564,7 +564,7 @@
                       nb.category,
                       count(*) AS request_count
                   FROM t_origin_tmp t
-                  INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                  INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
                   WHERE nb.bot_name IS NOT NULL
                   GROUP BY 1, 2, 3
                   ORDER BY 4 DESC
@@ -579,7 +579,7 @@
                       nb.bot_name,
                       count(*) AS count
                   FROM t_origin_tmp t
-                  INNER JOIN ngwaf_cache.ngwaf_bots nb USING (waf_req_id)
+                  INNER JOIN temp.ngwaf_cache_ngwaf_bots nb USING (waf_req_id)
                   WHERE nb.bot_name IS NOT NULL
                   GROUP BY 1, 2
                   ORDER BY 1, 2

@@ -41,7 +41,11 @@ _bootstrap_inflight: dict[str, asyncio.Future] = {}
 # inside header_badge_and_extents. Caps the query overhead on cold page loads
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
-_header_badge_cache: dict[str, tuple[float, dict | None, dict | None]] = {}
+_header_badge_cache: dict[str, tuple[float, dict | None, dict | None, dict]] = {}
+_ANALYST_PATH_A_UNSUPPORTED_REASON = (
+    "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+    "Use live shared-instance analyst access (Path B)."
+)
 
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
@@ -217,6 +221,17 @@ def _bootstrap_sync(
 
     services = timer.call("get_enriched_services", lambda: get_enriched_services(service_id))
 
+    def _project_analyst_path_capability() -> None:
+        from backend.provision import analyst_path_a_supported
+
+        supported = analyst_path_a_supported()
+        reason = None if supported else _ANALYST_PATH_A_UNSUPPORTED_REASON
+        for service in services:
+            service["analyst_path_a_supported"] = supported
+            service["analyst_path_a_reason"] = reason
+
+    timer.call("analyst_path_a_capability", _project_analyst_path_capability)
+
     # Analyst path: filter services to those scoped on the invite and force
     # access_level=read_only regardless of what get_source_for_service returned.
     if analyst_session is not None:
@@ -281,9 +296,10 @@ def _bootstrap_sync(
     # from the catalog here.
     custom_dashboard_cards: list[dict] = []
     active_log_field_ids: list[str] = []
+    ngwaf_configured = False
 
     def _resolve_custom_fields():
-        nonlocal custom_dashboard_cards, active_log_field_ids
+        nonlocal custom_dashboard_cards, active_log_field_ids, ngwaf_configured
         if not valid_active_id:
             return
         from backend import config as svcconfig
@@ -292,6 +308,7 @@ def _bootstrap_sync(
         active_cfg = svcconfig.load_config(valid_active_id)
         if not active_cfg:
             return
+        ngwaf_configured = bool(active_cfg.get("ngwaf_workspace_id"))
         lf_config = _lf.get_lf_config(active_cfg)
         catalog_entries = _lf.get_custom_fields_catalog_entries(lf_config)
         custom_dashboard_cards = [
@@ -389,13 +406,6 @@ def _bootstrap_sync(
         if not valid_active_id:
             return
 
-        # Check service-level cache to bypass expensive DuckDB/SQLite scans
-        now_time = time.monotonic()
-        cached = _header_badge_cache.get(valid_active_id)
-        if cached is not None and now_time < cached[0]:
-            header_badge_payload, log_extents_payload = cached[1], cached[2]
-            return
-
         # svcconfig.get_status is keyed on the service NAME, not the
         # service_id. They're often identical, but resolving via the
         # source dict matches the dedicated /api/sync-status handler
@@ -405,21 +415,35 @@ def _bootstrap_sync(
 
         from backend import config as svcconfig
 
-        cached_status = svcconfig.get_status(active_src["name"]) or {}
+        # Reuse the live snapshot already computed for the admin bootstrap
+        # payload. The config status is refreshed by discovery asynchronously
+        # and can lag the dedicated sync-status endpoint, which made the
+        # first-paint header show stale freshness even when ingestion was
+        # current.
+        cached_status = sync_status_payload or svcconfig.get_status(active_src["name"]) or {}
 
         # Get RUM and REQUEST metrics directly from cached_status!
         rum_payload = cached_status.get("rum")
         request_payload = cached_status.get("request")
 
-        # Fall back to live query if RUM is enabled but cached as empty/Never to self-heal
-        is_rum_enabled = bool(
-            active_src.get("rum_enabled", False) or (active_src.get("rum") or {}).get("enabled", False)
-        )
-        has_valid_rum_status = rum_payload and not (
-            is_rum_enabled and rum_payload.get("total_rows", 0) == 0 and rum_payload.get("latest_log_at") is None
-        )
+        # Complete request snapshots are cheap to project and authoritative,
+        # including explicit nulls/zeros after reset. Cache only the legacy
+        # fallback scans; don't let their TTL hide a newer (or older) snapshot.
+        metric_inputs = {
+            key: cached_status.get(key) for key in ("request", "rum", "local_rows", "earliest_log_at", "latest_log_at")
+        }
+        cached = _header_badge_cache.get(valid_active_id)
+        if (
+            request_payload is None
+            and cached is not None
+            and time.monotonic() < cached[0]
+            and cached[3] == metric_inputs
+        ):
+            header_badge_payload, log_extents_payload = cached[1], cached[2]
+            return
 
-        if has_valid_rum_status and request_payload:
+        if request_payload is not None:
+            rum_payload = rum_payload or {}
             rum_latest = rum_payload.get("latest_log_at")
             rum_total = rum_payload.get("total_rows", 0)
             rum_last_sync = rum_payload.get("last_sync_at")
@@ -502,20 +526,26 @@ def _bootstrap_sync(
                 except Exception:
                     pass
 
-                # Get last sync times for each type
+                # Get last sync times for each type. 'sync' is the pre-v3
+                # task name — keep it as a fallback so pre-upgrade history
+                # still renders, but prefer the current 'log_discovery' rows
+                # (reading only 'sync' froze the SSR-rendered Last Sync at
+                # whatever the pre-rename history ended with).
                 cron_data = latest_cron_per_task(valid_active_id)
                 rum_last_sync = cron_data.get("rum_sync", {}).get("started_at")
-                request_last_sync = cron_data.get("sync", {}).get("started_at")
+                request_last_sync = cron_data.get("log_discovery", {}).get("started_at") or cron_data.get(
+                    "sync", {}
+                ).get("started_at")
 
             except Exception:
                 pass
 
         earliest = cached_status.get("earliest_log_at")
-        latest = rum_latest or request_latest or cached_status.get("latest_log_at")
+        latest = request_latest if request_payload is not None else request_latest or cached_status.get("latest_log_at")
 
         # Align request_total with local_rows if DuckDB count is smaller or stale (e.g. on analyst instances or sync lag)
         local_rows_total = cached_status.get("local_rows")
-        if local_rows_total is not None:
+        if request_payload is None and local_rows_total is not None:
             expected_request_total = max(0, local_rows_total - rum_total)
             if request_total < expected_request_total:
                 request_total = expected_request_total
@@ -523,7 +553,7 @@ def _bootstrap_sync(
                     request_latest = cached_status.get("latest_log_at")
 
         total_rows = rum_total + request_total
-        local_rows = local_rows_total or total_rows
+        local_rows = local_rows_total if local_rows_total is not None else total_rows
 
         if latest is not None or local_rows is not None:
             header_badge_payload = {
@@ -537,7 +567,7 @@ def _bootstrap_sync(
                     "total_rows": request_total,
                     "last_sync_at": request_last_sync,
                 },
-                "latest_log_at": latest,  # Combined for backward compat
+                "latest_log_at": latest,  # Request-event extent for backward compat
                 "local_rows": local_rows,
             }
 
@@ -553,6 +583,7 @@ def _bootstrap_sync(
             time.monotonic() + _HEADER_BADGE_CACHE_TTL_S,
             header_badge_payload,
             log_extents_payload,
+            metric_inputs,
         )
 
     timer.call("header_badge_and_extents", _resolve_header_badge_and_extents)
@@ -662,7 +693,9 @@ def _bootstrap_sync(
         try:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
-            sync_row = latest_cron_per_task(valid_active_id).get("sync")
+            # 'sync' kept as the pre-v3-rename fallback for pre-upgrade history.
+            per_task = latest_cron_per_task(valid_active_id)
+            sync_row = per_task.get("log_discovery") or per_task.get("sync")
             if sync_row:
                 last_sync_payload = {
                     "started_at": sync_row.get("started_at"),
@@ -747,9 +780,14 @@ def _bootstrap_sync(
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
 
+    # Analysts need the capability flag, not the operator's workspace ID.
+    response_services = services
+    if analyst_session is not None:
+        response_services = [{k: v for k, v in svc.items() if k != "ngwaf_workspace_id"} for svc in services]
+
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
-        services=services,
+        services=response_services,
         schema=schema,
         table_name=table_name,
         countries=COUNTRY_MAP,
@@ -773,6 +811,7 @@ def _bootstrap_sync(
         },
         custom_dashboard_cards=custom_dashboard_cards,
         active_log_field_ids=active_log_field_ids,
+        ngwaf_configured=ngwaf_configured,
         views=views,
         log_fields_catalog=log_fields_catalog_payload,
         sync_status=sync_status_payload,

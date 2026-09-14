@@ -301,6 +301,28 @@ def test_local_admin_can_hit_admin_paths(client):
     assert r.status_code == 200, r.text
 
 
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/api/admin/clickhouse/status?service_id=svcA"),
+        ("POST", "/api/admin/clickhouse/replay"),
+    ],
+)
+def test_clickhouse_controls_block_authenticated_analyst(client, method, path):
+    from backend.routers.admin import router
+
+    client.app.include_router(router)
+    _start_share()
+    _login_analyst(client, _seed_invite())
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
+    allowed = client.get("/api/dashboard?service_id=svcA", headers=headers)
+    assert allowed.status_code == 200, allowed.text
+    response = client.request(method, path, headers=headers, json={"service_id": "svcA", "dataset_id": "dataset"})
+    assert response.status_code == 403
+    assert response.json()["error"] == "admin_only"
+
+
 def test_local_admin_writes_pass_through(client):
     r = client.post("/api/views")
     assert r.status_code == 200

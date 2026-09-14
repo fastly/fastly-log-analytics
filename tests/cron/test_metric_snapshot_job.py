@@ -71,7 +71,7 @@ def test_safe_record_swallows_record_snapshot_exception():
 
 def _fake_row(task: str, secs: float) -> dict:
     """SQLite row_factory dict shape (con.row_factory=Row)."""
-    return {"task": task, "duration_seconds": secs}
+    return {"task": task, "duration_s": secs}
 
 
 def test_sample_cron_duration_records_per_service_per_task():

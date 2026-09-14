@@ -5,6 +5,8 @@
 #                 [--frontend-port PORT] [--backend-port PORT]
 #   --kill  kill any stale stack, THEN start a fresh one.
 #   --stop  kill the stale stack and return to the shell (do NOT start).
+# Cleanup requires python3, ps and lsof. Unverifiable/unrelated listeners abort
+# the stop; Docker containers, volumes and database files are never removed.
 
 # If the user has a virtualenv activated in their shell, it might point to a
 # different path (e.g. if the directory was renamed). We unset it here so that
@@ -72,59 +74,40 @@ done
 # clobbered by the hardcoded NODE_OPTIONS in the npm invocations below.
 COMPOSED_NODE_OPTIONS="--dns-result-order=ipv4first ${NODE_OPTIONS_EXTRA:-} ${NODE_OPTIONS:-}"
 
-# Function to safely kill existing processes on the specific ports we use
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROCESS_HELPER="$SCRIPT_DIR/scripts/local_stack_processes.py"
+BACKEND_CAPTURE=""
+FRONTEND_CAPTURE=""
+
 cleanup_existing() {
     echo "Checking for existing processes on ports $FRONTEND_PORT and $BACKEND_PORT..."
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-    # Kill ALL uvicorn/node processes from this project directory first.
-    # Port-only kills miss the reloader process (which doesn't listen on the port
-    # itself) — killing just the worker causes the reloader to spawn a new one.
-    pkill -9 -f "$SCRIPT_DIR.*uvicorn" 2>/dev/null || true
-    pkill -9 -f "$SCRIPT_DIR.*node.*next" 2>/dev/null || true
-
-    # Also catch anything still holding the ports (belt-and-suspenders)
-    for PORT in $FRONTEND_PORT $BACKEND_PORT; do
-        PIDS=$(lsof -Pi :$PORT -sTCP:LISTEN -t 2>/dev/null)
-        if [ -n "$PIDS" ]; then
-            echo "Killing remaining process on port $PORT..."
-            echo "$PIDS" | xargs kill -9 2>/dev/null || true
-        fi
-    done
-
-    # Brief pause so the OS releases the ports before we try to bind again
-    sleep 1
+    python3 "$PROCESS_HELPER" stop --checkout "$SCRIPT_DIR" \
+        --port "$FRONTEND_PORT" --port "$BACKEND_PORT"
 }
 
-# Function to clean up the spawned background processes when the user presses Ctrl+C
+cleanup_spawned() {
+    local args=()
+    [ -n "$BACKEND_CAPTURE" ] && args+=(--captured "$BACKEND_CAPTURE")
+    [ -n "$FRONTEND_CAPTURE" ] && args+=(--captured "$FRONTEND_CAPTURE")
+    [ "${#args[@]}" -eq 0 ] && return 0
+    echo -e "\nStopping launched services..."
+    python3 "$PROCESS_HELPER" children --checkout "$SCRIPT_DIR" "${args[@]}"
+}
+
 cleanup() {
-    echo -e "\nStopping all services..."
-
-    # 1. Ask nicely (SIGTERM to the process groups)
-    if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
-    if [ -n "$FRONTEND_PGID" ]; then kill -TERM -$FRONTEND_PGID 2>/dev/null; fi
-    kill -TERM $BACKEND_PID $FRONTEND_PID 2>/dev/null
-
-    # 2. Give them a second to clean up
-    sleep 1
-
-    # 3. Force kill (SIGKILL) if they are stubborn
-    if [ -n "$BACKEND_PGID" ]; then kill -9 -$BACKEND_PGID 2>/dev/null; fi
-    if [ -n "$FRONTEND_PGID" ]; then kill -9 -$FRONTEND_PGID 2>/dev/null; fi
-    kill -9 $BACKEND_PID $FRONTEND_PID 2>/dev/null
-
-    # 4. Nuclear option: Mop up any stray processes spawned in this directory
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    pkill -9 -f "$SCRIPT_DIR.*uvicorn" 2>/dev/null || true
-    pkill -9 -f "$SCRIPT_DIR.*node.*next" 2>/dev/null || true
-
-    exit 0
+    local status=$?
+    trap - EXIT
+    trap '' SIGINT SIGTERM
+    cleanup_spawned || status=1
+    exit "$status"
 }
 
-trap cleanup SIGINT SIGTERM
+trap cleanup EXIT
+trap 'exit 130' SIGINT
+trap 'exit 143' SIGTERM
 
 if [ "$KILL_EXISTING" = true ]; then
-    cleanup_existing
+    cleanup_existing || exit $?
 fi
 
 # --stop: stack is now down; return to the shell without starting a new one.
@@ -140,7 +123,11 @@ echo "=================================================="
 
 echo "=================================================="
 if [ "$DEV_MODE" = true ]; then
-    echo "Starting Backend (DEV mode with reload on port $BACKEND_PORT)..."
+    if [ "$NO_RELOAD" = true ]; then
+        echo "Starting Backend (DEV mode, single process on port $BACKEND_PORT)..."
+    else
+        echo "Starting Backend (DEV mode with reload on port $BACKEND_PORT)..."
+    fi
     # Local dev runs against the same FOS bucket as prod — any
     # background ingestion would race the prod cron and double-write
     # rows into the shared Iceberg snapshot. The kill switch in
@@ -192,7 +179,7 @@ else
     uv run uvicorn backend.main:app --host 127.0.0.1 --port $BACKEND_PORT &
 fi
 BACKEND_PID=$!
-BACKEND_PGID=$(ps -o pgid= -p $BACKEND_PID | tr -d ' ')
+BACKEND_CAPTURE=$(python3 "$PROCESS_HELPER" capture --checkout "$SCRIPT_DIR" --pid "$BACKEND_PID") || exit 1
 set +m
 
 echo -n "Waiting for Backend to initialize."
@@ -217,7 +204,6 @@ done
 if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
     echo -e "\n[!] Error: Backend failed to become healthy after $MAX_ATTEMPTS seconds. Exiting."
     echo "Check for port conflicts or backend errors above."
-    if [ -n "$BACKEND_PGID" ]; then kill -9 -$BACKEND_PGID 2>/dev/null; fi
     exit 1
 fi
 
@@ -237,7 +223,6 @@ npm install
 echo "Syncing API types..."
 if ! npm run gen:types; then
     echo -e "\n[!] Error: Type generation failed. Exiting run script."
-    if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
     exit 1
 fi
 
@@ -248,7 +233,6 @@ else
     echo "Building production frontend (this takes a few seconds)..."
     if ! NEXT_PUBLIC_BACKEND_PORT=$BACKEND_PORT API_PROXY_URL=http://127.0.0.1:$BACKEND_PORT NODE_OPTIONS="$COMPOSED_NODE_OPTIONS" npm run build; then
         echo -e "\n[!] Error: Frontend build failed. Exiting run script."
-        if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
         exit 1
     fi
 
@@ -267,7 +251,7 @@ else
     fi
 fi
 FRONTEND_PID=$!
-FRONTEND_PGID=$(ps -o pgid= -p $FRONTEND_PID | tr -d ' ')
+FRONTEND_CAPTURE=$(python3 "$PROCESS_HELPER" capture --checkout "$SCRIPT_DIR" --pid "$FRONTEND_PID") || exit 1
 set +m
 cd ..
 
@@ -275,7 +259,6 @@ cd ..
 sleep 3
 if ! kill -0 $FRONTEND_PID 2>/dev/null; then
     echo -e "\n[!] Error: Frontend process died early. Check logs above."
-    if [ -n "$BACKEND_PGID" ]; then kill -TERM -$BACKEND_PGID 2>/dev/null; fi
     exit 1
 fi
 

@@ -1,6 +1,6 @@
 """Tests for ``backend.cron`` — APScheduler wrapper + small jobs.
 
-The big per-service jobs (``_run_service_cron``, ``_run_commit``,
+The big per-service jobs (``_run_log_discovery_cron``, ``_run_commit``,
 ``_run_optimize``, ``_run_expire_snapshots``, ``_run_ngwaf_bot_sync``,
 ``_run_service_alerts_evaluation``, ``_run_metadata_sync``) are heavy
 orchestrators that exercise the full DuckDB+Iceberg+FOS stack; they're
@@ -272,7 +272,7 @@ def test_sync_jobs_registers_sync_commit_and_alerts_for_readwrite_service():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-1" in s._job_ids
+    assert "log_discovery_svc-1" in s._job_ids
     assert "commit_svc-1" in s._job_ids
     assert "alerts_evaluation_svc-1" in s._job_ids
 
@@ -331,7 +331,7 @@ def test_sync_jobs_skips_alerts_cron_when_no_alerts_configured():
     ):
         s._sync_jobs()
 
-    assert "sync_svc-noalert" in s._job_ids
+    assert "log_discovery_svc-noalert" in s._job_ids
     assert "commit_svc-noalert" in s._job_ids
     # Alerts cron must not be registered until at least one alert exists.
     assert "alerts_evaluation_svc-noalert" not in s._job_ids
@@ -502,7 +502,7 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     real_add = s._sched.add_job
 
     def capturing_add_job(*args, **kwargs):
-        if kwargs.get("id", "").startswith("sync_svc-priority"):
+        if kwargs.get("id", "").startswith("log_discovery_svc-priority"):
             captured["seconds"] = kwargs.get("seconds")
         return real_add(*args, **kwargs)
 
@@ -1091,6 +1091,73 @@ def test_run_metadata_sync_handles_iceberg_table_not_found_gracefully():
     # status arg is "success" (positional or kw)
     summary = kwargs.get("summary") or (args[4] if len(args) > 4 else "")
     assert "Iceberg table not found" in summary or "skipping" in summary.lower()
+
+
+def test_run_metadata_sync_skips_when_the_ducklake_table_does_not_exist_yet():
+    """The v3 shape of "no data committed yet": ``init_iceberg_table``
+    succeeds (the catalog attaches) but the per-service table has not been
+    created, so ``ducklake_table_exists`` is False. Pinned because pre-v3
+    this condition arrived as a pyiceberg ``NoSuchTableError`` and the
+    graceful branch keyed off the exception text — which left a fresh
+    service falling through into the data sync instead of skipping."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=True),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=False),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert "success" in args or kwargs.get("status") == "success"
+    summary = kwargs.get("summary") or (args[4] if len(args) > 4 else "")
+    assert "skipping" in summary.lower()
+
+
+def test_run_metadata_sync_errors_when_the_ducklake_catalog_cannot_attach():
+    """A None return from ``init_iceberg_table`` is an attach failure —
+    bad credentials or config — not "no data yet". It must NOT be laundered
+    into a success row."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": "svc"}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc", "service_id": "svc"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table", return_value=None),
+        patch("backend.core.iceberg.sync_data") as mock_sync,
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.cleanup_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc")
+
+    mock_sync.assert_not_called()
+    # The job's own error handler records it — as an error, never a success.
+    statuses = [a for args, _ in log_calls for a in args if isinstance(a, str)]
+    assert "error" in statuses
+    assert "success" not in statuses
 
 
 def test_run_metadata_sync_propagates_non_not_found_iceberg_exception():
