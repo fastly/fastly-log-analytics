@@ -5,6 +5,7 @@ import urllib.parse
 
 from backend.core import field_registry as lf
 from backend.core.fastly.client import fastly
+from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
 from backend.core.fastly.service import (
     ensure_condition,
     ensure_vcl_snippet,
@@ -350,34 +351,24 @@ def generate_capture_vcl(
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
 
+    if rum_enabled:
+        rum_extraction, _ = generate_rum_recv_parts()
+        scrub_lines.append("  # Section 5: RUM field extraction (vcl_recv)")
+        scrub_lines.append('  if (req.url.path == "/rum-beacon") {')
+        for line in rum_extraction.splitlines():
+            scrub_lines.append(f"    {line}")
+        scrub_lines.append("  }")
+
     for statement in get_capture_vcl_statements(log_fields_config):
         scrub_lines.append(f"  {statement}")
 
     if rum_enabled:
-        rum_lines = [
-            "  # Section 5: RUM (vcl_recv)",
-            "  # Handle RUM beacon POST to /rum-beacon",
-            '  if (req.url.path == "/rum-beacon") {',
-            "      # Extract the essential fields from querystring:",
-            "      # - cid: session ID from rum_cid cookie (set in deliver)",
-            "      # - req: per-request ID (minted in recv)",
-            "      # - raw query: complete set of event_N_* params, parsed during ingest",
-            '      set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");',
-            '      set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");',
-            '      if (req.http.x-fos-edge-data:fastly_req_id == "") {',
-            "          set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;",
-            "      }",
-            "      set req.http.x-fos-edge-data:rum_raw_query = req.url;",
-            "      set req.http.x-fos-edge-data:rum_body = req.body;",
-            "",
-            "      # Mark beacon to skip S3 logging (already logged separately to metadata DB)",
-            '      set req.http.x-skip-rum-logging = "1";',
-            "",
-            "      # Synthetic 204 response (no origin round-trip needed)",
-            '      error 611 "No Content";',
-            "  }",
-        ]
-        scrub_lines.extend(rum_lines)
+        _, rum_response = generate_rum_recv_parts()
+        scrub_lines.append("  # Section 5: RUM (vcl_recv)")
+        scrub_lines.append('  if (req.url.path == "/rum-beacon") {')
+        for line in rum_response.splitlines():
+            scrub_lines.append(f"    {line}")
+        scrub_lines.append("  }")
 
     if scoring_enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex

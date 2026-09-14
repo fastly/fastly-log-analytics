@@ -37,6 +37,27 @@ class TestGeneratorVCLStructure:
             duplicates = [v for v in set(var_decls) if var_decls.count(v) > 1]
             assert not duplicates, f"{subroutine}: duplicate var declarations {duplicates}"
 
+    def test_rum_beacon_fields_are_extracted_before_capture(self):
+        """RUM fields must be populated before the log capture promotes them."""
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+            }
+        )
+
+        vcl = generate_consolidated_snippet(state, "vcl_recv")
+
+        extraction = vcl.index(
+            'set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");'
+        )
+        capture = vcl.index("# Capture edge data for logging")
+        assert extraction < capture
+        assert 'querystring.get(req.url, "rum_metric_value")' in vcl
+        assert 'querystring.get(req.url, "rum_error_message")' in vcl
+
     def test_generator_builds_5_consolidated_snippets(self):
         """Verify desired_snippets returns 5 consolidated snippets."""
         state = FeatureState.from_config(
