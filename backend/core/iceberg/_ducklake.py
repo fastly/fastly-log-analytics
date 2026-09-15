@@ -150,6 +150,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # function body is covered.
     with _attach_lock:
         try:
+            extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
+            if extension_directory:
+                os.makedirs(extension_directory, exist_ok=True)
+                escaped_extension_directory = extension_directory.replace("'", "''")
+                con.execute(f"SET extension_directory = '{escaped_extension_directory}';")
             try:
                 con.execute("LOAD ducklake;")
             except Exception:

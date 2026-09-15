@@ -178,6 +178,7 @@ config:
   duckdbMemoryLimit: "4GB"
   duckdbPoolMaxSize: "4"
   duckdbPoolConnMemoryLimit: "1536MB"
+  duckdbExtensionDirectory: "/tmp/duckdb/extensions"
   duckdbRecycleIntervalMin: "5"
   duckdbRecycleRssThresholdMb: "6000"
   duckdbRecycleBarrierCapMs: "10000"
