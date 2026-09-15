@@ -116,7 +116,17 @@ def _setup_sdk() -> None:
         # Concurrent backend/replay processes must not overwrite each other's
         # cumulative counters at the OTLP receiver. One identity per SDK, not
         # per query, batch, or tenant; Prometheus maps it to `instance`.
-        resource = Resource.create({"service.name": _SERVICE_NAME, "service.instance.id": str(uuid4())})
+        resource_attributes = {
+            "service.name": _SERVICE_NAME,
+            "service.instance.id": str(uuid4()),
+        }
+        cluster = os.environ.get("ELEVATION_CLUSTER_NAME", "").strip()
+        namespace = os.environ.get("POD_NAMESPACE", "").strip()
+        if cluster:
+            resource_attributes["site"] = cluster if cluster.startswith("elevation-") else f"elevation-{cluster}"
+        if namespace:
+            resource_attributes["namespace"] = namespace
+        resource = Resource.create(resource_attributes)
 
         tracer_provider = TracerProvider(resource=resource)
         meter_readers: list[Any] = []

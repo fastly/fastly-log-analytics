@@ -118,6 +118,23 @@ def test_sdk_resource_separates_short_lived_cli_and_backend_counters(monkeypatch
         assert first and second and first != second
 
 
+def test_sdk_resource_includes_elevation_identity(monkeypatch):
+    monkeypatch.setattr(request_telemetry, "_otel_enabled", lambda: True)
+    monkeypatch.setattr(request_telemetry, "_otel_exporter", lambda: "none")
+    monkeypatch.setenv("ELEVATION_CLUSTER_NAME", "dev-usc1")
+    monkeypatch.setenv("POD_NAMESPACE", "se-demo")
+    with (
+        patch.object(request_telemetry.trace, "set_tracer_provider"),
+        patch.object(request_telemetry.metrics, "set_meter_provider"),
+        patch.object(request_telemetry, "TracerProvider"),
+        patch.object(request_telemetry, "MeterProvider") as provider,
+    ):
+        request_telemetry.ensure_initialized()
+        attributes = provider.call_args.kwargs["resource"].attributes
+        assert attributes["site"] == "elevation-dev-usc1"
+        assert attributes["namespace"] == "se-demo"
+
+
 def test_setup_sdk_otlp_installs_otlp_exporters(monkeypatch):
     """OTEL_EXPORTER=otlp must construct the OTLP span + metric exporters
     (endpoints resolve from the standard OTEL_EXPORTER_OTLP_* env vars).

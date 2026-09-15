@@ -41,6 +41,28 @@ def test_durable_serving_uses_ephemeral_connection_and_never_opens_native_file(m
         con.close()
 
 
+def test_durable_serving_uses_writable_temp_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
+    temp_dir = tmp_path / "duckdb-temp"
+    monkeypatch.setenv("DUCKDB_TEMP_DIRECTORY", str(temp_dir))
+    source = _durable_source(tmp_path)
+
+    with (
+        patch("backend.core.duckdb._configure_fos"),
+        patch("backend.core.iceberg.configure_duckdb_s3"),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.iceberg.update_iceberg_view"),
+    ):
+        con = db.get_connection(source=source, read_only=True, skip_view_update=False)
+
+    try:
+        assert temp_dir.is_dir()
+        assert con.execute("SELECT current_setting('temp_directory')").fetchone() == (str(temp_dir),)
+    finally:
+        con.close()
+
+
 def test_durable_serving_rejects_writable_connection(monkeypatch, tmp_path):
     monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")

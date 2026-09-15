@@ -1134,9 +1134,16 @@ def get_connection(
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
 
-    # Configure temp directory to be service-specific next to the database file
-    if not durable_serving and db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
+    # File-backed connections keep temp files beside their database. Durable
+    # serving connections are in-memory and need an explicit writable path
+    # because the container root filesystem is read-only.
+    if durable_serving:
+        _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
         _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+    else:
+        _service_temp_dir = None
+    if _service_temp_dir:
         try:
             os.makedirs(_service_temp_dir, exist_ok=True)
             _escaped_dir = _service_temp_dir.replace("'", "''")
