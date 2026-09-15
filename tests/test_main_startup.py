@@ -3,7 +3,7 @@ from unittest.mock import patch
 from backend.core import rollup_readiness as rr
 
 
-def test_initialize_service_marks_coverage_ready_for_durable_service():
+def test_initialize_service_defers_durable_rollup_catchup():
     rr.reset_rollup_coverage_ready()
     cfg = {"service_id": "svc-durable"}
     fake_src = {"service_id": "svc-durable", "deployment_mode": "high_throughput"}
@@ -16,15 +16,15 @@ def test_initialize_service_marks_coverage_ready_for_durable_service():
         patch("backend.config.is_durable_serving_mode", return_value=True),
         patch(
             "backend.core.rollups.recompute.backfill_missing_hour_bundles",
-            return_value={"missing": 0, "bundled": 0, "coverage_verified": True},
+            side_effect=AssertionError("startup rollup catch-up must be deferred"),
         ) as mock_backfill,
     ):
         from backend.main import _initialize_service
 
         _initialize_service(cfg)
 
-    mock_backfill.assert_called_once_with("svc-durable", fake_src, lookback_days=30)
-    assert rr.rollup_coverage_ready("svc-durable") is True
+    mock_backfill.assert_not_called()
+    assert rr.rollup_coverage_ready("svc-durable") is False
 
 
 def test_initialize_service_skips_catchup_for_file_mode_service():
