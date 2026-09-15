@@ -212,7 +212,7 @@ def test_convert_failure_requeues_then_quarantines(monkeypatch):
         ):
             with (
                 patch("backend.core.ingest._get_fos_client"),
-                patch("backend.core.ingest._configure_fos", side_effect=_boom),
+                patch("backend.core.duckdb._configure_fos", side_effect=_boom),
             ):
                 for _ in range(LEDGER_MAX_ATTEMPTS):
                     statuses.append(convert_object(service_id, object_key, "test-worker"))
@@ -613,7 +613,7 @@ def test_convert_object_excludes_null_timestamp_rows_from_lake(tmp_path, monkeyp
             with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
                 with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect()):
                     with patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_fake_attach):
-                        with patch("backend.core.ingest._configure_fos"):
+                        with patch("backend.core.duckdb._configure_fos"):
                             with patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"):
                                 from backend.core.ingest import convert_object
 
@@ -676,7 +676,7 @@ def test_merge_lake_files_flushes_inlined_rows_to_parquet(tmp_path):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.ingest._configure_fos"),
+        patch("backend.core.duckdb._configure_fos"),
         patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_real_ducklake_attach),
     ):
         from backend.core.ingest import merge_lake_files

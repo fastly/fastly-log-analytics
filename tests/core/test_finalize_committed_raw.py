@@ -409,7 +409,7 @@ def test_merge_lake_files_raises_when_the_lake_attach_fails():
 
 def test_merge_lake_files_publishes_after_schema_mismatch_compaction_failure():
     class Connection:
-        def execute(self, sql):
+        def execute(self, sql, *args, **kwargs):
             if "ducklake_merge_adjacent_files" in sql:
                 raise duckdb.InvalidInputException("schema mismatch in glob")
 
