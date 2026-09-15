@@ -100,7 +100,7 @@ def refresh_durable_request_metrics(
             timer.start()
             row = (
                 InstrumentedDuckDBConnection(con, service_id=service_id)
-                .execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {_safe_table_name(service_id)}")
+                .execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{_safe_table_name(service_id)}"')
                 .fetchone()
             )
             if row is None:
