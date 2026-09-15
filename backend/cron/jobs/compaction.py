@@ -238,7 +238,13 @@ def _run_rollup_hour_heal(service_id: str) -> None:
         else:
             coverage_ready = True
         lookback_days = 1 if coverage_ready else 30
-        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=lookback_days)
+        max_missing_hours = 1 if durable_mode and not coverage_ready else None
+        heal = backfill_missing_hour_bundles(
+            service_id,
+            src,
+            lookback_days=lookback_days,
+            max_missing_hours=max_missing_hours,
+        )
         duration = time.time() - start_time
         # Durable mode only becomes trusted after a full-horizon pass. A
         # failed or timed-out startup catch-up therefore self-heals on the

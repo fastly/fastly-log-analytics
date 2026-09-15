@@ -426,6 +426,7 @@ def backfill_missing_hour_bundles(
     service_id: str,
     source: dict,
     lookback_days: int = 30,
+    max_missing_hours: int | None = None,
 ) -> dict[str, int | bool]:
     """Self-heal pass: find closed hours where the iceberg view has rows
     but no ``hour_bundled/`` file exists, then rebuild per-field rollups
@@ -444,6 +445,12 @@ def backfill_missing_hour_bundles(
     and runs the rebuild via the same code path the cron tick uses. Safe
     to call on every daily compaction tick — idempotent (no-op when the
     bundle tree is complete).
+
+    ``max_missing_hours`` bounds the number of non-empty hours rebuilt in one
+    pass. This lets scheduled durable-serving catch-up make incremental
+    progress without allowing one large DuckDB operation to evict the serving
+    pod. Coverage remains unverified until a later pass confirms the complete
+    lookback.
 
     Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
     "bundled": B, "stamped_empty": E}`` so callers can log a concise
@@ -523,6 +530,10 @@ def backfill_missing_hour_bundles(
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
 
         missing = sorted(h for h, _ in rows if h < active and h not in existing)
+        if max_missing_hours is not None:
+            if max_missing_hours < 1:
+                raise ValueError("max_missing_hours must be positive")
+            missing = missing[:max_missing_hours]
 
         # Closed hours with genuinely ZERO rows can never acquire coverage
         # through the data-driven writers (the HAVING n > 0 above never

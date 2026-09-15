@@ -308,6 +308,7 @@ def test_rollup_heal_full_catchup_marks_ready_under_durable_mode(monkeypatch, st
 
     mark_mock.assert_called_once_with("svc-1")
     assert heal_mock.call_args.kwargs.get("lookback_days") == 30
+    assert heal_mock.call_args.kwargs.get("max_missing_hours") == 1
 
 
 def test_rollup_heal_does_not_mark_ready_when_not_durable_mode(monkeypatch, stub_source, stub_progress):
