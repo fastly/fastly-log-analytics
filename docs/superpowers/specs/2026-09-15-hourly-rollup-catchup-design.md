@@ -14,11 +14,14 @@ will leave rollup readiness unset and complete normal service initialization
 without waiting for historical rollups.
 
 The existing `rollup_hour_heal` cron remains responsible for the catch-up. Its
-existing readiness gate will continue to use the deep lookback until coverage
-is verified, then switch to the one-day steady-state lookback and mark the
-service ready for durable rollup reads. The dashboard therefore uses the
-existing safe raw-query path while coverage is incomplete rather than serving
-partial rollups.
+readiness gate will continue to use the deep lookback until coverage is
+verified, but durable-mode catch-up will rebuild at most one missing non-empty
+hour per tick. This bounds DuckDB temporary-file and memory pressure while
+allowing the job to make incremental progress. Once coverage is verified, the
+job switches to the one-day steady-state lookback and marks the service ready
+for durable rollup reads. The dashboard therefore uses the existing safe
+raw-query path while coverage is incomplete rather than serving partial
+rollups.
 
 No data-plane, ClickHouse, Postgres, or API contract changes are included.
 Rollup writes remain local-only and idempotent. A failed hourly pass records a
