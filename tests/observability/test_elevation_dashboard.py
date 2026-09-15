@@ -1,10 +1,18 @@
 import json
 from pathlib import Path
 
+import pytest
+
+
+def _dashboard() -> dict:
+    dashboard_path = Path("local-docs/fla-multipod-elevation.json")
+    if not dashboard_path.exists():
+        pytest.skip("Elevation dashboard export is intentionally local-only")
+    return json.loads(dashboard_path.read_text())
+
 
 def test_elevation_dashboard_includes_high_scale_operational_panels() -> None:
-    dashboard_path = Path("local-docs/fla-multipod-elevation.json")
-    dashboard = json.loads(dashboard_path.read_text())
+    dashboard = _dashboard()
     panels = dashboard["panels"]
     panel_text = json.dumps(panels)
 
@@ -22,7 +30,7 @@ def test_elevation_dashboard_includes_high_scale_operational_panels() -> None:
 
 
 def test_elevation_dashboard_keeps_variable_based_promql() -> None:
-    dashboard = json.loads(Path("local-docs/fla-multipod-elevation.json").read_text())
+    dashboard = _dashboard()
     panel_text = json.dumps(dashboard["panels"])
 
     assert "$site" in panel_text

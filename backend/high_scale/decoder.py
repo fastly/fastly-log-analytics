@@ -94,9 +94,9 @@ def _decode_payload(payload: bytes) -> bytes:
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain == "rum_vitals":
-        event["client_id"] = event.get("rum_cid") or ""
-        event["metric_name"] = event.get("rum_metric_name") or ""
-        raw_metric_value = event.get("rum_metric_value")
+        event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
+        event["metric_name"] = event.get("rum_metric_name") or event.get("metric_name") or ""
+        raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))
         if raw_metric_value in (None, ""):
             event["metric_value"] = None
         elif isinstance(raw_metric_value, (int, float)) and not isinstance(raw_metric_value, bool):
@@ -105,13 +105,13 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
             event["metric_value"] = float(raw_metric_value)
         else:
             event["metric_value"] = None
-        event["metric_rating"] = event.get("rum_metric_rating") or ""
-        event["pathname"] = event.get("rum_pathname") or ""
+        event["metric_rating"] = event.get("rum_metric_rating") or event.get("metric_rating") or ""
+        event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
     elif domain == "rum_errors":
-        event["client_id"] = event.get("rum_cid") or ""
-        event["error_message"] = event.get("rum_error_message") or ""
-        event["error_file"] = event.get("rum_error_file") or ""
-        event["pathname"] = event.get("rum_pathname") or ""
+        event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
+        event["error_message"] = event.get("rum_error_message") or event.get("error_message") or ""
+        event["error_file"] = event.get("rum_error_file") or event.get("error_file") or ""
+        event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
 
 
 def _event_id(event: dict[str, Any], domain: str) -> str:
