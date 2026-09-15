@@ -28,6 +28,7 @@ import logging
 import threading
 
 from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
+from backend.high_scale.postgres_control import SCHEMA_DDL as HIGH_SCALE_CONTROL_DDL
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
     statements.extend(_INGEST_LEDGER_ALTERS)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
+    statements.append(HIGH_SCALE_CONTROL_DDL)
     return statements
 
 

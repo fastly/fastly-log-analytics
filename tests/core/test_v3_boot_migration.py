@@ -82,6 +82,9 @@ def test_pg_schema_statements_are_postgres_dialect():
     assert "committed_buffers" in blob
     assert "ingest_ledger" in blob
     assert "metric_snapshots" in blob
+    assert "high_scale_ownership" in blob
+    assert "high_scale_source_objects" in blob
+    assert "high_scale_publication_manifests" in blob
 
     # SQLite-only dialect must be translated away.
     assert "AUTOINCREMENT" not in blob
