@@ -430,3 +430,47 @@ def test_merge_lake_files_publishes_after_schema_mismatch_compaction_failure():
         merge_lake_files(SERVICE_ID)
 
     mark_published.assert_called_once_with(SERVICE_ID)
+
+
+def test_merge_lake_files_skips_rum_numeric_schema_mismatch_after_flushing():
+    """A RUM schema-drift warning must not bypass the durability flush.
+
+    ``2147483539`` is a valid int32 ``error_line`` value; its presence in the
+    DuckLake glob diagnostic does not make the rows unsafe to publish.  The
+    adjacent-file rewrite is the unsafe operation, so leave it skipped while
+    preserving the flush-first and publication invariants.
+    """
+
+    class Connection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, *args, **kwargs):
+            self.calls.append(sql)
+            if "ducklake_merge_adjacent_files" in sql:
+                raise duckdb.InvalidInputException(
+                    'schema mismatch in glob: "error_line" INTEGER vs BIGINT (2147483539)'
+                )
+
+        def close(self):
+            pass
+
+    connection = Connection()
+
+    def attach(con_arg, src_arg, read_only=False):
+        return True
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
+        patch("backend.core.ingest._configure_fos"),
+        patch("duckdb.connect", return_value=connection),
+        patch("backend.core.ingest._mark_ledger_published") as mark_published,
+    ):
+        merge_lake_files(SERVICE_ID)
+
+    assert [call for call in connection.calls if call.startswith("CALL ducklake_")] == [
+        "CALL ducklake_flush_inlined_data('lake')",
+        "CALL ducklake_merge_adjacent_files('lake')",
+    ]
+    mark_published.assert_called_once_with(SERVICE_ID)

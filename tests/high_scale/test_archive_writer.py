@@ -63,3 +63,26 @@ def test_archive_checksum_failure_is_detected(tmp_path) -> None:
     artifact_path.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="checksum"):
         verify_archive_checkpoint(manifest)
+
+
+def test_archive_checkpoint_accepts_empty_rum_body(tmp_path) -> None:
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/errors.gz", "sha256:a", 12)
+    manifest = write_archive_checkpoint(
+        tmp_path,
+        service_id="svc",
+        domain="rum_errors",
+        source=source,
+        events=[
+            {
+                "event_id": "1",
+                "rum_body": {},
+                "error_message": "empty body remains publishable",
+            }
+        ],
+        archive_epoch=1,
+        schema_version="rum_errors.v1",
+        transform_version="normalize.v1",
+        coverage_start=datetime(2026, 9, 1, tzinfo=UTC),
+        coverage_end=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+    )
+    verify_archive_checkpoint(manifest)

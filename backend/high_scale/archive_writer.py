@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,7 +30,7 @@ def event_digest(events: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> s
     keys = set().union(*(event.keys() for event in events))
     digest = hashlib.sha256()
     for event in events:
-        canonical = {key: event.get(key) for key in keys}
+        canonical = {key: _parquet_safe_value(event.get(key)) for key in keys}
         digest.update(
             (json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
         )
@@ -65,7 +66,7 @@ def write_archive_checkpoint(
     output_root = Path(root)
     output_root.mkdir(parents=True, exist_ok=True)
     keys = set().union(*(event.keys() for event in events))
-    canonical_events = [{key: event.get(key) for key in keys} for event in events]
+    canonical_events = [{key: _parquet_safe_value(event.get(key)) for key in keys} for event in events]
     artifact_digest = event_digest(canonical_events)
     source_token = hashlib.sha256(f"{source.object_key}:{source.checksum}".encode()).hexdigest()[:16]
     artifact_name = f"{service_id}-{domain}-{source_token}.parquet"
@@ -131,3 +132,15 @@ def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"cannot serialize {type(value).__name__}")
+
+
+def _parquet_safe_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if not value:
+            return None
+        return {key: _parquet_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_parquet_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_parquet_safe_value(item) for item in value)
+    return value
