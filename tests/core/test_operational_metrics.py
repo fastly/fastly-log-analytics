@@ -48,3 +48,23 @@ def test_record_keeps_distinct_label_sets(monkeypatch):
         (3.0, "discovered"),
         (2.0, "claimed"),
     }
+
+
+def test_high_scale_metrics_are_exported_with_domain_labels(monkeypatch):
+    meter = _FakeMeter()
+    operational_metrics.reset_for_tests()
+    monkeypatch.setattr(operational_metrics, "get_meter", lambda: meter)
+
+    operational_metrics.record(
+        "high_scale_publication_lag_seconds",
+        12.5,
+        service_id="svc",
+        domain="request",
+    )
+
+    gauge, description, unit = meter.gauges["fla_high_scale_publication_lag_seconds"]
+    observation = gauge.callbacks[0](None)[0]
+    assert observation.value == 12.5
+    assert observation.attributes == {"domain": "request", "service_id": "svc"}
+    assert description == "Age of the oldest pending high-scale publication"
+    assert unit == "s"

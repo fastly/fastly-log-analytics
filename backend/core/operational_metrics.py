@@ -19,6 +19,11 @@ _METRICS = {
     "celery_active_workers": ("Active Celery workers", "{workers}"),
     "celery_active_tasks": ("Active Celery tasks", "{tasks}"),
     "ingest_ledger_rows": ("Ingest ledger rows by state", "{rows}"),
+    "high_scale_source_objects": ("High-scale source objects by state", "{objects}"),
+    "high_scale_oldest_active_age_seconds": ("Age of the oldest active high-scale source object", "s"),
+    "high_scale_publication_lag_seconds": ("Age of the oldest pending high-scale publication", "s"),
+    "high_scale_pending_manifests": ("Pending high-scale publication manifests", "{manifests}"),
+    "high_scale_rows_published_total": ("High-scale rows published", "{rows}"),
 }
 
 

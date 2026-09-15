@@ -28,7 +28,14 @@ from backend.core import metric_snapshots
 logger = logging.getLogger("backend.scheduler")
 
 
-def _safe_record(metric: str, value: float, *, service_id: str | None = None, task: str | None = None) -> None:
+def _safe_record(
+    metric: str,
+    value: float,
+    *,
+    service_id: str | None = None,
+    task: str | None = None,
+    **attributes: str,
+) -> None:
     """Wrap record_snapshot so one bad metric can't poison the rest of the tick."""
     try:
         metric_snapshots.record_snapshot(metric, value, service_id=service_id, task=task)
@@ -55,6 +62,12 @@ def _safe_record(metric: str, value: float, *, service_id: str | None = None, ta
                 value,
                 status=metric.removeprefix("ingest_ledger_"),
             )
+        elif metric.startswith("high_scale_"):
+            if service_id is not None:
+                attributes["service_id"] = service_id
+            if task is not None:
+                attributes["task"] = task
+            operational_metrics.record(metric, value, **attributes)
     except Exception as e:
         logger.debug("[metric_snapshot] operational metric %s failed: %s", metric, e)
 
@@ -236,6 +249,105 @@ def _sample_ingest_ledger() -> None:
         logger.debug("[metric_snapshot] ingest_ledger sample failed: %s", e)
 
 
+def _sample_high_scale() -> None:
+    if os.getenv("HIGH_SCALE_ENABLED", "").lower() not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        from backend import config as svcconfig
+        from backend.high_scale.postgres_control import PostgresControlPlane
+
+        control = PostgresControlPlane()
+        configured_domains = {
+            domain.strip() for domain in os.getenv("HIGH_SCALE_DOMAINS", "").split(",") if domain.strip()
+        }
+        source_statuses = (
+            "discovered",
+            "claimed",
+            "appended",
+            "archived",
+            "acknowledged",
+            "source_deleted",
+            "source_missing",
+        )
+        for cfg in svcconfig.list_configs():
+            service_id = cfg.get("service_id")
+            if not service_id:
+                continue
+            snapshot = control.operational_snapshot(service_id)
+            domains = configured_domains | {
+                row["domain"] for row in snapshot["source_objects"] + snapshot["source_age"] + snapshot["publications"]
+            }
+            for domain in domains:
+                for status in source_statuses:
+                    _safe_record(
+                        "high_scale_source_objects",
+                        0.0,
+                        service_id=service_id,
+                        domain=domain,
+                        status=status,
+                    )
+                _safe_record(
+                    "high_scale_oldest_active_age_seconds",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                )
+                _safe_record(
+                    "high_scale_pending_manifests",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                )
+                _safe_record(
+                    "high_scale_publication_lag_seconds",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                )
+                _safe_record(
+                    "high_scale_rows_published_total",
+                    0.0,
+                    service_id=service_id,
+                    domain=domain,
+                )
+            for row in snapshot["source_objects"]:
+                _safe_record(
+                    "high_scale_source_objects",
+                    float(row["count"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                    status=row["status"],
+                )
+            for row in snapshot["source_age"]:
+                _safe_record(
+                    "high_scale_oldest_active_age_seconds",
+                    row["age_seconds"],
+                    service_id=service_id,
+                    domain=row["domain"],
+                )
+            for row in snapshot["publications"]:
+                _safe_record(
+                    "high_scale_pending_manifests",
+                    float(row["pending"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                )
+                _safe_record(
+                    "high_scale_publication_lag_seconds",
+                    row["lag_seconds"],
+                    service_id=service_id,
+                    domain=row["domain"],
+                )
+                _safe_record(
+                    "high_scale_rows_published_total",
+                    float(row["published_rows"]),
+                    service_id=service_id,
+                    domain=row["domain"],
+                )
+    except Exception as e:
+        logger.debug("[metric_snapshot] high_scale sample failed: %s", e)
+
+
 def _sample_celery_workers() -> None:
     try:
         from backend.celery_app import app
@@ -267,6 +379,7 @@ def _run_metric_snapshot() -> None:
     _sample_ingest_lag()
     _sample_active_queries()
     _sample_ducklake_admission()
+    _sample_high_scale()
     _sample_os_vitals()
     _sample_celery_queues()
     _sample_ingest_ledger()

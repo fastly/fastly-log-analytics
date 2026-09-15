@@ -266,6 +266,70 @@ class PostgresControlPlane:
         with self.transaction() as connection:
             connection.execute(SCHEMA_DDL)
 
+    def operational_snapshot(self, service_id: str) -> dict[str, list[dict[str, Any]]]:
+        """Return bounded aggregate state for high-scale operational metrics."""
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            source_rows = connection.execute(
+                """
+                SELECT domain, status, COUNT(*) AS object_count
+                FROM high_scale_source_objects
+                WHERE service_id=%s
+                GROUP BY domain, status
+                ORDER BY domain, status
+                """,
+                (service_id,),
+            ).fetchall()
+            source_age_rows = connection.execute(
+                """
+                SELECT domain,
+                       EXTRACT(EPOCH FROM (clock_timestamp() - MIN(updated_at))) AS age_seconds
+                FROM high_scale_source_objects
+                WHERE service_id=%s
+                  AND status IN ('discovered', 'claimed', 'appended', 'archived')
+                GROUP BY domain
+                """,
+                (service_id,),
+            ).fetchall()
+            publication_rows = connection.execute(
+                """
+                SELECT domain,
+                       COUNT(*) FILTER (WHERE status='pending') AS pending_count,
+                       COALESCE(SUM(visible_rows) FILTER (WHERE status='visible'), 0) AS published_rows,
+                       COALESCE(
+                           EXTRACT(EPOCH FROM (clock_timestamp() - MIN(updated_at)
+                               FILTER (WHERE status='pending'))),
+                           0
+                       ) AS lag_seconds
+                FROM high_scale_publication_manifests
+                WHERE service_id=%s
+                GROUP BY domain
+                """,
+                (service_id,),
+            ).fetchall()
+        return {
+            "source_objects": [
+                {
+                    "domain": str(row[0]),
+                    "status": str(row[1]),
+                    "count": int(row[2]),
+                }
+                for row in source_rows
+            ],
+            "source_age": [
+                {"domain": str(row[0]), "age_seconds": max(0.0, float(row[1] or 0.0))} for row in source_age_rows
+            ],
+            "publications": [
+                {
+                    "domain": str(row[0]),
+                    "pending": int(row[1] or 0),
+                    "published_rows": int(row[2] or 0),
+                    "lag_seconds": max(0.0, float(row[3] or 0.0)),
+                }
+                for row in publication_rows
+            ],
+        }
+
     def initialize_owner(self, service_id: str, *, owner: str, source_cursor: str) -> OwnerEpochRecord:
         _require_text(service_id, "service_id")
         _require_text(owner, "owner")

@@ -125,6 +125,30 @@ def test_schema_is_explicit_and_transactional() -> None:
     assert "CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations" in ddl
 
 
+def test_operational_snapshot_aggregates_source_and_publication_state() -> None:
+    store, _, connection = _fake_store()
+    source_counts = MagicMock(fetchall=MagicMock(return_value=[("request", "claimed", 4)]))
+    source_age = MagicMock(fetchall=MagicMock(return_value=[("request", 9.5)]))
+    publications = MagicMock(fetchall=MagicMock(return_value=[("request", 2, 120, 3.25)]))
+    connection.execute.side_effect = [MagicMock(), source_counts, source_age, publications]
+
+    snapshot = store.operational_snapshot("svc")
+
+    assert snapshot == {
+        "source_objects": [{"domain": "request", "status": "claimed", "count": 4}],
+        "source_age": [{"domain": "request", "age_seconds": 9.5}],
+        "publications": [
+            {
+                "domain": "request",
+                "pending": 2,
+                "published_rows": 120,
+                "lag_seconds": 3.25,
+            }
+        ],
+    }
+    assert connection.execute.call_count == 4
+
+
 def test_batch_claim_is_fenced_and_starts_at_generation_one() -> None:
     store, _, connection = _fake_store()
     owner_row = _owner_row(owner="high_scale")
