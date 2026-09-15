@@ -17,7 +17,7 @@ import os
 import sys
 import threading
 import time
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 # Anchor the logger to the historical ``backend.scheduler`` name so
 # log filters in tests (and downstream parsers) keep working after
@@ -662,6 +662,7 @@ class Scheduler:
                         _run_rollup_hour_heal,
                         "cron",
                         minute=5,
+                        next_run_time=datetime.now(UTC) + timedelta(seconds=30),
                         args=[service_id],
                         id=rh_job_id,
                         max_instances=1,
