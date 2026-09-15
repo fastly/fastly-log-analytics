@@ -60,6 +60,18 @@ spec:
               value: {{ .Values.config.sseBackplane | quote }}
             - name: DUCKDB_MEMORY_LIMIT
               value: {{ .Values.config.duckdbMemoryLimit | quote }}
+            - name: DUCKDB_POOL_MAX_SIZE
+              value: {{ .Values.config.duckdbPoolMaxSize | quote }}
+            - name: DUCKDB_POOL_CONN_MEMORY_LIMIT
+              value: {{ .Values.config.duckdbPoolConnMemoryLimit | quote }}
+            - name: DUCKDB_RECYCLE_INTERVAL_MIN
+              value: {{ .Values.config.duckdbRecycleIntervalMin | quote }}
+            - name: DUCKDB_RECYCLE_RSS_THRESHOLD_MB
+              value: {{ .Values.config.duckdbRecycleRssThresholdMb | quote }}
+            - name: DUCKDB_RECYCLE_BARRIER_CAP_MS
+              value: {{ .Values.config.duckdbRecycleBarrierCapMs | quote }}
+            - name: BACKEND_GRACEFUL_RESTART_RSS_MB
+              value: {{ .Values.config.backendGracefulRestartRssMb | quote }}
             - name: DUCKDB_THREADS
               value: {{ .Values.config.duckdbThreads | quote }}
             {{- if .Values.config.debugResponses }}

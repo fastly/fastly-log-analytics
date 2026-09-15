@@ -172,6 +172,12 @@ config:
   # same condition: never set this to something a public Ingress can reach.
   localAdminCidrs: ""
   duckdbMemoryLimit: "4GB"
+  duckdbPoolMaxSize: "4"
+  duckdbPoolConnMemoryLimit: "1536MB"
+  duckdbRecycleIntervalMin: "5"
+  duckdbRecycleRssThresholdMb: "6000"
+  duckdbRecycleBarrierCapMs: "10000"
+  backendGracefulRestartRssMb: "9000"
   # DuckDB sizes its default thread pool off the visible CPU count, which
   # under a container runtime is the NODE's cores, not this pod's cgroup
   # limit (resources.limits.cpu above) -- confirmed live: an idle/lightly

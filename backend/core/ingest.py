@@ -1631,7 +1631,6 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
     inside the same DuckLake transaction as the INSERT, so redelivery or a
     sweeper reclaim after a crash-between-insert-and-ack cannot duplicate data.
     """
-    import duckdb as _duckdb
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
@@ -1675,8 +1674,9 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
         # starves the backend's dashboard readers ("Database is locked by
         # another process" 503s). An in-memory connection with FOS creds +
         # the transactional DuckLake catalog is all a convert needs.
-        duckdb_con = _duckdb.connect()
-        _configure_fos(duckdb_con, src)
+        from backend.core.duckdb import get_memory_connection
+
+        duckdb_con = get_memory_connection(src)
         admission_cm.__enter__()
         admission_entered = True
         if not _ducklake_attach(duckdb_con, src, read_only=False):
@@ -1857,7 +1857,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
 
     Returns a summary dict of per-outcome counts.
     """
-    import duckdb as _duckdb
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
@@ -1912,8 +1911,9 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         # Same single-writer-per-file rationale as convert_object: a worker
         # holding the per-service .duckdb FILE starves the backend's
         # dashboard readers into 503s. In-memory connection only.
-        duckdb_con = _duckdb.connect()
-        _configure_fos(duckdb_con, src)
+        from backend.core.duckdb import get_memory_connection
+
+        duckdb_con = get_memory_connection(src)
         admission_cm.__enter__()
         admission_entered = True
         if not _ducklake_attach(duckdb_con, src, read_only=False):
@@ -2727,7 +2727,6 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
     which is a no-op for the table that already succeeded (same source
     file, same rows) and completes the table that didn't.
     """
-    import duckdb as _duckdb
     import pyarrow as pa
 
     from backend import config as svcconfig
@@ -2781,8 +2780,9 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
         # Same single-writer-file rationale as convert_object: an in-memory
         # connection with FOS creds + the transactional DuckLake catalog,
         # never the per-service .duckdb file.
-        duckdb_con = _duckdb.connect()
-        _configure_fos(duckdb_con, src)
+        from backend.core.duckdb import get_memory_connection
+
+        duckdb_con = get_memory_connection(src)
         admission_cm.__enter__()
         admission_entered = True
         if not _ducklake_attach(duckdb_con, src, read_only=False):
@@ -2918,7 +2918,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     per file, unlike regular-log discovery's ``LEDGER_CONVERT_BATCH_SIZE``
     chunking, was the actual cause.
     """
-    import duckdb as _duckdb
     import pyarrow as pa
 
     from backend import config as svcconfig
@@ -2965,8 +2964,9 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     admission_entered = False
     try:
         fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
-        duckdb_con = _duckdb.connect()
-        _configure_fos(duckdb_con, src)
+        from backend.core.duckdb import get_memory_connection
+
+        duckdb_con = get_memory_connection(src)
         admission_cm.__enter__()
         admission_entered = True
         if not _ducklake_attach(duckdb_con, src, read_only=False):
@@ -3417,10 +3417,11 @@ def merge_lake_files(service_id: str) -> None:
         raise RuntimeError(f"no source registered for {service_id}")
     # In-memory connection: same single-writer-file-lock rationale as
     # convert_object — never open the per-service .duckdb from a worker.
-    con = _duckdb.connect()
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection(src)
     try:
         with ducklake_write_admission(service_id):
-            _configure_fos(con, src)
             if not _ducklake_attach(con, src, read_only=False):
                 raise RuntimeError("DuckLake read-write attach failed")
             con.execute("CALL ducklake_flush_inlined_data('lake')")

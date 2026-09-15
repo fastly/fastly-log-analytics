@@ -410,7 +410,9 @@ def get_top_bots(
     arcjet_bots: list[dict] = []
     ngwaf_bots: list[dict] = []
 
-    use_rollups = not filters and not svcconfig.is_durable_serving_mode(src)
+    # QueryRunner owns the durable-mode coverage gate. Keeping this path
+    # enabled lets ready high-throughput services avoid a full-range UA scan.
+    use_rollups = not filters
 
     # ── Arcjet UA matching ──────────────────────────────────────────
     # Rollup-served when no filters apply. The hour bundles already

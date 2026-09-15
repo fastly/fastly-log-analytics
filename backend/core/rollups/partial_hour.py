@@ -96,9 +96,9 @@ def read_partial_hour_all_fields(
     if con is not None:
         rows = con.execute(sql).fetchall()
         return [(r[0], r[1], int(r[2])) for r in rows]
-    import duckdb
+    from backend.core.duckdb import get_memory_connection
 
-    tmp_con = duckdb.connect(":memory:")
+    tmp_con = get_memory_connection()
     try:
         rows = tmp_con.execute(sql).fetchall()
         return [(r[0], r[1], int(r[2])) for r in rows]
@@ -121,9 +121,9 @@ def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnect
     if con is not None:
         row = con.execute(sql).fetchone()
         return int(row[0]) if row else 0
-    import duckdb
+    from backend.core.duckdb import get_memory_connection
 
-    tmp_con = duckdb.connect(":memory:")
+    tmp_con = get_memory_connection()
     try:
         row = tmp_con.execute(sql).fetchone()
         return int(row[0]) if row else 0
@@ -210,11 +210,11 @@ def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict
     if not safe_fields:
         return {"hour": active_hour, "new_files": 0, "duration_ms": (time.perf_counter() - t0) * 1000}
 
-    import duckdb
+    from backend.core.duckdb import get_memory_connection
 
     from ._common import quote_path_list
 
-    con = duckdb.connect(":memory:")
+    con = get_memory_connection()
     try:
         # DuckDB's session TimeZone defaults to the OS locale, not UTC (see
         # backend/core/duckdb.py's connection setup) — without pinning it,

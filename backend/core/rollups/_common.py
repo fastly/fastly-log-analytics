@@ -889,7 +889,9 @@ def compact_closed_days(
     lock_key = source.get("name", "default")
 
     rebuilt = 0
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for bundle_filename, tmp_prefix, build_copy_sql in jobs:
             hours_by_day: dict[str, list[str]] = {}

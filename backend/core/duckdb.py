@@ -931,7 +931,7 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
             pass
 
 
-def get_memory_connection(source: dict) -> duckdb.DuckDBPyConnection:
+def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Return a tracked DuckDB connection in memory."""
     con = duckdb.connect(":memory:")
     # Copy relevant settings from main connection logic
@@ -941,8 +941,15 @@ def get_memory_connection(source: dict) -> duckdb.DuckDBPyConnection:
     except Exception:
         pass
 
+    try:
+        n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
+        con.execute(f"SET threads = {n_threads};")
+    except Exception:
+        pass
+
     con.execute("SET TimeZone='UTC';")
-    _configure_fos(con, source)
+    if source is not None:
+        _configure_fos(con, source)
 
     con.execute("SET enable_http_metadata_cache=true;")
     con.execute("SET enable_object_cache=true;")

@@ -82,7 +82,9 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
     rebuilt = 0
     # :memory: DuckDB — see bundle_hours for the rationale (avoid
     # contention on the per-service .duckdb file held by uvicorn).
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for day in days:
             if day == active_day:
@@ -313,7 +315,9 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
         except OSError:
             pass
 
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         # Field set spans both the per-field hour tree (live, not-yet-bundled
         # hours) AND any field that appears in a bundled-hour file (which is

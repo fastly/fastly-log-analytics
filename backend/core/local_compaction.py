@@ -48,8 +48,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import duckdb
-
+from backend.core.duckdb import get_memory_connection
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
@@ -495,7 +494,7 @@ def _rollup_bins(
             tmp_path = os.path.join(out_root, f"{out_name}.tmp")
             out_path = os.path.join(out_root, out_name)
             try:
-                con = duckdb.connect(":memory:")
+                con = get_memory_connection()
                 try:
                     paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in bin_paths)
                     probe = (
@@ -736,7 +735,7 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     # Use in-memory DuckDB so we don't contend with the per-service writer
     # lock. read_parquet with explicit list + union_by_name matches the
     # view's semantics so the resulting file is query-compatible.
-    con = duckdb.connect(":memory:")
+    con = get_memory_connection()
     try:
         paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
         # Strip the computed `timestamp_hour` / `dt` columns from output
