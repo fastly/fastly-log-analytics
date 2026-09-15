@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # App-wide settings (not per-service)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
+DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
 
@@ -936,8 +937,9 @@ def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnecti
     con = duckdb.connect(":memory:")
     # Copy relevant settings from main connection logic
     try:
-        if DUCKDB_MEMORY_LIMIT:
-            con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
+        limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
+        if limit:
+            con.execute(f"SET max_memory = '{limit}';")
     except Exception:
         pass
 
@@ -1078,8 +1080,9 @@ def get_connection(
 
     # Apply per-connection settings. DuckDB applies these to the session only.
     try:
-        if DUCKDB_MEMORY_LIMIT:
-            con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
+        limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
+        if limit:
+            con.execute(f"SET max_memory = '{limit}';")
     except Exception:
         pass
     # DUCKDB_THREADS is consumed below inside _cached_n_threads initialization
