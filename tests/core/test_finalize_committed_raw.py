@@ -405,3 +405,28 @@ def test_merge_lake_files_raises_when_the_lake_attach_fails():
     ):
         with pytest.raises(RuntimeError, match="attach failed"):
             merge_lake_files(SERVICE_ID)
+
+
+def test_merge_lake_files_publishes_after_schema_mismatch_compaction_failure():
+    class Connection:
+        def execute(self, sql):
+            if "ducklake_merge_adjacent_files" in sql:
+                raise duckdb.InvalidInputException("schema mismatch in glob")
+
+        def close(self):
+            pass
+
+    def attach(con_arg, src_arg, read_only=False):
+        con_arg.execute("CALL ducklake_flush_inlined_data('lake')")
+        return True
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
+        patch("backend.core.ingest._configure_fos"),
+        patch("duckdb.connect", return_value=Connection()),
+        patch("backend.core.ingest._mark_ledger_published") as mark_published,
+    ):
+        merge_lake_files(SERVICE_ID)
+
+    mark_published.assert_called_once_with(SERVICE_ID)

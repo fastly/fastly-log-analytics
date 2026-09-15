@@ -3424,7 +3424,17 @@ def merge_lake_files(service_id: str) -> None:
             if not _ducklake_attach(con, src, read_only=False):
                 raise RuntimeError("DuckLake read-write attach failed")
             con.execute("CALL ducklake_flush_inlined_data('lake')")
-            con.execute("CALL ducklake_merge_adjacent_files('lake')")
+            try:
+                con.execute("CALL ducklake_merge_adjacent_files('lake')")
+            except _duckdb.Error as exc:
+                if "schema mismatch in glob" not in str(exc):
+                    raise
+                logger.warning(
+                    "[ledger] %s: skipping DuckLake adjacent-file compaction after schema mismatch; "
+                    "inlined rows were flushed and remain durable: %s",
+                    service_id,
+                    exc,
+                )
             _mark_ledger_published(service_id)
     finally:
         con.close()
