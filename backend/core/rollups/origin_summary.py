@@ -98,7 +98,7 @@ def build_origin_summary_bundles(service_id: str, source: dict, hours: list[str]
         ottlb_p95_expr = 'CAST(APPROX_QUANTILE("ottlb", 0.95) AS DOUBLE)' if "ottlb" in cols else "CAST(NULL AS DOUBLE)"
         if "elapsed" in cols and "ottlb" in cols:
             cdn_ovh_count_expr = 'CAST(COUNT(*) FILTER (WHERE "elapsed" IS NOT NULL AND "ottlb" IS NOT NULL) AS BIGINT)'
-            cdn_ovh_p50_expr = 'CAST(MEDIAN("elapsed" - "ottlb") AS DOUBLE)'
+            cdn_ovh_p50_expr = 'CAST(MEDIAN(CAST("elapsed" AS DOUBLE) - CAST("ottlb" AS DOUBLE)) AS DOUBLE)'
         else:
             cdn_ovh_count_expr = "CAST(0 AS BIGINT)"
             cdn_ovh_p50_expr = "CAST(NULL AS DOUBLE)"
