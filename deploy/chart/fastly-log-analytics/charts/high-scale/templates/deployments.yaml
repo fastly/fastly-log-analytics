@@ -83,8 +83,8 @@ spec:
           {{- with $root.Values.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          - name: HIGH_SCALE_WORKER_ID
-            value: {{ default (printf "%s-%s" $root.Release.Name $workload) $root.Values.workerId | quote }}
+            - name: HIGH_SCALE_WORKER_ID
+              value: {{ default (printf "%s-%s" $root.Release.Name $workload) $root.Values.workerId | quote }}
           {{- if or $root.Values.secret.existingName $root.Values.secret.create }}
           envFrom:
             - secretRef:

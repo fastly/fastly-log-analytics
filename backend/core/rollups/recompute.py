@@ -502,13 +502,16 @@ def backfill_missing_hour_bundles(
     _configure_fos(con, source)
     try:
         update_iceberg_view(con, source)
-        lake_row = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
-        if lake_row is None:
-            logger.warning(
-                "[rollups] %s: backfill_missing_hour_bundles could not attach DuckLake catalog",
-                service_id,
-            )
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(source):
+            lake_row = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
+            if lake_row is None:
+                logger.warning(
+                    "[rollups] %s: backfill_missing_hour_bundles could not attach DuckLake catalog",
+                    service_id,
+                )
+                return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         # The view's actual SQL identifier is set by update_iceberg_view
         # — query through ``information_schema`` to find it rather than
         # guess (the name is derived from source["name"]/svc_name, not
