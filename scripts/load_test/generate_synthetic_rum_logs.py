@@ -66,6 +66,7 @@ def _synthetic_rum_line(ts: datetime, service_id: str) -> dict:
     vital = random.choice(VITALS)
     lo, hi = VITAL_RANGES[vital]
     value = random.uniform(lo, hi)
+    rating = random.choice(RATINGS)
     rum_body = {
         "meta": {
             "browser": {"name": browser, "mobile": mobile},
@@ -77,7 +78,7 @@ def _synthetic_rum_line(ts: datetime, service_id: str) -> dict:
             {
                 "type": "web-vitals",
                 "values": {vital: value},
-                "context": {"rating": random.choice(RATINGS)},
+                "context": {"rating": rating},
             }
         ],
     }
@@ -92,6 +93,10 @@ def _synthetic_rum_line(ts: datetime, service_id: str) -> dict:
         "ttfb": random.uniform(20, 300),
         "rum_cid": uuid.uuid4().hex[:16],
         "fastly_req_id": uuid.uuid4().hex,
+        "rum_metric_name": vital,
+        "rum_metric_value": value,
+        "rum_metric_rating": rating,
+        "rum_pathname": path,
         "rum_body": json.dumps(rum_body),
     }
 

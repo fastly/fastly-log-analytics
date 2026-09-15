@@ -68,6 +68,7 @@ def decode_source_object(
                     "raw_json": raw_line.decode("utf-8"),
                 }
             )
+            _normalize_serving_fields(event, selected_domain)
             event["event_id"] = _event_id(event, selected_domain)
             events.append(event)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -89,6 +90,28 @@ def _decode_payload(payload: bytes) -> bytes:
         except (OSError, EOFError) as exc:
             raise ValueError("source gzip payload is invalid") from exc
     return payload
+
+
+def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
+    if domain == "rum_vitals":
+        event["client_id"] = event.get("rum_cid") or ""
+        event["metric_name"] = event.get("rum_metric_name") or ""
+        raw_metric_value = event.get("rum_metric_value")
+        if raw_metric_value in (None, ""):
+            event["metric_value"] = None
+        elif isinstance(raw_metric_value, (int, float)) and not isinstance(raw_metric_value, bool):
+            event["metric_value"] = float(raw_metric_value)
+        elif isinstance(raw_metric_value, str):
+            event["metric_value"] = float(raw_metric_value)
+        else:
+            event["metric_value"] = None
+        event["metric_rating"] = event.get("rum_metric_rating") or ""
+        event["pathname"] = event.get("rum_pathname") or ""
+    elif domain == "rum_errors":
+        event["client_id"] = event.get("rum_cid") or ""
+        event["error_message"] = event.get("rum_error_message") or ""
+        event["error_file"] = event.get("rum_error_file") or ""
+        event["pathname"] = event.get("rum_pathname") or ""
 
 
 def _event_id(event: dict[str, Any], domain: str) -> str:

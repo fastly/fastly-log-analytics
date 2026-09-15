@@ -40,3 +40,33 @@ def test_decode_quarantines_malformed_records_losslessly() -> None:
     assert result.quarantined_rows == 2
     assert [item.raw_line for item in result.dead_letters] == [b"not-json", b'["not","an","object"]']
     assert json.loads(result.events[0]["raw_json"])["url"] == "/ok"
+
+
+def test_decode_normalizes_dedicated_rum_vitals_fields_for_serving() -> None:
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"cid-1","rum_metric_name":"LCP","rum_metric_value":"123.5",'
+        b'"rum_metric_rating":"good","rum_pathname":"/home"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-1"
+    assert result.events[0]["metric_name"] == "LCP"
+    assert result.events[0]["metric_value"] == 123.5
+    assert result.events[0]["metric_rating"] == "good"
+    assert result.events[0]["pathname"] == "/home"
+
+
+def test_decode_normalizes_dedicated_rum_error_fields_for_serving() -> None:
+    source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/errors.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"cid-2","rum_error_message":"boom","rum_error_file":"app.js","rum_pathname":"/checkout"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-2"
+    assert result.events[0]["error_message"] == "boom"
+    assert result.events[0]["error_file"] == "app.js"
+    assert result.events[0]["pathname"] == "/checkout"

@@ -119,7 +119,11 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS is required")
-    worker_id = os.getenv("HIGH_SCALE_WORKER_ID", "").strip() or f"high-scale-{os.getpid()}"
+    worker_id = (
+        os.getenv("HIGH_SCALE_WORKER_ID", "").strip()
+        or os.getenv("POD_NAME", "").strip()
+        or f"high-scale-{os.getpid()}"
+    )
     page_size = int(os.getenv("HIGH_SCALE_PAGE_SIZE", "100"))
     lease_seconds = float(os.getenv("HIGH_SCALE_LEASE_SECONDS", "300"))
     interval_seconds = float(os.getenv("HIGH_SCALE_WORKER_INTERVAL_SECONDS", "5"))
