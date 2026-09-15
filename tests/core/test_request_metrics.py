@@ -93,6 +93,26 @@ def test_observation_reads_inlined_rows_ignoring_local_parquet_and_native_file(d
     assert config.get_status(source["name"])["request"] == observed["request"]
 
 
+def test_observation_uses_durable_table_when_serving_view_is_missing(durable_metrics, monkeypatch):
+    source, replace_rows, _, _ = durable_metrics
+    latest = datetime(2026, 9, 7, 19, tzinfo=UTC)
+    replace_rows([latest])
+
+    from backend.core.duckdb import open_serving_connection as real_open
+
+    def open_without_serving_view(*args, **kwargs):
+        con = real_open(*args, **kwargs)
+        con.execute(f'DROP VIEW IF EXISTS "{ducklake_table_name(source)}"')
+        return con
+
+    monkeypatch.setattr("backend.core.duckdb.open_serving_connection", open_without_serving_view)
+
+    observed = request_metrics.refresh_durable_request_metrics(source)
+
+    assert observed["request"]["total_rows"] == 1
+    assert observed["request"]["latest_log_at"] == latest.isoformat()
+
+
 def test_observation_reads_durable_rum_extents(durable_metrics):
     source, replace_rows, _, _ = durable_metrics
     replace_rows([datetime(2026, 9, 7, 12, tzinfo=UTC)])
