@@ -98,13 +98,15 @@ spec:
             # anyone hairpinning through a plain hostname.
             - name: LOCAL_HOSTS
               value: {{ printf "%s-backend,%s-frontend" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) | quote }}
-            {{- if .Values.observability.enabled }}
             - name: OTEL_EXPORTER
+            {{- if .Values.observability.enabled }}
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
               value: "http://prometheus:9090/api/v1/otlp/v1/metrics"
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: "http://tempo:4318/v1/traces"
+            {{- else }}
+              value: "prometheus"
             {{- end }}
           # kubelet's httpGet probe sends the pod IP as the Host header by
           # default (no override), which backend/utils/remote_access.py's

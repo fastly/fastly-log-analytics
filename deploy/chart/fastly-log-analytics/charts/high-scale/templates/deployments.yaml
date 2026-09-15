@@ -19,6 +19,10 @@ spec:
       app.kubernetes.io/component: {{ $workload }}
   template:
     metadata:
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         {{- include "high-scale.workloadLabels" (dict "root" $root "workload" $workload) | nindent 8 }}
     spec:

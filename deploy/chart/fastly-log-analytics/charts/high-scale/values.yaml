@@ -22,7 +22,9 @@ secret:
   create: false
   stringData: {}
 
-env: []
+env:
+  - name: OTEL_EXPORTER
+    value: prometheus
 
 # A deterministic identity lets a replacement pod recover leases left by the
 # previous pod instead of deriving a new identity from its process ID.
@@ -33,6 +35,12 @@ sharedState:
   configSubPath: configs
   dataSubPath: data
   cacheSubPath: cache
+
+podAnnotations:
+  prometheus.io/scrape: 'true'
+  prometheus.io/port: '8000'
+  prometheus.io/path: '/metrics'
+
 
 podSecurityContext:
   runAsNonRoot: true

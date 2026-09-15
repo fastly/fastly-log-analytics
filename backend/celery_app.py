@@ -92,6 +92,20 @@ def _worker_process_init(**_kwargs):
 
     validate_deployment_mode()
 
+    # Start Prometheus metrics server for worker if configured
+    if os.environ.get("OTEL_EXPORTER") == "prometheus":
+        try:
+            import logging
+
+            from prometheus_client import start_http_server
+
+            logging.info("Starting Prometheus metrics server on port 8000")
+            start_http_server(8000)
+        except Exception as e:
+            import logging
+
+            logging.warning(f"Failed to start prometheus_client: {e}")
+
     # Workers issue metadata queries (ingest ledger, cron_runs) and may boot
     # before — or without — the API pod, so they cannot rely on the backend
     # lifespan having created the Postgres schema. Idempotent and

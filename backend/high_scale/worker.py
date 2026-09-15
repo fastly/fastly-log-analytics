@@ -268,6 +268,21 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def main() -> None:
+    import os
+
+    if os.environ.get("OTEL_EXPORTER") == "prometheus":
+        try:
+            import logging
+
+            from prometheus_client import start_http_server
+
+            logging.info("Starting Prometheus metrics server on port 8000")
+            start_http_server(8000)
+        except Exception as e:
+            import logging
+
+            logging.warning(f"Failed to start prometheus_client: {e}")
+
     parser = ArgumentParser(description="Run the bounded high-scale source worker")
     parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
     parser.add_argument("--iterations", type=int, default=None)

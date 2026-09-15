@@ -139,6 +139,16 @@ def _setup_sdk() -> None:
                     export_interval_millis=60_000,
                 )
             )
+
+        elif exporter == "prometheus":
+            try:
+                from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+                meter_readers.append(PrometheusMetricReader())
+            except ImportError:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning("opentelemetry-exporter-prometheus not installed.")
         elif exporter == "otlp":
             # The OTLP/HTTP exporters resolve their targets from the standard
             # OTEL_EXPORTER_OTLP_{METRICS,TRACES}_ENDPOINT env vars (falling

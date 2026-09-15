@@ -1135,6 +1135,19 @@ _HEALTH_ERROR_RESPONSES = {code: spec for code, spec in DEFAULT_ERROR_RESPONSES.
 _STUCK_SYNC_RUNNING_MINS = 15
 
 
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    try:
+        from fastapi.responses import Response
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    except ImportError:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=501, detail="Prometheus client not installed")
+
+
 @app.get("/api/health", tags=["meta"], responses=_HEALTH_ERROR_RESPONSES)
 def health_check(
     request: Request,
