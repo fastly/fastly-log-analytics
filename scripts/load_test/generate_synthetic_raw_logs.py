@@ -39,10 +39,12 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
 from backend.provision.log_paths import analytics_log_path  # noqa: E402
+from scripts.load_test.release_schedule import ReleaseReport, release_schedule  # noqa: E402
 
 COUNTRIES = ["US", "GB", "DE", "JP", "BR", "IN", "AU", "FR", "CA", "NL"]
 HOSTS = ["www.example.com", "api.example.com", "img.example.com"]
@@ -239,7 +241,93 @@ def _run_one_period(
     return TickResult(period_start, shards - errors, total_lines, total_bytes, elapsed, errors)
 
 
-def main() -> int:
+def _write_prepared_period(
+    prepare_dir: Path,
+    index: int,
+    generated: list[tuple[str, bytes, int]],
+) -> dict:
+    period_dir = prepare_dir / f"period-{index:06d}"
+    period_dir.mkdir(parents=True, exist_ok=True)
+    shards = []
+    for shard, (key, body, lines) in enumerate(generated):
+        filename = f"shard-{shard:06d}.json.gz"
+        (period_dir / filename).write_bytes(body)
+        shards.append({"key": key, "filename": filename, "lines": lines, "bytes": len(body)})
+    return {"shards": shards}
+
+
+def _write_manifest(prepare_dir: Path, periods: list[dict], args: argparse.Namespace) -> None:
+    (prepare_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "target_rps": args.target_rps,
+                "period_seconds": args.log_period_seconds,
+                "duration_seconds": args.duration_seconds,
+                "shards": args.shards,
+                "periods": periods,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _load_manifest(prepare_dir: Path) -> dict:
+    try:
+        return json.loads((prepare_dir / "manifest.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"prepared directory has no manifest: {prepare_dir}") from exc
+
+
+def _release_prepared(
+    *,
+    prepare_dir: Path,
+    manifest: dict,
+    fos_client,
+    bucket: str,
+    dry_run: bool,
+    schedule: tuple[datetime, ...],
+) -> list[ReleaseReport]:
+    reports = []
+    for index, (period, scheduled_at) in enumerate(zip(manifest["periods"], schedule, strict=True)):
+        period_dir = prepare_dir / f"period-{index:06d}"
+        first_upload = last_upload = None
+        started = time.monotonic()
+        total_bytes = total_lines = errors = files = 0
+        while True:
+            wait = (scheduled_at - datetime.now(UTC)).total_seconds()
+            if wait <= 0:
+                break
+            time.sleep(min(wait, 0.1))
+        for shard in period["shards"]:
+            body = (period_dir / shard["filename"]).read_bytes()
+            try:
+                if not dry_run:
+                    fos_client.put_object(Bucket=bucket, Key=shard["key"], Body=body)
+                uploaded_at = datetime.now(UTC)
+                first_upload = first_upload or uploaded_at
+                total_bytes += len(body)
+                total_lines += shard["lines"]
+                files += 1
+                last_upload = datetime.now(UTC)
+            except Exception as exc:
+                errors += 1
+                print(f"  [error] uploading {shard['key']}: {exc}", file=sys.stderr)
+        report = ReleaseReport(
+            scheduled_at, first_upload, last_upload, total_bytes, total_lines, time.monotonic() - started, files, errors
+        )
+        reports.append(report)
+        print(
+            f"  release {index + 1}/{len(schedule)} scheduled={scheduled_at.isoformat()} "
+            f"first={first_upload.isoformat() if first_upload else '-'} "
+            f"last={last_upload.isoformat() if last_upload else '-'} "
+            f"{total_lines} lines, {total_bytes / 1e6:.2f} MB, wall={report.wall_seconds:.2f}s"
+        )
+    return reports
+
+
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bucket", required=True)
     p.add_argument("--service-id", required=True)
@@ -247,22 +335,30 @@ def main() -> int:
     p.add_argument("--access-key-id", default="")
     p.add_argument("--secret-access-key", default="")
     p.add_argument("--target-rps", type=int, required=True)
-    p.add_argument("--log-period-seconds", type=int, default=10, help="Matches the service's configured log_period.")
-    p.add_argument(
-        "--shards",
-        type=int,
-        default=20,
-        help="Concurrent writer shards per period (simulates per-POP/per-node fan-out). Assumed, not measured -- tune against real production fan-out data once available.",
-    )
+    p.add_argument("--log-period-seconds", type=int, default=10)
+    p.add_argument("--shards", type=int, default=20)
     p.add_argument("--duration-seconds", type=int, default=60)
-    p.add_argument(
-        "--gen-workers",
-        type=int,
-        default=None,
-        help="Process pool size for line generation/gzip (CPU-bound, GIL-limited under threads). Defaults to os.cpu_count().",
-    )
-    p.add_argument("--dry-run", action="store_true", help="Generate/gzip locally; skip the FOS upload.")
+    p.add_argument("--gen-workers", type=int, default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--prepare-dir", type=Path)
+    p.add_argument("--release-only", action="store_true")
+    p.add_argument("--release-interval-seconds", type=int)
+    return p
+
+
+def main() -> int:
+    p = build_parser()
     args = p.parse_args()
+    if args.release_only and args.prepare_dir is None:
+        p.error("--release-only requires --prepare-dir")
+    if args.release_interval_seconds is not None and args.release_interval_seconds <= 0:
+        p.error("--release-interval-seconds must be positive")
+    if args.prepare_dir is not None and args.release_only:
+        manifest = _load_manifest(args.prepare_dir)
+        args.target_rps = manifest["target_rps"]
+        args.log_period_seconds = manifest["period_seconds"]
+        args.duration_seconds = manifest["duration_seconds"]
+        args.shards = manifest["shards"]
 
     service_id = args.service_id
     lines_per_period = args.target_rps * args.log_period_seconds
@@ -300,6 +396,42 @@ def main() -> int:
 
     start = datetime.now(UTC).replace(microsecond=0)
     n_periods = max(1, args.duration_seconds // args.log_period_seconds)
+    if args.prepare_dir is not None:
+        args.prepare_dir.mkdir(parents=True, exist_ok=True)
+        if not args.release_only:
+            periods = []
+            with ProcessPoolExecutor(max_workers=args.gen_workers) as pool:
+                for i in range(n_periods):
+                    period_start = start + timedelta(seconds=i * args.log_period_seconds)
+                    futures = [
+                        pool.submit(_generate_shard, period_start, service_id, lines_per_shard, s)
+                        for s in range(args.shards)
+                    ]
+                    periods.append(_write_prepared_period(args.prepare_dir, i, [future.result() for future in futures]))
+            _write_manifest(args.prepare_dir, periods, args)
+        release_started_at = datetime.now(UTC)
+        manifest = _load_manifest(args.prepare_dir)
+        schedule = release_schedule(
+            target_rps=args.target_rps,
+            period_seconds=args.log_period_seconds,
+            duration_seconds=args.duration_seconds,
+            started_at=release_started_at,
+            release_interval_seconds=args.release_interval_seconds,
+        )
+        reports = _release_prepared(
+            prepare_dir=args.prepare_dir,
+            manifest=manifest,
+            fos_client=fos_client,
+            bucket=args.bucket,
+            dry_run=args.dry_run,
+            schedule=schedule,
+        )
+        total_errors = sum(report.errors for report in reports)
+        print(
+            f"\nDone: {sum(r.files for r in reports)} files, {sum(r.lines for r in reports)} lines, {sum(r.bytes_uploaded for r in reports) / 1e6:.1f} MB, {total_errors} shard errors"
+        )
+        return 1 if total_errors else 0
+
     results: list[TickResult] = []
     with ProcessPoolExecutor(max_workers=args.gen_workers) as pool:
         for i in range(n_periods):
