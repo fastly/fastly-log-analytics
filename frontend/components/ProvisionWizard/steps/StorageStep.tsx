@@ -85,10 +85,11 @@ export function StorageStep({ s }: { s: WizardState }) {
                       <SelectItem value="us-central-1">
                         US Central (Chicago)
                       </SelectItem>
-                      <SelectItem value="eu-central">
+                      <SelectItem value="eu-central-1">
                         EU Central (Frankfurt)
                       </SelectItem>
                       <SelectItem value="eu-south-1">EU South (Milan)</SelectItem>
+                      <SelectItem value="eu-west-1">EU West (Paris)</SelectItem>
                       <SelectItem value="uk-east-1">UK East (London)</SelectItem>
                       <SelectItem value="jp-central-1">
                         JP Central (Tokyo)
