@@ -192,10 +192,9 @@ def _run_rollup_hour_heal(service_id: str) -> None:
     before the boundary) never retrigger — diagnosed 2026-07-06 as top-N
     cards silently missing every closed hour of the current day on the
     low-traffic service. Reuses the idempotent
-    ``backfill_missing_hour_bundles`` self-heal. Once durable-mode startup
-    coverage is ready, it uses a 1-day lookback so the steady-state tick is
-    cheap. If startup coverage is not ready yet, the first successful heal
-    uses the full 30-day horizon before enabling durable rollup reads. The
+    ``backfill_missing_hour_bundles`` self-heal. Durable-mode startup coverage
+    uses the dashboard's 1-day lookback so the first successful heal can
+    enable the fast path without waiting for the daily 30-day deep pass. The
     daily compaction job keeps its 30-day deep pass.
 
     LOCAL-only writes (rollup parquet under cache/) — no FOS traffic, so
@@ -237,7 +236,7 @@ def _run_rollup_hour_heal(service_id: str) -> None:
             coverage_ready = rollup_coverage_ready(service_id)
         else:
             coverage_ready = True
-        lookback_days = 1 if coverage_ready else 30
+        lookback_days = 1
         max_missing_hours = 1 if durable_mode and not coverage_ready else None
         heal = backfill_missing_hour_bundles(
             service_id,
@@ -246,10 +245,9 @@ def _run_rollup_hour_heal(service_id: str) -> None:
             max_missing_hours=max_missing_hours,
         )
         duration = time.time() - start_time
-        # Durable mode only becomes trusted after a full-horizon pass. A
-        # failed or timed-out startup catch-up therefore self-heals on the
-        # next hourly tick without enabling readers from a one-day partial
-        # cache.
+        # Durable mode becomes trusted once the dashboard lookback is
+        # complete. A failed or timed-out startup catch-up self-heals on the
+        # next tick.
         if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
             try:
                 from backend.core.rollup_readiness import mark_rollup_coverage_ready

@@ -295,8 +295,8 @@ def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stu
     assert "2 hour(s) bundled" in kwargs["summary"]
 
 
-def test_rollup_heal_full_catchup_marks_ready_under_durable_mode(monkeypatch, stub_source, stub_progress):
-    """A durable service gets a full-horizon pass before becoming trusted."""
+def test_rollup_heal_dashboard_catchup_marks_ready_under_durable_mode(monkeypatch, stub_source, stub_progress):
+    """A durable service gets a complete dashboard-window pass before becoming trusted."""
     heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1, "coverage_verified": True})
     monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
     monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
@@ -307,7 +307,7 @@ def test_rollup_heal_full_catchup_marks_ready_under_durable_mode(monkeypatch, st
     compaction._run_rollup_hour_heal.__wrapped__("svc-1")
 
     mark_mock.assert_called_once_with("svc-1")
-    assert heal_mock.call_args.kwargs.get("lookback_days") == 30
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 1
     assert heal_mock.call_args.kwargs.get("max_missing_hours") == 1
 
 

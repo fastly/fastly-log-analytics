@@ -1181,6 +1181,7 @@ class Scheduler:
                         _run_rollup_hour_heal,
                         "cron",
                         minute=5,
+                        next_run_time=datetime.now(UTC) + timedelta(seconds=30),
                         args=[service_id],
                         id=rh_job_id,
                         max_instances=1,
