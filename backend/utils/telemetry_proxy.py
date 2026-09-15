@@ -3,7 +3,7 @@ and PyIceberg so we can centrally capture FOS/CDN telemetry, re-sign SigV4
 on behalf of unsigned clients, and apply policy guardrails (e.g. dashboard
 reads MUST NOT hit cloud).
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md
+The implementation and tests below are the source of truth for proxy behavior.
 """
 
 from __future__ import annotations

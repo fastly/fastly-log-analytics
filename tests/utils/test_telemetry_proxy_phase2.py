@@ -1,8 +1,5 @@
 """Phase 2 tests for the telemetry proxy — boto3 routed through the proxy.
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md (§Phase 2)
-Plan: docs/superpowers/plans/2026-05-19-telemetry-proxy-phase2.md
-
 These tests live in their own file (not in test_telemetry_proxy.py) so the
 Phase 2 fixtures don't pollute the Phase 1 file and so the dual-mode
 comparison fixture stays isolated. Shared infrastructure with the Phase 1

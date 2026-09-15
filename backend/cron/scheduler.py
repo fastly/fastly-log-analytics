@@ -1096,8 +1096,7 @@ class Scheduler:
             # instead of "since the top of the hour". Always-on like
             # local_compact — benefits file-mode and durable-mode services
             # alike. Back off to a longer interval here (and in the misfire
-            # grace) if profiling shows contention with request-serving; see
-            # docs/superpowers/specs/2026-09-09-partial-hour-speed-layer-design.md.
+            # grace) if profiling shows contention with request-serving.
             ph_job_id = f"partial_hour_merge_{service_id}"
             seen_ids.add(ph_job_id)
             if ph_job_id not in self._job_ids:

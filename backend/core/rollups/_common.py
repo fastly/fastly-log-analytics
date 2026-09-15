@@ -107,15 +107,23 @@ def _get_fields(src: dict) -> list[str]:
     that does the unnest at write time so the dashboard reader doesn't
     have to rescan + unnest the raw window at query time.
 
-    Excludes METRICS-group catalog entries (requests, hit_rate,
-    p95_latency, ...) — those have ``vcl=None``, meaning they're a chart-
-    metric-only synthetic concept with no real per-row column to SELECT.
-    See AGENTS.md Trap #40 for the live incident this fixes.
+    Excludes every OTHER derived field (``vcl=None``: METRICS group like
+    requests/hit_rate/p95_latency, plus any VIRTUAL-group field with no
+    dedicated backing, plus INTERNAL) — those have no real per-row column
+    to SELECT. Checked via the registry's own ``is_derived``, not a hand-
+    maintained list: a hand list is exactly how this broke live (a VIRTUAL-
+    group field, ``_bot_name``, was never in the narrow ``_VIRTUAL_FIELDS``
+    tuple this used to filter against, so it slipped through as an "actual"
+    field). See AGENTS.md Trap #40.
     """
-    from backend.core.field_registry import Group, in_group
+    from backend.core.field_registry import try_get
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
 
-    metrics_only_fields = {f.code for f in in_group(Group.METRICS)}
+    def _is_unbacked_derived(code: str) -> bool:
+        if code in _VIRTUAL_FIELDS:
+            return False
+        spec = try_get(code)
+        return spec is not None and spec.is_derived
 
     lf_config = src.get("log_fields") or {}
     custom_field_names: list[str] = []
@@ -128,7 +136,7 @@ def _get_fields(src: dict) -> list[str]:
             continue
         custom_field_names.append(name)
     actual_fields = [
-        f for f in FIELDS if f not in _VIRTUAL_FIELDS and f not in metrics_only_fields and _is_safe_ident(f)
+        f for f in FIELDS if f not in _VIRTUAL_FIELDS and not _is_unbacked_derived(f) and _is_safe_ident(f)
     ]
     virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
     return actual_fields + virtual_fields + custom_field_names

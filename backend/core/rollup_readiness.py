@@ -1,9 +1,8 @@
 """Per-service, in-process flag: has this durable-serving pod confirmed its
 local closed-hour rollup cache reflects at least one full backfill pass?
 
-Deliberately NOT persisted anywhere (no Postgres/SQLite row, no file) — it
-exists only to bridge the pod-restart bootstrap window described in
-docs/superpowers/specs/2026-09-09-partial-hour-speed-layer-design.md Part 1.
+Deliberately NOT persisted anywhere (no Postgres/SQLite row, no file). It
+bridges the pod-restart bootstrap window for pod-local rollup accelerators.
 A restart naturally resets it to False, which is correct: a fresh pod must
 re-confirm coverage before trusting local rollups again.
 """

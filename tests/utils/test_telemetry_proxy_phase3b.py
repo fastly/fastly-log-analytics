@@ -1,8 +1,5 @@
 """Phase 3b tests for the telemetry proxy — PyIceberg routed through the proxy.
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md (§Phase 3b)
-Plan: docs/superpowers/plans/2026-05-19-telemetry-proxy-phase3b.md
-
 These tests live in their own file (matching the Phase 2 / Phase 3a split) so
 the Phase 3b fixtures don't pollute earlier files. Shared infrastructure with
 Phase 1/2/3a is duplicated on purpose — moving it to conftest.py would silently

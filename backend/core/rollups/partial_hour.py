@@ -1,9 +1,8 @@
 """Incremental partial-hour rollup — the "speed layer" for the currently-
 open hour.
 
-Deliberately a SEPARATE tree from ``rollups/hour``/``rollups/hour_bundled``
-(see docs/superpowers/specs/2026-09-09-partial-hour-speed-layer-design.md
-Part 2): readers only ever consult ``rollups/partial_hour/hour=<H>`` while
+Deliberately a SEPARATE tree from ``rollups/hour``/``rollups/hour_bundled``:
+readers only ever consult ``rollups/partial_hour/hour=<H>`` while
 ``H`` is the current UTC hour. The moment the wall clock rolls over, that
 tree is simply abandoned — no coordination with ``recompute_touched_hours``
 / ``bundle_hours``/``_run_rollup_hour_heal`` is needed, because this module

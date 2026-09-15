@@ -3,9 +3,8 @@ buffer/active-hour-partition files into the pod-local partial-hour rollup.
 
 Structurally mirrors ``backend/cron/jobs/compaction.py::_run_local_compact``
 (same active-request defer gate, same start_cron_run/log_cron_run lease
-contract) but on its own faster cadence — see
-docs/superpowers/specs/2026-09-09-partial-hour-speed-layer-design.md Part 2
-for why this isn't just piggybacked onto local_compact's 2 min tick.
+contract) but on its own faster cadence instead of piggybacking onto
+local_compact's 2 min tick.
 """
 
 from __future__ import annotations
