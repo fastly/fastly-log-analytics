@@ -171,3 +171,33 @@ def test_prepared_release_schedule_is_anchored_after_generation(tmp_path, monkey
 
     assert raw_logs.main() == 0
     assert captured["release_started_at"] >= captured["prepared_at"]
+
+
+@pytest.mark.parametrize("module", [raw_logs, rum_logs])
+def test_prepared_release_uploads_shards_concurrently(module, tmp_path) -> None:
+    period_dir = tmp_path / "period-000000"
+    period_dir.mkdir()
+    shards = []
+    for index in range(3):
+        filename = f"shard-{index:06d}.json.gz"
+        (period_dir / filename).write_bytes(f"payload-{index}".encode())
+        shards.append({"filename": filename, "key": f"key-{index}", "lines": index + 1})
+    manifest = {"periods": [{"shards": shards}]}
+    uploaded = []
+
+    class Client:
+        def put_object(self, **kwargs):
+            uploaded.append((kwargs["Key"], kwargs["Body"]))
+
+    reports = module._release_prepared(
+        prepare_dir=tmp_path,
+        manifest=manifest,
+        fos_client=Client(),
+        bucket="bucket",
+        dry_run=False,
+        schedule=(datetime.now(UTC),),
+    )
+
+    assert sorted(key for key, _ in uploaded) == ["key-0", "key-1", "key-2"]
+    assert reports[0].files == 3
+    assert reports[0].lines == 6

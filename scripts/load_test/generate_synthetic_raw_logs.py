@@ -294,26 +294,33 @@ def _release_prepared(
         period_dir = prepare_dir / f"period-{index:06d}"
         first_upload = last_upload = None
         started = time.monotonic()
-        total_bytes = total_lines = errors = files = 0
         while True:
             wait = (scheduled_at - datetime.now(UTC)).total_seconds()
             if wait <= 0:
                 break
             time.sleep(min(wait, 0.1))
-        for shard in period["shards"]:
+
+        def _upload_shard(shard: dict) -> tuple[int, int, datetime | None, datetime | None, bool]:
             body = (period_dir / shard["filename"]).read_bytes()
             try:
                 if not dry_run:
                     fos_client.put_object(Bucket=bucket, Key=shard["key"], Body=body)
                 uploaded_at = datetime.now(UTC)
-                first_upload = first_upload or uploaded_at
-                total_bytes += len(body)
-                total_lines += shard["lines"]
-                files += 1
-                last_upload = datetime.now(UTC)
+                return len(body), shard["lines"], uploaded_at, uploaded_at, False
             except Exception as exc:
-                errors += 1
                 print(f"  [error] uploading {shard['key']}: {exc}", file=sys.stderr)
+                return 0, 0, None, None, True
+
+        with ThreadPoolExecutor(max_workers=min(len(period["shards"]), 64)) as upload_ex:
+            upload_futures = [upload_ex.submit(_upload_shard, shard) for shard in period["shards"]]
+            results = [future.result() for future in as_completed(upload_futures)]
+        total_bytes = sum(result[0] for result in results)
+        total_lines = sum(result[1] for result in results)
+        upload_times = [time for result in results for time in result[2:4] if time is not None]
+        first_upload = min(upload_times, default=None)
+        last_upload = max(upload_times, default=None)
+        errors = sum(result[4] for result in results)
+        files = len(results) - errors
         report = ReleaseReport(
             scheduled_at, first_upload, last_upload, total_bytes, total_lines, time.monotonic() - started, files, errors
         )
