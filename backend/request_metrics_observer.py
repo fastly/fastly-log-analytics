@@ -8,6 +8,7 @@ import time
 
 from backend import config
 from backend.core.request_metrics import interrupt_request_metrics, refresh_durable_request_metrics
+from backend.high_scale.registry import get_high_scale_service_registry
 from backend.sync_status_publisher import publisher
 from backend.sync_status_snapshot import compute_sync_status_cached
 
@@ -39,6 +40,8 @@ class RequestMetricsObserver:
                 if not config.is_durable_serving_mode(source):
                     continue
                 service_id = source["name"]
+                if get_high_scale_service_registry().resolve(service_id) is not None:
+                    continue
                 if time.monotonic() < self._next_attempt_mono.get(service_id, 0.0):
                     continue
                 try:

@@ -59,6 +59,22 @@ def test_failed_observation_does_not_publish_or_discard_last_success(observer_st
     assert "request_metrics.refresh_failed" in caplog.text
 
 
+def test_registered_high_scale_service_is_not_observed(observer_state, monkeypatch):
+    observer, _, _, calls = observer_state
+    monkeypatch.setattr(
+        module,
+        "get_high_scale_service_registry",
+        lambda: type("Registry", (), {"resolve": lambda self, service_id: object()})(),
+    )
+    refresh = MagicMock()
+    monkeypatch.setattr(module, "refresh_durable_request_metrics", refresh)
+
+    observer.reconcile()
+
+    refresh.assert_not_called()
+    assert calls == []
+
+
 def test_failed_observation_backs_off_before_retrying(observer_state, monkeypatch):
     observer, _, _, _ = observer_state
     refresh = MagicMock(side_effect=RuntimeError("unavailable"))
