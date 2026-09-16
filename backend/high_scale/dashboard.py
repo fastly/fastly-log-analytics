@@ -23,12 +23,63 @@ _FIELD_DIMENSIONS = {
     "country": "country",
     "ip": "client_ip",
 }
+_HEADER_TABLES = {
+    "request": "request_facts",
+    "rum_vitals": "rum_vitals_facts",
+    "rum_errors": "rum_error_facts",
+}
 
 
 def _range_value(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def header_metrics(service: HighScaleService) -> dict[str, Any]:
+    """Return visible ClickHouse row counts and event-time extents for the header."""
+    totals: dict[str, int] = {}
+    latest: dict[str, str | None] = {}
+    for domain, table in _HEADER_TABLES.items():
+        rows = service.client.execute(
+            f"SELECT count() AS total_rows, max(event_timestamp) AS latest_log_at "
+            f"FROM {table} "
+            "WHERE service_id={service_id:String} "
+            "AND publication_state='visible' "
+            "AND batch_id IN ("
+            "SELECT batch_id FROM high_scale_batch_publications FINAL "
+            "WHERE service_id={service_id:String} AND domain={domain:String} "
+            "AND publication_state='visible'"
+            ")",
+            {"service_id": service.service_id, "domain": domain},
+        )
+        row = rows[0] if rows else {}
+        total_rows = int(row.get("total_rows") or 0)
+        latest_value: object = row.get("latest_log_at")
+        if isinstance(latest_value, datetime):
+            latest_value = latest_value.isoformat()
+        totals[domain] = total_rows
+        latest[domain] = str(latest_value) if latest_value is not None else None
+
+    rum_total = totals["rum_vitals"] + totals["rum_errors"]
+    rum_latest_values = [latest["rum_vitals"], latest["rum_errors"]]
+    rum_latest = max((value for value in rum_latest_values if value is not None), default=None)
+    request_total = totals["request"]
+    request_latest = latest["request"]
+    return {
+        "request": {
+            "latest_log_at": request_latest,
+            "total_rows": request_total,
+            "last_sync_at": None,
+        },
+        "rum": {
+            "latest_log_at": rum_latest,
+            "total_rows": rum_total,
+            "last_sync_at": None,
+        },
+        "latest_log_at": request_latest,
+        "local_rows": request_total + rum_total,
+    }
 
 
 def _aggregate(

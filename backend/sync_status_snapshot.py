@@ -44,6 +44,18 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     src = _db.get_source_for_service(service_id)
     if not src:
         return None
+    from backend.high_scale.dashboard import header_metrics
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(service_id)
+    if high_scale_service is not None:
+        metrics = header_metrics(high_scale_service)
+        return {
+            "configured": True,
+            **metrics,
+            "access_level": src.get("access_level", "read_write"),
+            "storage_mode": src.get("storage_mode", "cloud"),
+        }
     cached_status = svcconfig.get_status(src["name"])
     if not cached_status:
         return None  # fall through to dedicated endpoint
