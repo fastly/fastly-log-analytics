@@ -204,7 +204,7 @@ export function CronTab({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All tasks</SelectItem>
-                      <SelectItem value={isAnalyst ? 'metadata_sync' : 'log_discovery'}>Sync</SelectItem>
+                      <SelectItem value={isAnalyst ? 'metadata_sync' : 'log_discovery'}>Log Discovery</SelectItem>
                       {!isAnalyst && <SelectItem value="rum_sync">RUM Sync</SelectItem>}
                       {!isAnalyst && <SelectItem value="full_sync">Full Sync</SelectItem>}
                       {!isAnalyst && <SelectItem value="gap_heal">Gap Heal</SelectItem>}
