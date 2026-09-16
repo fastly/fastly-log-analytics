@@ -429,6 +429,12 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         return
 
     source = svcconfig.config_to_source(src)
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        logger.info("[refresh_status] %s: high-scale service uses ClickHouse status", service_id)
+        return
+
     durable_serving = svcconfig.is_durable_serving_mode(source)
     # ── 1. Non-DuckDB I/O (runs outside / before the exclusive WAL lock) ─────
     buf_bytes = None
