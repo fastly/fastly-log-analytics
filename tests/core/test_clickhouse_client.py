@@ -62,6 +62,28 @@ def response(rows=None):
     )
 
 
+def test_origin_projection_tables_and_columns_are_allowlisted():
+    for table in ("origin_minute_summary", "origin_minute_dimensions"):
+        assert table in ch.CLICKHOUSE_HIGH_SCALE_TABLES
+    for column in (
+        "requests",
+        "misses",
+        "passes",
+        "origin_5xx",
+        "origin_bytes",
+        "latency_count",
+        "latency_p50_us",
+        "latency_p75_us",
+        "latency_p95_us",
+        "latency_p99_us",
+        "ttlb_p50_us",
+        "ttlb_p95_us",
+        "cdn_overhead_p50_us",
+        "origin_bytes_p50",
+    ):
+        assert column in ch.CLICKHOUSE_HIGH_SCALE_COLUMNS
+
+
 def query_form(request):
     assert request.headers["content-type"].startswith("multipart/form-data;")
     message = BytesParser(policy=default).parsebytes(

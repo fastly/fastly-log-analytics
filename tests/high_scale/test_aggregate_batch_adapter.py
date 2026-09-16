@@ -30,6 +30,44 @@ def _batch(domain: str = "request_aggregate") -> HighScaleBatch:
     )
 
 
+def _origin_batch(domain: str) -> HighScaleBatch:
+    row = {
+        "bucket_start": datetime(2026, 9, 14, tzinfo=UTC).isoformat(),
+        "requests": 3,
+        "origin_5xx": 1,
+        "status_count": 3,
+        "origin_bytes": 100,
+        "latency_count": 3,
+        "ttlb_count": 3,
+        "overhead_count": 3,
+        "origin_bytes_count": 3,
+        "latency_p50_us": 1000.0,
+        "latency_p95_us": 2000.0,
+        "latency_p99_us": 2200.0,
+    }
+    if domain == "origin_summary":
+        row.update(
+            {
+                "misses": 2,
+                "passes": 1,
+                "latency_p75_us": 1500.0,
+                "ttlb_p50_us": 1800.0,
+                "ttlb_p95_us": 2800.0,
+                "cdn_overhead_p50_us": 500.0,
+                "origin_bytes_p50": 100.0,
+            }
+        )
+    else:
+        row.update({"dimension": "url", "value": "/a"})
+    return HighScaleBatch(
+        batch_id=f"batch-{domain}",
+        service_id="svc",
+        domain=domain,
+        generation="epoch-1",
+        rows=(row,),
+    )
+
+
 class FakeHttpClickHouse:
     def __init__(self) -> None:
         self.inserts: list[tuple[str, list[str], list[tuple]]] = []
@@ -126,3 +164,21 @@ def test_rejects_a_domain_outside_the_aggregate_allowlist() -> None:
 
     with pytest.raises(ValueError, match="domain"):
         AggregateBatchAdapter(client).insert(_batch("request"))
+
+
+@pytest.mark.parametrize(
+    ("domain", "table"),
+    [
+        ("origin_summary", "origin_minute_summary"),
+        ("origin_dimensions", "origin_minute_dimensions"),
+    ],
+)
+def test_maps_origin_projection_domains_to_allowlisted_tables(domain, table) -> None:
+    client = FakeHttpClickHouse()
+
+    result = AggregateBatchAdapter(client).insert(_origin_batch(domain))
+
+    assert result.rows_inserted == 1
+    facts = client.inserts[1]
+    assert facts[0] == table
+    assert facts[2][0][-2]

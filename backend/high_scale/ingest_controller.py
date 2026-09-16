@@ -16,6 +16,7 @@ from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import write_archive_checkpoint
 from backend.high_scale.decoder import DecodeResult, decode_source_object
 from backend.high_scale.ledger import HighScaleLedger, SourceObject
+from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.publication import (
     ClickHousePublication,
@@ -369,16 +370,32 @@ class HighScaleIngestController:
             return
         try:
             counts = compute_dimension_counts(source.domain, events)
-            if not counts:
-                return
-            batch = HighScaleBatch(
-                batch_id=f"{service_id}:{source.domain}_aggregate:{source.object_id}",
-                service_id=service_id,
-                domain=f"{source.domain}_aggregate",
-                generation=str(owner_epoch),
-                rows=counts,
-            )
-            self._aggregates.publish(batch)
+            if counts:
+                batch = HighScaleBatch(
+                    batch_id=f"{service_id}:{source.domain}_aggregate:{source.object_id}",
+                    service_id=service_id,
+                    domain=f"{source.domain}_aggregate",
+                    generation=str(owner_epoch),
+                    rows=counts,
+                )
+                self._aggregates.publish(batch)
+            if source.domain == "request":
+                projection = build_origin_projection_rows(events)
+                for domain, rows in (
+                    ("origin_summary", projection.summary_rows),
+                    ("origin_dimensions", projection.dimension_rows),
+                ):
+                    if not rows:
+                        continue
+                    self._aggregates.publish(
+                        HighScaleBatch(
+                            batch_id=f"{service_id}:{domain}:{source.object_id}",
+                            service_id=service_id,
+                            domain=domain,
+                            generation=str(owner_epoch),
+                            rows=rows,
+                        )
+                    )
         except Exception:
             logger.exception(
                 "high-scale aggregate publish failed",

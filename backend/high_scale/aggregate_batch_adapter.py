@@ -1,13 +1,12 @@
-"""ClickHouse writer for pre-aggregated dimension-count batches.
+"""ClickHouse writer for high-scale aggregate and projection batches.
 
 Mirrors :class:`~backend.high_scale.publication.ClickHouseBatchAdapter`'s
 idempotent insert-behind-a-publication-row pattern (same
 ``high_scale_batch_publications`` bookkeeping table, since its schema is
-already domain-agnostic), but for the flat (dimension, value, bucket_start,
-count) shape every aggregate table shares — no per-domain row mapping is
-needed the way facts require. Aggregate batch domains are suffixed
-"_aggregate" (e.g. "request_aggregate") so they never collide with a facts
-batch for the same logical source object in that shared bookkeeping table.
+already domain-agnostic). Flat ``*_aggregate`` batches share one dimension
+count shape; richer Origin summary and dimension projections use explicit
+allowlisted column maps. Their domain names remain distinct from fact batches
+for the same source object in the shared bookkeeping table.
 """
 
 from __future__ import annotations
@@ -31,6 +30,45 @@ _AGGREGATE_TABLES: dict[str, tuple[str, str]] = {
     "rum_vitals_aggregate": ("rum_vitals_aggregates", "event_count"),
     "rum_errors_aggregate": ("rum_error_aggregates", "error_count"),
     "cmcd_aggregate": ("cmcd_aggregates", "event_count"),
+}
+_ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "origin_summary": (
+        "origin_minute_summary",
+        (
+            "requests",
+            "misses",
+            "passes",
+            "origin_5xx",
+            "status_count",
+            "origin_bytes",
+            "latency_count",
+            "ttlb_count",
+            "overhead_count",
+            "origin_bytes_count",
+            "latency_p50_us",
+            "latency_p75_us",
+            "latency_p95_us",
+            "latency_p99_us",
+            "ttlb_p50_us",
+            "ttlb_p95_us",
+            "cdn_overhead_p50_us",
+            "origin_bytes_p50",
+        ),
+    ),
+    "origin_dimensions": (
+        "origin_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "requests",
+            "origin_5xx",
+            "origin_bytes",
+            "latency_count",
+            "latency_p50_us",
+            "latency_p95_us",
+            "latency_p99_us",
+        ),
+    ),
 }
 
 
@@ -65,7 +103,7 @@ class AggregateBatchAdapter:
         self._batch_locks_guard = threading.Lock()
 
     def insert(self, batch: HighScaleBatch) -> InsertReceipt:
-        if batch.domain not in _AGGREGATE_TABLES:
+        if batch.domain not in _AGGREGATE_TABLES and batch.domain not in _ORIGIN_COLUMNS:
             raise ValueError(f"unsupported aggregate domain: {batch.domain}")
         if not batch.rows:
             raise ValueError("aggregate batch must contain at least one row")
@@ -77,20 +115,42 @@ class AggregateBatchAdapter:
         self._client.delete_batch_rows(table, batch_id)
 
     def _insert_locked(self, batch: HighScaleBatch, batch_uuid: str) -> InsertReceipt:
-        table, metric_column = _AGGREGATE_TABLES[batch.domain]
-        columns = ["service_id", "bucket_start", "dimension", "value", metric_column, "batch_id", "publication_state"]
-        mapped_rows = [
-            (
-                batch.service_id,
-                _bucket_start(row["bucket_start"]),
-                str(row["dimension"]),
-                str(row["value"]),
-                int(row["count"]),
-                batch_uuid,
-                "visible",
-            )
-            for row in batch.rows
-        ]
+        if batch.domain in _ORIGIN_COLUMNS:
+            table, metric_columns = _ORIGIN_COLUMNS[batch.domain]
+            columns = ["service_id", "bucket_start", *metric_columns, "batch_id", "publication_state"]
+            mapped_rows = [
+                (
+                    batch.service_id,
+                    _bucket_start(row["bucket_start"]),
+                    *(row[column] for column in metric_columns),
+                    batch_uuid,
+                    "visible",
+                )
+                for row in batch.rows
+            ]
+        else:
+            table, metric_column = _AGGREGATE_TABLES[batch.domain]
+            columns = [
+                "service_id",
+                "bucket_start",
+                "dimension",
+                "value",
+                metric_column,
+                "batch_id",
+                "publication_state",
+            ]
+            mapped_rows = [
+                (
+                    batch.service_id,
+                    _bucket_start(row["bucket_start"]),
+                    str(row["dimension"]),
+                    str(row["value"]),
+                    int(row["count"]),
+                    batch_uuid,
+                    "visible",
+                )
+                for row in batch.rows
+            ]
 
         existing = self._existing_publication(batch, batch_uuid)
         if existing is not None:

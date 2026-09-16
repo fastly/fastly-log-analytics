@@ -55,6 +55,8 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "rum_vitals_aggregates",
         "rum_error_aggregates",
         "cmcd_aggregates",
+        "origin_minute_summary",
+        "origin_minute_dimensions",
     }
 )
 CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
@@ -99,6 +101,24 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "bucket_start",
         "dimension",
         "value",
+        "requests",
+        "misses",
+        "passes",
+        "origin_5xx",
+        "status_count",
+        "origin_bytes",
+        "latency_count",
+        "ttlb_count",
+        "overhead_count",
+        "origin_bytes_count",
+        "latency_p50_us",
+        "latency_p75_us",
+        "latency_p95_us",
+        "latency_p99_us",
+        "ttlb_p50_us",
+        "ttlb_p95_us",
+        "cdn_overhead_p50_us",
+        "origin_bytes_p50",
     }
 )
 CLICKHOUSE_ALLOWED_TABLES = frozenset({CLICKHOUSE_FACT_TABLE}) | CLICKHOUSE_HIGH_SCALE_TABLES

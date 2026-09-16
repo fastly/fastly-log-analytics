@@ -100,3 +100,37 @@ def test_clickhouse_schema_separates_domains_and_fences_visibility() -> None:
     assert "ReplicatedReplacingMergeTree" in publication_sql
     assert "publication_state" in publication_sql
     assert "quorum_acked" in publication_sql
+
+
+def test_origin_projection_schema_is_bounded_and_mergeable() -> None:
+    root = Path(__file__).parents[2] / "backend/high_scale/sql"
+    sql = (root / "origin_schema.sql").read_text()
+
+    for required in (
+        "origin_minute_summary",
+        "origin_minute_dimensions",
+        "publication_state",
+        "bucket_start",
+        "dimension",
+        "value",
+        "requests",
+        "misses",
+        "passes",
+        "origin_5xx",
+        "status_count",
+        "origin_bytes",
+        "latency_count",
+        "ttlb_count",
+        "overhead_count",
+        "origin_bytes_count",
+        "latency_p50_us",
+        "latency_p75_us",
+        "latency_p95_us",
+        "latency_p99_us",
+        "ttlb_p50_us",
+        "ttlb_p95_us",
+        "cdn_overhead_p50_us",
+        "origin_bytes_p50",
+        "ReplicatedMergeTree",
+    ):
+        assert required in sql

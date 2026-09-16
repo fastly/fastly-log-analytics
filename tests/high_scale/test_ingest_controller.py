@@ -169,7 +169,9 @@ def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
         worker_id="worker-1",
         deletion_grace_seconds=60,
     )
-    payload = gzip.compress(b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok","country":"US"}\n')
+    payload = gzip.compress(
+        b'{"timestamp":"2026-09-11T20:00:00Z","url":"/ok","country":"US","ottfb":1200,"ost":503,"obytes":64}\n'
+    )
 
     controller.ingest(
         service_id="svc",
@@ -181,12 +183,18 @@ def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
     )
 
-    assert len(aggregate_clickhouse.batches) == 1
+    assert len(aggregate_clickhouse.batches) == 3
     batch = aggregate_clickhouse.batches[0]
     assert batch.domain == "request_aggregate"
     values = {(row["dimension"], row["value"]) for row in batch.rows}
     assert ("url", "/ok") in values
     assert ("country", "US") in values
+    summary = aggregate_clickhouse.batches[1]
+    assert summary.domain == "origin_summary"
+    assert summary.rows[0]["latency_p50_us"] == 1200
+    dimensions = aggregate_clickhouse.batches[2]
+    assert dimensions.domain == "origin_dimensions"
+    assert ("url", "/ok") in {(row["dimension"], row["value"]) for row in dimensions.rows}
 
 
 def test_ingest_tolerates_aggregate_publish_failure_without_failing_the_ingest() -> None:
