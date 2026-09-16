@@ -934,7 +934,14 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
 
 def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Return a tracked DuckDB connection in memory."""
+    import os
+
     con = duckdb.connect(":memory:")
+
+    _temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    os.makedirs(_temp_dir, exist_ok=True)
+    con.execute(f"SET temp_directory = '{_temp_dir}';")
+
     # Copy relevant settings from main connection logic
     try:
         limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
