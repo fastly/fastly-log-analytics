@@ -432,7 +432,11 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                 common
                 + (
                     _required_string(row, "country", default=""),
-                    _required_string(row, "client_ip", default=""),
+                    _required_string(
+                        {"client_ip": row.get("client_ip") or row.get("ip")},
+                        "client_ip",
+                        default="",
+                    ),
                     _required_string(row, "url", default=""),
                     _string_map(row, "custom_fields"),
                     _string_map(row, "cmcd"),

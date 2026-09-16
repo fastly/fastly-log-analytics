@@ -211,6 +211,18 @@ def test_clickhouse_adapter_inserts_exact_allowlisted_shape() -> None:
     assert visible[2][0][7:9] == (1, "visible")
 
 
+def test_clickhouse_adapter_uses_raw_request_ip_for_client_ip() -> None:
+    client = FakeHttpClickHouse()
+    row = {key: value for key, value in _request_batch().rows[0].items() if key != "client_ip"}
+    row["ip"] = "198.51.100.10"
+    batch = HighScaleBatch("batch-raw-ip", "svc", "request", "4", (row,))
+
+    ClickHouseBatchAdapter(client).insert(batch)
+
+    facts = next(rows for table, _, rows in client.inserts if table == "request_facts")
+    assert facts[0][-4] == "198.51.100.10"
+
+
 def test_clickhouse_adapter_rejects_invalid_rows_before_http() -> None:
     batch = _request_batch()
     invalid = HighScaleBatch(

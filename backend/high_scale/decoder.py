@@ -93,9 +93,7 @@ def _decode_payload(payload: bytes) -> bytes:
 
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
-    if domain == "request":
-        event["client_ip"] = event.get("ip") or event.get("client_ip") or ""
-    elif domain == "rum_vitals":
+    if domain == "rum_vitals":
         event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
         event["metric_name"] = event.get("rum_metric_name") or event.get("metric_name") or ""
         raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))
