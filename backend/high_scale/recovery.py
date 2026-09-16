@@ -19,7 +19,7 @@ from uuid import uuid4
 from backend.high_scale.archive_models import ArchiveManifest
 from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.publication import ClickHousePublication
-from backend.high_scale.replay import replay_manifest
+from backend.high_scale.replay import replay_manifest, replay_origin_projections
 
 
 class ArchiveManifestCatalog(Protocol):
@@ -106,6 +106,51 @@ def rebuild_serving_state_from_fos(
         manifests_replayed=recent_replayed + warm_replayed,
         rows_replayed=recent_rows + warm_rows,
         errors=tuple(recent_errors) + tuple(warm_errors),
+        rebuild_id=resolved_rebuild_id,
+    )
+
+
+def rebuild_origin_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+) -> RecoveryReport:
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    resolved_rebuild_id = rebuild_id or uuid4().hex
+    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
+    rows = 0
+    replayed = 0
+    errors: list[str] = []
+    for manifest in manifests:
+        try:
+            result = replay_origin_projections(
+                manifest,
+                archive,
+                publication,
+                rebuild_id=resolved_rebuild_id,
+            )
+        except Exception as exc:
+            errors.append(f"manifest {manifest.manifest_id} failed to rebuild Origin projections: {exc}")
+            continue
+        rows += result.rows_published
+        replayed += 1
+    available = not errors
+    return RecoveryReport(
+        ingest_accepted=True,
+        triage_available=available,
+        raw_query_available=True,
+        warm_history_available=available,
+        full_rebuild_complete=available,
+        manifests_replayed=replayed,
+        rows_replayed=rows,
+        errors=tuple(errors),
         rebuild_id=resolved_rebuild_id,
     )
 

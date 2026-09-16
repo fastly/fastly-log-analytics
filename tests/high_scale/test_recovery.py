@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.publication import ClickHousePublication, InMemoryBatchManifestStore, InsertReceipt
-from backend.high_scale.recovery import rebuild_serving_state_from_fos
+from backend.high_scale.recovery import rebuild_origin_projections_from_fos, rebuild_serving_state_from_fos
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
 
@@ -218,3 +218,48 @@ def test_recovery_with_no_archived_history_is_a_trivially_complete_rebuild() -> 
     assert report.manifests_replayed == 0
     assert report.full_rebuild_complete is True
     assert report.ingest_accepted is True
+
+
+def test_origin_projection_rebuild_is_resumable_without_replaying_request_facts() -> None:
+    recent, recent_bytes = _manifest(
+        "recent-origin",
+        NOW - timedelta(hours=1),
+        NOW - timedelta(minutes=59),
+        (
+            {
+                "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+                "url": "/slow",
+                "ottfb": 2500,
+                "ost": 503,
+            },
+        ),
+    )
+    store = InMemoryObjectStore()
+    archive = ArchivePublication(store)
+    archive.publish(recent, recent_bytes)
+    catalog = _Catalog((recent,))
+    client = ReplayClient()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+
+    first = rebuild_origin_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id="svc",
+        now=NOW,
+    )
+    second = rebuild_origin_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id="svc",
+        now=NOW,
+        rebuild_id=first.rebuild_id,
+    )
+
+    assert first.manifests_replayed == second.manifests_replayed == 1
+    assert first.rows_replayed == second.rows_replayed == 3
+    assert client.insert_calls == [
+        f"rebuild-origin:{first.rebuild_id}:recent-origin:summary",
+        f"rebuild-origin:{first.rebuild_id}:recent-origin:dimensions",
+    ]
