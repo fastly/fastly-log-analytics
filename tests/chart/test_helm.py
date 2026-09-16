@@ -391,8 +391,11 @@ def test_high_scale_ingest_runs_continuous_worker_without_placeholder_workloads(
         "-m",
         "backend.high_scale.worker",
     ]
-    worker_env = {entry["name"]: entry["value"] for entry in ingest["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert worker_env["HIGH_SCALE_WORKER_ID"] == "test-release-ingest"
+    worker_env = {entry["name"]: entry for entry in ingest["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert worker_env["HIGH_SCALE_WORKER_ID"] == {
+        "name": "HIGH_SCALE_WORKER_ID",
+        "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
+    }
     assert {"name": "tmp", "mountPath": "/tmp"} in ingest["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     assert {"name": "tmp", "emptyDir": {}} in ingest["spec"]["template"]["spec"]["volumes"]
 
