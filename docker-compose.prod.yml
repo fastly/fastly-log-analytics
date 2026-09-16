@@ -143,10 +143,6 @@ services:
       # Cap pooled connections independently; httpfs and object-cache
       # allocations are not fully represented by DuckDB's memory accounting.
       - DUCKDB_POOL_CONN_MEMORY_LIMIT=512MB
-      # Direct in-memory cron connections use the global limit rather than
-      # the pool-specific limit. Keep their overlap with request queries
-      # bounded below the 12GB container cap.
-      - DUCKDB_MEMORY_LIMIT=1GB
       # Existing deployments that have completed the v3 migration can opt
       # out of the boot-time legacy Iceberg adoption sweep. Keep the actual
       # decision in the host-local .env because fresh installs may need it.
