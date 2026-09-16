@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -19,6 +20,7 @@ _DOMAIN_TABLES = {
     "rum_errors": ("rum_error_aggregates", "error_count"),
     "cmcd": ("cmcd_aggregates", "event_count"),
 }
+_INTERNAL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 DEFAULT_AGGREGATE_DIMENSIONS = {
     "request": "url",
     "rum_vitals": "metric_name",
@@ -42,7 +44,7 @@ def query_clickhouse_aggregate(
         raise ValueError("watermark does not belong to this service and domain")
     table, metric = _DOMAIN_TABLES[request.domain]
     dimension = request.dimension or DEFAULT_AGGREGATE_DIMENSIONS[request.domain]
-    if not dimension or any(char not in "abcdefghijklmnopqrstuvwxyz_" for char in dimension):
+    if not dimension or _INTERNAL_IDENTIFIER.fullmatch(dimension) is None:
         raise ValueError("aggregate dimension must be an internal identifier")
 
     clauses = [

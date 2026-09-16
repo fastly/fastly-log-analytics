@@ -99,6 +99,31 @@ def test_range_parameters_use_a_clickhouse_type_matching_the_parameter_format() 
     assert "{end:DateTime}" not in client.sql
 
 
+def test_query_allows_digit_suffix_in_internal_dimension_identifier() -> None:
+    client = FakeClient([])
+
+    query_clickhouse_aggregate(
+        client,
+        AggregateRequest("svc", "request", dimension="is_ipv6"),
+        watermark=watermark(),
+        now=NOW,
+    )
+
+    assert client.params is not None
+    assert client.params["dimension"] == "is_ipv6"
+
+
+@pytest.mark.parametrize("dimension", ["3xx", "ja-3", "url; DROP TABLE request_aggregates"])
+def test_query_rejects_non_identifier_dimension(dimension: str) -> None:
+    with pytest.raises(ValueError, match="internal identifier"):
+        query_clickhouse_aggregate(
+            FakeClient([]),
+            AggregateRequest("svc", "request", dimension=dimension),
+            watermark=watermark(),
+            now=NOW,
+        )
+
+
 def test_watermark_must_match_request_domain() -> None:
     with pytest.raises(ValueError, match="watermark"):
         query_clickhouse_aggregate(
