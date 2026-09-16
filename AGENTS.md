@@ -869,6 +869,20 @@ writer that iterates `FIELDS` directly must exclude this same set** — a
 hand-curated skip-list will drift the moment a new METRICS field is added to
 the catalog, which is exactly how this incident happened.
 
+### 41. Incremental ingest must attempt one batch after an expensive LIST
+
+The standard-mode `log_discovery` budget includes both FOS discovery and file
+processing. On a high-object-count bucket, the four-hour incremental lookback
+can consume the full 240-second budget before `ingest()` reaches its chunk loop.
+Checking `max_seconds` before the first chunk then creates a permanent stall:
+every tick lists the same backlog, processes zero files, and reports "No new log
+files found" even while newer objects exist in FOS.
+
+Always allow the first bounded chunk to run, then enforce the time limit before
+subsequent chunks. This guarantees forward progress without removing the
+per-tick bound. The regression is pinned in
+`tests/core/test_ingest_timing.py::TestIngestMaxSeconds::test_expired_listing_budget_still_attempts_first_batch`.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

@@ -856,7 +856,10 @@ def ingest(
             # guard at the top-of-tick gate is the backstop for sustained
             # API load — this helper just smooths the per-chunk contention.
             yield_to_api()
-            if max_seconds and (time.time() - start_time_exec) > max_seconds:
+            # An expensive incremental LIST can consume the entire tick budget
+            # before processing starts. Always attempt the first bounded chunk
+            # so a backlog advances instead of remaining permanently wedged.
+            if chunk_start > 0 and max_seconds and (time.time() - start_time_exec) > max_seconds:
                 yield {
                     "type": "status",
                     "message": f"{elapsed()} Time limit of {max_seconds}s reached. Stopping batch early.",
