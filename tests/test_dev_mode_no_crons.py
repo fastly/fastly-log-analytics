@@ -127,6 +127,29 @@ def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
     assert added == ["local_compact_svc-ro", "partial_hour_merge_svc-ro"]
 
 
+def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
+    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
+
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {"service_id": "svc-high", "provisioning": {"access_level": "read_write"}}
+    sched = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc-high"}),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
+        ),
+        patch.object(sched._sched, "add_job") as add_job,
+    ):
+        sched._register_dev_local_safe_jobs()
+
+    assert sched._job_ids == {}
+    add_job.assert_not_called()
+
+
 def test_scheduler_reload_is_a_noop_when_kill_switch_on(monkeypatch):
     """reload() is called by service-config saves. If it re-registers jobs
     after start() bailed, an admin clicking 'Save' in the cron settings

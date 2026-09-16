@@ -585,6 +585,7 @@ class Scheduler:
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.partial_hour import _run_partial_hour_merge
+        from backend.high_scale.registry import get_high_scale_service_registry
 
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id", "")
@@ -592,6 +593,11 @@ class Scheduler:
                 continue
             src = get_source_for_service(service_id)
             if not src or not is_configured(src):
+                continue
+            if get_high_scale_service_registry().resolve(service_id) is not None:
+                logger.info(
+                    "⏭️  [scheduler] (dev-local) Skipping legacy local jobs for high-scale service %s.", service_id
+                )
                 continue
 
             # local_compact — local-only parquet compaction, always-on
