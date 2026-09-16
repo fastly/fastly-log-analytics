@@ -120,6 +120,15 @@ def test_compose_prod_backend_has_memory_cap():
     assert "memswap_limit:" in compose, "backend memswap_limit missing"
 
 
+def test_compose_prod_bounds_duckdb_connections_below_container_limit():
+    """The single-host deployment must survive dashboard and cron overlap."""
+    compose = _read("docker-compose.prod.yml")
+    assert "DUCKDB_POOL_WARM_AT_BOOT=false" in compose
+    assert "DUCKDB_POOL_MAX_SIZE=2" in compose
+    assert "DUCKDB_POOL_CONN_MEMORY_LIMIT=512MB" in compose
+    assert "DUCKDB_MEMORY_LIMIT=1GB" in compose
+
+
 # ── 3. backend/main.py middleware order (ADR-04) ─────────────────────────────
 
 
