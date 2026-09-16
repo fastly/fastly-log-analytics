@@ -204,12 +204,12 @@ def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_
         start_time=start_time,
         end_time=end_time,
         select=(
-            "sum(requests) AS requests, "
+            "sum(origin_minute_dimensions.requests) AS requests, "
             f"{_weighted('latency_p50_us')} AS p50_us, "
             f"{_weighted('latency_p95_us')} AS p95_us, "
             f"{_weighted('latency_p99_us')} AS p99_us"
         ),
-        having="sum(requests) >= {min_requests:UInt64}",
+        having="sum(origin_minute_dimensions.requests) >= {min_requests:UInt64}",
         order_by="p95_us DESC",
         limit=req.slow_urls_limit,
         extra_params={"min_requests": int(req.slow_urls_min_requests)},
@@ -237,7 +237,10 @@ def _status_codes(service: HighScaleService, start_time: str | None, end_time: s
         dimension="status",
         start_time=start_time,
         end_time=end_time,
-        select="sum(requests) AS requests, sum(sum(requests)) OVER () AS total_requests",
+        select=(
+            "sum(origin_minute_dimensions.requests) AS requests, "
+            "sum(sum(origin_minute_dimensions.requests)) OVER () AS total_requests"
+        ),
         order_by="requests DESC",
     )
     return {
@@ -271,7 +274,8 @@ def _latency_dimension(
         start_time=start_time,
         end_time=end_time,
         select=(
-            "sum(requests) AS requests, sum(origin_5xx) AS origin_5xx, "
+            "sum(origin_minute_dimensions.requests) AS requests, "
+            "sum(origin_5xx) AS origin_5xx, "
             f"{_weighted('latency_p50_us')} AS p50_us, "
             f"{_weighted('latency_p95_us')} AS p95_us"
         ),
@@ -369,7 +373,7 @@ def aggregates(
             start_time=start_time,
             end_time=end_time,
             limit=req.ip_health_limit,
-            having="sum(requests) >= 10",
+            having="sum(origin_minute_dimensions.requests) >= 10",
         )
         result["ip_health"] = {
             "has_data": bool(rows),

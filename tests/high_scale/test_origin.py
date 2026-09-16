@@ -112,7 +112,11 @@ def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
     assert all("high_scale_batch_publications FINAL" in sql for sql, _ in client.calls)
     assert all(params["service_id"] == "svc" for _, params in client.calls)
     assert client.calls[2][1]["limit"] == 20
-    assert "HAVING sum(requests) >= 10" in client.calls[-1][0]
+    dimension_queries = [sql for sql, _ in client.calls if "FROM origin_minute_dimensions" in sql]
+    assert dimension_queries
+    assert all("sum(origin_minute_dimensions.requests)" in sql for sql in dimension_queries)
+    assert all("sum(requests)" not in sql for sql in dimension_queries)
+    assert "HAVING sum(origin_minute_dimensions.requests) >= 10" in client.calls[-1][0]
 
 
 def test_rejects_filters_that_cannot_be_preserved_by_origin_projections() -> None:
