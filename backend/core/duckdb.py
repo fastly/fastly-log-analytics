@@ -944,9 +944,8 @@ def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnecti
 
     # Copy relevant settings from main connection logic
     try:
-        limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
-        if limit:
-            con.execute(f"SET max_memory = '{limit}';")
+        if DUCKDB_MEMORY_LIMIT:
+            con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
     except Exception:
         pass
 

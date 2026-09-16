@@ -912,7 +912,8 @@ def ingest(
                             records='auto', filename=true, columns={columns_sql}, ignore_errors=true)
                     """,
                     )
-                except Exception:
+                except Exception as batch_err:
+                    logger.error(f"Batch read failed: {batch_err}")
                     yield {"type": "status", "message": "Batch read failed, isolating problematic files..."}
 
                     valid_paths = []
