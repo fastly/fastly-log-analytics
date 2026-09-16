@@ -36,7 +36,12 @@ def watermark(domain: str = "request") -> ServingWatermark:
 
 
 def test_query_reads_visible_rows_with_bound_values() -> None:
-    client = FakeClient([{"value": "/a", "aggregate_count": 3}, {"value": "/b", "aggregate_count": 2}])
+    client = FakeClient(
+        [
+            {"value": "/a", "aggregate_count": 3, "total_count": 9},
+            {"value": "/b", "aggregate_count": 2, "total_count": 9},
+        ]
+    )
 
     response = query_clickhouse_aggregate(
         client,
@@ -45,10 +50,11 @@ def test_query_reads_visible_rows_with_bound_values() -> None:
         now=NOW,
     )
 
-    assert response.request_count == 5
+    assert response.request_count == 9
     assert response.top_values == (("/a", 3), ("/b", 2))
     assert "request_aggregates" in client.sql
     assert "publication_state='visible'" in client.sql
+    assert "LIMIT 10" in client.sql
     assert client.params is not None
     assert client.params["service_id"] == "svc"
 

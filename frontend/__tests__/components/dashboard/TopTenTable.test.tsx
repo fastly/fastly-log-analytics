@@ -142,6 +142,25 @@ describe('TopTenTable', () => {
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
   })
 
+  it('renders at most ten rows even if an API returns more', () => {
+    const top = Array.from({ length: 12 }, (_, index) => ({
+      value: `value-${index + 1}`,
+      count: 12 - index,
+    }))
+
+    render(
+      <TopTenTable
+        title="Bounded"
+        field="status"
+        data={{ total: 78, top }}
+      />,
+    )
+
+    expect(screen.getAllByRole('button', { name: /filter to value-/i })).toHaveLength(10)
+    expect(screen.getByText('value-10')).toBeInTheDocument()
+    expect(screen.queryByText('value-11')).toBeNull()
+  })
+
   it('lets URL values share the normal card width while preserving the full value for access', () => {
     const longUrl = 'https://example.com/very/long/path/with/query/parameters?session=synthetic&region=us'
     render(

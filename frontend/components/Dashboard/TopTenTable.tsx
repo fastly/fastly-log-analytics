@@ -110,13 +110,14 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     )
   }
 
-  const maxCount = Math.max(...data.top.map(item => item.count))
+  const topItems = data.top.slice(0, 10)
+  const maxCount = Math.max(...topItems.map(item => item.count))
   const compareMap = new Map(compareData?.top?.map(item => [item.value, item.count]) || [])
 
   const handleCopyCSV = (e: React.MouseEvent) => {
     e.stopPropagation()
     const header = `${field},count\n`
-    const rows = data.top.map(item => {
+    const rows = topItems.map(item => {
       // CSV/formula-injection hardening: log fields are attacker-controlled
       // (User-Agent, URL, Referer…). Prefix formula-leading values with a
       // single quote so spreadsheets treat them as text, and double any
@@ -165,7 +166,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
         </div>
       </div>
       <div className="flex flex-col gap-[2px] flex-1">
-        {data.top.map((item) => {
+        {topItems.map((item) => {
           const displayVal = item.label || formatValue(field, item.value as string | number)
           const compCount = compareMap.get(item.value)
           const delta = calculateDelta(item.count, compCount)

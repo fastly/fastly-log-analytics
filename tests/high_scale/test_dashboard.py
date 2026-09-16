@@ -23,7 +23,7 @@ class FakeClient:
                 }
             ]
         return [
-            {"value": "/synthetic", "aggregate_count": 12},
+            {"value": "/synthetic", "aggregate_count": 12, "total_count": 12},
         ]
 
 
