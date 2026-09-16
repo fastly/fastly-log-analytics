@@ -308,7 +308,12 @@ def test_aggregates_queries_configured_domain_and_dimension(client, test_service
     object.__setattr__(
         service,
         "client",
-        _AggregateQueryClient([{"value": "/", "aggregate_count": 3}, {"value": "/next", "aggregate_count": 1}]),
+        _AggregateQueryClient(
+            [
+                {"value": "/", "aggregate_count": 3, "total_count": 4},
+                {"value": "/next", "aggregate_count": 1, "total_count": 4},
+            ]
+        ),
     )
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
 
@@ -355,7 +360,7 @@ def test_aggregates_masks_client_ip_dimension_for_analysts(client, test_service_
     object.__setattr__(
         service,
         "client",
-        _AggregateQueryClient([{"value": "203.0.113.42", "aggregate_count": 1}]),
+        _AggregateQueryClient([{"value": "203.0.113.42", "aggregate_count": 1, "total_count": 1}]),
     )
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
     app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, None)
