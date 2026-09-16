@@ -151,6 +151,9 @@ services:
       # out of the boot-time legacy Iceberg adoption sweep. Keep the actual
       # decision in the host-local .env because fresh installs may need it.
       - FLA_SKIP_LEGACY_ADOPTION=${FLA_SKIP_LEGACY_ADOPTION:-}
+      # Optional emergency switch for the local active-hour optimization.
+      # Readers fall back to the existing live scan when this is disabled.
+      - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}
       # Periodic DuckDB instance recycle (backend/core/duckdb_recycle.py).
       # DuckDB's enable_object_cache caches parquet metadata keyed by
       # filename and never evicts deleted files; under continuous buffer +

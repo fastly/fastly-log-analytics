@@ -65,6 +65,10 @@ def dev_mode_no_crons() -> bool:
     return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
 
 
+def partial_hour_merge_enabled() -> bool:
+    return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
+
+
 def _display_name(src: dict, fallback: str) -> str:
     """Return src['service_name'] or src['name'], falling back to ``fallback``.
     Used by every cron-log site that wants the human-friendly name with
@@ -622,7 +626,7 @@ class Scheduler:
             # local_compact (never touches the shared FOS bucket), so it
             # belongs in the dev-safe allowlist too. Matches _sync_jobs.
             ph_job_id = f"partial_hour_merge_{service_id}"
-            if ph_job_id not in self._job_ids:
+            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
                 self._add_job(
                     _run_partial_hour_merge,
                     "interval",
@@ -1105,8 +1109,9 @@ class Scheduler:
             # alike. Back off to a longer interval here (and in the misfire
             # grace) if profiling shows contention with request-serving.
             ph_job_id = f"partial_hour_merge_{service_id}"
-            seen_ids.add(ph_job_id)
-            if ph_job_id not in self._job_ids:
+            if partial_hour_merge_enabled():
+                seen_ids.add(ph_job_id)
+            if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
                 self._add_job(
                     _run_partial_hour_merge,
                     "interval",

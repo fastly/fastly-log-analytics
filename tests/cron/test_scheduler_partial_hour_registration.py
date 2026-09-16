@@ -29,3 +29,8 @@ def _actual_partial_hour_job_id_prefix() -> str:
 def test_partial_hour_merge_registered_pod_local_not_redbeat():
     job_id = f"{_actual_partial_hour_job_id_prefix()}svc"
     assert not job_id.startswith(Scheduler._REDBEAT_JOB_PREFIXES)
+
+
+def test_partial_hour_merge_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("PARTIAL_HOUR_MERGE_ENABLED", "0")
+    assert scheduler_module.partial_hour_merge_enabled() is False
