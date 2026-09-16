@@ -64,8 +64,6 @@ spec:
               value: {{ .Values.config.duckdbPoolMaxSize | quote }}
             - name: DUCKDB_POOL_CONN_MEMORY_LIMIT
               value: {{ .Values.config.duckdbPoolConnMemoryLimit | quote }}
-            - name: DUCKDB_EXTENSION_DIRECTORY
-              value: {{ .Values.config.duckdbExtensionDirectory | quote }}
             - name: DUCKDB_RECYCLE_INTERVAL_MIN
               value: {{ .Values.config.duckdbRecycleIntervalMin | quote }}
             - name: DUCKDB_RECYCLE_RSS_THRESHOLD_MB
@@ -99,7 +97,7 @@ spec:
             # added. Bare "backend" stays covered by the code default for
             # anyone hairpinning through a plain hostname.
             - name: LOCAL_HOSTS
-              value: {{ printf "%s-backend,%s-frontend" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) | quote }}
+              value: {{ if .Values.config.localHosts }}{{ printf "%s-backend,%s-frontend,%s" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) .Values.config.localHosts | quote }}{{ else }}{{ printf "%s-backend,%s-frontend" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) | quote }}{{ end }}
             - name: OTEL_EXPORTER
             {{- if .Values.observability.enabled }}
               value: "otlp"

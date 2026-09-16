@@ -201,7 +201,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
               <span
                 className={cn(
                   "relative z-10 truncate pr-4 min-w-0",
-                  field === 'url' ? "max-w-[65%]" : "flex-1",
+                  "flex-1",
                 )}
               >
                 {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}

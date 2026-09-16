@@ -613,6 +613,15 @@ def test_get_fastly_api_key_falls_back_to_active_service():
 
 def test_get_fastly_api_key_returns_empty_string_when_unconfigured():
     assert svcconfig.get_fastly_api_key("nonexistent") == ""
+
+
+def test_save_config_handles_read_only_filesystem():
+    """When /app/configs is on a read-only filesystem (e.g. mounted Secret),
+    save_config logs a warning instead of raising an unhandled OSError."""
+    with patch("backend.config._atomic_write_json", side_effect=OSError(30, "Read-only file system")):
+        # Should not raise
+        svcconfig.save_config("svc-ro", _cfg(service_id="svc-ro"))
+
     assert svcconfig.get_fastly_api_key(None) == ""  # no configs at all
 
 

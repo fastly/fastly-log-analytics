@@ -16,14 +16,58 @@ from typing import Any
 # heavy-hitter tracking (aggregates.py) — kept in sync deliberately, since
 # the reader side (aggregate_query.py) only ever asks for these by default.
 DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
-    "request": ("url", "country", "client_ip"),
+    "request": (
+        "url",
+        "country",
+        "client_ip",
+        "asn",
+        "host",
+        "method",
+        "status",
+        "cache",
+        "proto",
+        "ua",
+        "referer",
+        "cookie_session",
+        "resp_header_content_encoding",
+        "ttl",
+        "age",
+        "hits",
+        "digest",
+        "city",
+        "region",
+        "metro",
+        "transport",
+        "c_speed",
+        "c_type",
+        "pop",
+        "backend",
+        "edge",
+        "server_region",
+        "tls",
+        "is_ipv6",
+        "conn_requests",
+        "waf",
+        "waf_resp",
+        "waf_ms",
+        "p_type",
+        "p_desc",
+        "ja3",
+        "ja4",
+        "tls_ciphers_sha",
+        "io_input_format",
+        "io_output_format",
+    ),
     "rum_vitals": ("metric_name",),
     "rum_errors": ("error_message",),
     "cmcd": ("cmcd_session",),
 }
 # Only cmcd's dimension name differs from its source event field (a session
 # id stored under the short key "sid" in the raw beacon).
-_SOURCE_FIELD_OVERRIDES: dict[str, str] = {"cmcd_session": "sid"}
+_SOURCE_FIELD_OVERRIDES: dict[str, str] = {
+    "client_ip": "ip",
+    "cmcd_session": "sid",
+}
 _BUCKET_SECONDS = 60
 
 

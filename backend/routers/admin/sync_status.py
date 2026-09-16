@@ -64,6 +64,15 @@ def sync_status(
         return resp_empty
 
     try:
+        from backend.high_scale.registry import get_high_scale_service_registry
+
+        high_scale_service = get_high_scale_service_registry().resolve(service_id)
+        if high_scale_service is not None:
+            cached = compute_sync_status_cached(service_id)
+            if cached is not None:
+                high_scale_response: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
+                return high_scale_response
+
         # Fast path: skip_fos=true callers (FilterBar polling, badge in
         # the page header, etc.) only need the cached snapshot that the
         # sync cron refreshes every minute. Return it without grabbing a
@@ -78,7 +87,8 @@ def sync_status(
 
         from backend.core.duckdb import get_connection
 
-        _con = get_connection(source=src, max_wait=5, skip_view_update=True)
+        is_durable = svcconfig.is_durable_serving_mode(src)
+        _con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=is_durable)
         try:
             status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
         finally:

@@ -31,6 +31,14 @@ def test_decode_replays_with_identical_event_ids() -> None:
     assert first.events[0]["event_id"] == second.events[0]["event_id"]
 
 
+def test_decode_normalizes_request_ip_for_high_scale_serving() -> None:
+    payload = gzip.compress(b'{"ip":"198.51.100.10","url":"/same","status":200}\n')
+
+    result = decode_source_object(_source(), payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_ip"] == "198.51.100.10"
+
+
 def test_decode_quarantines_malformed_records_losslessly() -> None:
     malformed = b'{"url":"/ok"}\nnot-json\n["not","an","object"]\n'
 

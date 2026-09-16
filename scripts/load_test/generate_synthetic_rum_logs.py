@@ -40,7 +40,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, ".")
+for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.parent]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
 from backend.provision.log_paths import rum_log_path  # noqa: E402
 from scripts.load_test.release_schedule import ReleaseReport, release_schedule  # noqa: E402
@@ -215,50 +217,96 @@ def _load_manifest(prepare_dir: Path) -> dict:
 
 
 def _release_prepared(
-    *, prepare_dir: Path, manifest: dict, fos_client, bucket: str, dry_run: bool, schedule: tuple[datetime, ...]
+    *,
+    prepare_dir: Path,
+    manifest: dict,
+    fos_client,
+    bucket: str,
+    dry_run: bool,
+    schedule: tuple[datetime, ...],
+    upload_workers: int = 128,
 ) -> list[ReleaseReport]:
     reports = []
-    for index, (period, scheduled_at) in enumerate(zip(manifest["periods"], schedule, strict=True)):
+
+    def _upload_shard(shard_data: tuple[dict, bytes]) -> tuple[int, int, datetime | None, datetime | None, bool]:
+        shard, body = shard_data
+        try:
+            if not dry_run:
+                fos_client.put_object(Bucket=bucket, Key=shard["key"], Body=body)
+            uploaded_at = datetime.now(UTC)
+            return len(body), shard["lines"], uploaded_at, uploaded_at, False
+        except Exception as exc:
+            print(f"  [error] uploading {shard['key']}: {exc}", file=sys.stderr)
+            return 0, 0, None, None, True
+
+    # Pre-load all shard files into memory to avoid I/O blocking during scheduled releases
+    all_periods_data = []
+    for index, period in enumerate(manifest["periods"]):
         period_dir = prepare_dir / f"period-{index:06d}"
-        first_upload = last_upload = None
-        started = time.monotonic()
-        while True:
-            wait = (scheduled_at - datetime.now(UTC)).total_seconds()
-            if wait <= 0:
-                break
-            time.sleep(min(wait, 0.1))
+        all_periods_data.append([(shard, (period_dir / shard["filename"]).read_bytes()) for shard in period["shards"]])
 
-        def _upload_shard(shard: dict) -> tuple[int, int, datetime | None, datetime | None, bool]:
-            body = (period_dir / shard["filename"]).read_bytes()
-            try:
-                if not dry_run:
-                    fos_client.put_object(Bucket=bucket, Key=shard["key"], Body=body)
-                uploaded_at = datetime.now(UTC)
-                return len(body), shard["lines"], uploaded_at, uploaded_at, False
-            except Exception as exc:
-                print(f"  [error] uploading {shard['key']}: {exc}", file=sys.stderr)
-                return 0, 0, None, None, True
+    with ThreadPoolExecutor(max_workers=max(1, upload_workers)) as upload_ex:
+        if not dry_run and schedule:
+            warm_futures = [
+                upload_ex.submit(lambda: fos_client.list_objects_v2(Bucket=bucket, MaxKeys=1))
+                for _ in range(upload_workers)
+            ]
+            for f in as_completed(warm_futures):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+            actual_start = datetime.now(UTC)
+            offset = (actual_start + timedelta(milliseconds=500)) - schedule[0]
+            schedule = tuple(t + offset for t in schedule)
 
-        with ThreadPoolExecutor(max_workers=min(len(period["shards"]), 64)) as upload_ex:
-            upload_futures = [upload_ex.submit(_upload_shard, shard) for shard in period["shards"]]
+        for index, (period, scheduled_at) in enumerate(zip(manifest["periods"], schedule, strict=True)):
+            shards_with_bodies = all_periods_data[index]
+            while True:
+                wait = (scheduled_at - datetime.now(UTC)).total_seconds()
+                if wait <= 0:
+                    break
+                time.sleep(min(wait, 0.05))
+
+            started = time.monotonic()
+            upload_futures = [upload_ex.submit(_upload_shard, item) for item in shards_with_bodies]
             results = [future.result() for future in as_completed(upload_futures)]
-        total_bytes = sum(result[0] for result in results)
-        total_lines = sum(result[1] for result in results)
-        upload_times = [time for result in results for time in result[2:4] if time is not None]
-        first_upload = min(upload_times, default=None)
-        last_upload = max(upload_times, default=None)
-        errors = sum(result[4] for result in results)
-        files = len(results) - errors
-        report = ReleaseReport(
-            scheduled_at, first_upload, last_upload, total_bytes, total_lines, time.monotonic() - started, files, errors
-        )
-        reports.append(report)
-        print(
-            f"  release {index + 1}/{len(schedule)} scheduled={scheduled_at.isoformat()} "
-            f"first={first_upload.isoformat() if first_upload else '-'} "
-            f"last={last_upload.isoformat() if last_upload else '-'} "
-            f"{total_lines} lines, {total_bytes / 1e6:.2f} MB, wall={report.wall_seconds:.2f}s"
-        )
+            del shards_with_bodies
+            total_bytes = sum(result[0] for result in results)
+            total_lines = sum(result[1] for result in results)
+            upload_times = [time for result in results for time in result[2:4] if time is not None]
+            first_upload = min(upload_times, default=None)
+            last_upload = max(upload_times, default=None)
+            errors = sum(result[4] for result in results)
+            files = len(results) - errors
+            report = ReleaseReport(
+                scheduled_at,
+                first_upload,
+                last_upload,
+                total_bytes,
+                total_lines,
+                time.monotonic() - started,
+                files,
+                errors,
+            )
+            reports.append(report)
+            print(
+                f"  release {index + 1}/{len(schedule)} scheduled={scheduled_at.isoformat()} "
+                f"first={first_upload.isoformat() if first_upload else '-'} "
+                f"last={last_upload.isoformat() if last_upload else '-'} "
+                f"{total_lines} lines, {total_bytes / 1e6:.2f} MB, wall={report.wall_seconds:.2f}s"
+            )
+            cadence = (
+                (schedule[1] - schedule[0]).total_seconds()
+                if len(schedule) > 1
+                else float(manifest.get("period_seconds", 1.0))
+            )
+            max_allowed_wall = max(cadence * 1.15, cadence + 0.25)
+            if report.wall_seconds > max_allowed_wall:
+                raise RuntimeError(
+                    f"Release {index + 1}/{len(schedule)} wall time {report.wall_seconds:.2f}s "
+                    f"exceeded requested cadence {cadence:.2f}s (max allowed: {max_allowed_wall:.2f}s); schedule violated"
+                )
     return reports
 
 
@@ -274,8 +322,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shards", type=int, default=20)
     p.add_argument("--duration-seconds", type=int, default=60)
     p.add_argument("--gen-workers", type=int, default=None)
+    p.add_argument("--upload-workers", type=int, default=128)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--prepare-dir", type=Path)
+    p.add_argument("--prepare-only", action="store_true")
     p.add_argument("--release-only", action="store_true")
     p.add_argument("--release-interval-seconds", type=int)
     return p
@@ -314,6 +364,7 @@ def main() -> int:
                 s3={"addressing_style": "path"},
                 request_checksum_calculation="when_required",
                 response_checksum_validation="when_required",
+                max_pool_connections=max(args.upload_workers or 128, 128),
             ),
         )
 
@@ -339,6 +390,9 @@ def main() -> int:
                     ]
                     periods.append(_write_prepared_period(args.prepare_dir, i, [future.result() for future in futures]))
             _write_manifest(args.prepare_dir, periods, args)
+            if args.prepare_only:
+                print(f"Preparation complete. Wrote {len(periods)} periods to {args.prepare_dir}")
+                return 0
         release_started_at = datetime.now(UTC)
         manifest = _load_manifest(args.prepare_dir)
         schedule = release_schedule(
@@ -355,6 +409,7 @@ def main() -> int:
             bucket=args.bucket,
             dry_run=args.dry_run,
             schedule=schedule,
+            upload_workers=args.upload_workers,
         )
         total_errors = sum(report.errors for report in reports)
         print(

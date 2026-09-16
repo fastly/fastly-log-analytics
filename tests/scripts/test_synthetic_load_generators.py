@@ -201,3 +201,29 @@ def test_prepared_release_uploads_shards_concurrently(module, tmp_path) -> None:
     assert sorted(key for key, _ in uploaded) == ["key-0", "key-1", "key-2"]
     assert reports[0].files == 3
     assert reports[0].lines == 6
+
+
+@pytest.mark.parametrize("module", [raw_logs, rum_logs])
+def test_prepared_release_rejects_schedule_violation(module, tmp_path, monkeypatch) -> None:
+    import time
+
+    period_dir = tmp_path / "period-000000"
+    period_dir.mkdir()
+    filename = "shard-000000.json.gz"
+    (period_dir / filename).write_bytes(b"payload")
+    manifest = {"periods": [{"shards": [{"filename": filename, "key": "k", "lines": 1}]}], "period_seconds": 0.1}
+
+    class SlowClient:
+        def put_object(self, **kwargs):
+            time.sleep(0.5)
+
+    now = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="schedule violated"):
+        module._release_prepared(
+            prepare_dir=tmp_path,
+            manifest=manifest,
+            fos_client=SlowClient(),
+            bucket="bucket",
+            dry_run=False,
+            schedule=(now, now + timedelta(seconds=0.1)),
+        )

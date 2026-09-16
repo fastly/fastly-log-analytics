@@ -175,10 +175,13 @@ config:
   # port-forward only) is the trusted equivalent." Only safe under that
   # same condition: never set this to something a public Ingress can reach.
   localAdminCidrs: ""
+  # Additional comma-separated hostnames to permit in LOCAL_HOSTS (e.g.
+  # "backend-svc,frontend-svc" when service names differ from the release name).
+  localHosts: ""
   duckdbMemoryLimit: "4GB"
   duckdbPoolMaxSize: "4"
   duckdbPoolConnMemoryLimit: "1536MB"
-  duckdbExtensionDirectory: "/tmp/duckdb/extensions"
+  duckdbExtensionDirectory: "/tmp/duckdb-extensions"
   duckdbRecycleIntervalMin: "5"
   duckdbRecycleRssThresholdMb: "6000"
   duckdbRecycleBarrierCapMs: "10000"

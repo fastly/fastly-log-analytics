@@ -28,6 +28,7 @@ Config file schema:
 
 import copy
 import json
+import logging
 import math
 import os
 import re
@@ -38,6 +39,8 @@ import time
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -293,7 +296,13 @@ def save_config(service_id: str, cfg: dict):
         import datetime as _dt
 
         cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
-    _atomic_write_json(config_path(service_id), cfg)
+    try:
+        _atomic_write_json(config_path(service_id), cfg)
+    except (OSError, PermissionError) as e:
+        if getattr(e, "errno", None) == 30 or "read-only" in str(e).lower():
+            logger.warning("save_config_skipped_read_only_fs service_id=%s: %s", service_id, e)
+            return
+        raise
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
     # os.replace() calls within the same microsecond can produce identical

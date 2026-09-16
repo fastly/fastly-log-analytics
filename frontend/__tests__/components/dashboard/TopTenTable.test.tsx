@@ -142,7 +142,7 @@ describe('TopTenTable', () => {
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
   })
 
-  it('keeps long URL values in the compact display width while preserving the full value for access', () => {
+  it('lets URL values share the normal card width while preserving the full value for access', () => {
     const longUrl = 'https://example.com/very/long/path/with/query/parameters?session=synthetic&region=us'
     render(
       <TopTenTable
@@ -155,7 +155,8 @@ describe('TopTenTable', () => {
     const row = screen.getByRole('button', { name: `Filter to ${longUrl}` })
     const value = screen.getByText(longUrl)
 
-    expect(value.className).toMatch(/max-w-\[65%\]/)
+    expect(value.className).toMatch(/flex-1/)
+    expect(value.className).not.toMatch(/max-w-\[65%\]/)
     expect(row).toHaveAttribute('title', longUrl)
   })
 

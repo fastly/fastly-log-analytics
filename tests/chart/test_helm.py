@@ -248,10 +248,18 @@ def test_celery_mode_renders_the_full_ingest_fleet():
         # "couldn't find key" rather than boot it into the config gate.
         assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
         assert env["CELERY_BROKER_URL"]["valueFrom"]["secretKeyRef"]["optional"] is False
+        assert env["DUCKDB_EXTENSION_DIRECTORY"]["value"] == "/tmp/duckdb-extensions"
 
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
     assert secret["stringData"]["METADATA_DSN"] == _PG
     assert secret["stringData"]["CELERY_BROKER_URL"] == "redis://valkey-master:6379/0"
+
+
+def test_custom_local_hosts_appends_to_backend_hosts():
+    docs = _render("config.localHosts=backend-svc\\,frontend-svc")
+    env = _env(_deployment(docs, "backend"))
+    assert "backend-svc,frontend-svc" in env["LOCAL_HOSTS"]["value"]
+    assert "test-release-fastly-log-analytics-backend" in env["LOCAL_HOSTS"]["value"]
 
 
 def test_existing_secret_satisfies_the_dsn_requirement():

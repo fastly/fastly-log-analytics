@@ -25,6 +25,8 @@ secret:
 env:
   - name: OTEL_EXPORTER
     value: prometheus
+  - name: DUCKDB_EXTENSION_DIRECTORY
+    value: /tmp/duckdb-extensions
 
 # A deterministic identity lets a replacement pod recover leases left by the
 # previous pod instead of deriving a new identity from its process ID.
@@ -32,6 +34,7 @@ workerId: ""
 
 sharedState:
   existingClaim: ""
+  emptyDir: false
   configSubPath: configs
   dataSubPath: data
   cacheSubPath: cache

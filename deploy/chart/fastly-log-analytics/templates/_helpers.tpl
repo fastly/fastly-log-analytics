@@ -131,6 +131,10 @@ instead of starting it and letting validate_deployment_mode() CrashLoop it.
 - name: HOT_S3_ENDPOINT
   value: {{ .Values.config.hotS3Endpoint | quote }}
 {{- end }}
+{{- if .Values.config.duckdbExtensionDirectory }}
+- name: DUCKDB_EXTENSION_DIRECTORY
+  value: {{ .Values.config.duckdbExtensionDirectory | quote }}
+{{- end }}
 {{- end }}
 
 {{/*

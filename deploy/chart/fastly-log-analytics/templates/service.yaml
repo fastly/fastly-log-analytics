@@ -7,7 +7,7 @@ metadata:
     helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.service.type | default "ClusterIP" }}
   ports:
     - port: 8000
       targetPort: http
@@ -26,7 +26,7 @@ metadata:
     helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.service.type | default "ClusterIP" }}
   ports:
     - port: 3000
       targetPort: http

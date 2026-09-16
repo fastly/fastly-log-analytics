@@ -56,6 +56,35 @@ def test_high_scale_dashboard_uses_clickhouse_aggregate_shape():
     assert response.time_series[0].value == 12
 
 
+def test_high_scale_dashboard_returns_requested_supported_card_dimensions():
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["host", "method", "status", "cache", "ua"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert set(response.data) == {"host", "method", "status", "cache", "ua"}
+    assert all(field.total == 12 for field in response.data.values())
+
+
 def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
     service = HighScaleService(
         service_id="svc",
