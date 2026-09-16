@@ -188,8 +188,8 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
         try:
             con.execute(attach_sql)
         except Exception as e:
-            msg = str(e)
-            if "already exists" in msg or "already attached" in msg:
+            msg = str(e).lower()
+            if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
                 return True
             logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
             return False
