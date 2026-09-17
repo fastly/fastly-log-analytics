@@ -436,7 +436,13 @@ class ClickHouseClient:
                 if operation == "execute" and data and "query" in data:
                     try:
                         queries = get_queries()
-                        queries.append({"sql": data["query"].strip(), "time_ms": round(stats["duration_ms"], 2)})
+                        queries.append(
+                            {
+                                "sql": data["query"].strip(),
+                                "time_ms": round(stats["duration_ms"], 2),
+                                "engine": "ClickHouse",
+                            }
+                        )
                         _QUERIES.set(queries)
                     except Exception:
                         pass

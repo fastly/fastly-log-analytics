@@ -212,7 +212,15 @@ def bundle(
     start_time: str | None,
     end_time: str | None,
 ) -> dict[str, Any]:
+    from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
+
+    res_aggregates = aggregates(service, req, start_time, end_time)
+    res_top_bots = SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=[])
+
     return {
-        "aggregates": aggregates(service, req, start_time, end_time),
-        "top_bots": SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=[]),
+        "aggregates": res_aggregates,
+        "top_bots": res_top_bots,
+        "debug_queries": get_queries(),
+        "debug_calls": get_tracked_calls(),
+        "debug_sqlite": list(get_sqlite_queries()),
     }

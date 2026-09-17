@@ -1011,7 +1011,11 @@ class QueryRunner:
                 raise e
             res = self.con.execute(q, p if p is not None else [])
         self.debug_queries.append(
-            {"sql": _compact_sql_for_debug(q.strip()), "time_ms": round((time.time() - t0) * 1000, 2)}
+            {
+                "sql": _compact_sql_for_debug(q.strip()),
+                "time_ms": round((time.time() - t0) * 1000, 2),
+                "engine": "DuckDB",
+            }
         )
         return res
 

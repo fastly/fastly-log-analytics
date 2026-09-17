@@ -63,7 +63,7 @@ def _execute_on_cursor(
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
     with debug_lock:
-        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
+        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms, "engine": "DuckDB"})
     return res
 
 

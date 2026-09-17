@@ -477,6 +477,7 @@ def inject_view_debug(debug_list: list, source: dict):
             {
                 "sql": _compact_sql_for_debug(f"-- DuckDB Iceberg View Resolution [{mode}] --\n{stats['sql']}"),
                 "time_ms": stats["time_ms"],
+                "engine": "DuckDB",
             },
         )
 
