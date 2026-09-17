@@ -604,7 +604,6 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
                         if (
                             "is not a valid Parquet file" in str(inner_err)
                             or "No files found" in str(inner_err)
-                            or "Catalog Error" in str(inner_err)
                             or "Missing page" in str(inner_err)
                         ):
                             if _quarantine_buffer_file(source, f, inner_err, table_name):

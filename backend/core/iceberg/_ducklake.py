@@ -185,14 +185,26 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
             f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE);"
         )
-        try:
-            con.execute(attach_sql)
-        except Exception as e:
-            msg = str(e).lower()
-            if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
-                return True
-            logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
-            return False
+        for attempt in range(5):
+            try:
+                con.execute(attach_sql)
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                if "unique file handle conflict" in msg or "already attached by database" in msg:
+                    if attempt < 4:
+                        import time
+
+                        time.sleep(0.1 * (2**attempt))
+                        continue
+                    logger.warning(
+                        "[ducklake] %s: failed to attach ducklake catalog (zombie lock timeout): %s", service_id, e
+                    )
+                    return False
+                if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
+                    return True
+                logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
+                return False
         if not read_only:
             _apply_target_file_size(con)
     return True

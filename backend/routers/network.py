@@ -83,6 +83,14 @@ def network_health(
     req: NetworkHealthRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_health as hs_network_health
+
+        return hs_network_health(high_scale_service, req, req.start_time, req.end_time)
+
     # ── Relative-range keyed path ───────────────────────────────────────────
     # When the caller sends a recognized ``range_token``, the SERVER resolves
     # the scan window from (token, quantized anchor) — we do NOT trust the
@@ -177,6 +185,14 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_quality as hs_network_quality
+
+        return hs_network_quality(high_scale_service, req, req.start_time, req.end_time)
+
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_quality(
         con=ctx.con,
@@ -211,6 +227,14 @@ def get_pop_health(
     end_time: datetime | None = Query(default=None),
 ):
     """Aggregate edge-routing and cache metrics across Fastly POP locations."""
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import get_pop_health as hs_get_pop_health
+
+        return hs_get_pop_health(high_scale_service, start_time, end_time)
+
     table_name = _safe_table(ctx.source["name"])
     time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
     params = [start_time or (datetime.now(UTC) - timedelta(hours=24)), end_time or datetime.now(UTC)]
