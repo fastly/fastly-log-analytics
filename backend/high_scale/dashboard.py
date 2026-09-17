@@ -175,7 +175,7 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
         values = (
             getattr(config, "values", [])
             if hasattr(config, "values")
-            else (config.get("values", []) if isinstance(config, dict) else getattr(config, "values", []))
+            else (config.get("values", []) if isinstance(config, dict) else [])
         )
         if not values:
             continue
