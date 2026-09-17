@@ -555,6 +555,11 @@ async def rum_beacon_health(
     """Check if RUM beacons are arriving (validation endpoint for setup).
     Queries DuckDB views using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
+        return _inject_telemetry({"has_data": False, "beacons": 0})
+
     service_id = ctx.service_id
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
@@ -648,6 +653,11 @@ async def rum_analytics(
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
+        return _inject_telemetry({"has_data": False, "total_page_views": 0, "rows": []})
+
     service_id = ctx.service_id
 
     # 1. Clamp timebounds against analyst session limits
@@ -1157,6 +1167,11 @@ async def rum_live_events(
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
+        return []
+
     service_id = ctx.service_id
     rum_source = rum_source_for(ctx.source)
 

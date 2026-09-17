@@ -92,7 +92,7 @@ def _analyst_context(source, con):
     return RequestContext(
         service_id=source["service_id"],
         source=source,
-        con=con,
+        _con_override=con,
         telemetry=RequestTelemetry("POST", "/api/high-scale/services/{service_id}/request-facts"),
         analyst_session=session,
         time_bounds=TimeBounds(

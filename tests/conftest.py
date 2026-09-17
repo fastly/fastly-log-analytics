@@ -435,7 +435,9 @@ def in_memory_duckdb():
     con.close()
 
 
-def override_request_context(*, source, con, session=None, path="/test", time_bounds=None):
+def override_request_context(*, source, con=None, _con_override=None, session=None, path="/test", time_bounds=None):
+    if _con_override is not None:
+        con = _con_override
     """Return a ``build_request_context`` override that yields a RequestContext
     wired to ``source``/``con`` (read-only). Mirrors what the ``client`` fixture
     installs; router tests use it to inject a custom source or an analyst
@@ -453,7 +455,7 @@ def override_request_context(*, source, con, session=None, path="/test", time_bo
         yield RequestContext(
             service_id=source["service_id"],
             source=source,
-            con=con,
+            _con_override=con,
             telemetry=RequestTelemetry(request_method="POST", request_path=path),
             analyst_session=session,
             read_only=True,

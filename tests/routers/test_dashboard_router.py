@@ -88,7 +88,7 @@ def test_ducklake_receives_analyst_clamp_when_clickhouse_enabled(
     ctx = RequestContext(
         service_id=test_service_source["service_id"],
         source=test_service_source,
-        con=in_memory_duckdb,
+        _con_override=in_memory_duckdb,
         telemetry=RequestTelemetry("POST", f"/api/dashboard/{endpoint}"),
         analyst_session=SimpleNamespace(service_ids=[test_service_source["service_id"]]),
         time_bounds=TimeBounds(start=start, end=end),
@@ -405,7 +405,7 @@ def _inject_mask_ips_analyst(in_memory_duckdb, test_service_source):
 
     session = SimpleNamespace(service_ids=[test_service_source["service_id"]], pii_policy={"mask_ips": True})
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source, con=in_memory_duckdb, session=session
+        source=test_service_source, _con_override=in_memory_duckdb, session=session
     )
 
 

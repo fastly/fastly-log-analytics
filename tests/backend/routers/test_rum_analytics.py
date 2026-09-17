@@ -637,7 +637,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
             "secret_access_key": "mock",
             "region": "mock",
         },
-        con=None,
+        _con_override=None,
         telemetry=typing.cast(
             typing.Any,
             SimpleNamespace(
@@ -677,7 +677,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
             "secret_access_key": "mock",
             "region": "mock",
         },
-        con=None,
+        _con_override=None,
         telemetry=typing.cast(
             typing.Any,
             SimpleNamespace(
