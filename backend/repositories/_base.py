@@ -3813,13 +3813,40 @@ class QueryRunner:
 
         asn_placeholders = ", ".join(["?"] * len(top_asns))
         paths_sql = quote_path_list(rollup_paths)
-        sql = (
-            f"SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"WHERE asn IN ({asn_placeholders}) "
-            f"GROUP BY asn, c_speed "
-            f"ORDER BY asn, cnt DESC"
-        )
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+            et_iso = et.isoformat()
+            sql = (
+                f"SELECT asn, c_speed, CAST(SUM(cnt) AS BIGINT) AS cnt FROM ("
+                f"  SELECT asn, c_speed, count AS cnt "
+                f"  FROM read_parquet([{paths_sql}]) "
+                f"  WHERE asn IN ({asn_placeholders}) "
+                f"  UNION ALL "
+                f"  SELECT asn, c_speed, CAST(COUNT(*) AS BIGINT) AS cnt "
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
+                f"    AND asn IN ({asn_placeholders}) AND c_speed IS NOT NULL "
+                f"  GROUP BY asn, c_speed"
+                f") GROUP BY asn, c_speed "
+                f"ORDER BY asn, cnt DESC"
+            )
+            # Duplicate top_asns because asn_placeholders appears twice
+            top_asns = top_asns + top_asns
+        else:
+            sql = (
+                f"SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE asn IN ({asn_placeholders}) "
+                f"GROUP BY asn, c_speed "
+                f"ORDER BY asn, cnt DESC"
+            )
         try:
             rows = self.execute(sql, top_asns).fetchall()
         except duckdb.Error as e:
@@ -3873,22 +3900,70 @@ class QueryRunner:
         paths_sql = quote_path_list(rollup_paths)
         st_iso = st.isoformat()
         et_iso = et.isoformat()
-        sql = (
-            f"SELECT"
-            f"  asn,"
-            f"  hour_ts                                                             AS bucket_ts,"
-            f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
-            f"  rtt_p50_us                                                         AS rtt_med_us,"
-            f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
-            f"  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
-            f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
-            f"  rtt_var_p50_us                                                     AS jitter_us,"
-            f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
-            f"  CAST(reqs AS BIGINT)                                               AS reqs"
-            f" FROM read_parquet([{paths_sql}])"
-            f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-            f" ORDER BY reqs DESC"
-        )
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+
+            # The active hour duration in seconds for throughput calculation
+            active_duration_secs = max(1, (et - active_hour_start).total_seconds())
+
+            sql = (
+                f"SELECT * FROM ("
+                f"  SELECT"
+                f"    asn,"
+                f"    hour_ts                                                             AS bucket_ts,"
+                f"    resp_bytes_sum / 3600.0                                            AS throughput_bps,"
+                f"    rtt_p50_us                                                         AS rtt_med_us,"
+                f"    rtt_min_p50_us                                                     AS rtt_baseline_us,"
+                f"    CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"    ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
+                f"    rtt_var_p50_us                                                     AS jitter_us,"
+                f"    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
+                f"    CAST(reqs AS BIGINT)                                               AS reqs"
+                f"   FROM read_parquet([{paths_sql}])"
+                f"   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f"   UNION ALL "
+                f"   SELECT"
+                f"    asn,"
+                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
+                f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_baseline_us,"  # No min baseline for active hour
+                f"    0::BIGINT AS rtt_congestion_us,"
+                f"    0::DOUBLE AS avg_ploss,"  # Ploss requires packet info, assume 0 for live
+                f"    0::DOUBLE AS jitter_us,"
+                f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
+                f"    CAST(COUNT(*) AS BIGINT) AS reqs"
+                f"   FROM {base_table} "
+                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
+                f"     AND asn IS NOT NULL"
+                f"   GROUP BY asn"
+                f")"
+                f" ORDER BY reqs DESC"
+            )
+        else:
+            sql = (
+                f"SELECT"
+                f"  asn,"
+                f"  hour_ts                                                             AS bucket_ts,"
+                f"  resp_bytes_sum / 3600.0                                            AS throughput_bps,"
+                f"  rtt_p50_us                                                         AS rtt_med_us,"
+                f"  rtt_min_p50_us                                                     AS rtt_baseline_us,"
+                f"  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,"
+                f"  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,"
+                f"  rtt_var_p50_us                                                     AS jitter_us,"
+                f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
+                f"  CAST(reqs AS BIGINT)                                               AS reqs"
+                f" FROM read_parquet([{paths_sql}])"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
+                f" ORDER BY reqs DESC"
+            )
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
@@ -5111,19 +5186,56 @@ class QueryRunner:
 
         paths_sql = quote_path_list(rollup_paths)
 
-        query = (
-            f"SELECT "
-            f"  pop, "
-            f"  CAST(SUM(requests) AS BIGINT), "
-            f"  CAST(SUM(errors) AS BIGINT), "
-            f"  CAST(SUM(cache_hits) AS BIGINT), "
-            f"  CAST(SUM(bandwidth_bytes) AS BIGINT), "
-            f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
-            f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"WHERE pop IS NOT NULL AND pop != '' "
-            f"GROUP BY pop"
-        )
+        from datetime import UTC, datetime
+
+        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        from backend.core.rollups import _safe_table_for
+
+        base_table = _safe_table_for(self.src)
+
+        if et > active_hour_start:
+            ah_iso = active_hour_start.isoformat()
+            et_iso = et.isoformat()
+            query = (
+                f"SELECT pop,"
+                f"  CAST(SUM(requests) AS BIGINT),"
+                f"  CAST(SUM(errors) AS BIGINT),"
+                f"  CAST(SUM(cache_hits) AS BIGINT),"
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),"
+                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"
+                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+                f"FROM ("
+                f"  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms "
+                f"  FROM read_parquet([{paths_sql}]) "
+                f"  WHERE pop IS NOT NULL AND pop != '' "
+                f"  UNION ALL "
+                f"  SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, "
+                f"         CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, "
+                f"         CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
+                f"         CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
+                f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
+                f"         CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms "
+                f"  FROM {base_table} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
+                f"    AND pop IS NOT NULL AND pop != '' "
+                f"  GROUP BY pop"
+                f") "
+                f"GROUP BY pop"
+            )
+        else:
+            query = (
+                f"SELECT "
+                f"  pop, "
+                f"  CAST(SUM(requests) AS BIGINT), "
+                f"  CAST(SUM(errors) AS BIGINT), "
+                f"  CAST(SUM(cache_hits) AS BIGINT), "
+                f"  CAST(SUM(bandwidth_bytes) AS BIGINT), "
+                f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
+                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE pop IS NOT NULL AND pop != '' "
+                f"GROUP BY pop"
+            )
         return self.execute(query).fetchall()
 
 
