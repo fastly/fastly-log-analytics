@@ -209,6 +209,18 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                         ).fetchone()
                         if row and bool(row[0]) == read_only:
                             return True
+                        elif row:
+                            # Mode mismatch. Detach and let the loop retry.
+                            try:
+                                con.execute("DETACH lake")
+                                continue
+                            except Exception as detach_err:
+                                logger.warning(
+                                    "[ducklake] %s: failed to detach mismatched lake catalog: %s",
+                                    service_id,
+                                    detach_err,
+                                )
+                                return False
                     except Exception:
                         pass
                     return False

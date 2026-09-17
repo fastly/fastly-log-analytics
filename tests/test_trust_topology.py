@@ -126,7 +126,7 @@ def test_compose_prod_bounds_duckdb_connections_below_container_limit():
     assert "DUCKDB_POOL_WARM_AT_BOOT=false" in compose
     assert "DUCKDB_POOL_MAX_SIZE=2" in compose
     assert "DUCKDB_POOL_CONN_MEMORY_LIMIT=512MB" in compose
-    assert "DUCKDB_MEMORY_LIMIT=1GB" in compose
+    assert "DUCKDB_MEMORY_LIMIT=6GB" in compose
     assert "FLA_SKIP_LEGACY_ADOPTION=${FLA_SKIP_LEGACY_ADOPTION:-}" in compose
     assert "PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}" in compose
 

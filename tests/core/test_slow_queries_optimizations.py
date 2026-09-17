@@ -199,6 +199,7 @@ def test_flush_releases_postgres_thread_connection_after_success(monkeypatch):
     monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
 
     with slow_queries._buffer_lock:
+        slow_queries._buffer.clear()
         slow_queries._buffer["svc-flush"] = [{"query_id": "q1"}]
 
     slow_queries._flush_all()
@@ -216,6 +217,7 @@ def test_flush_releases_connection_when_write_fails(monkeypatch):
     monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
 
     with slow_queries._buffer_lock:
+        slow_queries._buffer.clear()
         slow_queries._buffer["svc-flush-error"] = [{"query_id": "q1"}]
 
     slow_queries._flush_all()
@@ -233,6 +235,7 @@ def test_flush_releases_on_the_short_lived_worker_thread(monkeypatch):
 
     monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
     with slow_queries._buffer_lock:
+        slow_queries._buffer.clear()
         slow_queries._buffer["svc-thread"] = [{"query_id": "q1"}]
 
     worker = threading.Thread(target=slow_queries._flush_all)
@@ -252,6 +255,7 @@ def test_flush_without_connection_keeps_best_effort_behavior(monkeypatch):
     release = MagicMock()
     monkeypatch.setattr(slow_queries, "release_thread_connection", release, raising=False)
     with slow_queries._buffer_lock:
+        slow_queries._buffer.clear()
         slow_queries._buffer["svc-no-connection"] = [{"query_id": "q1"}]
 
     slow_queries._flush_all()
