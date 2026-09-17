@@ -155,7 +155,11 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
 
 
 def compact_local_partitions(
-    source: dict, min_files_per_partition: int = 1, dry_run: bool = False, table_name: str = "logs"
+    source: dict,
+    min_files_per_partition: int = 1,
+    dry_run: bool = False,
+    table_name: str = "logs",
+    compact_active_hour: bool = False,
 ) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
@@ -222,14 +226,16 @@ def compact_local_partitions(
             result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
             result["watermark_evicted"] = _enforce_disk_watermark(data_dir)
 
-    # ── Active-hour guard: do NOT compact the current UTC hour. The sync
+    # ── Active-hour guard: do NOT compact the current UTC hour (unless compact_active_hour is True). The sync
     # cron may be flushing buffer files into this partition mid-pass; our
     # delete-then-rename is atomic per-file but a half-second window after
     # we listdir() and before we delete is enough for a freshly-arrived
     # file to be in the listing of one operation and gone from the other.
     # Skipping the active hour is cheap and removes the race entirely.
     active_hour = datetime.now(UTC).strftime("timestamp_hour=%Y-%m-%d-%H")
-    result["active_hour_skipped"] = os.path.isdir(os.path.join(data_dir, active_hour))
+    result["active_hour_skipped"] = (
+        os.path.isdir(os.path.join(data_dir, active_hour)) if not compact_active_hour else False
+    )
 
     # Accumulate every basename we delete across all three tiers so we
     # can register them in one SQLite write at the end (vs N small writes).
@@ -237,7 +243,7 @@ def compact_local_partitions(
 
     # ── Hourly tier: walk each partition dir, merge if multi-file.
     for entry in sorted(os.listdir(data_dir)):
-        if entry == active_hour:
+        if entry == active_hour and not compact_active_hour:
             continue
         if entry in (_DAILY_DIR, _WEEKLY_DIR):
             continue  # daily/weekly rollup dirs handled in subsequent passes

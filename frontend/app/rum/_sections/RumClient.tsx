@@ -306,10 +306,19 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId],
+    queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return [];
-      const res = await adminFetch(`/api/services/${serviceId}/rum/live-events`);
+      const params = new URLSearchParams();
+      if (startTime) params.append('start_time', startTime);
+      if (endTime) params.append('end_time', endTime);
+      if (filterPayload) {
+        params.append('filters', JSON.stringify(filterPayload));
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`;
+
+      const res = await adminFetch(url);
       return res.ok ? res.json() : [];
     },
     enabled: !!serviceId && !!status?.enabled,

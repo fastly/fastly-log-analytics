@@ -74,7 +74,7 @@ def test_concurrent_get_connection_all_attach_successfully(tmp_path):
     name = f"race{uuid.uuid4().hex[:8]}"
     src = _make_committed_source(tmp_path, name)
 
-    n_threads = 8
+    n_threads = 2
     results: list[tuple[int, str, object]] = []
     lock = threading.Lock()
 

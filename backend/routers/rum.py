@@ -1162,6 +1162,9 @@ async def rum_analytics(
 
 @router.get("/{service_id}/rum/live-events")
 async def rum_live_events(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    filters: str | None = None,
     ctx: RequestContext = Depends(build_request_context),
 ) -> list[dict[str, Any]]:
     """Fetch recent live beacons stream to feed frontend ticker.
@@ -1173,6 +1176,35 @@ async def rum_live_events(
         return []
 
     service_id = ctx.service_id
+
+    # 1. Clamp timebounds against analyst session limits
+    start_time, end_time = ctx.clamp(start_time, end_time)
+
+    # 2. Establish fallback ranges
+    if not start_time and not end_time:
+        import datetime
+
+        from backend.utils.date_utils import iso_z
+
+        end_dt = datetime.datetime.now(datetime.UTC)
+        start_dt = end_dt - datetime.timedelta(hours=24)
+        start_time = iso_z(start_dt)
+        end_time = iso_z(end_dt)
+
+    # Parse JSON filters
+    parsed_filters = {}
+    if filters:
+        import json
+
+        try:
+            parsed_filters = json.loads(filters)
+        except Exception:
+            pass
+
+    from backend.repositories.utils.filters import build_where_clause
+
+    params, where_sql = build_where_clause(start_time, end_time, parsed_filters)
+
     rum_source = rum_source_for(ctx.source)
 
     try:
@@ -1180,7 +1212,7 @@ async def rum_live_events(
         def _get_live_events(con):
             from backend.utils.telemetry import track_query
 
-            query_str = """
+            query_str = f"""
             WITH vitals_base AS (
                 SELECT
                     'pageview' AS type,
@@ -1202,6 +1234,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_vitals
+                WHERE {where_sql}
             ),
             errors_base AS (
                 SELECT
@@ -1224,6 +1257,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_errors
+                WHERE {where_sql}
             ),
             combined AS (
                 SELECT * FROM vitals_base
@@ -1251,10 +1285,10 @@ async def rum_live_events(
                 ttfb
             FROM combined
             ORDER BY timestamp DESC
-            LIMIT 10
+            LIMIT 50
             """
 
-            with track_query(con, query_str, [], "rum_live_events") as cur:
+            with track_query(con, query_str, params, "rum_live_events") as cur:
                 return cur.fetchall()
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:

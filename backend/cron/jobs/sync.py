@@ -379,6 +379,28 @@ def _run_log_discovery_cron(
                                 ),
                             )
 
+                            if done_event.get("new_files", 0) > 1:
+                                import threading as _t
+
+                                def _compact_and_refresh():
+                                    try:
+                                        from backend.core import local_compaction as _lc
+
+                                        # Compact active hour since new files just landed there
+                                        res = _lc.compact_local_partitions(src, compact_active_hour=True)
+                                        if res.get("files_merged", 0) > 0:
+                                            refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
+                                    except Exception as e:
+                                        logger.warning(
+                                            "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
+                                        )
+
+                                _t.Thread(
+                                    target=_compact_and_refresh,
+                                    name=f"local-compact-on-sync:{service_id}",
+                                    daemon=True,
+                                ).start()
+
                         touched_hours = done_event.get("touched_hours", [])
                         if touched_hours:
                             from backend.utils.active_requests import yield_to_api
