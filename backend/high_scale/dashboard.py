@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import datetime
 from typing import Any
 
@@ -162,7 +163,130 @@ def _time_series(service: HighScaleService, start_time: str | None, end_time: st
     return [TimeSeriesPoint(time=str(row["bucket_start"]), value=float(row["value"])) for row in rows]
 
 
+def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if not filters:
+        return "1=1", {}
+
+    clauses = []
+    params = {}
+
+    for i, (field, config) in enumerate(filters.items()):
+        mode = config.get("mode", "include")
+        values = config.get("values", [])
+        if not values:
+            continue
+
+        col_name = _FIELD_DIMENSIONS.get(field)
+        if not col_name:
+            continue
+
+        if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
+            sql_col = col_name
+        else:
+            sql_col = f"custom_fields['{col_name}']"
+
+        param_name = f"filter_{i}"
+        params[param_name] = values
+
+        op = "IN" if mode == "include" else "NOT IN"
+        clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
+
+    where_sql = " AND ".join(clauses) if clauses else "1=1"
+    return where_sql, params
+
+
+def _filtered_aggregates(
+    service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
+):
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+
+    where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
+
+    clauses = ["service_id={service_id:String}", "publication_state='visible'", where_sql]
+    params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
+
+    if start is not None and end is not None:
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end:DateTime64(3)}")
+        params.update({"start": start, "end": end})
+
+    where_clause = " AND ".join(clauses)
+
+    requested_fields = req.fields or list(_FIELD_DIMENSIONS)
+
+    def fetch_field(field: str):
+        if field not in _FIELD_DIMENSIONS:
+            return field, []
+        col_name = _FIELD_DIMENSIONS[field]
+        if col_name in {"client_ip", "country", "url"}:
+            sql_col = col_name
+        else:
+            sql_col = f"custom_fields['{col_name}']"
+
+        q = f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' GROUP BY v ORDER BY c DESC LIMIT 10"
+        try:
+            rows = service.client.execute(q, params)
+            return field, [(str(r["v"]), int(r["c"])) for r in rows]
+        except Exception as e:
+            return field, []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        field_results = dict(ex.map(fetch_field, requested_fields))
+
+    try:
+        total_rows_result = service.client.execute(
+            f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params
+        )
+        total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
+    except Exception:
+        total_count = 0
+
+    data = {
+        field: FieldAggregate(
+            top=[FieldTopEntry(value=v, count=c) for v, c in top_values],
+            total=total_count,
+        )
+        for field, top_values in field_results.items()
+    }
+
+    map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])]
+
+    time_series = []
+    if req.include_time_series is not False:
+        interval_sql = "toStartOfMinute(event_timestamp)"
+        if req.chart_interval == "5 minute":
+            interval_sql = "toStartOfFiveMinutes(event_timestamp)"
+        elif req.chart_interval == "1 hour":
+            interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
+        elif req.chart_interval == "1 day":
+            interval_sql = "toStartOfDay(event_timestamp)"
+
+        ts_q = f"SELECT {interval_sql} AS bucket_start, count() AS value FROM request_facts WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start"
+        try:
+            ts_rows = service.client.execute(ts_q, params)
+            time_series = [TimeSeriesPoint(time=str(r["bucket_start"]), value=float(r["value"])) for r in ts_rows]
+        except Exception:
+            time_series = []
+
+    return AggregatesResponse.with_telemetry(
+        data=data,
+        time_series=time_series,
+        map_data=map_data,
+        where_clause="high-scale ClickHouse (filtered)",
+        interval=req.chart_interval,
+        metric=req.chart_metric,
+        total_rows=total_count,
+        total_rows_total=total_count,
+        earliest_log_at=None,
+        latest_log_at=None,
+    )
+
+
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
+    if req.filters:
+        return _filtered_aggregates(service, req, start_time, end_time)
+
     requested_fields = req.fields or list(_FIELD_DIMENSIONS)
     responses = {
         field: _aggregate(
