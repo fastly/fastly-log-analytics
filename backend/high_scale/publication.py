@@ -421,6 +421,35 @@ def row_matches_serving_domain(domain: str, row: Mapping[str, Any]) -> bool:
     return True
 
 
+def _extract_custom_fields(row: Mapping[str, Any]) -> dict[str, str]:
+    base = _string_map(row, "custom_fields")
+    core_keys = {
+        "event_id",
+        "timestamp",
+        "ingest_timestamp",
+        "source_object_key",
+        "source_object_version",
+        "line_ordinal",
+        "transform_version",
+        "country",
+        "client_ip",
+        "ip",
+        "url",
+        "custom_fields",
+        "cmcd",
+        "service_id",
+        "domain",
+        "raw_json",
+        "waf_req_id",
+        "ngwaf_bot_verification_state",
+    }
+    for k, v in row.items():
+        if k not in core_keys and not k.startswith("_"):
+            if isinstance(v, (str, int, float, bool)) and v not in (None, ""):
+                base[k] = str(v)
+    return base
+
+
 def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, ...]]:
     rows: list[tuple[Any, ...]] = []
     for row in batch.rows:
@@ -438,7 +467,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                         default="",
                     ),
                     _required_string(row, "url", default=""),
-                    _string_map(row, "custom_fields"),
+                    _extract_custom_fields(row),
                     _string_map(row, "cmcd"),
                 )
             )
