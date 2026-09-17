@@ -342,12 +342,17 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
     Callers (recompute_touched_hours / backfill_rollups) gate via
     ``_is_safe_ident`` and ``_safe_table_for``.
     """
+    if field in ("age", "ttl"):
+        val_expr = f'CAST(CAST(ROUND("{field}") AS INTEGER) AS VARCHAR)'
+    else:
+        val_expr = f'CAST("{field}" AS VARCHAR)'
+
     return f"""
         SELECT field, hour, value, count FROM (
             SELECT
                 '{field}' AS field,
                 strftime(timestamp, '%Y-%m-%d-%H') AS hour,
-                CAST("{field}" AS VARCHAR) AS value,
+                {val_expr} AS value,
                 COUNT(*) AS count,
                 ROW_NUMBER() OVER (
                     PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')
@@ -356,7 +361,7 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
             FROM {table_ident}
             WHERE {where_sql}
               AND "{field}" IS NOT NULL
-              AND NULLIF(CAST("{field}" AS VARCHAR), '') IS NOT NULL
+              AND NULLIF({val_expr}, '') IS NOT NULL
             GROUP BY 1, 2, 3
         ) WHERE rn <= {TOP_K}
     """
