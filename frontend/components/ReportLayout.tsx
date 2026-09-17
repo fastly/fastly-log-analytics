@@ -1,6 +1,7 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useActiveService } from '@/hooks/useActiveService'
 import { useEffectiveServiceId } from '@/hooks/useIsDataReady'
 import { useTimeRange } from '@/hooks/useTimeRange'
@@ -75,6 +76,14 @@ export function ReportLayout<TData = unknown>({
   // `edge=include[true]` into every report query. Without it the toggle
   // was visible in the UI but discarded before reaching the backend.
   const filterPayload = useDebouncedFilterPayload(true)
+
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    return () => {
+      // Cancel report queries on unmount to free pool connections when navigating
+      queryClient.cancelQueries({ queryKey: [queryKey || 'report'] })
+    }
+  }, [queryClient, queryKey])
 
   useViewMetricUrlSync()
 
