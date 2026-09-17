@@ -186,7 +186,7 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
             sql_col = f"custom_fields['{col_name}']"
 
         param_name = f"filter_{i}"
-        params[param_name] = values
+        params[param_name] = [str(v) for v in values]
 
         op = "IN" if mode == "include" else "NOT IN"
         clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
