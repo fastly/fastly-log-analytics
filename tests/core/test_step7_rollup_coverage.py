@@ -91,7 +91,7 @@ def test_unfiltered_dashboard_queries_hit_rollups_and_skip_raw_scans(in_memory_d
     assert "temp_table_create" in timings_sec, "Security verified_bots_ts requires temp table"
 
     res_net_health = network.get_health(
-        con=in_memory_duckdb,
+        con_factory=lambda: in_memory_duckdb,
         src=src,
         start_time="2026-01-01T00:00:00Z",
         end_time="2026-01-02T00:00:00Z",

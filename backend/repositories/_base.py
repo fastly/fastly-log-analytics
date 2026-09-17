@@ -3736,7 +3736,7 @@ class QueryRunner:
         from backend.core.rollups._common import NETWORK_RTT_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=0
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=48
         )
         if win is None:
             return None
@@ -3801,7 +3801,7 @@ class QueryRunner:
         from backend.core.rollups._common import NETWORK_SPEED_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=0
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=48
         )
         if win is None:
             return None
@@ -3888,7 +3888,7 @@ class QueryRunner:
         if bucket_seconds != 3600:
             return None
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=0)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
         if win is None:
             return None
         st, et = win
@@ -4014,7 +4014,7 @@ class QueryRunner:
         if map_asn != "all":
             return None  # per-ASN map drill-down not supported by geo rollup
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=0)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
         if win is None:
             return None
         st, et = win
@@ -5240,7 +5240,7 @@ class QueryRunner:
         """Serve the /api/network/pop-health panel from parquets."""
         from backend.core.rollups._common import POP_HEALTH_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=0)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
         if win is None:
             return None
         st, et = win
