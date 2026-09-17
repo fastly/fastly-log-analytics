@@ -31,7 +31,7 @@ def cmcd_aggregates(
             {
                 "service_id": service.service_id,
                 "start_time": datetime.fromisoformat(start_time) if start_time else None,
-                "end_time": end_time,
+                "end_time": datetime.fromisoformat(end_time) if end_time else None,
             },
         )
         has_data = (

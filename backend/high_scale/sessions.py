@@ -91,10 +91,18 @@ def sessions_endpoint(
     sessions = res
     for s in sessions:
         if s.get("session_start"):
-            val = s["session_start"].isoformat()
+            val = (
+                s["session_start"].isoformat()
+                if hasattr(s["session_start"], "isoformat")
+                else s["session_start"].replace(" ", "T")
+            )
             s["session_start"] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
         if s.get("session_end"):
-            val = s["session_end"].isoformat()
+            val = (
+                s["session_end"].isoformat()
+                if hasattr(s["session_end"], "isoformat")
+                else s["session_end"].replace(" ", "T")
+            )
             s["session_end"] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
 
     # For now, fast path total
@@ -167,7 +175,9 @@ def sessions_detail(
     cols = list(data[0].keys()) if data else []
     for d in data:
         if d.get("timestamp"):
-            val = d["timestamp"].isoformat()
+            val = (
+                d["timestamp"].isoformat() if hasattr(d["timestamp"], "isoformat") else d["timestamp"].replace(" ", "T")
+            )
             d["timestamp"] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
 
     return {"data": data, "columns": cols}
