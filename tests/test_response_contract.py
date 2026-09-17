@@ -282,7 +282,7 @@ def test_network_health_contract(seeded_con):
     from backend.models.network import NetworkHealthResponse
     from backend.repositories.network import get_health
 
-    result = get_health(seeded_con, _src, None, None, {})
+    result = get_health(lambda: seeded_con, _src, None, None, {})
     _check_no_dropped_keys(result, NetworkHealthResponse, "network.get_health")
 
 
