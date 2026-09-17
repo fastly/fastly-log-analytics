@@ -24,7 +24,8 @@ def sessions_endpoint(
             custom_fields['ua'] as ua,
             toInt32OrZero(custom_fields['status']) as status,
             toInt64OrZero(custom_fields['resp_bytes']) as resp_bytes,
-            toFloat64OrZero(custom_fields['tcp_rtt']) as tcp_rtt
+            toFloat64OrZero(custom_fields['tcp_rtt']) as tcp_rtt,
+            custom_fields['cmcd_sid'] as cmcd_sid
         FROM fastly_log_analytics.request_facts
         WHERE service_id = {service_id:String}
           AND publication_state = 'visible'
@@ -68,7 +69,7 @@ def sessions_endpoint(
             sum(if(edge = '1', 1, 0)) as edge_count,
             sum(if(edge = '0', 1, 0)) as shield_count,
             max(edge_sid) as edge_sid,
-            sum(if(custom_fields['cmcd_sid'] != '', 1, 0)) as streaming_reqs
+            sum(if(cmcd_sid != '', 1, 0)) as streaming_reqs
         FROM sessions_raw
         GROUP BY ip, ja4, sid
     )
