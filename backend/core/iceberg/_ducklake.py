@@ -58,6 +58,17 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # alias/extension state, not the main database file.
 _attach_lock = threading.Lock()
 
+# Bounds how long a WAITING caller will queue for _attach_lock before giving
+# up. The lock itself must stay unconditional mutual exclusion (see above) —
+# this only lets an impatient caller stop waiting and fail fast instead of
+# hanging its DuckDB pool connection slot forever when the current holder's
+# ATTACH is blocked on a genuinely slow or stuck OS-level file lock (e.g. a
+# concurrent cron writer mid-ingest). That blocking call has no internal
+# timeout of its own — DuckDB's ATTACH can sit in an uninterruptible kernel
+# wait for the file lock — so without this bound a queued reader can wait
+# indefinitely, and pool exhaustion cascades from there.
+_ATTACH_LOCK_TIMEOUT_S = float(os.environ.get("DUCKLAKE_ATTACH_LOCK_TIMEOUT_S", "20") or "20")
+
 # Same knob the local tiered compaction honors (backend/core/local_compaction.py
 # _MAX_PARTITION_BYTES). Keeping the two caps on one env var means DuckLake
 # merges and local compaction can never disagree about the ceiling.
@@ -148,7 +159,16 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # testing when only the ATTACH statements were serialized and
     # INSTALL/LOAD ducklake was left outside the lock, so the whole
     # function body is covered.
-    with _attach_lock:
+    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+        logger.warning(
+            "[ducklake] %s: timed out after %.0fs waiting for the process-wide attach lock — "
+            "another connection's ATTACH is taking unusually long (e.g. a concurrent cron writer "
+            "mid-ingest). Failing fast instead of hanging this caller's pool connection indefinitely.",
+            service_id,
+            _ATTACH_LOCK_TIMEOUT_S,
+        )
+        return False
+    try:
         try:
             extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
             if extension_directory:
@@ -233,7 +253,9 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
 
         if not read_only:
             _apply_target_file_size(con)
-    return True
+        return True
+    finally:
+        _attach_lock.release()
 
 
 def _apply_target_file_size(con, alias: str = "lake") -> None:
