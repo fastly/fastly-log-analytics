@@ -204,6 +204,8 @@ def _filtered_aggregates(
     where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
     if where_sql == "1=1":
         return {"total_rows": -1, "data": {"url": {"top": []}}}
+    if where_sql == "1=1":
+        return {"total_rows": -1, "data": {"url": {"top": []}}}
 
     clauses = ["service_id={service_id:String}", "1=1", where_sql]
 
@@ -242,7 +244,7 @@ def _filtered_aggregates(
             f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params
         )
         total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
-    except Exception:
+    except Exception as e:
         total_count = 0
 
     data = {
