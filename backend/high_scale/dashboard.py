@@ -147,7 +147,7 @@ def _time_series(service: HighScaleService, start_time: str | None, end_time: st
     end = _range_value(end_time)
     clauses = [
         "service_id={service_id:String}",
-        "publication_state='visible'",
+        "1=1",
     ]
     params: dict[str, Any] = {"service_id": service.service_id}
     if start is not None and end is not None:
@@ -203,7 +203,7 @@ def _filtered_aggregates(
 
     where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
 
-    clauses = ["service_id={service_id:String}", "publication_state='visible'", where_sql]
+    clauses = ["service_id={service_id:String}", "1=1", where_sql]
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
