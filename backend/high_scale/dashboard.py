@@ -205,7 +205,8 @@ def _filtered_aggregates(
     start = _range_value(start_time)
     end = _range_value(end_time)
 
-    where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
+    filter_dict = getattr(req.filters, "__dict__", req.filters) if req.filters else {}
+    where_sql, filter_params = _build_clickhouse_filters(filter_dict)
 
     clauses = ["service_id={service_id:String}", "1=1", where_sql]
 
