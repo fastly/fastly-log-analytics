@@ -80,6 +80,14 @@ async def insights_endpoint(
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.insights import insights_endpoint as hs_insights
+
+        return hs_insights(high_scale_service, req, clamp_start, clamp_end)
+
     sem = _get_insights_sem(ctx.service_id)
     async with sem:
         return await asyncio.to_thread(
@@ -103,6 +111,15 @@ def cache_collapse_detail_endpoint(
     ctx: RequestContext = Depends(build_request_context),
 ):
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
+
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.insights import cache_collapse_detail_endpoint as hs_detail
+
+        return hs_detail(high_scale_service, req, clamp_start, clamp_end)
+
     return repo.get_cache_collapse_detail(
         con=ctx.con,
         src=ctx.source,

@@ -16,6 +16,7 @@ from backend.high_scale.archive_publication import ArchivePublication
 from backend.high_scale.archive_writer import write_archive_checkpoint
 from backend.high_scale.decoder import DecodeResult, decode_source_object
 from backend.high_scale.ledger import HighScaleLedger, SourceObject
+from backend.high_scale.network_projection import build_network_projection_rows
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.ownership import OwnershipStore
 from backend.high_scale.performance_projection import build_performance_projection_rows
@@ -385,12 +386,14 @@ class HighScaleIngestController:
                 origin_proj = build_origin_projection_rows(events)
                 perf_proj = build_performance_projection_rows(events)
                 security_proj = build_security_projection_rows(events)
+                network_proj = build_network_projection_rows(events)
 
                 for domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
                     ("performance_dimensions", perf_proj.dimension_rows),
                     ("security_dimensions", security_proj.dimension_rows),
+                    ("network_dimensions", network_proj.dimension_rows),
                 ):
                     if not rows:
                         continue

@@ -59,6 +59,7 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "origin_minute_dimensions",
         "performance_minute_dimensions",
         "security_minute_dimensions",
+        "network_minute_dimensions",
     }
 )
 CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
@@ -130,6 +131,15 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "verified_count",
         "impersonator_count",
         "unverified_count",
+        "c_speed",
+        "errors",
+        "tcp_rtt_count",
+        "tcp_rtt_sum",
+        "tcp_rtt_p50_us",
+        "tcp_rtt_p95_us",
+        "tcp_rtt_p99_us",
+        "ploss_sum",
+        "ploss_count",
     }
 )
 CLICKHOUSE_ALLOWED_TABLES = frozenset({CLICKHOUSE_FACT_TABLE}) | CLICKHOUSE_HIGH_SCALE_TABLES

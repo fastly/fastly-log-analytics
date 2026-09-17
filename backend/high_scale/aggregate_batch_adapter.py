@@ -95,6 +95,25 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "unverified_count",
         ),
     ),
+    "network_dimensions": (
+        "network_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "c_speed",
+            "requests",
+            "errors",
+            "tcp_rtt_count",
+            "tcp_rtt_sum",
+            "tcp_rtt_p50_us",
+            "tcp_rtt_p95_us",
+            "tcp_rtt_p99_us",
+            "ploss_sum",
+            "ploss_count",
+            "ttfb_p50_us",
+            "ttfb_p95_us",
+        ),
+    ),
 }
 
 

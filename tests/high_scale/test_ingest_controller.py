@@ -183,7 +183,7 @@ def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
         now=datetime(2026, 9, 11, 20, 0, tzinfo=UTC),
     )
 
-    assert len(aggregate_clickhouse.batches) == 4
+    assert len(aggregate_clickhouse.batches) == 5
     batch = aggregate_clickhouse.batches[0]
     assert batch.domain == "request_aggregate"
     values = {(row["dimension"], row["value"]) for row in batch.rows}
