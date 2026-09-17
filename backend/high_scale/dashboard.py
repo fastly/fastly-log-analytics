@@ -171,8 +171,8 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
     params = {}
 
     for i, (field, config) in enumerate(filters.items()):
-        mode = config.get("mode", "include")
-        values = config.get("values", [])
+        mode = getattr(config, "mode", "include") if hasattr(config, "mode") else config.get("mode", "include")
+        values = getattr(config, "values", []) if hasattr(config, "values") else config.get("values", [])
         if not values:
             continue
 
