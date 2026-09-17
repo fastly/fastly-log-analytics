@@ -1307,20 +1307,42 @@ class QueryRunner:
 
         def _create_sql(union_by_name: str) -> str:
             branches: list[str] = []
+
+            # To get derived fields (c_speed mapped, timestamp_hour, etc.) correctly
+            # we must apply the same view derivations to the active-hour raw rows.
+            # We select * from the raw sources, union them, wrap with _finalize_view_sql,
+            # and finally project just the columns we need.
+
             if buffer_files:
                 paths_sql = quote_path_list(buffer_files)
                 branches.append(
-                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
             if lake_table:
                 lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
-                branches.append(f"SELECT {cols_sql} FROM {lake_ident} WHERE {where}")
+                branches.append(f"SELECT * FROM {lake_ident} WHERE {where}")
             if hourly_files:
                 paths_sql = quote_path_list(hourly_files)
                 branches.append(
-                    f"SELECT {cols_sql} FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
-            return " UNION ALL ".join(branches)
+
+            union_sql = " UNION ALL ".join(branches)
+
+            from backend.core.iceberg.view import _finalize_view_sql
+
+            target_table = "logs"  # QueryRunner active hour direct is only used for logs path right now
+            # For exact correctness, we could pass the real dynamic schema fields, but custom fields
+            # are real columns in the parquet anyway, so passing an empty set is fine for the EXCLUDE logic.
+            finalized = _finalize_view_sql(
+                union_sql,
+                self.src,
+                target_table=target_table,
+                dynamic_schema_field_names=set(),
+                existing_cols=set(actual_cols),
+            )
+
+            return f"SELECT {cols_sql} FROM ({finalized})"
 
         temp_name = f"t_active_direct_{_uuid.uuid4().hex}"
         # union_by_name=false first: with =true DuckDB reconciles every
