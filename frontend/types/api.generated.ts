@@ -21296,6 +21296,9 @@ export interface operations {
     rum_live_events_api_services__service_id__rum_live_events_get: {
         parameters: {
             query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                filters?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };
