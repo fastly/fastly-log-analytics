@@ -1327,7 +1327,10 @@ class QueryRunner:
                     f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
                 )
 
-            union_sql = " UNION ALL ".join(branches)
+            joiner = " UNION ALL BY NAME " if union_by_name == "true" else " UNION ALL "
+            # We must use BY NAME across the branches (lake_table vs buffer_files) because
+            # their physical column layouts can differ (e.g. lake catalog columns vs raw).
+            union_sql = " UNION ALL BY NAME ".join(branches)
 
             from backend.core.iceberg.view import _finalize_view_sql
 
