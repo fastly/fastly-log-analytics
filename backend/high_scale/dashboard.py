@@ -183,7 +183,7 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
             mode = getattr(config, "mode", "include")
             values = getattr(config, "values", [])
 
-        if not values:
+        if values is None or not values:
             continue
 
         col_name = _FIELD_DIMENSIONS.get(field)
@@ -192,6 +192,8 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
 
         if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             sql_col = col_name
+        elif col_name in {"age", "ttl"}:
+            sql_col = f"CAST(CAST(ROUND(custom_fields['{col_name}']) AS INTEGER) AS VARCHAR)"
         else:
             sql_col = f"custom_fields['{col_name}']"
 
@@ -264,8 +266,11 @@ def _filtered_aggregates(
         if field not in _FIELD_DIMENSIONS:
             return field, []
         col_name = _FIELD_DIMENSIONS[field]
-        if col_name in {"client_ip", "country", "url"}:
+
+        if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             sql_col = col_name
+        elif col_name in {"age", "ttl"}:
+            sql_col = f"CAST(CAST(ROUND(custom_fields['{col_name}']) AS INTEGER) AS VARCHAR)"
         else:
             sql_col = f"custom_fields['{col_name}']"
 
