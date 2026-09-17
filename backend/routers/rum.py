@@ -557,8 +557,11 @@ async def rum_beacon_health(
     """
     from backend.high_scale.registry import get_high_scale_service_registry
 
-    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
-        return _inject_telemetry({"has_data": False, "beacons": 0})
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_beacon_health as hs_rum_health
+
+        return _inject_telemetry(hs_rum_health(high_scale_service))
 
     service_id = ctx.service_id
     cfg = svcconfig.load_config(service_id) or {}
@@ -655,8 +658,12 @@ async def rum_analytics(
     """
     from backend.high_scale.registry import get_high_scale_service_registry
 
-    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
-        return _inject_telemetry({"has_data": False, "total_page_views": 0, "rows": []})
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_analytics as hs_rum_analytics
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return _inject_telemetry(hs_rum_analytics(high_scale_service, start_time, end_time))
 
     service_id = ctx.service_id
 
@@ -1172,8 +1179,12 @@ async def rum_live_events(
     """
     from backend.high_scale.registry import get_high_scale_service_registry
 
-    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
-        return []
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_live_events as hs_rum_live
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return hs_rum_live(high_scale_service, start_time, end_time, 50)
 
     service_id = ctx.service_id
 
