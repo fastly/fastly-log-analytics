@@ -1113,15 +1113,14 @@ def get_connection(
         iceberg.configure_duckdb_s3(con)
         con.execute("SET unsafe_enable_version_guessing=true;")
         attached = _ducklake_attach(con, src, read_only=True)
-        if durable_serving and not attached:
-            raise RuntimeError("durable serving mode could not attach the Postgres DuckLake catalog")
+        if not attached:
+            raise RuntimeError("failed to attach DuckLake catalog")
     except Exception:
-        if durable_serving:
-            try:
-                con.close()
-            except Exception:
-                pass
-            raise
+        try:
+            con.close()
+        except Exception:
+            pass
+        raise
 
     con.execute("SET enable_http_metadata_cache=true;")
     con.execute("SET enable_object_cache=true;")
