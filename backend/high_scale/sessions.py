@@ -17,7 +17,7 @@ def sessions_endpoint(
             custom_fields['ja4'] as ja4,
             event_timestamp as ts,
             country,
-            custom_fields['asn'] as asn,
+            toInt32OrNull(custom_fields['asn']) as asn,
             url,
             custom_fields['edge'] as edge,
             custom_fields['edge_sid'] as edge_sid,
@@ -71,8 +71,12 @@ def sessions_endpoint(
         FROM sessions_raw
         GROUP BY ip, ja4, sid
     )
-    SELECT *
-    FROM sessions_agg
+    SELECT * FROM (
+        SELECT *,
+               ((req_count >= {min_reqs_flag:UInt32}) OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {min_4xx_pct_flag:Float64})) as flagged
+        FROM sessions_agg
+    ) sub
+    WHERE ({flagged_only:UInt8} = 0) OR flagged = 1
     ORDER BY session_start DESC
     LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     """
@@ -85,11 +89,22 @@ def sessions_endpoint(
             "end_time": datetime.fromisoformat(end_time) if end_time else None,
             "limit": req.limit,
             "offset": (req.page - 1) * req.limit,
+            "min_reqs_flag": req.min_reqs_flag if req.min_reqs_flag is not None else 1000,
+            "min_4xx_pct_flag": req.min_4xx_pct_flag if req.min_4xx_pct_flag is not None else 20.0,
+            "flagged_only": 1 if req.flagged_only else 0,
         },
     )
 
     sessions = res
     for s in sessions:
+        if s.get("asn") == "":
+            s["asn"] = None
+        elif s.get("asn"):
+            try:
+                s["asn"] = int(s["asn"])
+            except ValueError:
+                s["asn"] = None
+
         if s.get("session_start"):
             val = (
                 s["session_start"].isoformat()
@@ -148,7 +163,7 @@ def sessions_detail(
         custom_fields['edge'] as edge,
         custom_fields['edge_sid'] as edge_sid,
         custom_fields['ua'] as ua,
-        custom_fields['asn'] as asn
+        toInt32OrNull(custom_fields['asn']) as asn
     FROM fastly_log_analytics.request_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
