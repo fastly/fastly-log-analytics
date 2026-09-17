@@ -7,8 +7,8 @@ from backend.high_scale.registry import HighScaleService
 from backend.models.network import (
     NetworkHealthResponse,
     NetworkQualityResponse,
-    PopHealthResponse,
 )
+from backend.routers.network import PopHealthListResponse
 
 
 def network_health(
@@ -39,7 +39,7 @@ def network_quality(
 
 def get_pop_health(
     service: HighScaleService, start_time: datetime | None, end_time: datetime | None
-) -> PopHealthResponse:
-    return PopHealthResponse.with_telemetry(
-        pops=[],
+) -> PopHealthListResponse:
+    return PopHealthListResponse.with_telemetry(
+        data=[],
     )
