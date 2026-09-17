@@ -302,7 +302,7 @@ export function DebugPanel() {
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
 
-  const duckDbCopyText = `DuckDB Queries (Total Time: ${totalQueryTime.toFixed(2)}ms)
+  const duckDbCopyText = `Data Queries (DuckDB/ClickHouse) (Total Time: ${totalQueryTime.toFixed(2)}ms)
 ${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
@@ -322,7 +322,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-primary/10 p-1.5 rounded-md">
                 <Database className="h-4 w-4 text-primary" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries (DuckDB / ClickHouse)</h3>
               <Button
                 variant="ghost"
                 size="sm"

@@ -26,7 +26,7 @@ import structlog
 from backend import config
 from backend.core.clickhouse_metrics import record_operation
 from backend.core.query_registry import query_registry
-from backend.utils.telemetry import record_call
+from backend.utils.telemetry import _QUERIES, get_queries, record_call
 
 logger = structlog.get_logger(__name__)
 
@@ -433,6 +433,13 @@ class ClickHouseClient:
                 if acquired:
                     self._slots.release()
                 stats["duration_ms"] = (time.perf_counter() - started) * 1000
+                if operation == "execute" and data and "query" in data:
+                    try:
+                        queries = get_queries()
+                        queries.append({"sql": data["query"].strip(), "time_ms": round(stats["duration_ms"], 2)})
+                        _QUERIES.set(queries)
+                    except Exception:
+                        pass
                 try:
                     _record_operation(**stats)
                 except Exception:
