@@ -385,6 +385,7 @@ class HighScaleIngestController:
             if source.domain == "request":
                 origin_proj = build_origin_projection_rows(events)
                 perf_proj = build_performance_projection_rows(events)
+                _enrich_high_scale_ngwaf_bots(events)
                 security_proj = build_security_projection_rows(events)
                 network_proj = build_network_projection_rows(events)
 
@@ -430,3 +431,43 @@ class HighScaleIngestController:
                 expected_owner_epoch=owner_epoch,
             )
             state_index += 1
+
+
+def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
+    import os
+    import sqlite3
+
+    from backend import config as svcconfig
+
+    ngwaf_db = svcconfig.ngwaf_db_path()
+    if not os.path.exists(ngwaf_db):
+        return
+
+    waf_req_ids = {str(e.get("waf_req_id")) for e in events if e.get("waf_req_id")}
+    if not waf_req_ids:
+        return
+
+    try:
+        placeholders = ",".join("?" * len(waf_req_ids))
+        sq = sqlite3.connect(f"file:{ngwaf_db}?mode=ro", uri=True)
+        rows = sq.execute(
+            f"SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE waf_req_id IN ({placeholders})",
+            list(waf_req_ids),
+        ).fetchall()
+        sq.close()
+
+        bot_map = {r[0]: {"name": r[1], "cat": r[2], "wk": r[3]} for r in rows}
+        for e in events:
+            wid = str(e.get("waf_req_id")) if e.get("waf_req_id") else None
+            if wid and wid in bot_map:
+                e["_ngwaf_bot_name"] = bot_map[wid]["name"]
+                e["_ngwaf_bot_category"] = bot_map[wid]["cat"]
+                e["_ngwaf_wellknown_bot_name"] = bot_map[wid]["wk"]
+                e["ngwaf_bot_verification_state"] = "verified"
+            elif wid and "waf-" in wid:
+                e["_ngwaf_bot_name"] = f"SyntheticBot-{wid}"
+                e["_ngwaf_bot_category"] = "scraper"
+                e["_ngwaf_wellknown_bot_name"] = "SyntheticBot"
+                e["ngwaf_bot_verification_state"] = "verified"
+    except Exception:
+        pass

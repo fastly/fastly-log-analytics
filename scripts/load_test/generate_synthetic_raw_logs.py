@@ -134,7 +134,6 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "waf": False,
         "waf_resp": 200,
         "waf_ms": 0,
-        "waf_sig": "synthetic-none",
         "waf_req_id": f"waf-{random.randint(1, 10_000)}",
         "q_rtt": random.randint(8, 180_000),
         "q_rtt_var": random.randint(1, 20_000),
@@ -154,6 +153,8 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "io_input_format": random.choice(IMAGE_FORMATS),
         "io_output_format": random.choice(IMAGE_FORMATS),
         "service_id": service_id,
+        "cmcd": {"v": "1", "sid": f"sid-{random.randint(1, 1000)}", "br": "3000", "d": "4000"},
+        "waf_sig": "VERIFIED-BOT",
     }
 
 

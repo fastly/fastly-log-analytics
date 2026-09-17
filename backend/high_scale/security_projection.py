@@ -46,6 +46,11 @@ def build_security_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> Secur
             else:
                 acc.unverified_count += 1
 
+            if not acc.wellknown_bot_name:
+                acc.wellknown_bot_name = _text(row.get("_ngwaf_wellknown_bot_name"))
+            if not acc.bot_category:
+                acc.bot_category = _text(row.get("_ngwaf_bot_category"))
+
     return SecurityProjection(
         dimension_rows=tuple(
             _dimension_row(bucket, dimension, value, acc)
