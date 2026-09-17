@@ -186,7 +186,7 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
             sql_col = f"custom_fields['{col_name}']"
 
         param_name = f"filter_{i}"
-        params[param_name] = [str(v) for v in values]
+        params[param_name] = values
 
         op = "IN" if mode == "include" else "NOT IN"
         clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
@@ -204,6 +204,7 @@ def _filtered_aggregates(
     where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
 
     clauses = ["service_id={service_id:String}", "1=1", where_sql]
+
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
