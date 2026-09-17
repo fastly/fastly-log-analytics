@@ -161,7 +161,7 @@ def performance_aggregates(
         start_time=start_time,
         end_time=end_time,
         select=(
-            "sum(requests) AS requests, "
+            "sum(requests) AS req_count, "
             "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
             f"{_weighted('latency_p50_ms')} AS p50_ms, "
             f"{_weighted('latency_p95_ms')} AS p95_ms, "
@@ -174,7 +174,7 @@ def performance_aggregates(
     top_urls = [
         {
             "url": row["value"],
-            "requests": int(row["requests"]),
+            "requests": int(row["req_count"]),
             "avg": float(row["avg_ms"]) if row["avg_ms"] is not None else 0.0,
             "p50": float(row["p50_ms"]) if row["p50_ms"] is not None else 0.0,
             "p95": float(row["p95_ms"]) if row["p95_ms"] is not None else 0.0,
@@ -190,7 +190,7 @@ def performance_aggregates(
         start_time=start_time,
         end_time=end_time,
         select=(
-            "sum(requests) AS requests, "
+            "sum(requests) AS req_count, "
             "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
             f"{_weighted('latency_p50_ms')} AS p50_ms, "
             f"{_weighted('latency_p95_ms')} AS p95_ms, "
@@ -203,7 +203,7 @@ def performance_aggregates(
     top_asns = [
         {
             "asn": row["value"],
-            "requests": int(row["requests"]),
+            "requests": int(row["req_count"]),
             "avg": float(row["avg_ms"]) if row["avg_ms"] is not None else 0.0,
             "p50": float(row["p50_ms"]) if row["p50_ms"] is not None else 0.0,
             "p95": float(row["p95_ms"]) if row["p95_ms"] is not None else 0.0,
