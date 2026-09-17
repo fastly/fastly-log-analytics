@@ -192,10 +192,10 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             except Exception as e:
                 msg = str(e).lower()
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
-                    if attempt < 4:
+                    if attempt < 9:
                         import time
 
-                        time.sleep(0.1 * (2**attempt))
+                        time.sleep(1.5)
                         continue
                     logger.warning(
                         "[ducklake] %s: failed to attach ducklake catalog (zombie lock timeout): %s", service_id, e
