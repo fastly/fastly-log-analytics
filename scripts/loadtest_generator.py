@@ -171,6 +171,20 @@ def _gen_batch(n: int, hour_start_ms: int, hour_end_ms: int, card: dict, rng: np
     elapsed_ms = rng.lognormal(mean=np.log(25), sigma=1.2, size=n).astype(np.int32)
     elapsed = np.clip(elapsed_ms, 1, 30_000)
     ttfb = (elapsed * rng.uniform(0.3, 0.9, size=n)).astype(np.int32)
+
+    # Origin timings
+    ottfb = (elapsed * rng.uniform(0.1, 0.8, size=n)).astype(np.int32)
+    ottlb = (ottfb + rng.lognormal(mean=np.log(10), sigma=1.0, size=n)).astype(np.int32)
+
+    # TLS and WAF timings
+    tls_time = np.clip(rng.lognormal(mean=np.log(45), sigma=0.5, size=n), 10, 1000).astype(np.int32)
+    waf_ms = np.clip(rng.lognormal(mean=np.log(5), sigma=0.5, size=n), 1, 100).astype(np.int32)
+
+    # TTL distribution
+    ttl_choices = [0, 300, 3600, 86400, 31536000]
+    ttl_weights = [0.2, 0.3, 0.3, 0.15, 0.05]
+    ttl = rng.choice(ttl_choices, size=n, p=ttl_weights).astype(np.int32)
+
     resp_bytes = np.clip(
         rng.lognormal(mean=np.log(8_000), sigma=1.5, size=n).astype(np.int64),
         100,
@@ -197,6 +211,11 @@ def _gen_batch(n: int, hour_start_ms: int, hour_end_ms: int, card: dict, rng: np
         "req_bytes": req_bytes,
         "pop": pop,
         "ttfb": ttfb,
+        "ottfb": ottfb,
+        "ottlb": ottlb,
+        "tls_time": tls_time,
+        "waf_ms": waf_ms,
+        "ttl": ttl,
         "country": country,
         "asn": asn,
         "ja3": ja3,

@@ -13,6 +13,78 @@ def _range_value(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _where(
+    service_id: str,
+    domain: str,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    dimension: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    clauses = [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
+        "AND publication_state='visible')",
+    ]
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "publication_domain": domain,
+    }
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None:
+        clauses.append("bucket_start >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        clauses.append("bucket_start < {end:DateTime64(3)}")
+        params["end"] = end
+    if dimension is not None:
+        clauses.append("dimension={dimension:String}")
+        params["dimension"] = dimension
+    return " AND ".join(clauses), params
+
+
+def _weighted(column: str, count_column: str = "latency_count") -> str:
+    return f"sum({column} * {count_column}) / nullIf(sum(if({column} IS NOT NULL, {count_column}, 0)), 0)"
+
+
+def _dimension_rows(
+    service: HighScaleService,
+    *,
+    marker: str,
+    dimension: str,
+    start_time: str | None,
+    end_time: str | None,
+    select: str,
+    order_by: str,
+    limit: int | None = None,
+    having: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    where, params = _where(
+        service.service_id,
+        "performance_dimensions",
+        start_time,
+        end_time,
+        dimension=dimension,
+    )
+    suffix = f" HAVING {having}" if having else ""
+    params.update(extra_params or {})
+    if limit is not None:
+        params["limit"] = int(limit)
+        suffix += " ORDER BY " + order_by + " LIMIT {limit:UInt32}"
+    else:
+        suffix += " ORDER BY " + order_by
+    return service.client.execute(
+        f"/* perf:{marker} */ SELECT value, {select} "
+        f"FROM performance_minute_dimensions WHERE {where} GROUP BY value{suffix}",
+        params,
+    )
+
+
 def _aggregate(
     service: HighScaleService,
     *,
@@ -82,9 +154,67 @@ def performance_aggregates(
 
     ttl_dist = [{"bucket": k, "count": v} for k, v in buckets.items() if v > 0]
 
+    top_urls_rows = _dimension_rows(
+        service,
+        marker="top_urls",
+        dimension="url",
+        start_time=start_time,
+        end_time=end_time,
+        select=(
+            "sum(requests) AS requests, "
+            "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
+            f"{_weighted('latency_p50_ms')} AS p50_ms, "
+            f"{_weighted('latency_p95_ms')} AS p95_ms, "
+            f"{_weighted('latency_p99_ms')} AS p99_ms"
+        ),
+        having="sum(requests) > 5",
+        order_by="p99_ms DESC",
+        limit=20,
+    )
+    top_urls = [
+        {
+            "url": row["value"],
+            "requests": int(row["requests"]),
+            "avg": float(row["avg_ms"]) if row["avg_ms"] is not None else 0.0,
+            "p50": float(row["p50_ms"]) if row["p50_ms"] is not None else 0.0,
+            "p95": float(row["p95_ms"]) if row["p95_ms"] is not None else 0.0,
+            "p99": float(row["p99_ms"]) if row["p99_ms"] is not None else 0.0,
+        }
+        for row in top_urls_rows
+    ]
+
+    top_asns_rows = _dimension_rows(
+        service,
+        marker="top_asns",
+        dimension="asn",
+        start_time=start_time,
+        end_time=end_time,
+        select=(
+            "sum(requests) AS requests, "
+            "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
+            f"{_weighted('latency_p50_ms')} AS p50_ms, "
+            f"{_weighted('latency_p95_ms')} AS p95_ms, "
+            f"{_weighted('latency_p99_ms')} AS p99_ms"
+        ),
+        having="sum(requests) > 5",
+        order_by="p99_ms DESC",
+        limit=20,
+    )
+    top_asns = [
+        {
+            "asn": row["value"],
+            "requests": int(row["requests"]),
+            "avg": float(row["avg_ms"]) if row["avg_ms"] is not None else 0.0,
+            "p50": float(row["p50_ms"]) if row["p50_ms"] is not None else 0.0,
+            "p95": float(row["p95_ms"]) if row["p95_ms"] is not None else 0.0,
+            "p99": float(row["p99_ms"]) if row["p99_ms"] is not None else 0.0,
+        }
+        for row in top_asns_rows
+    ]
+
     return PerformanceAggregatesResponse.with_telemetry(
-        top_urls=[],
-        top_asns=[],
+        top_urls=top_urls,
+        top_asns=top_asns,
         ttl_dist=ttl_dist,
         scatter=[],
         waterfall={},

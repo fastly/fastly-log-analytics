@@ -18,6 +18,7 @@ from backend.high_scale.decoder import DecodeResult, decode_source_object
 from backend.high_scale.ledger import HighScaleLedger, SourceObject
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.ownership import OwnershipStore
+from backend.high_scale.performance_projection import build_performance_projection_rows
 from backend.high_scale.publication import (
     ClickHousePublication,
     HighScaleBatch,
@@ -380,10 +381,13 @@ class HighScaleIngestController:
                 )
                 self._aggregates.publish(batch)
             if source.domain == "request":
-                projection = build_origin_projection_rows(events)
+                origin_proj = build_origin_projection_rows(events)
+                perf_proj = build_performance_projection_rows(events)
+
                 for domain, rows in (
-                    ("origin_summary", projection.summary_rows),
-                    ("origin_dimensions", projection.dimension_rows),
+                    ("origin_summary", origin_proj.summary_rows),
+                    ("origin_dimensions", origin_proj.dimension_rows),
+                    ("performance_dimensions", perf_proj.dimension_rows),
                 ):
                     if not rows:
                         continue
