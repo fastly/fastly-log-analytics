@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Users } from 'lucide-react'
 import dynamic from 'next/dynamic'
@@ -75,6 +75,14 @@ function SessionsBody({
 }: SessionsBodyProps) {
   const isReady = useIsDataReady()
   const cmcdEnabled = useActiveServiceCmcdEnabled(activeServiceId)
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    return () => {
+      queryClient.cancelQueries({ queryKey: ['sessions'] })
+      queryClient.cancelQueries({ queryKey: ['scoring-labels'] })
+    }
+  }, [queryClient])
 
   // Mirror backend's 7-day guard client-side so the request never
   // fires on a too-wide range. Backend rejects with a 400 either
