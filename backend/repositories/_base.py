@@ -2609,6 +2609,9 @@ class QueryRunner:
         else:  # rate
             value_expr = "ROUND(SUM(num) * 100.0 / NULLIF(SUM(den), 0), 2)"
 
+        if not select_clauses:
+            return []
+
         unioned = " UNION ALL ".join(f"({c})" for c in select_clauses)
         final_sql = (
             f"SELECT out_bucket, {value_expr} AS value "
