@@ -7231,6 +7231,8 @@ export interface components {
              * @default false
              */
             is_cached: boolean;
+            /** Engine */
+            engine?: string | null;
         };
         /** DebugSettingsResponse */
         DebugSettingsResponse: {

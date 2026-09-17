@@ -45442,6 +45442,17 @@
             "type": "boolean",
             "title": "Is Cached",
             "default": false
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
           }
         },
         "type": "object",

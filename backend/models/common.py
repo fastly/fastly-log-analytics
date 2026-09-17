@@ -108,6 +108,7 @@ class DebugQuery(BaseModel):
     sql: str
     time_ms: float
     is_cached: bool = False
+    engine: str | None = None
 
 
 class DebugCall(BaseModel):
