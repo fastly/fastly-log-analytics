@@ -299,7 +299,12 @@ def reconcile_vcl_state(
             if not config_path.exists():
                 # Bootstrap from Fastly if config missing (Gotcha 1)
                 desired_state = _bootstrap_featurestate_from_fastly(service_id, token)
-                config_path.write_text(json.dumps(asdict(desired_state), indent=2))
+                try:
+                    config_path.write_text(json.dumps(asdict(desired_state), indent=2))
+                except OSError as e:
+                    import logging
+
+                    logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
             else:
                 cfg = json.loads(config_path.read_text())
                 desired_state = FeatureState.from_config(cfg)
@@ -438,7 +443,12 @@ def reconcile_vcl_state(
                     # Update local config with activation metadata
                     cfg = json.loads(config_path.read_text())
                     cfg["last_activated_version"] = draft_version
-                    config_path.write_text(json.dumps(cfg, indent=2))
+                    try:
+                        config_path.write_text(json.dumps(cfg, indent=2))
+                    except OSError as e:
+                        import logging
+
+                        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
                 else:
                     if status_cb:
                         status_cb(
@@ -596,7 +606,12 @@ def reconcile_cdn_service_state(
         cfg["fos_proxy"]["shield"] = cdn_shield
         cfg["fos_proxy"]["secret"] = cdn_secret
         cfg["cdn_service_id"] = cdn_service_id  # flat key
-        config_path.write_text(json.dumps(cfg, indent=2))
+        try:
+            config_path.write_text(json.dumps(cfg, indent=2))
+        except OSError as e:
+            import logging
+
+            logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
 
     result = ReconciliationResult(service_id=cdn_service_id)
 
@@ -772,7 +787,12 @@ def reconcile_cdn_service_state(
                         cfg["fos_proxy"] = {}
                     cfg["fos_proxy"]["last_activated_version"] = draft_version
                     cfg["last_activated_version_cdn"] = draft_version
-                    config_path.write_text(json.dumps(cfg, indent=2))
+                    try:
+                        config_path.write_text(json.dumps(cfg, indent=2))
+                    except OSError as e:
+                        import logging
+
+                        logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
                 else:
                     if status_cb:
                         status_cb(

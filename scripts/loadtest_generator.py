@@ -217,7 +217,19 @@ def _cols_to_arrow_table(cols: dict, schema: pa.Schema) -> pa.Table:
                 arr = arr.cast(field.type, safe=False)
             arrays.append(arr)
         else:
-            arrays.append(pa.nulls(n_rows, type=field.type))
+            if pa.types.is_string(field.type):
+                arr = pa.array([f"dummy_{name}"] * n_rows, type=field.type)
+            elif pa.types.is_integer(field.type):
+                arr = pa.array([1] * n_rows, type=field.type)
+            elif pa.types.is_floating(field.type):
+                arr = pa.array([1.0] * n_rows, type=field.type)
+            elif pa.types.is_boolean(field.type):
+                arr = pa.array([False] * n_rows, type=field.type)
+            elif pa.types.is_timestamp(field.type):
+                arr = pa.array([0] * n_rows, type=field.type)
+            else:
+                arr = pa.nulls(n_rows, type=field.type)
+            arrays.append(arr)
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
