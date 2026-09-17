@@ -396,6 +396,14 @@ def build_where_clause(
                     op = "NOT IN" if mode == "exclude" else "IN"
                     if is_varchar:
                         sub_parts.append(f"{sql_clean_col} {op} ({placeholders})")
+                    elif sql_clean_col in ("age", "ttl"):
+                        # Fields whose underlying values are stored as FLOAT but represent
+                        # integer seconds (Fastly's obj.ttl / obj.age).
+                        # They are grouped as integers in top_n queries, so we must
+                        # cast them back to stringified integers to match the filter value.
+                        sub_parts.append(
+                            f"CAST(CAST(ROUND({sql_clean_col}) AS INTEGER) AS VARCHAR) {op} ({placeholders})"
+                        )
                     else:
                         sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} ({placeholders})")
 
