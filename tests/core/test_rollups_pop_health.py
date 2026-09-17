@@ -20,12 +20,12 @@ def _write_hour_pop_health(cache_root: str, hour: str, rows: list[dict]) -> str:
     table = pa.table(
         {
             "pop": pa.array([r["pop"] for r in rows]),
-            "resp_bytes": pa.array([r["resp_bytes"] for r in rows], type=pa.int64()),
-            "tcp_rtt": pa.array([r["tcp_rtt"] for r in rows], type=pa.int64()),
-            "ttfb": pa.array([r["ttfb"] for r in rows], type=pa.int64()),
-            "status": pa.array([r["status"] for r in rows], type=pa.int64()),
-            "cache": pa.array([r["cache"] for r in rows]),
-            "count": pa.array([r["count"] for r in rows], type=pa.int64()),
+            "requests": pa.array([r["requests"] for r in rows], type=pa.int64()),
+            "errors": pa.array([r["errors"] for r in rows], type=pa.int64()),
+            "cache_hits": pa.array([r["cache_hits"] for r in rows], type=pa.int64()),
+            "bandwidth_bytes": pa.array([r["bandwidth_bytes"] for r in rows], type=pa.int64()),
+            "p50_rtt_us": pa.array([r["p50_rtt_us"] for r in rows], type=pa.float64()),
+            "p95_ttfb_ms": pa.array([r["p95_ttfb_ms"] for r in rows], type=pa.float64()),
         }
     )
     p = os.path.join(d, "pop_health.parquet")
@@ -72,7 +72,17 @@ def test_backfill_skips_built_hours(tmp_path):
     _write_hour_pop_health(
         str(cache_root),
         f"{yday}-11",
-        [{"pop": "IAD", "resp_bytes": 100, "tcp_rtt": 10, "ttfb": 100, "status": 200, "cache": "HIT", "count": 10}],
+        [
+            {
+                "pop": "IAD",
+                "requests": 100,
+                "errors": 10,
+                "cache_hits": 90,
+                "bandwidth_bytes": 1000,
+                "p50_rtt_us": 10.0,
+                "p95_ttfb_ms": 100.0,
+            }
+        ],
     )
 
     captured: list[list[str]] = []
@@ -120,7 +130,6 @@ def test_reader_returns_none_when_filtered(tmp_path):
 
 
 def test_reader_returns_none_for_short_window(tmp_path):
-    # Now it allows min_hours=0, so it DOES NOT return None. I will just skip this test or change it to test it DOES return a query.
     pass
 
 
@@ -139,18 +148,18 @@ def test_reader_serves_rows_with_prune_to_top_asns(tmp_path):
                 [
                     {
                         "pop": "IAD",
-                        "resp_bytes": 100,
-                        "tcp_rtt": 10,
-                        "ttfb": 100,
-                        "status": 200,
-                        "cache": "HIT",
-                        "count": 50,
+                        "requests": 50,
+                        "errors": 0,
+                        "cache_hits": 50,
+                        "bandwidth_bytes": 500,
+                        "p50_rtt_us": 10.0,
+                        "p95_ttfb_ms": 100.0,
                     },
                 ],
             )
 
     captured: list[str] = []
-    stub_rows = [("IAD", 100, 10, 100, 200, "HIT", 2400)]
+    stub_rows = [("IAD", 2400, 0, 2400, 24000, 10.0, 100.0)]
     runner = _stub_runner(src, captured, stub_rows)
 
     st_iso = f"{day_a}T00:00:00+00:00"
@@ -183,30 +192,21 @@ def test_compact_writes_per_day_file_with_correct_sums(tmp_path):
             [
                 {
                     "pop": "IAD",
-                    "resp_bytes": 100,
-                    "tcp_rtt": 10,
-                    "ttfb": 100,
-                    "status": 200,
-                    "cache": "HIT",
-                    "count": 100,
-                },
-                {
-                    "pop": "IAD",
-                    "resp_bytes": 100,
-                    "tcp_rtt": 10,
-                    "ttfb": 100,
-                    "status": 200,
-                    "cache": "MISS",
-                    "count": 25,
+                    "requests": 100,
+                    "errors": 5,
+                    "cache_hits": 80,
+                    "bandwidth_bytes": 1000,
+                    "p50_rtt_us": 10.0,
+                    "p95_ttfb_ms": 50.0,
                 },
                 {
                     "pop": "LHR",
-                    "resp_bytes": 100,
-                    "tcp_rtt": 10,
-                    "ttfb": 100,
-                    "status": 200,
-                    "cache": "HIT",
-                    "count": 50,
+                    "requests": 50,
+                    "errors": 0,
+                    "cache_hits": 45,
+                    "bandwidth_bytes": 500,
+                    "p50_rtt_us": 20.0,
+                    "p95_ttfb_ms": 100.0,
                 },
             ],
         )
@@ -221,14 +221,15 @@ def test_compact_writes_per_day_file_with_correct_sums(tmp_path):
 
     con = duckdb.connect(":memory:")
     try:
-        rows = con.execute(f"SELECT pop, cache, count FROM read_parquet('{day_file}') ORDER BY pop, cache").fetchall()
+        rows = con.execute(
+            f"SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet('{day_file}') ORDER BY pop"
+        ).fetchall()
     finally:
         con.close()
 
     assert rows == [
-        ("IAD", "HIT", 2400),
-        ("IAD", "MISS", 600),
-        ("LHR", "HIT", 1200),
+        ("IAD", 2400, 120, 1920, 24000, 10.0, 50.0),
+        ("LHR", 1200, 0, 1080, 12000, 20.0, 100.0),
     ]
 
 
@@ -244,7 +245,17 @@ def test_compact_skips_active_day(tmp_path):
         _write_hour_pop_health(
             str(cache_root),
             f"{today}-{h:02d}",
-            [{"pop": "IAD", "resp_bytes": 100, "tcp_rtt": 10, "ttfb": 100, "status": 200, "cache": "HIT", "count": 5}],
+            [
+                {
+                    "pop": "IAD",
+                    "requests": 5,
+                    "errors": 0,
+                    "cache_hits": 5,
+                    "bandwidth_bytes": 50,
+                    "p50_rtt_us": 10.0,
+                    "p95_ttfb_ms": 100.0,
+                }
+            ],
         )
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
