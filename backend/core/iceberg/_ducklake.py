@@ -192,7 +192,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             except Exception as e:
                 msg = str(e).lower()
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
-                    if attempt < 9:
+                    if attempt < 4:
                         import time
 
                         time.sleep(1.5)
@@ -226,6 +226,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                     return False
                 logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
                 return False
+        else:
+            # If the loop exhausts all attempts without breaking (e.g., continue on last attempt)
+            logger.warning("[ducklake] %s: failed to attach ducklake catalog (retries exhausted)", service_id)
+            return False
+
         if not read_only:
             _apply_target_file_size(con)
     return True

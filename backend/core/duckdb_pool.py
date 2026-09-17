@@ -454,6 +454,13 @@ class _Pool:
         # and the FastAPI thread pool then fills with stuck checkouts until
         # the backend stops accepting new connections.
         if reused_con is not None:
+            # Re-attach lake since release() detached it to free the process-wide lock
+            from backend.core.iceberg._ducklake import _ducklake_attach
+
+            if not _ducklake_attach(reused_con, src, read_only=True):
+                self._discard(reused_con)
+                raise RuntimeError("Failed to re-attach DuckLake")
+
             if skip_view_update:
                 # Caller has guaranteed the view state is fresh for the
                 # duration of this acquire (in-request extras after a
@@ -520,6 +527,14 @@ class _Pool:
         if errored or self._draining:
             self._discard(con)
             return
+
+        # Detach lake from idle connections so background writers can acquire the process-wide lock.
+        # It gets re-attached on the next acquire().
+        try:
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see
         # _pool_sweep_enabled). Runs outside the lock — TEMP tables live
