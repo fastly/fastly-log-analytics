@@ -205,7 +205,14 @@ def _filtered_aggregates(
     start = _range_value(start_time)
     end = _range_value(end_time)
 
-    filter_dict = req.filters if req.filters else {}
+    if not req.filters:
+        filter_dict = {}
+    elif hasattr(req.filters, "model_dump"):
+        filter_dict = req.filters.model_dump()
+    elif hasattr(req.filters, "dict"):
+        filter_dict = req.filters.dict()
+    else:
+        filter_dict = req.filters
     where_sql, filter_params = _build_clickhouse_filters(
         filter_dict.model_dump()
         if hasattr(filter_dict, "model_dump")
