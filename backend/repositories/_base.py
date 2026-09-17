@@ -1297,7 +1297,7 @@ class QueryRunner:
         if not buffer_files and not hourly_files and not lake_table:
             # Nothing on disk for the active hour. Caller will report
             # empty live_res — semantically correct (no current-hour rows).
-            return None
+            return "__empty__"
 
         # Escape internal double quotes (audit finding 004).
         cols_sql = ", ".join('"{}"'.format(c.replace('"', '""')) for c in projected)
@@ -2003,7 +2003,9 @@ class QueryRunner:
                 live_where = f"timestamp >= '{live_start.isoformat()}' AND timestamp < '{live_end.isoformat()}'"
                 _t_lt = time.perf_counter()
                 tmp_name = self._create_active_hour_temp_direct(live_topn_fields, actual_cols, live_start, live_end)
-                if tmp_name is None:
+                if tmp_name == "__empty__":
+                    tmp_name = None
+                elif tmp_name is None:
                     tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
                 _phase("live_active_hour:temp_create", (time.perf_counter() - _t_lt) * 1000)
                 _phase("live_active_hour:n_files", float(self._last_active_direct_n_files))
@@ -2559,21 +2561,24 @@ class QueryRunner:
                         )
                 except Exception:
                     direct_live_tmp = None
-            if direct_live_tmp is not None:
+            if direct_live_tmp == "__empty__":
+                live_source = None
+            elif direct_live_tmp is not None:
                 live_source, live_where = direct_live_tmp, "1=1"
             else:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
-            select_clauses.append(
-                f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
-                f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
-                f"FROM {live_source} "
-                f"WHERE {live_where} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
-                f"GROUP BY 1"
-            )
+            if live_source is not None:
+                select_clauses.append(
+                    f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS out_bucket, "
+                    f"       {parts['num_live']} AS num, {parts['den_live']} AS den "
+                    f"FROM {live_source} "
+                    f"WHERE {live_where} "
+                    f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                    f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}' "
+                    f"GROUP BY 1"
+                )
 
             if partial_total:
                 # partial_total is only ever non-zero when chart_metric ==
@@ -2758,19 +2763,22 @@ class QueryRunner:
                     direct_live_tmp = self._create_active_hour_temp_direct([], [], live_start, live_end)
                 except Exception:
                     direct_live_tmp = None
-            if direct_live_tmp is not None:
+            if direct_live_tmp == "__empty__":
+                live_source = None
+            elif direct_live_tmp is not None:
                 live_source, live_where = direct_live_tmp, "1=1"
             else:
                 live_source, live_where = table_name, where_clause
                 live_needs_params = True
 
-            select_clauses.append(
-                f"SELECT COUNT(*) AS num "
-                f"FROM {live_source} "
-                f"WHERE {live_where} "
-                f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
-                f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
-            )
+            if live_source is not None:
+                select_clauses.append(
+                    f"SELECT COUNT(*) AS num "
+                    f"FROM {live_source} "
+                    f"WHERE {live_where} "
+                    f"  AND timestamp >= TIMESTAMPTZ '{live_st_tz}' "
+                    f"  AND timestamp <  TIMESTAMPTZ '{live_et_tz}'"
+                )
 
             if partial_total:
                 # Read from the writer's synthetic __total__ row (C1, final
@@ -4356,7 +4364,9 @@ class QueryRunner:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if "conn_requests" in cols:
                 tmp = self._create_active_hour_temp_direct(["conn_requests"], cols, live_start, live_end)
-                if tmp is not None:
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
                     try:
                         from backend.repositories._sql import dashboard as _dash_sql
 
@@ -4428,6 +4438,8 @@ class QueryRunner:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if backing_col in cols:
                 tmp = self._create_active_hour_temp_direct([backing_col], cols, live_start, live_end)
+                if tmp == "__empty__":
+                    return {}
                 if tmp is None:
                     return None
                 try:
@@ -4524,7 +4536,9 @@ class QueryRunner:
             cols = self.get_schema_cols()
             if "waf_req_id" in cols:
                 tmp = self._create_active_hour_temp_direct(["waf_req_id"], cols, live_start, live_end)
-                if tmp is not None:
+                if tmp == "__empty__":
+                    pass
+                elif tmp is not None:
                     try:
                         live_q = (
                             f"SELECT nb.bot_name, nb.category, CAST(COUNT(*) AS BIGINT) AS c "

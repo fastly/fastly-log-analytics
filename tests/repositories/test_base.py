@@ -708,6 +708,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         )
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveimport")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -756,6 +757,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         active_hour = active_dt.strftime("%Y-%m-%d-%H")
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -853,6 +855,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         active_hour = active_dt.strftime("%Y-%m-%d-%H")
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_pht_overlap")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -957,6 +960,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         )
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_liveskip")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
         monkeypatch.setattr(
@@ -1036,6 +1040,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         )
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_rollupkeep")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid"])
         monkeypatch.setattr(
@@ -1111,6 +1116,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         )
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_skipwarn")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "rid", "status"])
         monkeypatch.setattr(
@@ -1230,7 +1236,9 @@ class TestExecuteTopNBatchPerFieldLimits:
         # Point the runner at our test table; bypass rollup enumeration
         # by giving it a real but empty rollup dir (forces rolled_res=[]).
         monkeypatch.setattr("backend.repositories._base._cache_dir", lambda _src: str(tmp_path), raising=False)
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_clamp")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -1776,6 +1784,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         security FE relies on this empty-result being distinguishable
         from a real "zero IPs for any fingerprint" answer."""
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
 
         runner = QueryRunner(in_memory_duckdb, test_service_source)
         counts, meta = runner.execute_ip_spread_rollups(
@@ -2045,6 +2054,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         )
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healtest")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -2106,6 +2116,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         (tmp_path / "rollups" / "hour").mkdir(parents=True)
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healbundle")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -2169,6 +2180,7 @@ class TestExecuteTopNBatchPerFieldLimits:
         (tmp_path / "rollups" / "hour").mkdir(parents=True)
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "logs_healcompacted")
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
@@ -2200,6 +2212,7 @@ class TestExecuteTopNBatchPerFieldLimits:
 
         in_memory_duckdb.execute("SET TimeZone='UTC'")
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
+        monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: table)
         monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country"])
         monkeypatch.setattr(
