@@ -665,7 +665,7 @@ def get_health(
             # Fallback to sparse buckets present in the query results
             all_buckets_set: set[str] = set()
             for r in heatmap_rows:
-                bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
+                bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
                 all_buckets_set.add(bucket)
 
             # Selector callers that ask for map_buckets/cities WITHOUT heatmap skip
@@ -674,7 +674,7 @@ def get_health(
             # from map_rows in that case so the per-bucket map cells survive.
             if not heatmap_rows and map_rows:
                 for r in map_rows:
-                    bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                    bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
                     all_buckets_set.add(bucket)
 
             all_buckets = sorted(all_buckets_set)
@@ -740,7 +740,7 @@ def get_health(
             asn = int(r[0])
             if asn not in top_asn_set:
                 continue
-            bucket = r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1])
+            bucket = r[1].isoformat().replace("+00:00", "") if hasattr(r[1], "isoformat") else str(r[1])
             tp = float(r[2]) if r[2] is not None else None
             rtt = float(r[3]) if r[3] is not None else None
             rtt_base = float(r[4]) if r[4] is not None else None
@@ -812,7 +812,7 @@ def get_health(
                 lat = float(r[2]) if r[2] is not None else None
                 lon = float(r[3]) if r[3] is not None else None
                 metro_raw = r[4]
-                bucket = r[5].isoformat() if hasattr(r[5], "isoformat") else str(r[5])
+                bucket = r[5].isoformat().replace("+00:00", "") if hasattr(r[5], "isoformat") else str(r[5])
                 rtt = float(r[6]) if r[6] is not None else None
                 pkt = float(r[7]) if r[7] is not None else None
                 err = float(r[8]) if r[8] is not None else None
