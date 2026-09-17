@@ -93,7 +93,7 @@ export function useDashboardBundle({
   return useQuery({
     queryKey: bundleKey,
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST('/api/dashboard/bundle', {
+      const { data, error } = await client.POST('/api/dashboard/bundle', {
         signal,
         body: {
           // Token mode → {range_token, anchor} + display bounds (server
@@ -108,6 +108,7 @@ export function useDashboardBundle({
           ...rangeBody,
         },
       })
+      if (error) throw error
       const body = data
       if (body?.aggregates) {
         // Stale-view guard: throws if the response is the empty-schema

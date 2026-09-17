@@ -92,7 +92,7 @@ function StreamingBody({
   const cmcdQuery = useServiceQuery(
     ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
     async ({ signal }) => {
-      const { data } = await client.POST('/api/cmcd/aggregates', {
+      const { data, error } = await client.POST('/api/cmcd/aggregates', {
         signal,
         body: {
           filters: filterPayload,
@@ -101,6 +101,7 @@ function StreamingBody({
           ...rangeBody,
         },
       })
+      if (error) throw error
       return data
     },
     { refetchInterval: 30_000 },

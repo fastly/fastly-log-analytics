@@ -100,7 +100,7 @@ function SessionsBody({
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: ['sessions', 'list', activeServiceId, startTime, endTime, filterPayload, flaggedOnly, streamingOnly, minReqs, min4xxPct],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST("/api/sessions", {
+      const { data, error } = await client.POST("/api/sessions", {
         signal,
         body: {
           start_time: startTime,
@@ -116,6 +116,7 @@ function SessionsBody({
           min_4xx_pct_flag: min4xxPct !== '' ? min4xxPct : undefined,
         }
       })
+      if (error) throw error
       return data as SessionsResponse | undefined
     },
     enabled: isReady && !rangeExceedsSevenDays

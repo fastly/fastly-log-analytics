@@ -117,7 +117,10 @@ export function adminFetch(
   // service. Global admin endpoints (live-query registry, host metrics) ignore
   // it; path-scoped /api/services/{id}/* calls already carry the id.
   try {
-    const sid = useServiceStore.getState().activeServiceId
+    let sid = useServiceStore.getState().activeServiceId
+    if (!sid && typeof window !== "undefined") {
+      sid = new URLSearchParams(window.location.search).get("service");
+    }
     if (sid && !headers.has("x-service-id")) {
       headers.set("x-service-id", sid)
     }
@@ -265,7 +268,11 @@ client.use({
     // touches a session). Set before the activeServiceId early-returns below.
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
 
-    const { activeServiceId } = useServiceStore.getState();
+    let { activeServiceId } = useServiceStore.getState();
+    if (!activeServiceId && typeof window !== "undefined") {
+      activeServiceId = new URLSearchParams(window.location.search).get("service");
+    }
+
     if (activeServiceId) {
       request.headers.set("x-service-id", activeServiceId);
       return request;

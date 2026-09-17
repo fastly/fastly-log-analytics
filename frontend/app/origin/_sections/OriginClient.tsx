@@ -96,7 +96,7 @@ function OriginReportContent({
   const bundle = useServiceQuery(
     ['origin', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
     async ({ signal }) => {
-      const { data } = await client.POST('/api/origin/aggregates', { signal,
+      const { data, error } = await client.POST('/api/origin/aggregates', { signal,
         body: {
           // Token mode → {range_token, anchor} (server resolves the window).
           // Custom mode → {start_time, end_time} (backend falls back to these
