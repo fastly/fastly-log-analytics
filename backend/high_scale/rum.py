@@ -8,10 +8,10 @@ from backend.high_scale.registry import HighScaleService
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
     res = service.client.execute(
-        "SELECT sum(event_count) FROM fastly_log_analytics.rum_vitals_aggregates WHERE service_id = {service_id:String}",
+        "SELECT count() as c FROM fastly_log_analytics.rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
         {"service_id": service.service_id},
     )
-    beacons = res[0].get("sum(event_count)", 0) if res else 0 or 0
+    beacons = res[0].get("c", 0) if res else 0 or 0
     return {"has_data": beacons > 0, "beacons": beacons}
 
 
@@ -21,15 +21,68 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     if not health["has_data"]:
         return {"no_data": True}
 
+    start = datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else None
+    end = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else None
+
+    query = """
+        SELECT metric_name,
+               quantile(0.75)(metric_value) as p75,
+               count() as total,
+               sum(if(metric_rating = 'good', 1, 0)) as good,
+               sum(if(metric_rating = 'needs-improvement', 1, 0)) as ni,
+               sum(if(metric_rating = 'poor', 1, 0)) as poor
+        FROM fastly_log_analytics.rum_vitals_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+        GROUP BY metric_name
+    """
+    try:
+        rows = service.client.execute(query, {"service_id": service.service_id, "start": start, "end": end})
+    except Exception:
+        rows = []
+
+    vitals: dict[str, Any] = {
+        "lcp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "cls": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "inp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "fid": {"p75": None, "fcp": None, "ttfb": None},
+    }
+
+    total_pageviews = 0
+
+    for r in rows:
+        m = r["metric_name"].lower()
+        if m in vitals:
+            total_pageviews += r["total"]
+            vitals[m]["p75"] = r["p75"]
+            if m in ("lcp", "cls", "inp"):
+                t = r["total"]
+                if t > 0:
+                    vitals[m]["distribution"]["good"] = int(r["good"] * 100 / t)
+                    vitals[m]["distribution"]["poor"] = int(r["poor"] * 100 / t)
+                    vitals[m]["distribution"]["needs_improvement"] = max(
+                        0, 100 - vitals[m]["distribution"]["good"] - vitals[m]["distribution"]["poor"]
+                    )
+
     return {
-        "has_data": True,
-        "pageviews": 0,
-        "interactions": 0,
-        "errors": 0,
-        "metrics": [],
-        "environments": {"browser": [], "os": [], "device": []},
+        "is_mock": False,
+        "no_data": False,
+        "beacon_count": health["beacons"],
+        "pageview_count": total_pageviews,
+        "interaction_count": 0,
+        "error_count": 0,
+        "vitals": vitals,
         "worst_pages": [],
-        "worst_sessions": [],
+        "errors": [],
+        "trends": {
+            "timestamps": [],
+            "lcp": [],
+            "cls": [],
+            "error_rate": [],
+            "pageviews": [],
+            "interactions": [],
+            "errors": [],
+        },
+        "environments": {"browsers": {}, "os": {}, "devices": {}},
     }
 
 
@@ -40,22 +93,13 @@ def rum_live_events(
     SELECT
         event_timestamp as timestamp,
         'vitals' as type,
-        url as pathname,
-        custom_fields['metric_name'] as metric_name,
-        toFloat64OrZero(custom_fields['metric_value']) as metric_value,
-        custom_fields['metric_rating'] as metric_rating,
-        custom_fields['browser'] as browser,
-        custom_fields['os'] as os,
-        custom_fields['device'] as device,
-        custom_fields['cid'] as cid,
-        custom_fields['req_id'] as req_id,
-        CAST(NULL as String) as error_message,
-        custom_fields['city'] as city,
-        custom_fields['region'] as region,
-        country,
-        custom_fields['pop'] as pop,
-        custom_fields['tls'] as tls,
-        toFloat64OrZero(custom_fields['ttfb']) as ttfb
+        pathname,
+        metric_name,
+        metric_value,
+        metric_rating,
+        client_id as cid,
+        request_event_id as req_id,
+        country
     FROM fastly_log_analytics.rum_vitals_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
@@ -69,17 +113,20 @@ def rum_live_events(
             query,
             {
                 "service_id": service.service_id,
-                "start_time": datetime.fromisoformat(start_time) if start_time else None,
-                "end_time": datetime.fromisoformat(end_time) if end_time else None,
+                "start_time": datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else None,
+                "end_time": datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else None,
                 "limit": limit,
             },
         )
-    except Exception:
+    except Exception as e:
+        import logging
+
+        logging.getLogger("backend").error(f"ERROR in rum_live_events: {e}")
         return []
 
     events = []
     for d in res:
-        ts = d["timestamp"].isoformat()
+        ts = d["timestamp"].isoformat() if hasattr(d["timestamp"], "isoformat") else str(d["timestamp"])
         ts = ts.replace("+00:00", "Z") if "+" in ts else ts + "Z"
 
         mname = d.get("metric_name")
@@ -98,13 +145,13 @@ def rum_live_events(
                 "type": "vitals",
                 "path": d.get("pathname") or "/",
                 "desc": desc,
-                "browser": d.get("browser") or "Unknown",
-                "os": d.get("os") or "Unknown",
+                "browser": "Unknown",
+                "os": "Unknown",
                 "raw_log": {
                     "meta": {
-                        "browser": {"name": d.get("browser") or "Unknown"},
-                        "os": {"name": d.get("os") or "Unknown"},
-                        "device": {"type": d.get("device") or "Unknown"},
+                        "browser": {"name": "Unknown"},
+                        "os": {"name": "Unknown"},
+                        "device": {"type": "Unknown"},
                         "page": {"url": d.get("pathname") or "/"},
                     },
                     "measurements": [
@@ -118,12 +165,12 @@ def rum_live_events(
                     else [],
                     "cid": d.get("cid"),
                     "req_id": d.get("req_id"),
-                    "city": d.get("city") or "Unknown",
-                    "region": d.get("region") or "Unknown",
+                    "city": "Unknown",
+                    "region": "Unknown",
                     "country": d.get("country") or "Unknown",
-                    "pop": d.get("pop") or "Unknown",
-                    "tls": d.get("tls") or "Unknown",
-                    "ttfb": d.get("ttfb") or 0,
+                    "pop": "Unknown",
+                    "tls": "Unknown",
+                    "ttfb": 0,
                 },
             }
         )

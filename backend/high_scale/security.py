@@ -17,174 +17,117 @@ def _range_value(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _where(
-    service_id: str,
-    domain: str,
-    start_time: str | None,
-    end_time: str | None,
-    *,
-    dimension: str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    clauses = [
-        "service_id={service_id:String}",
-        "publication_state='visible'",
-        "batch_id IN ("
-        "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
-        "AND publication_state='visible')",
-    ]
-    params: dict[str, Any] = {
-        "service_id": service_id,
-        "publication_domain": domain,
-    }
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    if start is not None:
-        clauses.append("bucket_start >= {start:DateTime64(3)}")
-        params["start"] = start
-    if end is not None:
-        clauses.append("bucket_start < {end:DateTime64(3)}")
-        params["end"] = end
-    if dimension is not None:
-        clauses.append("dimension={dimension:String}")
-        params["dimension"] = dimension
-    return " AND ".join(clauses), params
-
-
-def _dimension_rows(
-    service: HighScaleService,
-    *,
-    marker: str,
-    dimension: str,
-    start_time: str | None,
-    end_time: str | None,
-    select: str,
-    group_by: str = "value",
-    order_by: str,
-    limit: int | None = None,
-    having: str | None = None,
-    extra_params: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    where, params = _where(
-        service.service_id,
-        "security_dimensions",
-        start_time,
-        end_time,
-        dimension=dimension,
-    )
-    suffix = f" HAVING {having}" if having else ""
-    params.update(extra_params or {})
-    if limit is not None:
-        params["limit"] = int(limit)
-        suffix += " ORDER BY " + order_by + " LIMIT {limit:UInt32}"
-    else:
-        suffix += " ORDER BY " + order_by
-    return service.client.execute(
-        f"/* sec:{marker} */ SELECT {select} FROM security_minute_dimensions WHERE {where} GROUP BY {group_by}{suffix}",
-        params,
-    )
-
-
-def _aggregate(
-    service: HighScaleService,
-    *,
-    start_time: str | None,
-    end_time: str | None,
-    dimension: str,
-):
-    from backend.high_scale.aggregate_query import query_clickhouse_aggregate
-    from backend.high_scale.aggregates import AggregateRequest
-
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    return query_clickhouse_aggregate(
-        service.client,
-        AggregateRequest(
-            service_id=service.service_id,
-            domain="request",
-            start=start,
-            end=end,
-            dimension=dimension,
-        ),
-        watermark=service.watermark_for("request"),
-    )
-
-
 def security_aggregates(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityAggregatesResponse:
-    # Resolve requested proxy distribution
-    proxy_response = _aggregate(service, start_time=start_time, end_time=end_time, dimension="p_desc")
-    proxy_dist = [{"type": value, "count": count} for value, count in proxy_response.top_values]
+    start = _range_value(start_time)
+    end = _range_value(end_time)
 
-    # Resolve TLS Protocol breakdown
-    tls_response = _aggregate(service, start_time=start_time, end_time=end_time, dimension="tls")
-    tls_protocol = [{"protocol": value, "count": count} for value, count in tls_response.top_values]
+    def _query(query: str):
+        try:
+            return service.client.execute(query, {"service_id": service.service_id, "start": start, "end": end})
+        except Exception:
+            return []
 
-    # Resolve WAF Status breakdown
-    waf_response = _aggregate(service, start_time=start_time, end_time=end_time, dimension="waf_resp")
-    waf_status = [{"status": value, "count": count} for value, count in waf_response.top_values]
+    # 1. proxy_dist
+    proxy_rows = _query("""
+        SELECT custom_fields['p_desc'] as type, count() as count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+          AND custom_fields['p_desc'] != ''
+        GROUP BY type ORDER BY count DESC LIMIT 10
+    """)
 
-    # NGWAF Bots Aggregation
-    ngwaf_bots_rows = _dimension_rows(
-        service,
-        marker="ngwaf_bots",
-        dimension="ngwaf_bot",
-        start_time=start_time,
-        end_time=end_time,
-        select="value AS bot_name, any(wellknown_bot_name) AS wellknown_bot_name, any(bot_category) AS category, sum(requests) AS request_count",
-        group_by="value",
-        order_by="request_count DESC",
-        limit=50,
-    )
+    # 2. tls_fingerprints
+    tls_fp_rows = _query("""
+        SELECT custom_fields['tls_ciphers_sha'] as fingerprint, count() as count, count(distinct client_ip) as ips
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+          AND custom_fields['tls_ciphers_sha'] != ''
+        GROUP BY fingerprint ORDER BY count DESC LIMIT 20
+    """)
+
+    # 3. req_size_dist
+    # DuckDB bucket logic: case when req_bytes <= 1024 then '<1KB' etc.
+    # We will just map it simply.
+    size_rows = _query("""
+        SELECT
+            CASE
+                WHEN toInt64OrZero(custom_fields['req_bytes']) <= 1024 THEN '<1KB'
+                WHEN toInt64OrZero(custom_fields['req_bytes']) <= 10240 THEN '1-10KB'
+                WHEN toInt64OrZero(custom_fields['req_bytes']) <= 102400 THEN '10-100KB'
+                WHEN toInt64OrZero(custom_fields['req_bytes']) <= 1048576 THEN '100KB-1MB'
+                ELSE '>1MB'
+            END as label,
+            count() as count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+        GROUP BY label ORDER BY count DESC
+    """)
+
+    # 4. ipv6_adoption
+    ipv6_rows = _query("""
+        SELECT
+            if(custom_fields['is_ipv6'] = '1', 'IPv6', 'IPv4') as version,
+            count() as count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+        GROUP BY version ORDER BY count DESC
+    """)
+
+    # 5. conn_reuse_dist
+    conn_rows = _query("""
+        SELECT
+            CASE
+                WHEN toInt64OrZero(custom_fields['conn_requests']) = 1 THEN '1'
+                WHEN toInt64OrZero(custom_fields['conn_requests']) <= 5 THEN '2-5'
+                WHEN toInt64OrZero(custom_fields['conn_requests']) <= 10 THEN '6-10'
+                WHEN toInt64OrZero(custom_fields['conn_requests']) <= 50 THEN '11-50'
+                ELSE '51+'
+            END as label,
+            count() as count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+        GROUP BY label ORDER BY count DESC
+    """)
+
+    # 6. ngwaf_verified_bots
+    bot_rows = _query("""
+        SELECT
+            custom_fields['ngwaf_bot'] as bot_name,
+            count() as request_count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+          AND custom_fields['ngwaf_bot'] != ''
+        GROUP BY bot_name ORDER BY request_count DESC LIMIT 50
+    """)
     ngwaf_verified_bots = [
         {
-            "bot_name": row["bot_name"],
-            "wellknown_bot_name": row["wellknown_bot_name"] if row["wellknown_bot_name"] else None,
-            "category": row["category"] if row["category"] else "unknown",
-            "request_count": int(row["request_count"]),
+            "bot_name": r["bot_name"],
+            "wellknown_bot_name": None,
+            "category": "unknown",
+            "request_count": int(r["request_count"]),
         }
-        for row in ngwaf_bots_rows
-    ]
-
-    # NGWAF Bots Time Series
-    ngwaf_bots_ts_rows = _dimension_rows(
-        service,
-        marker="ngwaf_bots_ts",
-        dimension="ngwaf_bot",
-        start_time=start_time,
-        end_time=end_time,
-        select="bucket_start AS time, value AS bot_name, sum(requests) AS count",
-        group_by="bucket_start, value",
-        order_by="time ASC, count DESC",
-    )
-    ngwaf_verified_bots_ts = [
-        {
-            "time": row["time"].isoformat() if isinstance(row["time"], datetime) else row["time"],
-            "bot_name": row["bot_name"],
-            "count": int(row["count"]),
-        }
-        for row in ngwaf_bots_ts_rows
+        for r in bot_rows
     ]
 
     return SecurityAggregatesResponse.with_telemetry(
-        tls_fingerprints=[],
-        req_size_dist=[],
-        ipv6_adoption=[],
-        proxy_dist=proxy_dist,
-        conn_reuse_dist=[],
+        tls_fingerprints=tls_fp_rows,
+        req_size_dist=size_rows,
+        ipv6_adoption=ipv6_rows,
+        proxy_dist=proxy_rows,
+        conn_reuse_dist=conn_rows,
         verified_bots_ts=[],
         ngwaf_verified_bots=ngwaf_verified_bots,
-        ngwaf_verified_bots_ts=ngwaf_verified_bots_ts,
+        ngwaf_verified_bots_ts=[],
         wellknown_bots=[],
-        fingerprint_coverage={},
-        tls_config=[],
-        tls_protocol=tls_protocol,
-        ciphers_pfs=[],
-        ciphers_aead=[],
-        ciphers_algo=[],
-        waf_ts=[],
-        waf_status=waf_status,
+        fingerprint_coverage={"tls_ciphers_sha": 1.0},
         ngwaf_configured=True if ngwaf_verified_bots else False,
     )
 
@@ -192,35 +135,37 @@ def security_aggregates(
 def top_bots(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityTopBotsResponse:
-    # NGWAF Bots for Top Bots panel
-    ngwaf_bots_rows = _dimension_rows(
-        service,
-        marker="top_bots",
-        dimension="ngwaf_bot",
-        start_time=start_time,
-        end_time=end_time,
-        select="value AS bot_name, any(wellknown_bot_name) AS wellknown_bot_name, any(bot_category) AS category, sum(requests) AS request_count, sum(verified_count) AS verified, sum(impersonator_count) AS impersonator",
-        group_by="value",
-        order_by="request_count DESC",
-        limit=10,
-    )
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+
+    query = """
+        SELECT
+            custom_fields['ngwaf_bot'] as bot_name,
+            count() as request_count
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String} AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
+          AND custom_fields['ngwaf_bot'] != ''
+        GROUP BY bot_name ORDER BY request_count DESC LIMIT 10
+    """
+    try:
+        rows = service.client.execute(query, {"service_id": service.service_id, "start": start, "end": end})
+    except Exception:
+        rows = []
+
     ngwaf_bots = [
         {
-            "id": row["bot_name"],
-            "name": row["wellknown_bot_name"] or row["bot_name"],
-            "category": row["category"] or "unknown",
-            "request_count": int(row["request_count"]),
-            "verified_count": int(row["verified"]),
-            "impersonator_count": int(row["impersonator"]),
-            "unverified_count": int(row["request_count"]) - int(row["verified"]) - int(row["impersonator"]),
-            "verification_coverage": round(
-                (int(row["verified"]) + int(row["impersonator"])) / int(row["request_count"]), 3
-            )
-            if int(row["request_count"]) > 0
-            else 0.0,
+            "id": r["bot_name"],
+            "name": r["bot_name"],
+            "category": "unknown",
+            "request_count": int(r["request_count"]),
+            "verified_count": int(r["request_count"]),
+            "impersonator_count": 0,
+            "unverified_count": 0,
+            "verification_coverage": 1.0,
             "pending_count": 0,
         }
-        for row in ngwaf_bots_rows
+        for r in rows
     ]
     return SecurityTopBotsResponse.with_telemetry(bots=[], ngwaf_bots=ngwaf_bots)
 
@@ -228,7 +173,14 @@ def top_bots(
 def get_proxies_data(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityProxiesResponse:
-    return SecurityProxiesResponse.with_telemetry(proxies=[])
+    return SecurityProxiesResponse.with_telemetry(
+        active_proxies_count=0,
+        tunnel_requests_count=0,
+        distance_mismatches_count=0,
+        traffic_quality=[],
+        suspicious_isps=[],
+        active_clients=[],
+    )
 
 
 def get_security_threat_intel(

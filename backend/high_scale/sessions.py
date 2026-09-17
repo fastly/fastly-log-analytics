@@ -67,16 +67,19 @@ def sessions_endpoint(
             median(tcp_rtt) / 1000.0 as median_rtt_ms,
             sum(if(edge = '1', 1, 0)) as edge_count,
             sum(if(edge = '0', 1, 0)) as shield_count,
-            max(edge_sid) as edge_sid
+            max(edge_sid) as edge_sid,
+            sum(if(custom_fields['cmcd_sid'] != '', 1, 0)) as streaming_reqs
         FROM sessions_raw
         GROUP BY ip, ja4, sid
     )
     SELECT * FROM (
         SELECT *,
-               ((req_count >= {min_reqs_flag:UInt32}) OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {min_4xx_pct_flag:Float64})) as flagged
+               ((req_count >= {min_reqs_flag:UInt32}) OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {min_4xx_pct_flag:Float64})) as flagged,
+               (streaming_reqs > 0) as is_streaming
         FROM sessions_agg
     ) sub
-    WHERE ({flagged_only:UInt8} = 0) OR flagged = 1
+    WHERE (({flagged_only:UInt8} = 0) OR flagged = 1)
+      AND (({streaming_only:UInt8} = 0) OR is_streaming = 1)
     ORDER BY session_start DESC
     LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     """
@@ -92,6 +95,7 @@ def sessions_endpoint(
             "min_reqs_flag": req.min_reqs_flag if req.min_reqs_flag is not None else 1000,
             "min_4xx_pct_flag": req.min_4xx_pct_flag if req.min_4xx_pct_flag is not None else 20.0,
             "flagged_only": 1 if req.flagged_only else 0,
+            "streaming_only": 1 if req.streaming_only else 0,
         },
     )
 
@@ -155,11 +159,11 @@ def sessions_detail(
         event_timestamp as timestamp,
         country,
         url,
-        custom_fields['status'] as status,
+        toInt32OrZero(custom_fields['status']) as status,
         custom_fields['method'] as method,
         custom_fields['protocol'] as protocol,
-        custom_fields['resp_bytes'] as resp_bytes,
-        custom_fields['tcp_rtt'] as tcp_rtt,
+        toInt64OrZero(custom_fields['resp_bytes']) as resp_bytes,
+        toFloat64OrZero(custom_fields['tcp_rtt']) as tcp_rtt,
         custom_fields['edge'] as edge,
         custom_fields['edge_sid'] as edge_sid,
         custom_fields['ua'] as ua,

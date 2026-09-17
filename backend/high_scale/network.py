@@ -18,109 +18,53 @@ def _range_value(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _where(
-    service_id: str,
-    domain: str,
-    start_time: str | None,
-    end_time: str | None,
-    *,
-    dimension: str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    clauses = [
-        "service_id={service_id:String}",
-        "publication_state='visible'",
-        "batch_id IN ("
-        "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
-        "AND publication_state='visible')",
-    ]
-    params: dict[str, Any] = {
-        "service_id": service_id,
-        "publication_domain": domain,
-    }
-    start = _range_value(start_time)
-    end = _range_value(end_time)
-    if start is not None:
-        clauses.append("bucket_start >= {start:DateTime64(3)}")
-        params["start"] = start
-    if end is not None:
-        clauses.append("bucket_start < {end:DateTime64(3)}")
-        params["end"] = end
-    if dimension is not None:
-        clauses.append("dimension={dimension:String}")
-        params["dimension"] = dimension
-    return " AND ".join(clauses), params
-
-
-def _dimension_rows(
-    service: HighScaleService,
-    *,
-    marker: str,
-    dimension: str,
-    start_time: str | None,
-    end_time: str | None,
-    select: str,
-    group_by: str = "value",
-    order_by: str = "",
-    limit: int | None = None,
-    having: str | None = None,
-    extra_params: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    where, params = _where(
-        service.service_id,
-        "network_dimensions",
-        start_time,
-        end_time,
-        dimension=dimension,
-    )
-    suffix = f" HAVING {having}" if having else ""
-    params.update(extra_params or {})
-    if order_by:
-        if limit is not None:
-            params["limit"] = int(limit)
-            suffix += " ORDER BY " + order_by + " LIMIT {limit:UInt32}"
-        else:
-            suffix += " ORDER BY " + order_by
-    elif limit is not None:
-        params["limit"] = int(limit)
-        suffix += " LIMIT {limit:UInt32}"
-
-    return service.client.execute(
-        f"/* net:{marker} */ SELECT {select} FROM network_minute_dimensions WHERE {where} GROUP BY {group_by}{suffix}",
-        params,
-    )
-
-
 def network_health(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkHealthResponse:
-    # 1. Heatmap (asn and country)
-    heatmap_rows = _dimension_rows(
-        service,
-        marker="heatmap_asn",
-        dimension="asn",
-        start_time=start_time,
-        end_time=end_time,
-        select="bucket_start AS bucket, value AS asn, sum(requests) AS reqs, sum(errors) AS err_count, sum(ploss_sum) / max2(sum(ploss_count), 1) AS avg_ploss, sum(tcp_rtt_sum) / max2(sum(tcp_rtt_count), 1) AS avg_rtt",
-        group_by="bucket_start, value",
-        order_by="reqs DESC",
-        limit=500,
-    )
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+
+    query = """
+        SELECT
+            toStartOfMinute(event_timestamp) AS bucket,
+            toInt32OrNull(custom_fields['asn']) AS asn,
+            count() AS reqs,
+            sum(if(toInt32OrZero(custom_fields['status']) >= 500, 1, 0)) AS err_count,
+            avg(toFloat64OrZero(custom_fields['tcp_rtt']) / 1000.0) AS avg_rtt
+        FROM fastly_log_analytics.request_facts
+        WHERE service_id={service_id:String}
+          AND publication_state='visible'
+          AND event_timestamp >= {start:DateTime64(3)}
+          AND event_timestamp < {end:DateTime64(3)}
+        GROUP BY bucket, asn
+        ORDER BY reqs DESC
+        LIMIT 500
+    """
+    params = {
+        "service_id": service.service_id,
+        "start": start,
+        "end": end,
+    }
+
+    try:
+        heatmap_rows = service.client.execute(query, params)
+    except Exception:
+        heatmap_rows = []
+
     heatmap = [
         {
-            "bucket": row["bucket"].isoformat() if isinstance(row["bucket"], datetime) else row["bucket"],
-            "asn": row["asn"],
+            "bucket": row["bucket"].isoformat() if hasattr(row["bucket"], "isoformat") else row["bucket"],
+            "asn": row["asn"] if row["asn"] is not None else 0,
             "reqs": int(row["reqs"]),
             "error_pct": float(row["err_count"]) * 100.0 / float(row["reqs"]) if float(row["reqs"]) > 0 else 0.0,
-            "rtt_med_us": float(row["avg_rtt"]) if row["avg_rtt"] is not None else 0.0,
-            "avg_ploss": float(row["avg_ploss"]) if row["avg_ploss"] is not None else 0.0,
+            "rtt_med_us": float(row["avg_rtt"]) * 1000.0 if row["avg_rtt"] is not None else 0.0,
+            "avg_ploss": 0.0,
         }
         for row in heatmap_rows
     ]
 
-    # Summary calculations (Mocked for speed since high scale has exact data in clickhouse)
     total_reqs = sum(int(r["reqs"]) for r in heatmap_rows)
-    avg_rtt_ms = sum(float(r["avg_rtt"] or 0) * int(r["reqs"]) for r in heatmap_rows) / max(total_reqs, 1) / 1000.0
+    avg_rtt_ms = sum(float(r["avg_rtt"] or 0) * int(r["reqs"]) for r in heatmap_rows) / max(total_reqs, 1)
 
     summary = NetworkHealthSummary(
         global_health_score=100.0,
@@ -146,42 +90,38 @@ def network_health(
 def network_quality(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkQualityResponse:
-    # Top ASNs by requests
-    by_asn_rows = _dimension_rows(
-        service,
-        marker="quality_asn",
-        dimension="asn",
-        start_time=start_time,
-        end_time=end_time,
-        select="value AS label, sum(requests) AS reqs, max(tcp_rtt_p50_us) / 1000.0 AS rtt_ms",
-        group_by="value",
-        order_by="reqs DESC",
-        limit=25,
-    )
+    start = _range_value(start_time)
+    end = _range_value(end_time)
 
-    by_country_rows = _dimension_rows(
-        service,
-        marker="quality_country",
-        dimension="country",
-        start_time=start_time,
-        end_time=end_time,
-        select="value AS label, sum(requests) AS reqs, max(tcp_rtt_p50_us) / 1000.0 AS rtt_ms",
-        group_by="value",
-        order_by="reqs DESC",
-        limit=25,
-    )
+    def _top_by(dimension: str, limit: int = 25):
+        query = f"""
+            SELECT
+                {dimension} AS label,
+                count() AS reqs,
+                median(toFloat64OrZero(custom_fields['tcp_rtt']) / 1000.0) AS rtt_ms
+            FROM fastly_log_analytics.request_facts
+            WHERE service_id={{service_id:String}}
+              AND publication_state='visible'
+              AND event_timestamp >= {{start:DateTime64(3)}}
+              AND event_timestamp < {{end:DateTime64(3)}}
+            GROUP BY label
+            ORDER BY reqs DESC
+            LIMIT {limit}
+        """
+        try:
+            return service.client.execute(query, {"service_id": service.service_id, "start": start, "end": end})
+        except Exception:
+            return []
 
-    by_pop_rows = _dimension_rows(
-        service,
-        marker="quality_pop",
-        dimension="pop",
-        start_time=start_time,
-        end_time=end_time,
-        select="value AS label, sum(requests) AS reqs, max(tcp_rtt_p50_us) / 1000.0 AS rtt_ms",
-        group_by="value",
-        order_by="reqs DESC",
-        limit=25,
-    )
+    by_asn_rows = _top_by("toInt32OrNull(custom_fields['asn'])")
+    for row in by_asn_rows:
+        if row["label"] is None:
+            row["label"] = "Unknown"
+        else:
+            row["label"] = str(row["label"])
+
+    by_country_rows = _top_by("country")
+    by_pop_rows = _top_by("custom_fields['pop']")
 
     return NetworkQualityResponse.with_telemetry(
         available=True,
