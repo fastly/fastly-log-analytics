@@ -26,6 +26,7 @@ from backend.high_scale.publication import (
     PublicationStatus,
     row_matches_serving_domain,
 )
+from backend.high_scale.security_projection import build_security_projection_rows
 
 logger = logging.getLogger(__name__)
 
@@ -383,11 +384,13 @@ class HighScaleIngestController:
             if source.domain == "request":
                 origin_proj = build_origin_projection_rows(events)
                 perf_proj = build_performance_projection_rows(events)
+                security_proj = build_security_projection_rows(events)
 
                 for domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
                     ("performance_dimensions", perf_proj.dimension_rows),
+                    ("security_dimensions", security_proj.dimension_rows),
                 ):
                     if not rows:
                         continue

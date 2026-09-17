@@ -82,6 +82,19 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "latency_p99_ms",
         ),
     ),
+    "security_dimensions": (
+        "security_minute_dimensions",
+        (
+            "dimension",
+            "value",
+            "requests",
+            "wellknown_bot_name",
+            "bot_category",
+            "verified_count",
+            "impersonator_count",
+            "unverified_count",
+        ),
+    ),
 }
 
 

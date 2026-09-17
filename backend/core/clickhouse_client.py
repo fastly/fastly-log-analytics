@@ -57,6 +57,8 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "cmcd_aggregates",
         "origin_minute_summary",
         "origin_minute_dimensions",
+        "performance_minute_dimensions",
+        "security_minute_dimensions",
     }
 )
 CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
@@ -119,6 +121,15 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "ttlb_p95_us",
         "cdn_overhead_p50_us",
         "origin_bytes_p50",
+        "latency_sum_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "latency_p99_ms",
+        "wellknown_bot_name",
+        "bot_category",
+        "verified_count",
+        "impersonator_count",
+        "unverified_count",
     }
 )
 CLICKHOUSE_ALLOWED_TABLES = frozenset({CLICKHOUSE_FACT_TABLE}) | CLICKHOUSE_HIGH_SCALE_TABLES
