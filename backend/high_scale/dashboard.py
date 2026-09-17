@@ -196,6 +196,11 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
         clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
 
     where_sql = " AND ".join(clauses) if clauses else "1=1"
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "BUILD_CLICKHOUSE_FILTERS clauses=%s params=%s filters=%s", clauses, params, filters
+    )
     return where_sql, params
 
 
