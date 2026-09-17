@@ -1288,7 +1288,7 @@ async def rum_live_events(
             LIMIT 50
             """
 
-            with track_query(con, query_str, params, "rum_live_events") as cur:
+            with track_query(con, query_str, params * 2, "rum_live_events") as cur:
                 return cur.fetchall()
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:

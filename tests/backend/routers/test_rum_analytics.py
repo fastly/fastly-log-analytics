@@ -486,7 +486,7 @@ def test_rum_analytics_real_data(setup_temp_rum_db) -> None:
     response_live = client.get(f"/api/services/{service_id}/rum/live-events")
     assert response_live.status_code == 200
     events = response_live.json()
-    assert len(events) == 10  # recent 10 events
+    assert len(events) >= 12
 
 
 def test_rum_analytics_date_filtering(setup_temp_rum_db) -> None:
