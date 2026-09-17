@@ -171,12 +171,13 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
     params = {}
 
     for i, (field, config) in enumerate(filters.items()):
-        mode = getattr(config, "mode", "include") if hasattr(config, "mode") else config.get("mode", "include")
-        values = (
-            getattr(config, "values", [])
-            if hasattr(config, "values")
-            else (config.get("values", []) if isinstance(config, dict) else [])
-        )
+        if isinstance(config, dict):
+            mode = config.get("mode", "include")
+            values = config.get("values", [])
+        else:
+            mode = getattr(config, "mode", "include")
+            values = getattr(config, "values", [])
+
         if not values:
             continue
 
@@ -196,6 +197,9 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
         clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
 
     where_sql = " AND ".join(clauses) if clauses else "1=1"
+    import logging
+
+    logging.getLogger(__name__).warning("BUILD_CLICKHOUSE_FILTERS END: filters=%s -> %s %s", filters, where_sql, params)
     import logging
 
     logging.getLogger(__name__).warning(
