@@ -213,10 +213,15 @@ def _filtered_aggregates(
         filter_dict = req.filters.dict()
     else:
         filter_dict = req.filters
-    where_sql, filter_params = _build_clickhouse_filters(
-        filter_dict.model_dump()
-        if hasattr(filter_dict, "model_dump")
-        else (filter_dict.dict() if hasattr(filter_dict, "dict") else filter_dict)
+    where_sql, filter_params = _build_clickhouse_filters(filter_dict)
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "DEBUG FILTERS filter_dict=%s mode=%s values=%s clauses=%s",
+        filter_dict,
+        type(filter_dict),
+        filter_params,
+        where_sql,
     )
 
     clauses = ["service_id={service_id:String}", "1=1", where_sql]
