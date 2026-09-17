@@ -19,9 +19,7 @@ def query_endpoint(
     sql = re.sub(r"\bclient_errors\b", "fastly_log_analytics.rum_error_facts", sql, flags=re.IGNORECASE)
 
     # Inject time bounds
-    time_cond = (
-        f"service_id = '{service.service_id}' AND event_timestamp >= '{start_time}' AND event_timestamp <= '{end_time}'"
-    )
+    time_cond = f"service_id = '{service.service_id}' AND event_timestamp >= parseDateTime64BestEffort('{start_time}') AND event_timestamp <= parseDateTime64BestEffort('{end_time}')"
 
     if "WHERE" in sql.upper():
         sql = re.sub(r"\bWHERE\b", f"WHERE {time_cond} AND ", sql, flags=re.IGNORECASE)

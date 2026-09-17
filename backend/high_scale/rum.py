@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -41,7 +42,7 @@ def rum_live_events(
         'vitals' as type,
         url as pathname,
         custom_fields['metric_name'] as metric_name,
-        CAST(custom_fields['metric_value'] AS Float64) as metric_value,
+        toFloat64OrZero(custom_fields['metric_value']) as metric_value,
         custom_fields['metric_rating'] as metric_rating,
         custom_fields['browser'] as browser,
         custom_fields['os'] as os,
@@ -54,18 +55,24 @@ def rum_live_events(
         country,
         custom_fields['pop'] as pop,
         custom_fields['tls'] as tls,
-        CAST(custom_fields['ttfb'] AS Float64) as ttfb
+        toFloat64OrZero(custom_fields['ttfb']) as ttfb
     FROM fastly_log_analytics.rum_vitals_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
-      AND event_timestamp >= {start_time:DateTime}
-      AND event_timestamp <= {end_time:DateTime}
+      AND event_timestamp >= {start_time:DateTime64(3)}
+      AND event_timestamp <= {end_time:DateTime64(3)}
     ORDER BY timestamp DESC
     LIMIT {limit:UInt32}
     """
     try:
         res = service.client.execute(
-            query, {"service_id": service.service_id, "start_time": start_time, "end_time": end_time, "limit": limit}
+            query,
+            {
+                "service_id": service.service_id,
+                "start_time": datetime.fromisoformat(start_time) if start_time else None,
+                "end_time": datetime.fromisoformat(end_time) if end_time else None,
+                "limit": limit,
+            },
         )
     except Exception:
         return []

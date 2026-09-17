@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -20,13 +21,18 @@ def cmcd_aggregates(
     SELECT sum(event_count)
     FROM fastly_log_analytics.cmcd_aggregates
     WHERE service_id = {service_id:String}
-      AND bucket_start >= {start_time:DateTime}
-      AND bucket_start <= {end_time:DateTime}
+      AND bucket_start >= {start_time:DateTime64(3)}
+      AND bucket_start <= {end_time:DateTime64(3)}
     """
 
     try:
         res = service.client.execute(
-            query, {"service_id": service.service_id, "start_time": start_time, "end_time": end_time}
+            query,
+            {
+                "service_id": service.service_id,
+                "start_time": datetime.fromisoformat(start_time) if start_time else None,
+                "end_time": end_time,
+            },
         )
         has_data = (
             res[0].get("sum(event_count)", 0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -21,14 +22,14 @@ def sessions_endpoint(
             custom_fields['edge'] as edge,
             custom_fields['edge_sid'] as edge_sid,
             custom_fields['ua'] as ua,
-            CAST(custom_fields['status'] AS Int32) as status,
-            CAST(custom_fields['resp_bytes'] AS Int64) as resp_bytes,
-            CAST(custom_fields['tcp_rtt'] AS Float64) as tcp_rtt
+            toInt32OrZero(custom_fields['status']) as status,
+            toInt64OrZero(custom_fields['resp_bytes']) as resp_bytes,
+            toFloat64OrZero(custom_fields['tcp_rtt']) as tcp_rtt
         FROM fastly_log_analytics.request_facts
         WHERE service_id = {service_id:String}
           AND publication_state = 'visible'
-          AND event_timestamp >= {start_time:DateTime}
-          AND event_timestamp <= {end_time:DateTime}
+          AND event_timestamp >= {start_time:DateTime64(3)}
+          AND event_timestamp <= {end_time:DateTime64(3)}
     ),
     gaps AS (
         SELECT
@@ -80,8 +81,8 @@ def sessions_endpoint(
         query,
         {
             "service_id": service.service_id,
-            "start_time": start_time,
-            "end_time": end_time,
+            "start_time": datetime.fromisoformat(start_time) if start_time else None,
+            "end_time": datetime.fromisoformat(end_time) if end_time else None,
             "limit": req.limit,
             "offset": (req.page - 1) * req.limit,
         },
@@ -144,11 +145,16 @@ def sessions_detail(
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
       AND client_ip = {ip:String}
-      AND event_timestamp >= {start_time:DateTime}
-      AND event_timestamp <= {end_time:DateTime}
+      AND event_timestamp >= {start_time:DateTime64(3)}
+      AND event_timestamp <= {end_time:DateTime64(3)}
     """
 
-    params = {"service_id": service.service_id, "start_time": start_time, "end_time": end_time, "ip": ip}
+    params = {
+        "service_id": service.service_id,
+        "start_time": datetime.fromisoformat(start_time) if start_time else None,
+        "end_time": datetime.fromisoformat(end_time) if end_time else None,
+        "ip": ip,
+    }
 
     if ja4:
         query += " AND custom_fields['ja4'] = {ja4:String}"
