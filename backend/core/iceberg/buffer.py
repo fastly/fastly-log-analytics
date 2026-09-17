@@ -611,9 +611,13 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     finally:
         # Always restore to read-only for the pool
         try:
-            con.execute("DETACH lake")
+            con.execute("ROLLBACK")
         except Exception:
             pass
+        try:
+            con.execute("DETACH lake")
+        except Exception as e:
+            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
         _ducklake_attach(con, source, read_only=True)
         con.close()
 
@@ -677,9 +681,13 @@ def _optimize_table_impl(
         # Pool connections hold a READ-ONLY lake attach — re-attach
         # read-write for the rewrite (same dance as _commit_buffer_impl).
         try:
-            con.execute("DETACH lake")
+            con.execute("ROLLBACK")
         except Exception:
             pass
+        try:
+            con.execute("DETACH lake")
+        except Exception as e:
+            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
         if not _ducklake_attach(con, source, read_only=False):
             return {"error": "Failed to attach DuckLake", "files_rewritten": 0}
 
@@ -965,9 +973,13 @@ def _run_ducklake_maintenance(
     try:
         con = get_connection(source)
         try:
-            con.execute("DETACH lake")
+            con.execute("ROLLBACK")
         except Exception:
             pass
+        try:
+            con.execute("DETACH lake")
+        except Exception as e:
+            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
         if not _ducklake_attach(con, source, read_only=False):
             raise RuntimeError("Failed to attach DuckLake")
     except Exception as e:
@@ -994,9 +1006,13 @@ def _run_ducklake_maintenance(
             out["snapshot_expiry_error"] = str(e)
     finally:
         try:
-            con.execute("DETACH lake")
+            con.execute("ROLLBACK")
         except Exception:
             pass
+        try:
+            con.execute("DETACH lake")
+        except Exception as e:
+            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
         _ducklake_attach(con, source, read_only=True)
         try:
             con.close()

@@ -202,7 +202,16 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                     )
                     return False
                 if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
-                    return True
+                    # Check if the mode matches what we want
+                    try:
+                        row = con.execute(
+                            "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
+                        ).fetchone()
+                        if row and bool(row[0]) == read_only:
+                            return True
+                    except Exception:
+                        pass
+                    return False
                 logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
                 return False
         if not read_only:
