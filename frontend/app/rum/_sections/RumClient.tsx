@@ -370,6 +370,26 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     );
   }
 
+  if (analytics.beacon_count === 0) {
+    return (
+      <div className="space-y-6">
+        <AnalyticsCard title="Real User Monitoring Dashboard">
+          <div className="space-y-6 text-center py-12">
+            <div>
+              <div className="mx-auto w-16 h-16 bg-muted/20 rounded-full flex items-center justify-center mb-4 border border-border">
+                <Activity className="h-8 w-8 text-muted-foreground/50" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">No data for this time period</p>
+              <p className="text-sm text-muted-foreground mt-2 max-w-sm mx-auto">
+                No real-time beacons were received during the selected time window. Try expanding your time range or check back later.
+              </p>
+            </div>
+          </div>
+        </AnalyticsCard>
+      </div>
+    );
+  }
+
   const lcpColors = getLcpColors(analytics.vitals.lcp.p75);
   const clsColors = getClsColors(analytics.vitals.cls.p75);
   const inpColors = getInpColors(analytics.vitals.inp.p75);
