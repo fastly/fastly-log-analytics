@@ -162,12 +162,12 @@ def performance_aggregates(
         end_time=end_time,
         select=(
             "sum(requests) AS req_count, "
-            "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
+            "sum(latency_sum_ms) / nullIf(req_count, 0) AS avg_ms, "
             f"{_weighted('latency_p50_ms')} AS p50_ms, "
             f"{_weighted('latency_p95_ms')} AS p95_ms, "
             f"{_weighted('latency_p99_ms')} AS p99_ms"
         ),
-        having="sum(requests) > 5",
+        having="req_count > 5",
         order_by="p99_ms DESC",
         limit=20,
     )
@@ -191,12 +191,12 @@ def performance_aggregates(
         end_time=end_time,
         select=(
             "sum(requests) AS req_count, "
-            "sum(latency_sum_ms) / nullIf(sum(requests), 0) AS avg_ms, "
+            "sum(latency_sum_ms) / nullIf(req_count, 0) AS avg_ms, "
             f"{_weighted('latency_p50_ms')} AS p50_ms, "
             f"{_weighted('latency_p95_ms')} AS p95_ms, "
             f"{_weighted('latency_p99_ms')} AS p99_ms"
         ),
-        having="sum(requests) > 5",
+        having="req_count > 5",
         order_by="p99_ms DESC",
         limit=20,
     )
