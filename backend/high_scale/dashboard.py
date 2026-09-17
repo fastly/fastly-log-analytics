@@ -206,14 +206,6 @@ def _filtered_aggregates(
     end = _range_value(end_time)
 
     where_sql, filter_params = _build_clickhouse_filters(req.filters or {})
-    import logging
-
-    logging.getLogger(__name__).warning("DEBUG FILTERS: %s", req.filters)
-
-    if where_sql == "1=1":
-        return {"total_rows": -1, "data": {"url": {"top": []}}}
-    if where_sql == "1=1":
-        return {"total_rows": -1, "data": {"url": {"top": []}}}
 
     clauses = ["service_id={service_id:String}", "1=1", where_sql]
 
