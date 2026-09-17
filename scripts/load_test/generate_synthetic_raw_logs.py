@@ -131,8 +131,8 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "ja4": random.choice(["ja4-synthetic-a", "ja4-synthetic-b"]),
         "tls_ciphers_sha": random.choice(["cipher-synthetic-a", "cipher-synthetic-b"]),
         "cookie_session": f"session-{random.randint(1, 10_000)}",
-        "waf": False,
-        "waf_resp": 200,
+        "waf": random.random() < 0.1,
+        "waf_resp": random.choice([200, 403]),
         "waf_ms": 0,
         "waf_req_id": f"waf-{random.randint(1, 10_000)}",
         "q_rtt": random.randint(8, 180_000),
@@ -154,7 +154,7 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "io_output_format": random.choice(IMAGE_FORMATS),
         "service_id": service_id,
         "cmcd": {"v": "1", "sid": f"sid-{random.randint(1, 1000)}", "br": "3000", "d": "4000"},
-        "waf_sig": "VERIFIED-BOT",
+        "waf_sig": random.choice(["VERIFIED-BOT", "SQLI", "XSS"]),
     }
 
 

@@ -138,6 +138,8 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "tcp_rtt_p50_us",
         "tcp_rtt_p95_us",
         "tcp_rtt_p99_us",
+        "ttfb_p50_us",
+        "ttfb_p95_us",
         "ploss_sum",
         "ploss_count",
     }
