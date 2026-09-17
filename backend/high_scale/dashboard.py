@@ -172,7 +172,11 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
 
     for i, (field, config) in enumerate(filters.items()):
         mode = getattr(config, "mode", "include") if hasattr(config, "mode") else config.get("mode", "include")
-        values = getattr(config, "values", []) if hasattr(config, "values") else config.get("values", [])
+        values = (
+            getattr(config, "values", [])
+            if hasattr(config, "values")
+            else (config.get("values", []) if isinstance(config, dict) else getattr(config, "values", []))
+        )
         if not values:
             continue
 
