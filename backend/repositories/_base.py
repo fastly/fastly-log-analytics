@@ -5086,6 +5086,42 @@ class QueryRunner:
         q = "\n            UNION ALL\n            ".join(branches) + "\n            ORDER BY field, c DESC"
         return self.execute(q).fetchall(), field_order
 
+    def try_pop_health_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+    ) -> list[tuple] | None:
+        """Serve the /api/network/pop-health panel from parquets."""
+        from backend.core.rollups._common import POP_HEALTH_BUNDLE_FILENAME
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=0)
+        if win is None:
+            return None
+        st, et = win
+
+        rollup_paths = self._collect_rollup_paths(st, et, POP_HEALTH_BUNDLE_FILENAME)
+        if rollup_paths is None:
+            return None
+
+        paths_sql = quote_path_list(rollup_paths)
+
+        query = (
+            f"SELECT "
+            f"  pop, "
+            f"  CAST(SUM(requests) AS BIGINT), "
+            f"  CAST(SUM(errors) AS BIGINT), "
+            f"  CAST(SUM(cache_hits) AS BIGINT), "
+            f"  CAST(SUM(bandwidth_bytes) AS BIGINT), "
+            f"  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
+            f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+            f"FROM read_parquet([{paths_sql}]) "
+            f"WHERE pop IS NOT NULL AND pop != '' "
+            f"GROUP BY pop"
+        )
+        return self.execute(query).fetchall()
+
 
 # R-1: register the schema + listdir caches so the autouse fixture in
 # tests/conftest.py drains them via CacheRegistry.clear_all(). Both

@@ -122,6 +122,7 @@ from .day_bundles import (
     compact_overview_closed_days_to_daily,
     compact_perf_dims_closed_days_to_daily,
     compact_perf_latency_closed_days_to_daily,
+    compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
 )
@@ -139,6 +140,7 @@ from .origin_summary import backfill_origin_summary_bundles, build_origin_summar
 from .overview import backfill_overview_bundles, build_overview_bundles
 from .perf_dims import backfill_perf_dims_bundles, build_perf_dims_bundles
 from .perf_latency import backfill_perf_latency_bundles, build_perf_latency_bundles
+from .pop_health import backfill_pop_health_bundles, build_pop_health_bundles
 from .recompute import (
     _run_per_field_copy,
     backfill_missing_hour_bundles,
@@ -186,6 +188,8 @@ __all__ = [
     "backfill_verified_bots_ts_bundles",
     "build_perf_latency_bundles",
     "backfill_perf_latency_bundles",
+    "build_pop_health_bundles",
+    "backfill_pop_health_bundles",
     "build_perf_dims_bundles",
     "backfill_perf_dims_bundles",
     "build_security_dims_bundles",
@@ -203,6 +207,7 @@ __all__ = [
     "compact_ngwaf_bots_closed_days_to_daily",
     "compact_verified_bots_ts_closed_days_to_daily",
     "compact_perf_latency_closed_days_to_daily",
+    "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
     "recompute_touched_hours",

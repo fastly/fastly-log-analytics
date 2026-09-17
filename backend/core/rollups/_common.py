@@ -554,6 +554,7 @@ PERF_ASNS_MIN_REQUESTS_PER_HOUR = 10
 ORIGIN_POP_BUNDLE_FILENAME = "origin_pop.parquet"
 ORIGIN_IP_BUNDLE_FILENAME = "origin_ip.parquet"
 ORIGIN_PATH_BUNDLE_FILENAME = "origin_path.parquet"
+POP_HEALTH_BUNDLE_FILENAME = "pop_health.parquet"
 ORIGIN_DIMS_BUNDLE_TOP_K = 100
 # Per-hour minimum-request floor for the oip bundle (mirrors the slow_urls
 # noise cut; the live IP_HEALTH panel applies a window-level HAVING >= 10
@@ -704,6 +705,10 @@ def _origin_ip_bundle_path(source: dict, hour: str) -> str:
 
 def _origin_path_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_PATH_BUNDLE_FILENAME)
+
+
+def _pop_health_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", POP_HEALTH_BUNDLE_FILENAME)
 
 
 def _origin_latency_ts_bundle_path(source: dict, hour: str) -> str:

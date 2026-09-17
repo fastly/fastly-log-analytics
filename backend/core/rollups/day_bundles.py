@@ -27,6 +27,7 @@ from ._common import (
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
+    POP_HEALTH_BUNDLE_FILENAME,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
     SECURITY_COV_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
@@ -1014,5 +1015,32 @@ def compact_overview_closed_days_to_daily(service_id: str, source: dict) -> int:
         service_id,
         source,
         jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
+        logger=logger,
+    )
+
+
+def compact_pop_health_closed_days_to_daily(service_id: str, source: dict) -> int:
+    """Consolidate closed-day per-hour pop_health parquets into per-day files."""
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"      CAST(pop AS VARCHAR) AS pop, "
+            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"      CAST(SUM(errors) AS BIGINT) AS errors, "
+            f"      CAST(SUM(cache_hits) AS BIGINT) AS cache_hits, "
+            f"      CAST(SUM(bandwidth_bytes) AS BIGINT) AS bandwidth_bytes, "
+            f"      CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_rtt_us, "
+            f"      CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_ttfb_ms "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY pop"
+            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _copy_sql)],
         logger=logger,
     )

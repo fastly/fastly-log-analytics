@@ -81,6 +81,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_overview_bundles,
         backfill_perf_dims_bundles,
         backfill_perf_latency_bundles,
+        backfill_pop_health_bundles,
         backfill_security_dims_bundles,
         backfill_slow_urls_bundles,
         backfill_verified_bots_ts_bundles,
@@ -94,6 +95,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         compact_overview_closed_days_to_daily,
         compact_perf_dims_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
+        compact_pop_health_closed_days_to_daily,
         compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
     )
@@ -138,6 +140,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_ns = backfill_network_speed_bundles(sid, source)
     n_vbts = backfill_verified_bots_ts_bundles(sid, source)
     n_perf = backfill_perf_latency_bundles(sid, source)
+    n_ph = backfill_pop_health_bundles(sid, source)
     # security_dims: req_size / conn_reuse / topips / cov — the all-rows live
     # scans behind /api/security/aggregates' equivalent panels. EXACT.
     n_sd = backfill_security_dims_bundles(sid, source)
@@ -165,6 +168,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
     n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
+    n_ph_day = compact_pop_health_closed_days_to_daily(sid, source)
     n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
@@ -184,6 +188,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "verified_bots_ts": n_vbts,
         "verified_bots_ts_days": n_vbts_day,
         "perf_latency": n_perf,
+        "pop_health": n_ph,
         "perf_latency_days": n_perf_day,
         "security_dims": n_sd,
         "security_dims_days": n_sd_day,
