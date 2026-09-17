@@ -166,6 +166,11 @@ def _time_series(service: HighScaleService, start_time: str | None, end_time: st
 def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not filters:
         return "1=1", {}
+    import logging
+
+    logging.getLogger(__name__).warning("DEBUG FILTERS TYPE filters=%s type=%s", filters, type(filters))
+    for k, v in filters.items():
+        logging.getLogger(__name__).warning("DEBUG FILTERS ITEM k=%s v=%s type=%s", k, v, type(v))
 
     clauses = []
     params = {}
@@ -190,11 +195,17 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
         else:
             sql_col = f"custom_fields['{col_name}']"
 
-        param_name = f"filter_{i}"
-        params[param_name] = [str(v) for v in values]
-
         op = "IN" if mode == "include" else "NOT IN"
-        clauses.append(f"{sql_col} {op} {{{param_name}:Array(String)}}")
+        keys = []
+        for j, val in enumerate(values):
+            p_name = f"filter_{i}_{j}"
+            params[p_name] = str(val)
+            keys.append(f"{{{p_name}:String}}")
+
+        if keys:
+            clauses.append(f"{sql_col} {op} ({', '.join(keys)})")
+        else:
+            clauses.append("1=0" if mode == "include" else "1=1")
 
     where_sql = " AND ".join(clauses) if clauses else "1=1"
     import logging
@@ -243,6 +254,9 @@ def _filtered_aggregates(
         params.update({"start": start, "end": end})
 
     where_clause = " AND ".join(clauses)
+    import logging
+
+    logging.getLogger(__name__).warning("DEBUG EXACT QUERY: %s params: %s", where_clause, params)
 
     requested_fields = req.fields or list(_FIELD_DIMENSIONS)
 
@@ -260,6 +274,9 @@ def _filtered_aggregates(
             rows = service.client.execute(q, params)
             return field, [(str(r["v"]), int(r["c"])) for r in rows]
         except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).error("FILTER ERROR field %s: %s", field, e)
             return field, []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
@@ -271,6 +288,9 @@ def _filtered_aggregates(
         )
         total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
     except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).error("FILTER ERROR total: %s", e)
         total_count = 0
 
     data = {

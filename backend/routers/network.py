@@ -132,7 +132,7 @@ def network_health(
 
     if want_core:
         res = repo.get_health(
-            con=ctx.con,
+            con_factory=lambda: ctx.con,
             src=ctx.source,
             start_time=start_time,
             end_time=end_time,
@@ -195,7 +195,7 @@ def network_quality(
 
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_quality(
-        con=ctx.con,
+        con_factory=lambda: ctx.con,
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,

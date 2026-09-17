@@ -136,7 +136,7 @@ def test_durable_network_health_uses_ducklake_fallback_when_rollups_are_missing(
         from backend.repositories.network import get_health
 
         result = get_health(
-            in_memory_duckdb,
+            lambda: in_memory_duckdb,
             src,
             "2026-09-06T00:00:00Z",
             "2026-09-07T00:00:00Z",

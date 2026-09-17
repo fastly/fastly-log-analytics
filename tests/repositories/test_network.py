@@ -176,7 +176,11 @@ def test_get_health_returns_available_false_when_required_cols_missing(in_memory
     in_memory_duckdb.execute(f"CREATE TABLE {table} (timestamp TIMESTAMP, status INTEGER)")
 
     out = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     assert out["available"] is False
     assert "Groups F" in out["reason"] and "G" in out["reason"]
@@ -199,7 +203,7 @@ def test_get_health_strips_asn_filter_when_map_asn_specified(in_memory_duckdb, t
     # An asn filter ("not 7922") in filters + map_asn="7922" — the
     # asn filter MUST be removed so the map for 7922 still renders.
     out = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -255,7 +259,7 @@ def test_get_quality_returns_available_false_when_tcp_rtt_missing(in_memory_duck
     table = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(f"CREATE TABLE {table} (timestamp TIMESTAMP, status INTEGER)")
 
-    out = get_quality(in_memory_duckdb, test_service_source, None, None, {})
+    out = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {})
     assert out["available"] is False
     # All the array keys must be empty lists, not missing, so the FE renders fine
     for key in ("by_country", "by_asn", "by_region", "by_pop", "scatter", "countries"):
@@ -271,7 +275,7 @@ def test_get_quality_returns_bars_grouped_by_country_when_data_present(in_memory
         log["country"] = "US" if i < 20 else "GB"
     insert_mock_logs(in_memory_duckdb, table, logs)
 
-    out = get_quality(in_memory_duckdb, test_service_source, None, None, {})
+    out = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {})
     by_country = out["by_country"]
     assert len(by_country) >= 1
     labels = {r["label"] for r in by_country}
@@ -294,7 +298,7 @@ def test_get_quality_respects_region_country_param(in_memory_duckdb, test_servic
         log["region"] = "London"
     insert_mock_logs(in_memory_duckdb, table, logs)
 
-    out = get_quality(in_memory_duckdb, test_service_source, None, None, {}, region_country="GB")
+    out = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {}, region_country="GB")
     assert out["region_country"] == "GB"
 
 
@@ -319,7 +323,7 @@ def test_get_quality_enriches_asn_labels_and_keeps_pop_as_code(in_memory_duckdb,
         lambda service_id, asns: {7922: "Comcast Cable Communications"},
     )
 
-    out = get_quality(in_memory_duckdb, test_service_source, None, None, {})
+    out = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {})
 
     asn_row = next(r for r in out["by_asn"] if r["value"] == "7922")
     assert asn_row["label"] == "Comcast Cable Communications (7922)"
@@ -346,7 +350,11 @@ def test_get_health_full_response_when_sections_none(in_memory_duckdb, test_serv
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     for key in ("summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"):
         assert key in out, f"section {key} missing from default response"
@@ -365,7 +373,7 @@ def test_get_health_selector_drops_unrequested_keys(in_memory_duckdb, test_servi
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -390,7 +398,7 @@ def test_get_health_metro_only_skips_heatmap_query(in_memory_duckdb, test_servic
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -419,7 +427,7 @@ def test_get_health_summary_selector_pulls_dependent_queries(in_memory_duckdb, t
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -447,7 +455,7 @@ def test_get_health_selector_skips_response_cache_write(in_memory_duckdb, test_s
 
     # Selector first
     _ = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -456,7 +464,11 @@ def test_get_health_selector_skips_response_cache_write(in_memory_duckdb, test_s
     )
     # Full second — must still have everything
     full = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     for key in ("summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"):
         assert key in full, f"selector poisoned the cache; full response missing {key}"
@@ -569,11 +581,19 @@ def test_cache_read_write_round_trip(in_memory_duckdb, test_service_source):
     insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
 
     first = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     assert not first.get("is_cached")
     second = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     assert second.get("is_cached") is True
 
@@ -588,11 +608,15 @@ def test_force_refresh_skips_read_but_writes(in_memory_duckdb, test_service_sour
 
     # Prime the cache.
     get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     # force_refresh must NOT read the primed entry (recomputes fresh).
     refreshed = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         None,
         None,
@@ -602,7 +626,11 @@ def test_force_refresh_skips_read_but_writes(in_memory_duckdb, test_service_sour
     assert not refreshed.get("is_cached")
     # But it rewrote the entry → next normal call hits.
     after = get_health(
-        in_memory_duckdb, test_service_source, None, None, {"status": FilterSpec(mode="include", values=["200"])}
+        lambda: in_memory_duckdb,
+        test_service_source,
+        None,
+        None,
+        {"status": FilterSpec(mode="include", values=["200"])},
     )
     assert after.get("is_cached") is True
 
@@ -617,10 +645,10 @@ def test_stale_empty_result_is_not_cached(in_memory_duckdb, test_service_source)
     insert_mock_logs(in_memory_duckdb, table, _net_logs(test_service_source))
 
     empty_window = ("2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z")
-    out = get_health(in_memory_duckdb, test_service_source, *empty_window, {})
+    out = get_health(lambda: in_memory_duckdb, test_service_source, *empty_window, {})
     # available True (schema present) but zero signal → not cached.
     assert not _has_signal(out)
-    second = get_health(in_memory_duckdb, test_service_source, *empty_window, {})
+    second = get_health(lambda: in_memory_duckdb, test_service_source, *empty_window, {})
     assert not second.get("is_cached"), "a zero-signal window was cached (poison risk)"
 
 
@@ -850,7 +878,7 @@ def test_keyed_path_cache_hit_round_trip(in_memory_duckdb, test_service_source):
     win_end = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     first = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         win_start_a,
         win_end,
@@ -861,7 +889,7 @@ def test_keyed_path_cache_hit_round_trip(in_memory_duckdb, test_service_source):
     assert not first.get("is_cached")
     assert _has_signal(first), "fixture window should carry signal so the entry is cacheable"
     second = get_health(
-        in_memory_duckdb,
+        lambda: in_memory_duckdb,
         test_service_source,
         win_start_b,
         win_end,
@@ -939,7 +967,7 @@ def test_get_health_coalesces_concurrent_core_and_map_temp_table_builds(monkeypa
     def run(label, con, sections):
         try:
             results[label] = get_health(
-                con,
+                lambda: con,
                 test_service_source,
                 None,
                 None,
@@ -1005,7 +1033,7 @@ def test_get_health_does_not_coalesce_requests_with_different_top_n(monkeypatch,
 
     def run(label, con, top_n):
         results[label] = get_health(
-            con,
+            lambda: con,
             test_service_source,
             None,
             None,
@@ -1052,7 +1080,7 @@ def test_get_health_coalesced_temp_table_failure_surfaces_to_both_waiters(monkey
 
     def run(label, con, sections):
         results[label] = get_health(
-            con,
+            lambda: con,
             test_service_source,
             None,
             None,
