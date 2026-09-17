@@ -83,11 +83,11 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
             f"SELECT count() AS total_rows, max(event_timestamp) AS latest_log_at "
             f"FROM {table} "
             "WHERE service_id={service_id:String} "
-            "AND publication_state='visible' "
+            "AND publication_state='pending' OR publication_state='visible' "
             "AND batch_id IN ("
             "SELECT batch_id FROM high_scale_batch_publications FINAL "
             "WHERE service_id={service_id:String} AND domain={domain:String} "
-            "AND publication_state='visible'"
+            "AND publication_state='pending' OR publication_state='visible'"
             ")",
             {"service_id": service.service_id, "domain": domain},
         )
