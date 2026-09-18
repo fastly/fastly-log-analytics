@@ -508,6 +508,11 @@ NETWORK_RTT_BUNDLE_FILENAME = "network_rtt.parquet"
 NETWORK_RTT_BUNDLE_TOP_K = 100
 NETWORK_RTT_BUNDLE_MIN_REQUESTS_PER_HOUR = 5
 
+NETWORK_QUALITY_COUNTRY_FILENAME = "network_quality_country.parquet"
+NETWORK_QUALITY_ASN_FILENAME = "network_quality_asn.parquet"
+NETWORK_QUALITY_REGION_FILENAME = "network_quality_region.parquet"
+NETWORK_QUALITY_POP_FILENAME = "network_quality_pop.parquet"
+
 # Filename for the per-hour per-ASN client-speed (c_speed) distribution
 # rollup feeding /api/network-health's speed_distribution_query (2.9 s
 # on prod 30 d). Schema: (asn, c_speed, count). Same top-K=100 ASNs

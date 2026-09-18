@@ -193,7 +193,7 @@ def _build_clickhouse_filters(filters: dict[str, Any]) -> tuple[str, dict[str, A
         if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             sql_col = col_name
         elif col_name in {"age", "ttl"}:
-            sql_col = f"CAST(CAST(ROUND(custom_fields['{col_name}']) AS INTEGER) AS VARCHAR)"
+            sql_col = f"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}'])) AS INTEGER) AS VARCHAR)"
         else:
             sql_col = f"custom_fields['{col_name}']"
 
@@ -270,7 +270,7 @@ def _filtered_aggregates(
         if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             sql_col = col_name
         elif col_name in {"age", "ttl"}:
-            sql_col = f"CAST(CAST(ROUND(custom_fields['{col_name}']) AS INTEGER) AS VARCHAR)"
+            sql_col = f"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}'])) AS INTEGER) AS VARCHAR)"
         else:
             sql_col = f"custom_fields['{col_name}']"
 

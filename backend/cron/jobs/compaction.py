@@ -306,6 +306,7 @@ def _run_rollup_compact_daily(service_id: str) -> None:
         backfill_missing_hour_bundles,
         backfill_missing_hour_ip_spread,
         compact_closed_days_to_daily,
+        compact_network_quality_closed_days_to_daily,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
         compact_ngwaf_bots_closed_days_to_daily,
@@ -436,6 +437,16 @@ def _run_rollup_compact_daily(service_id: str) -> None:
                 e,
             )
             network_speed_compacted = 0
+
+        try:
+            network_quality_compacted = compact_network_quality_closed_days_to_daily(service_id, src)
+        except Exception as e:
+            logger.warning(
+                "[rollup-compact] %s: network_quality day-compact failed (per-hour still serves): %s",
+                _display,
+                e,
+            )
+            network_quality_compacted = 0
 
         # verified_bots_ts per-day compaction: same shape as network_speed
         # but PRESERVES the minute (bucket_ts) dimension because the panel

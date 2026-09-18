@@ -56,6 +56,14 @@ _TEMP_COL_ORDER = (
     "waf_sig",
     "ua",
     "waf_req_id",
+    "pop",
+    "rtt_min",
+    "tcp_rtt",
+    "lat",
+    "lon",
+    "asn",
+    "country",
+    "city",
 )
 
 # (section name, is_list) — the empty default each section carries when it
@@ -385,6 +393,7 @@ def get_top_bots(
     end_time: str | None,
     filters: FiltersDict,
     n: int = 10,
+    shared_temp_table: str | None = None,
 ) -> dict:
     """Return top N bots from UA matching and (if available) the NGWAF bot cache."""
     import logging
@@ -527,7 +536,14 @@ def get_top_bots(
                 logging.getLogger(__name__).error("[security] NGWAF top bots failed: %s", e)
     elif cols_needed:
         _t = _time.perf_counter()
-        with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+        from contextlib import nullcontext
+
+        ctx = (
+            nullcontext(shared_temp_table)
+            if shared_temp_table
+            else runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params)
+        )
+        with ctx as temp_table:
             timer.mark("top_bots:temp_table_create", _t)
             if temp_table is None:
                 return {
@@ -985,6 +1001,12 @@ def _build_security_response(
     elif _want("wellknown_bots"):
         results["wellknown_bots"] = []
 
+    if _want("top_bots"):
+        _need("top_bots", {"ua", "waf_req_id"})
+
+    if _want("proxies"):
+        _need("proxies", {"ip", "pop", "rtt_min", "tcp_rtt", "lat", "lon", "asn", "country", "city"})
+
     # ── Build the (narrowed / NGWAF-only / skipped) catalog temp ──
     temp_table: str | None = None
     if needed_cols:
@@ -1232,6 +1254,31 @@ def _build_security_response(
 
                 logging.getLogger(__name__).error("[security] well-known bots query failed: %s", e)
                 results["wellknown_bots"] = []
+
+        if "top_bots" in live_sections and temp_table:
+            _t = _time.perf_counter()
+            try:
+                tb = get_top_bots(con, src, start_time, end_time, filters or {}, shared_temp_table=temp_table)
+                results["bots"] = tb.get("bots", [])
+                results["ngwaf_bots"] = tb.get("ngwaf_bots", [])
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).error("[security] get_top_bots failed in aggregate: %s", e)
+            timer.mark("top_bots", _t)
+
+        if "proxies" in live_sections and temp_table:
+            _t = _time.perf_counter()
+            try:
+                px = get_security_proxies(con, src, start_time, end_time, filters, shared_temp_table=temp_table)
+                for k, v in px.items():
+                    if k not in ["section_timings", "debug_calls", "debug_queries"]:
+                        results[k] = v
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).error("[security] get_security_proxies failed in aggregate: %s", e)
+            timer.mark("proxies", _t)
     finally:
         if temp_table:
             try:
@@ -1246,6 +1293,21 @@ def _build_security_response(
         if _want(name) and name not in results:
             results[name] = [] if is_list else {}
 
+    if _want("top_bots"):
+        if "bots" not in results:
+            results["bots"] = []
+        if "ngwaf_bots" not in results:
+            results["ngwaf_bots"] = []
+
+    if _want("proxies"):
+        if "active_proxies_count" not in results:
+            results["active_proxies_count"] = 0
+            results["tunnel_requests_count"] = 0
+            results["distance_mismatches_count"] = 0
+            results["traffic_quality"] = []
+            results["suspicious_isps"] = []
+            results["active_clients"] = []
+
     results["section_timings"] = section_timings
     return results
 
@@ -1256,6 +1318,7 @@ def get_security_proxies(
     start_time: Any,
     end_time: Any,
     filters: dict[str, Any] | None = None,
+    shared_temp_table: str | None = None,
 ) -> dict[str, Any]:
     from backend.repositories._base import QueryRunner, _safe_table
     from backend.repositories._sql import security as SQL
@@ -1282,7 +1345,14 @@ def get_security_proxies(
     optional = ["country", "city"]
     cols_needed = [c for c in required + optional if c in actual_cols]
 
-    with runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params) as temp_table:
+    from contextlib import nullcontext
+
+    ctx = (
+        nullcontext(shared_temp_table)
+        if shared_temp_table
+        else runner.temp_table(cols_needed, actual_cols, table_name, where_clause, params)
+    )
+    with ctx as temp_table:
         if temp_table is None:
             return {
                 "active_proxies_count": 0,

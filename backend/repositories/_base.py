@@ -3710,6 +3710,87 @@ class QueryRunner:
             return '"ottlb"'
         return None
 
+    def try_network_quality_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        region_country: str,
+    ) -> dict[str, Any] | None:
+        from backend.core.rollups._common import (
+            NETWORK_QUALITY_ASN_FILENAME,
+            NETWORK_QUALITY_COUNTRY_FILENAME,
+            NETWORK_QUALITY_POP_FILENAME,
+            NETWORK_QUALITY_REGION_FILENAME,
+        )
+
+        win = self._eligible_rollup_window(
+            start_time, end_time, has_filters=has_filters, require_top_asns=None, min_hours=24
+        )
+        if win is None:
+            return None
+        st, et = win
+
+        def _run_dim(
+            filename: str, group_col: str, filter_sql: str = "", filter_params: list = None
+        ) -> list[dict] | None:
+            rollup_paths = self._collect_rollup_paths(st, et, filename)
+            if not rollup_paths:
+                return None
+            paths_sql = ", ".join(f"'{p}'" for p in rollup_paths)
+
+            sql = (
+                f"SELECT dim_val as label, "
+                f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms, "
+                f"       SUM(requests) AS reqs "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"WHERE 1=1 {filter_sql} "
+                f"GROUP BY dim_val "
+                f"ORDER BY reqs DESC "
+                f"LIMIT 25"
+            )
+            rows = self.execute(sql, filter_params or []).fetchall()
+            return [
+                {"value": str(r[0]), "label": str(r[0]), "rtt_ms": round(float(r[1]), 2), "reqs": int(r[2])}
+                for r in rows
+                if r[1] is not None
+            ]
+
+        try:
+            by_country = _run_dim(NETWORK_QUALITY_COUNTRY_FILENAME, "country")
+            if by_country is None:
+                return None
+
+            by_asn = _run_dim(NETWORK_QUALITY_ASN_FILENAME, "asn")
+            if by_asn is None:
+                return None
+
+            by_pop = _run_dim(NETWORK_QUALITY_POP_FILENAME, "pop")
+            if by_pop is None:
+                return None
+
+            by_region = _run_dim(NETWORK_QUALITY_REGION_FILENAME, "region", "AND country = ?", [region_country])
+            if by_region is None:
+                return None
+
+            return {
+                "available": True,
+                "by_country": by_country,
+                "by_asn": by_asn,
+                "by_pop": by_pop,
+                "by_region": by_region,
+                "region_country": region_country,
+                "scatter": [],  # Scatter not supported in rollup; UI will just render empty or we handle it
+                "countries": [c["value"] for c in by_country],
+                "_approx": True,
+            }
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).debug("[network_quality_rollup] read failed: %s", e)
+            return None
+
     def try_network_rtt_from_rollup(
         self,
         start_time: str | None,
@@ -3736,7 +3817,7 @@ class QueryRunner:
         from backend.core.rollups._common import NETWORK_RTT_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=48
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=24
         )
         if win is None:
             return None
@@ -3801,7 +3882,7 @@ class QueryRunner:
         from backend.core.rollups._common import NETWORK_SPEED_BUNDLE_FILENAME
 
         win = self._eligible_rollup_window(
-            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=48
+            start_time, end_time, has_filters=has_filters, require_top_asns=top_asns, min_hours=24
         )
         if win is None:
             return None
@@ -3831,7 +3912,7 @@ class QueryRunner:
                 f"  UNION ALL "
                 f"  SELECT asn, c_speed, CAST(COUNT(*) AS BIGINT) AS cnt "
                 f"  FROM {base_table} "
-                f"  WHERE timestamp >= CAST('{ah_iso}' AS TIMESTAMP) AND timestamp < CAST('{et_iso}' AS TIMESTAMP) "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
                 f"    AND asn IN ({asn_placeholders}) AND c_speed IS NOT NULL "
                 f"  GROUP BY asn, c_speed"
                 f") GROUP BY asn, c_speed "
@@ -3888,7 +3969,7 @@ class QueryRunner:
         if bucket_seconds != 3600:
             return None
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
             return None
         st, et = win
@@ -3927,11 +4008,11 @@ class QueryRunner:
                 f"    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
                 f"    CAST(reqs AS BIGINT)                                               AS reqs"
                 f"   FROM read_parquet([{paths_sql}])"
-                f"   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f"   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f"   UNION ALL "
                 f"   SELECT"
                 f"    asn,"
-                f"    CAST(CAST('{ah_iso}' AS TIMESTAMP) AS TIMESTAMP) AS bucket_ts,"
+                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_baseline_us,"  # No min baseline for active hour
@@ -3941,7 +4022,7 @@ class QueryRunner:
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"   FROM {base_table} "
-                f"   WHERE timestamp >= CAST('{ah_iso}' AS TIMESTAMP) AND timestamp < CAST('{et_iso}' AS TIMESTAMP)"
+                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
                 f"     AND asn IS NOT NULL"
                 f"   GROUP BY asn"
                 f")"
@@ -3961,7 +4042,7 @@ class QueryRunner:
                 f"  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
                 f"  CAST(reqs AS BIGINT)                                               AS reqs"
                 f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f" ORDER BY reqs DESC"
             )
         try:
@@ -4014,7 +4095,7 @@ class QueryRunner:
         if map_asn != "all":
             return None  # per-ASN map drill-down not supported by geo rollup
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
             return None
         st, et = win
@@ -4048,7 +4129,7 @@ class QueryRunner:
                 f"    errors * 100.0 / NULLIF(reqs, 0) AS error_pct,"
                 f"    CAST(reqs AS BIGINT) AS reqs"
                 f"  FROM read_parquet([{paths_sql}])"
-                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f"  UNION ALL "
                 f"  SELECT"
                 f"    client_geo_country_code AS country,"
@@ -4056,13 +4137,13 @@ class QueryRunner:
                 f"    CAST(client_geo_latitude AS DOUBLE) AS lat,"
                 f"    CAST(client_geo_longitude AS DOUBLE) AS lon,"
                 f"    client_geo_metro_code AS metro,"
-                f"    CAST(CAST('{ah_iso}' AS TIMESTAMP) AS TIMESTAMP) AS bucket_ts,"
+                f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
                 f"    0::DOUBLE AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
-                f"  WHERE timestamp >= CAST('{ah_iso}' AS TIMESTAMP) AND timestamp < CAST('{et_iso}' AS TIMESTAMP)"
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
                 f"    AND client_geo_country_code IS NOT NULL AND client_geo_country_code != ''"
                 f"  GROUP BY country, city, lat, lon, metro"
                 f") ORDER BY bucket_ts, reqs DESC LIMIT 5000"
@@ -4080,7 +4161,7 @@ class QueryRunner:
                 f"    SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0) AS error_pct,"
                 f"    CAST(SUM(reqs) AS BIGINT) AS reqs"
                 f"  FROM read_parquet([{paths_sql}])"
-                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f"  GROUP BY country, city, metro"
                 f"  UNION ALL "
                 f"  SELECT client_geo_country_code AS country, client_geo_city AS city, client_geo_metro_code AS metro,"
@@ -4089,7 +4170,7 @@ class QueryRunner:
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
-                f"  WHERE timestamp >= CAST('{ah_iso}' AS TIMESTAMP) AND timestamp < CAST('{et_iso}' AS TIMESTAMP)"
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
                 f"    AND client_geo_country_code IS NOT NULL AND client_geo_country_code != ''"
                 f"  GROUP BY country, city, metro"
                 f") GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
@@ -4108,7 +4189,7 @@ class QueryRunner:
                 f"  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,"
                 f"  CAST(reqs AS BIGINT)                             AS reqs"
                 f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f" ORDER BY hour_ts, reqs DESC"
                 f" LIMIT 5000"
             )
@@ -4127,7 +4208,7 @@ class QueryRunner:
                 f"  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,"
                 f"  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs"
                 f" FROM read_parquet([{paths_sql}])"
-                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < CAST('{et_iso}' AS TIMESTAMP)"
+                f" WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f" GROUP BY country, city, metro"
                 f" ORDER BY total_reqs DESC"
                 f" LIMIT 100"
@@ -4223,7 +4304,7 @@ class QueryRunner:
             f"  SELECT time_bucket(INTERVAL '{n} seconds', bucket_ts) AS bucket, "
             f"         bot_type, SUM(count) AS count "
             f"  FROM read_parquet([{paths_sql}]) "
-            f"  WHERE bucket_ts >= TIMESTAMPTZ '{st_iso}' AND bucket_ts < CAST('{et_iso}' AS TIMESTAMP) "
+            f"  WHERE bucket_ts >= TIMESTAMPTZ '{st_iso}' AND bucket_ts < TIMESTAMPTZ '{et_iso}' "
             f"  GROUP BY 1, 2 "
             f"  UNION ALL "
             f"  SELECT time_bucket(INTERVAL '{n} seconds', timestamp) AS bucket, "
@@ -4232,7 +4313,7 @@ class QueryRunner:
             f"    SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag "
             f"    FROM {temp_table} "
             f"    WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%' "
-            f"      AND timestamp >= TIMESTAMPTZ '{active_iso}' AND timestamp < CAST('{et_iso}' AS TIMESTAMP)"
+            f"      AND timestamp >= TIMESTAMPTZ '{active_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
             f"  ) sub "
             f"  WHERE tag LIKE 'VERIFIED-BOT.%' "
             f"  GROUP BY 1, 2"
@@ -5240,7 +5321,7 @@ class QueryRunner:
         """Serve the /api/network/pop-health panel from parquets."""
         from backend.core.rollups._common import POP_HEALTH_BUNDLE_FILENAME
 
-        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=48)
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
         if win is None:
             return None
         st, et = win
@@ -5281,7 +5362,7 @@ class QueryRunner:
                 f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
                 f"         CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms "
                 f"  FROM {base_table} "
-                f"  WHERE timestamp >= CAST('{ah_iso}' AS TIMESTAMP) AND timestamp < CAST('{et_iso}' AS TIMESTAMP) "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}' "
                 f"    AND pop IS NOT NULL AND pop != '' "
                 f"  GROUP BY pop"
                 f") "

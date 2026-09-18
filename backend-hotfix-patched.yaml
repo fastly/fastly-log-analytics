@@ -1,0 +1,1533 @@
+apiVersion: v1
+data:
+  config.py: "\"\"\"Service configuration management for multi-service support.\n\n\
+    Each service is stored as a JSON file in the configs/ directory.\nThe filename\
+    \ is the Fastly logging service ID (e.g. abcdefg12345abcdef1234.json).\n\nConfig\
+    \ file schema:\n{\n    \"service_id\": \"abcdefg12345abcdef1234\",   # Fastly\
+    \ logging service ID (matches filename)\n    \"name\": \"My Production Site\"\
+    ,               # Human-readable label (from Fastly API)\n    \"access_level\"\
+    : \"read_write\",               # \"read_write\" or \"read_only\"\n    \"fos_endpoint\"\
+    : \"us-east-1.object.fastlystorage.app\",\n    \"fos_access_key_id\": \"...\"\
+    ,\n    \"fos_secret_access_key\": \"...\",\n    \"fos_bucket\": \"...\",\n   \
+    \ \"fos_prefix\": \"\",\n    \"raw_layout_version\": 3,\n    \"fos_region\": \"\
+    us-east-1\",\n    \"cdn_url\": \"https://...\",\n    \"cdn_secret\": \"...\",\n\
+    \    \"cdn_service_id\": \"...\",                    # The CDN VCL service fronting\
+    \ FOS\n    \"fastly_api_key\": \"...\",                    # Account-wide Fastly\
+    \ API key\n    \"provisioning\": {                           # Embedded provisioning\
+    \ state for teardown\n        \"endpoint_name\": \"Fastly Object Storage Logs\"\
+    ,\n        \"temp_admin_key_id\": null\n    }\n}\n\"\"\"\n\nimport copy\nimport\
+    \ json\nimport logging\nimport math\nimport os\nimport re\nimport sys\nimport\
+    \ tempfile\nimport threading\nimport time\nfrom dataclasses import dataclass,\
+    \ field\nfrom ipaddress import ip_address\nfrom pathlib import Path\n\nlogger\
+    \ = logging.getLogger(__name__)\n\n_ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n\
+    \nCONFIGS_DIR = _ROOT_DIR / \"configs\"\nDATA_DIR = _ROOT_DIR / \"data\"\n\n#\
+    \ Sub-directories for organized data storage\nSERVICES_DATA_DIR = DATA_DIR / \"\
+    services\"\nNGWAF_DATA_DIR = DATA_DIR / \"ngwaf\"\nCACHE_DATA_DIR = DATA_DIR /\
+    \ \"cache\"\nSYSTEM_DATA_DIR = DATA_DIR / \"system\"\n\n# Deployment topology\
+    \ is deployment-wide rather than per-service. Define this\n# before the default\
+    \ source is built so config_to_source() can safely include\n# it during module\
+    \ import.\nDEPLOYMENT_MODE = os.getenv(\"DEPLOYMENT_MODE\", \"standard\").strip().lower()\n\
+    \n\n@dataclass(frozen=True)\nclass ClickHouseConfig:\n    \"\"\"Deployment-only\
+    \ HTTP settings; loaded at startup, never from service JSON.\"\"\"\n\n    host:\
+    \ str\n    port: int\n    database: str\n    user: str\n    password: str = field(repr=False)\n\
+    \    secure: bool = True\n    connect_timeout_s: float = 5.0\n    query_timeout_s:\
+    \ float = 30.0\n    insert_timeout_s: float = 30.0\n    pool_timeout_s: float\
+    \ = 5.0\n    pool_max_size: int = 8\n\n\ndef _clickhouse_bool(name: str, default:\
+    \ str) -> bool:\n    raw = os.getenv(name, default).strip().lower()\n    if raw\
+    \ in {\"1\", \"true\", \"yes\", \"on\"}:\n        return True\n    if raw in {\"\
+    0\", \"false\", \"no\", \"off\"}:\n        return False\n    raise ValueError(f\"\
+    {name} must be a boolean\")\n\n\ndef _clickhouse_number(name: str, default: float,\
+    \ maximum: float, *, integer: bool = False):\n    try:\n        raw = os.getenv(name,\
+    \ str(default))\n        value = int(raw) if integer else float(raw)\n       \
+    \ if math.isfinite(value) and (1 if integer else 0.01) <= value <= maximum:\n\
+    \            return value\n    except (ValueError, OverflowError):\n        pass\n\
+    \    raise ValueError(f\"{name} must be finite and between {1 if integer else\
+    \ 0.01} and {maximum}\")\n\n\ndef load_clickhouse_config() -> ClickHouseConfig\
+    \ | None:\n    \"\"\"CLICKHOUSE_ENABLED is opt-in; disabled mode ignores all other\
+    \ settings.\n\n    Enabled mode requires HOST (bare DNS/IP), DATABASE and USER.\
+    \ SECURE defaults\n    to true (verified HTTPS, port 8443; HTTP uses 8123). A\
+    \ missing PASSWORD is\n    permitted only for explicitly insecure loopback test\
+    \ instances. Operators\n    must opt into SECURE=false for a trusted private-network\
+    \ HTTP deployment.\n    CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S\
+    \ 0.01..300;\n    POOL_MAX_SIZE is 1..64. Environment changes require a process\
+    \ restart.\n    \"\"\"\n    if not _clickhouse_bool(\"CLICKHOUSE_ENABLED\", \"\
+    false\"):\n        return None\n    required = {}\n    for key in (\"HOST\", \"\
+    DATABASE\", \"USER\"):\n        value = os.getenv(f\"CLICKHOUSE_{key}\", \"\"\
+    ).strip()\n        if not value:\n            raise ValueError(f\"CLICKHOUSE_{key}\
+    \ is required when enabled\")\n        required[key] = value\n    host = required[\"\
+    HOST\"]\n    loopback = host == \"localhost\"\n    try:\n        loopback = ip_address(host).is_loopback\n\
+    \    except ValueError:\n        if len(host) > 253 or not all(\n            re.fullmatch(r\"\
+    [A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\", label) for label in host.split(\"\
+    .\")\n        ):\n            raise ValueError(\"CLICKHOUSE_HOST must be a bare\
+    \ hostname or IP address\") from None\n    if not re.fullmatch(r\"[A-Za-z_][A-Za-z0-9_]{0,127}\"\
+    , required[\"DATABASE\"]):\n        raise ValueError(\"CLICKHOUSE_DATABASE must\
+    \ be a simple identifier\")\n    if not re.fullmatch(r\"[A-Za-z0-9_.@-]{1,128}\"\
+    , required[\"USER\"]):\n        raise ValueError(\"CLICKHOUSE_USER contains unsupported\
+    \ characters\")\n    secure = _clickhouse_bool(\"CLICKHOUSE_SECURE\", \"true\"\
+    )\n    password = os.getenv(\"CLICKHOUSE_PASSWORD\", \"\")\n    if not password.strip()\
+    \ and (secure or not loopback):\n        raise ValueError(\"CLICKHOUSE_PASSWORD\
+    \ is required except for explicit HTTP loopback tests\")\n    query_timeout =\
+    \ _clickhouse_number(\"CLICKHOUSE_QUERY_TIMEOUT_S\", 30, 300)\n    return ClickHouseConfig(\n\
+    \        host=host,\n        port=_clickhouse_number(\"CLICKHOUSE_PORT\", 8443\
+    \ if secure else 8123, 65535, integer=True),\n        database=required[\"DATABASE\"\
+    ],\n        user=required[\"USER\"],\n        password=password,\n        secure=secure,\n\
+    \        connect_timeout_s=_clickhouse_number(\"CLICKHOUSE_CONNECT_TIMEOUT_S\"\
+    , 5, 60),\n        query_timeout_s=query_timeout,\n        insert_timeout_s=_clickhouse_number(\"\
+    CLICKHOUSE_INSERT_TIMEOUT_S\", query_timeout, 300),\n        pool_timeout_s=_clickhouse_number(\"\
+    CLICKHOUSE_POOL_TIMEOUT_S\", 5, 60),\n        pool_max_size=_clickhouse_number(\"\
+    CLICKHOUSE_POOL_MAX_SIZE\", 8, 64, integer=True),\n    )\n\n\n# Cache for Fastly\
+    \ service names: {service_id: {\"name\": str, \"fetched_at\": float}}\n_name_cache:\
+    \ dict = {}\n_name_cache_lock = threading.Lock()\n_name_refresh_in_flight: set[str]\
+    \ = set()\n_name_refresh_lock = threading.Lock()\n_NAME_CACHE_TTL = 300  # 5 minutes\n\
+    \n# Cache for parsed configs: {service_id: (mtime_ns, parsed_dict)}.\n# Revalidated\
+    \ by stat() on each load_config call AND explicitly invalidated\n# by save_config\
+    \ \u2014 mtime alone is not enough because Linux ext4/tmpfs can\n# produce identical\
+    \ st_mtime_ns for two writes within the same microsecond.\n# Hot paths (sync-status\
+    \ polls, every cron tick, every dashboard request)\n# hit this enough that skipping\
+    \ the open+read on the no-change path adds up.\n_config_cache: dict[str, tuple[int,\
+    \ dict]] = {}\n_config_cache_lock = threading.Lock()\n\n# Path-keyed memo for\
+    \ _ensure_dirs(). Called from every list_configs /\n# save_config / save_usage_logging_config\
+    \ so the mkdir(exist_ok=True)\n# syscall storm shows up under load. Tests that\
+    \ monkeypatch CONFIGS_DIR\n# get fresh entries because the tmp_path is a different\
+    \ Path object.\n_ensured_dirs: set[Path] = set()\n\n\ndef _ensure_dirs():\n  \
+    \  dirs = (CONFIGS_DIR, DATA_DIR, SERVICES_DATA_DIR, NGWAF_DATA_DIR, CACHE_DATA_DIR,\
+    \ SYSTEM_DATA_DIR)\n    missing = [d for d in dirs if d not in _ensured_dirs]\n\
+    \    if not missing:\n        return\n    for d in missing:\n        d.mkdir(exist_ok=True)\n\
+    \        _ensured_dirs.add(d)\n\n\n# Alphabet shared with backend.deps.ServiceId.\
+    \ Public so the FastAPI\n# Path validator can reuse the same pattern instead of\
+    \ redefining it.\nSERVICE_ID_PATTERN = r\"^[A-Za-z0-9_-]+$\"\n_SERVICE_ID_RE =\
+    \ re.compile(SERVICE_ID_PATTERN)\n_SERVICE_ID_MAX_LEN = 64\n\n\ndef _validate_service_id(service_id:\
+    \ str) -> str:\n    \"\"\"Security: defense in depth against path traversal in\
+    \ any helper\n    that builds a path from ``service_id``.\n\n    Real Fastly service\
+    \ IDs are opaque 22-char alphanumeric strings, but the\n    test suite and a handful\
+    \ of legacy provisioning paths use hyphenated\n    IDs like ``svc-1`` / ``test-service-id``.\
+    \ The regex therefore accepts\n    ``[A-Za-z0-9_-]+`` \u2014 every character allowed\
+    \ is safe inside a filename\n    and contains no path-separator / dot / null-byte.\
+    \ Without this,\n    ``service_id=\"/etc/passwd\"`` or ``service_id=\"../../tmp/x\"\
+    `` would\n    compose with ``pathlib`` semantics \u2014 absolute paths discard\
+    \ the base\n    entirely, relative ``..`` traverses out, and ``\\\\x00`` truncates\
+    \ on\n    some kernels.\n\n    Length cap (64) is well above the longest legitimate\
+    \ Fastly ID (22)\n    and bounds memory in error-logging paths.\n    \"\"\"\n\
+    \    if not isinstance(service_id, str):\n        raise ValueError(f\"invalid\
+    \ service_id type {type(service_id).__name__}: must be str (security)\")\n   \
+    \ if not service_id or len(service_id) > _SERVICE_ID_MAX_LEN:\n        raise ValueError(\n\
+    \            f\"invalid service_id length {len(service_id) if service_id else\
+    \ 0}: \"\n            f\"1..{_SERVICE_ID_MAX_LEN} characters required (security)\"\
+    \n        )\n    if not _SERVICE_ID_RE.match(service_id):\n        raise ValueError(f\"\
+    invalid service_id {service_id!r}: must be alphanumeric / dash / underscore (security)\"\
+    )\n    return service_id\n\n\ndef config_path(service_id: str) -> Path:\n    _validate_service_id(service_id)\n\
+    \    return CONFIGS_DIR / f\"{service_id}.json\"\n\n\ndef duckdb_path(service_id:\
+    \ str) -> str:\n    _validate_service_id(service_id)\n    return str(SERVICES_DATA_DIR\
+    \ / f\"{service_id}.duckdb\")\n\n\ndef load_config(service_id: str | None) ->\
+    \ dict | None:\n    \"\"\"Load a single service config by ID. Returns None if\
+    \ not found.\n\n    Returns a freshly-parsed dict on every call \u2014 callers\
+    \ that mutate the\n    result (e.g. update_status) won't poison the cache. The\
+    \ on-disk file is\n    revalidated via st_mtime_ns, so external edits and save_config\
+    \ writes\n    are picked up on the next call without explicit invalidation.\n\n\
+    \    Returns ``None`` (not a raised exception) for invalid service IDs,\n    including\
+    \ ``None`` itself \u2014 several call sites in the iceberg/\n    submodules pass\
+    \ ``src.get(\"name\")`` (typed as ``Any | None``) and\n    rely on the None response\
+    \ to mean \"no config\". Security's validation\n    in ``config_path`` is still\
+    \ what blocks path-traversal; this just\n    makes the helper friendlier at call\
+    \ sites that don't pre-validate.\n    \"\"\"\n    if service_id is None:\n   \
+    \     return None\n    try:\n        path = config_path(service_id)\n    except\
+    \ ValueError:\n        return None\n    try:\n        mtime_ns = path.stat().st_mtime_ns\n\
+    \    except FileNotFoundError:\n        return None\n\n    cached = _config_cache.get(service_id)\n\
+    \    if cached is not None and cached[0] == mtime_ns:\n        return copy.deepcopy(cached[1])\n\
+    \n    with open(path, \"rb\") as f:\n        raw = f.read()\n    parsed = json.loads(raw)\n\
+    \    with _config_cache_lock:\n        _config_cache[service_id] = (mtime_ns,\
+    \ parsed)\n    return copy.deepcopy(parsed)\n\n\ndef _atomic_write_json(path,\
+    \ data: dict) -> None:\n    \"\"\"Write ``data`` to ``path`` atomically (unique\
+    \ tmp file + os.replace).\n\n    Shared by :func:`save_config` and :func:`save_usage_logging_config`,\n\
+    \    which used to paste identical mkstemp / fdopen / json.dump / os.replace\n\
+    \    blocks. Uses a UNIQUE tmp file (per-call random suffix) so concurrent\n \
+    \   callers cannot clobber each other's tmp file mid-write. The shared-tmp\n \
+    \   variant produced corrupted JSON (a stray ``}`` appended to the rendered\n\
+    \    file) and bricked the backend on next read; we hit it twice in one\n    debugging\
+    \ session before fixing.\n    \"\"\"\n    fd, tmp_path = tempfile.mkstemp(prefix=f\"\
+    .{path.name}.\", suffix=\".tmp\", dir=str(path.parent))\n    try:\n        with\
+    \ os.fdopen(fd, \"w\") as f:\n            json.dump(data, f, indent=2)\n     \
+    \   os.replace(tmp_path, path)\n    except Exception:\n        try:\n        \
+    \    os.unlink(tmp_path)\n        except OSError:\n            pass\n        raise\n\
+    \n\ndef save_config(service_id: str, cfg: dict):\n    \"\"\"Write a service config\
+    \ atomically. See :func:`_atomic_write_json`.\"\"\"\n    global _cdn_service_id_map\n\
+    \    _ensure_dirs()\n    if \"created_at\" not in cfg or not cfg[\"created_at\"\
+    ]:\n        import datetime as _dt\n\n        cfg[\"created_at\"] = _dt.datetime.now(_dt.UTC).isoformat()\n\
+    \    try:\n        _atomic_write_json(config_path(service_id), cfg)\n    except\
+    \ (OSError, PermissionError) as e:\n        if getattr(e, \"errno\", None) ==\
+    \ 30 or \"read-only\" in str(e).lower():\n            logger.warning(\"save_config_skipped_read_only_fs\
+    \ service_id=%s: %s\", service_id, e)\n            return\n        raise\n   \
+    \ # Invalidate the load_config cache. The cache uses st_mtime_ns as its\n    #\
+    \ revalidation key, which is normally fine \u2014 but on Linux ext4/tmpfs two\n\
+    \    # os.replace() calls within the same microsecond can produce identical\n\
+    \    # mtime_ns values, so a cached (old_mtime, old_raw) entry can stay\n    #\
+    \ \"fresh\" after this write and serve stale bytes. update_status() does\n   \
+    \ # exactly that: load \u2192 mutate \u2192 save \u2192 and the next load can\
+    \ see the\n    # pre-mutation cached copy. Drop the entry so the next load re-reads.\n\
+    \    with _config_cache_lock:\n        _config_cache.pop(service_id, None)\n \
+    \   _cdn_service_id_map = None\n\n\ndef update_status(service_id: str, status:\
+    \ dict):\n    \"\"\"Partially update the 'status' section of a service config.\"\
+    \"\"\n    cfg = load_config(service_id)\n    if not cfg:\n        return\n\n \
+    \   current_status = cfg.get(\"status\", {})\n    current_status.update(status)\n\
+    \    current_status[\"updated_at\"] = time.time()\n    cfg[\"status\"] = current_status\n\
+    \    save_config(service_id, cfg)\n\n\ndef get_status(service_id: str) -> dict:\n\
+    \    \"\"\"Return the 'status' section of a service config.\"\"\"\n    cfg = load_config(service_id)\n\
+    \    if not cfg:\n        return {}\n    return cfg.get(\"status\", {})\n\n\n\
+    def delete_config(service_id: str):\n    \"\"\"Remove a service config file.\"\
+    \"\"\n    global _cdn_service_id_map\n    path = config_path(service_id)\n   \
+    \ if path.exists():\n        path.unlink()\n    _cdn_service_id_map = None\n \
+    \   with _config_cache_lock:\n        _config_cache.pop(service_id, None)\n\n\n\
+    _cdn_service_id_map: dict[str, str] | None = None\n\n\ndef get_cdn_service_id_map()\
+    \ -> dict[str, str]:\n    \"\"\"Return a mapping of CDN service IDs to their logging\
+    \ service IDs. Memoized.\"\"\"\n    global _cdn_service_id_map\n    if _cdn_service_id_map\
+    \ is not None:\n        return _cdn_service_id_map\n\n    m = {}\n    for c in\
+    \ list_configs():\n        cdn_sid = c.get(\"cdn_service_id\")\n        if cdn_sid:\n\
+    \            m[cdn_sid] = c[\"service_id\"]\n    _cdn_service_id_map = m\n   \
+    \ return m\n\n\ndef list_service_ids() -> list[str]:\n    \"\"\"Return all configured\
+    \ service IDs (sorted).\"\"\"\n    _ensure_dirs()\n    return sorted(p.stem for\
+    \ p in CONFIGS_DIR.glob(\"*.json\"))\n\n\ndef list_configs() -> list[dict]:\n\
+    \    \"\"\"Return all service configs as a list, sorted by service ID.\"\"\"\n\
+    \    return [c for sid in list_service_ids() if (c := load_config(sid)) is not\
+    \ None]\n\n\ndef get_active_service_id(fallback_to_first: bool = True) -> str\
+    \ | None:\n    \"\"\"Return the first configured service ID as a fallback default.\n\
+    \n    The actual active service is tracked client-side in localStorage and\n \
+    \   passed via the ?service= query param. This is used server-side when\n    no\
+    \ service is specified (e.g. health checks, cron jobs).\n    \"\"\"\n    ids =\
+    \ list_service_ids()\n    if not ids:\n        return None\n    return ids[0]\
+    \ if fallback_to_first else None\n\n\ndef config_to_source(cfg: dict) -> dict:\n\
+    \    \"\"\"Convert a service config dict to the db.py 'source' dict format.\"\"\
+    \"\n    if is_high_throughput_mode() and cfg.get(\"raw_layout_version\") != 3:\n\
+    \        raise RuntimeError(\n            f\"service {cfg.get('service_id', '<unknown>')}\
+    \ uses the v2 raw-log layout; \"\n            \"tear it down and reprovision it\
+    \ for v3 before enabling high-throughput deployment\"\n        )\n    actual_db_path\
+    \ = duckdb_path(cfg.get(\"service_id\", \"default\"))\n\n    region = cfg.get(\"\
+    fos_region\", \"us-east-1\")\n\n    # Native FOS endpoint \u2014 used by boto3\
+    \ for ListObjectsV2/PutObject/DeleteObject\n    # etc. The CDN VCL only proxies\
+    \ GET/HEAD on object keys, not bucket-listing\n    # requests, so writes and lists\
+    \ must go direct.\n    native_endpoint = cfg.get(\"fos_endpoint\", f\"{region}.object.fastlystorage.app\"\
+    )\n\n    # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet\
+    \ GETs)\n    # so we benefit from caching and free egress.\n    cdn_url = cfg.get(\"\
+    cdn_url\")\n    if cdn_url:\n        endpoint = cdn_url.replace(\"https://\",\
+    \ \"\").replace(\"http://\", \"\").split(\"/\")[0]\n    else:\n        endpoint\
+    \ = native_endpoint\n\n    prov = cfg.get(\"provisioning\", {})\n\n    log_fields\
+    \ = cfg.get(\"log_fields\") or {}\n    if log_fields and \"format_hash\" not in\
+    \ log_fields:\n        try:\n            from backend.core import log_fields as\
+    \ lf_module\n\n            log_fields = dict(log_fields)\n            log_fields[\"\
+    format_hash\"] = lf_module.format_hash(log_fields)\n        except Exception:\n\
+    \            pass\n\n    return {\n        \"name\": cfg.get(\"service_id\", \"\
+    default\"),\n        \"service_id\": cfg.get(\"service_id\", \"default\"),\n \
+    \       \"service_name\": cfg.get(\"name\", \"\"),\n        \"endpoint\": endpoint,\n\
+    \        \"fos_native_endpoint\": native_endpoint,\n        \"access_key_id\"\
+    : cfg.get(\"fos_access_key_id\", \"\"),\n        \"secret_access_key\": cfg.get(\"\
+    fos_secret_access_key\", \"\"),\n        \"bucket\": cfg.get(\"fos_bucket\", \"\
+    \"),\n        \"prefix\": \"\",\n        \"region\": region,\n        \"cdn_url\"\
+    : cfg.get(\"cdn_url\", \"\"),\n        \"cdn_secret\": cfg.get(\"cdn_secret\"\
+    , \"\"),\n        \"cdn_service_id\": cfg.get(\"cdn_service_id\", \"\"),\n   \
+    \     \"logging_service_id\": cfg.get(\"service_id\", \"\"),\n        \"duckdb_path\"\
+    : actual_db_path,\n        \"deployment_mode\": DEPLOYMENT_MODE,\n        \"access_level\"\
+    : cfg.get(\"access_level\", \"read_write\"),\n        \"storage_mode\": cfg.get(\"\
+    storage_mode\", \"cloud\"),\n        \"log_period\": int(cfg.get(\"log_period\"\
+    , 60)),\n        \"log_fields\": log_fields,\n        \"provisioning\": prov,\n\
+    \        \"rum_enabled\": cfg.get(\"rum_enabled\", False) or (cfg.get(\"rum\"\
+    ) or {}).get(\"enabled\", False),\n        \"rum\": cfg.get(\"rum\", {}),\n  \
+    \  }\n\n\ndef fetch_service_name(service_id: str, api_key: str) -> str | None:\n\
+    \    \"\"\"Fetch the human-readable service name from the Fastly API.\n\n    Routes\
+    \ through the shared ``fastly()`` client with ``timeout=10`` +\n    ``max_retries=1``\
+    \ so the worst-case cold-path tail stays bounded\n    (~21 s vs the client default\
+    \ of ~127 s). The caller is behind a\n    300 s name cache (see :func:`refresh_service_name`)\
+    \ so steady-state\n    cost is one call per service per 5 min.\n\n    Returns\
+    \ None on failure (caller should use the cached name).\n    \"\"\"\n    from backend.core.fastly.client\
+    \ import fastly\n\n    try:\n        data = fastly(\"GET\", f\"/service/{service_id}\"\
+    , token=api_key, timeout=10, max_retries=1)\n        return data.get(\"name\"\
+    )\n    except Exception:\n        return None\n\n\ndef refresh_service_name(service_id:\
+    \ str, api_key: str | None = None) -> str:\n    \"\"\"Return service name, using\
+    \ cache. Refreshes from API if cache is stale.\n\n    Falls back to name in config,\
+    \ then to service_id itself.\n    \"\"\"\n    now = time.time()\n    with _name_cache_lock:\n\
+    \        entry = _name_cache.get(service_id)\n        if entry and (now - entry[\"\
+    fetched_at\"]) < _NAME_CACHE_TTL:\n            return entry[\"name\"]\n\n    #\
+    \ Try to fetch from API\n    api_name = None\n    if api_key and api_key.strip():\n\
+    \        api_name = fetch_service_name(service_id, api_key)\n        if api_name:\n\
+    \            with _name_cache_lock:\n                _name_cache[service_id] =\
+    \ {\"name\": api_name, \"fetched_at\": now}\n\n            # Persist to config\
+    \ if it has changed or was the ID\n            cfg = load_config(service_id)\n\
+    \            if cfg and (cfg.get(\"name\") != api_name or cfg.get(\"name\") ==\
+    \ service_id):\n                cfg[\"name\"] = api_name\n                save_config(service_id,\
+    \ cfg)\n            return api_name\n\n    # Fall back to config\n    cfg = load_config(service_id)\n\
+    \    if cfg:\n        name = cfg.get(\"name\") or service_id\n        with _name_cache_lock:\n\
+    \            # On failure, don't try again for 2 minutes\n            _name_cache[service_id]\
+    \ = {\"name\": name, \"fetched_at\": now - _NAME_CACHE_TTL + 120}\n        return\
+    \ name\n\n    return service_id\n\n\ndef _refresh_service_names_bg(misses_args:\
+    \ list[tuple[str, str | None]]) -> None:\n    try:\n        for sid, api_key in\
+    \ misses_args:\n            try:\n                refresh_service_name(sid, api_key)\n\
+    \            except Exception:\n                pass\n    finally:\n        with\
+    \ _name_refresh_lock:\n            for sid, _ in misses_args:\n              \
+    \  _name_refresh_in_flight.discard(sid)\n\n\ndef refresh_all_service_names(configs:\
+    \ list[dict], _sync: bool = False) -> dict[str, str]:\n    \"\"\"Refresh service\
+    \ names for all configs. Returns {service_id: name}.\n\n    Stale-while-revalidate\
+    \ asynchronous refresh by default to completely avoid\n    blocking web requests\
+    \ or spawning a ThreadPoolExecutor on the request thread.\n    Returns the best\
+    \ available name (cached or from JSON config) immediately\n    and spins off a\
+    \ background thread to update the cache in the background.\n\n    For testing/synchronous\
+    \ usage, specify _sync=True.\n    \"\"\"\n    now = time.time()\n    name_map:\
+    \ dict[str, str] = {}\n    misses: list[dict] = []\n    with _name_cache_lock:\n\
+    \        for cfg in configs:\n            sid = cfg.get(\"service_id\", \"\")\n\
+    \            entry = _name_cache.get(sid)\n            if entry and (now - entry[\"\
+    fetched_at\"]) < _NAME_CACHE_TTL:\n                name_map[sid] = entry[\"name\"\
+    ]\n            else:\n                misses.append(cfg)\n\n    if not misses:\n\
+    \        return name_map\n\n    if _sync:\n        import concurrent.futures\n\
+    \n        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:\n\
+    \            futures = {\n                executor.submit(refresh_service_name,\
+    \ cfg.get(\"service_id\", \"\"), cfg.get(\"fastly_api_key\", \"\")): cfg\n   \
+    \             for cfg in misses\n            }\n            for future in concurrent.futures.as_completed(futures):\n\
+    \                cfg = futures[future]\n                sid = cfg.get(\"service_id\"\
+    , \"\")\n                try:\n                    name_map[sid] = future.result()\n\
+    \                except Exception:\n                    name_map[sid] = cfg.get(\"\
+    name\") or sid\n        return name_map\n\n    # Asynchronous stale-while-revalidate\
+    \ path\n    to_schedule = []\n    with _name_refresh_lock:\n        for cfg in\
+    \ misses:\n            sid = cfg.get(\"service_id\", \"\")\n            entry\
+    \ = _name_cache.get(sid)\n            best_effort = sid\n            if entry:\n\
+    \                best_effort = entry[\"name\"]\n            elif cfg.get(\"name\"\
+    ):\n                best_effort = cfg[\"name\"]\n            name_map[sid] = best_effort\n\
+    \n            if sid not in _name_refresh_in_flight:\n                _name_refresh_in_flight.add(sid)\n\
+    \                to_schedule.append((sid, cfg.get(\"fastly_api_key\")))\n\n  \
+    \  if to_schedule:\n        try:\n            threading.Thread(\n            \
+    \    target=_refresh_service_names_bg,\n                args=(to_schedule,),\n\
+    \                name=\"refresh-service-names-bg\",\n                daemon=True,\n\
+    \            ).start()\n        except Exception:\n            with _name_refresh_lock:\n\
+    \                for sid, _ in to_schedule:\n                    _name_refresh_in_flight.discard(sid)\n\
+    \n    return name_map\n\n\n# \u2500\u2500 Fastly credential helpers \u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\ndef _get_cfg_field(field:\
+    \ str, service_id: str | None, default):\n    \"\"\"Return ``cfg[field]`` for\
+    \ ``service_id`` (or the active service), or\n    ``default`` when nothing is\
+    \ configured.\n\n    Shared by the four near-identical fastly + ngwaf accessors\
+    \ below. All\n    four used to paste the same ``sid = service_id or get_active_service_id();\n\
+    \    if sid: cfg = load_config(sid); if cfg: return cfg.get(field, ...)``\n  \
+    \  block. Pulling the dispatch up means adding another accessor is a\n    one-line\
+    \ tuple addition.\n    \"\"\"\n    sid = service_id or get_active_service_id()\n\
+    \    if sid:\n        cfg = load_config(sid)\n        if cfg:\n            return\
+    \ cfg.get(field, default)\n    return default\n\n\ndef get_fastly_api_key(service_id:\
+    \ str | None = None) -> str:\n    \"\"\"Return the Fastly API key for a service\
+    \ (or the active service).\"\"\"\n    return _get_cfg_field(\"fastly_api_key\"\
+    , service_id, \"\")\n\n\ndef get_fastly_service_id(service_id: str | None = None)\
+    \ -> str:\n    \"\"\"Return the CDN service ID for a service.\"\"\"\n    return\
+    \ _get_cfg_field(\"cdn_service_id\", service_id, \"\")\n\n\ndef get_fastly_logging_service_id(service_id:\
+    \ str | None = None) -> str:\n    \"\"\"Return the logging service ID (the FOS\
+    \ logging endpoint's parent service).\"\"\"\n    return _get_cfg_field(\"service_id\"\
+    , service_id, \"\")\n\n\ndef ngwaf_db_path() -> str:\n    \"\"\"Return the path\
+    \ to the shared NGWAF bot cache SQLite file.\"\"\"\n    return str(DATA_DIR /\
+    \ \"ngwaf_bot_cache.db\")\n\n\ndef get_ngwaf_workspace_id(service_id: str) ->\
+    \ str | None:\n    \"\"\"Return the ngwaf_workspace_id for a service, or None\
+    \ if not configured.\"\"\"\n    return _get_cfg_field(\"ngwaf_workspace_id\",\
+    \ service_id, None) or None\n\n\n# \u2500\u2500 Global usage logging config \u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n_USAGE_LOGGING_CONFIG_PATH\
+    \ = SYSTEM_DATA_DIR / \"usage_logging.json\"\n\n_USAGE_LOGGING_DEFAULTS: dict\
+    \ = {\n    \"enabled\": False,\n    \"retention_days\": 30,\n    \"class_a_rate_per_1k\"\
+    : 0.005,\n    \"class_b_rate_per_10k\": 0.01,\n    \"cdn_egress_rate_per_gb\"\
+    : 0.12,\n    \"storage_rate_per_gb_month\": 0.02,\n    \"min_billed_days\": 30,\n\
+    \    # When true, every DuckDB connection enables HTTP-only structured logging\n\
+    \    # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds\n\
+    \    # tiny per-query overhead (one in-memory log scan + truncate at close).\n\
+    \    \"track_duckdb_httpfs\": True,\n}\n\n\ndef load_usage_logging_config() ->\
+    \ dict:\n    \"\"\"Return the global usage logging config, creating defaults if\
+    \ missing.\"\"\"\n    _ensure_dirs()\n    if _USAGE_LOGGING_CONFIG_PATH.exists():\n\
+    \        try:\n            with open(_USAGE_LOGGING_CONFIG_PATH) as f:\n     \
+    \           stored = json.load(f)\n            return {**_USAGE_LOGGING_DEFAULTS,\
+    \ **stored}\n        except Exception:\n            pass\n    return dict(_USAGE_LOGGING_DEFAULTS)\n\
+    \n\ndef save_usage_logging_config(cfg: dict):\n    \"\"\"Persist the global usage\
+    \ logging config atomically. See\n    :func:`_atomic_write_json`.\"\"\"\n    _ensure_dirs()\n\
+    \    _atomic_write_json(_USAGE_LOGGING_CONFIG_PATH, cfg)\n\n\ndef is_usage_logging_enabled()\
+    \ -> bool:\n    \"\"\"Quick check: is usage logging enabled globally?\n\n    Always\
+    \ returns False during unit tests to avoid pollution and overhead.\n    \"\"\"\
+    \n    if \"pytest\" in sys.modules:\n        return False\n    return load_usage_logging_config().get(\"\
+    enabled\", False)\n\n\nfrom backend.utils.cache_registry import CacheRegistry\
+    \ as _CacheRegistry  # noqa: E402\n\n_CacheRegistry.register(\"config._name_cache\"\
+    , _name_cache)\n_CacheRegistry.register(\"config._name_refresh_in_flight\", _name_refresh_in_flight)\n\
+    \n# Cloud / Scalability Overrides (Phase 2+)\nCELERY_BROKER_URL = os.getenv(\"\
+    CELERY_BROKER_URL\", \"\")\nDUCKLAKE_CATALOG = os.getenv(\"DUCKLAKE_CATALOG\"\
+    , \"\")\nDUCKLAKE_DATA_PATH = os.getenv(\"DUCKLAKE_DATA_PATH\", \"\")\nHOT_S3_ENDPOINT\
+    \ = os.getenv(\"HOT_S3_ENDPOINT\", \"\")\nHOT_S3_KEY = os.getenv(\"HOT_S3_KEY\"\
+    , \"\")\nHOT_S3_SECRET = os.getenv(\"HOT_S3_SECRET\", \"\")\nSSE_BACKPLANE = os.getenv(\"\
+    SSE_BACKPLANE\", \"local\")\nSCHEDULER_MODE = os.getenv(\"SCHEDULER_MODE\", \"\
+    inprocess\")\n\n\ndef high_scale_shared_source_enabled(cfg: dict | None) -> bool:\n\
+    \    \"\"\"Return whether this service's raw request/RUM stream is shared with\
+    \ an\n    out-of-band high-scale consumer (``provisioning.cron_sync.high_scale_shared_source``).\n\
+    \n    While this is set, the high-scale archive deletion controller\n    (``backend/high_scale/deletion.py``)\
+    \ is the sole raw-deletion authority for\n    this service's stream \u2014 every\
+    \ legacy raw-deletion path (standard sync's\n    ``delete_after``, celery-mode\
+    \ ``finalize_committed_raw``, RUM cleanup) must\n    stand down regardless of\
+    \ its own ``delete_after`` setting. See\n    ``resolve_raw_delete_after``, the\
+    \ single place that enforces this.\n    \"\"\"\n    return bool((cfg or {}).get(\"\
+    provisioning\", {}).get(\"cron_sync\", {}).get(\"high_scale_shared_source\", False))\n\
+    \n\ndef resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None)\
+    \ -> bool:\n    \"\"\"Resolve the effective delete_after decision for raw FOS\
+    \ objects.\n\n    ``requested`` lets a caller pass an explicit override the way\
+    \ a cron\n    argument normally would; ``None`` falls back to the configured\n\
+    \    ``provisioning.cron_sync.delete_after`` (default True). A high-scale\n  \
+    \  shared source always forces this to False \u2014 see\n    ``high_scale_shared_source_enabled``\
+    \ \u2014 because raw-deletion authority for\n    that stream belongs to the high-scale\
+    \ deletion controller, not legacy sync.\n    \"\"\"\n    if high_scale_shared_source_enabled(cfg):\n\
+    \        return False\n    if requested is not None:\n        return bool(requested)\n\
+    \    return bool((cfg or {}).get(\"provisioning\", {}).get(\"cron_sync\", {}).get(\"\
+    delete_after\", True))\n\n\ndef is_durable_serving_mode(source: dict | None =\
+    \ None) -> bool:\n    \"\"\"Return whether serving must use durable shared state\
+    \ only.\n\n    The durable serving mode is intentionally restricted to the Celery\n\
+    \    topology with a Postgres DuckLake catalog. Sync/file mode keeps its\n   \
+    \ existing native per-service DuckDB file and local-buffer behavior.\n    \"\"\
+    \"\n    return is_high_throughput_mode(source) and DUCKLAKE_CATALOG.startswith((\"\
+    postgres://\", \"postgresql://\"))\n\n\ndef is_high_throughput_mode(source: dict\
+    \ | None = None) -> bool:\n    \"\"\"Return whether the deployment uses the high-throughput\
+    \ topology.\"\"\"\n    mode = (source or {}).get(\"deployment_mode\") or DEPLOYMENT_MODE\n\
+    \    return mode == \"high_throughput\"\n\n\ndef validate_deployment_mode() ->\
+    \ None:\n    \"\"\"Fail fast on incoherent high-throughput configuration.\n\n\
+    \    Called from the backend lifespan AND celery worker init so both\n    processes\
+    \ refuse to run rather than degrade invisibly:\n\n    - Celery mode without a\
+    \ broker: discovery would dispatch into nothing.\n    - Celery mode on a DuckDB-FILE\
+    \ DuckLake catalog: worker processes write\n      while the backend reads, which\
+    \ a file catalog cannot support (single\n      process holds the file lock; concurrent\
+    \ merges tear the catalog and\n      leave it referencing parquet that never landed\
+    \ \u2014 observed live as\n      404 NoSuchKey on reads). A transactional multi-writer\
+    \ catalog\n      (Postgres DSN) is REQUIRED.\n    - Celery mode on per-pod SQLite\
+    \ metadata: the cron lease, the ingest\n      ledger, and ingested-file bookkeeping\
+    \ would each be private to one\n      process, so nothing serializes the fleet.\
+    \ A shared Postgres metadata\n      database (``METADATA_DSN``) is REQUIRED. See\
+    \ ADR-15.\n\n    ``METADATA_DSN`` is read from the environment here rather than\
+    \ captured\n    as a module constant so this gate and\n    ``metadata.pg_connection.is_postgres()``\
+    \ (which also reads it live)\n    can never disagree about which backend is active.\n\
+    \    \"\"\"\n    if DEPLOYMENT_MODE not in {\"standard\", \"high_throughput\"\
+    }:\n        raise RuntimeError(\"DEPLOYMENT_MODE must be either 'standard' or\
+    \ 'high_throughput'\")\n    if DEPLOYMENT_MODE != \"high_throughput\":\n     \
+    \   return\n    if not CELERY_BROKER_URL:\n        raise RuntimeError(\"DEPLOYMENT_MODE=high_throughput\
+    \ requires CELERY_BROKER_URL to be set\")\n    if not DUCKLAKE_CATALOG.startswith((\"\
+    postgres://\", \"postgresql://\")):\n        raise RuntimeError(\n           \
+    \ \"DEPLOYMENT_MODE=high_throughput requires DUCKLAKE_CATALOG to be a Postgres\
+    \ DSN \u2014 \"\n            \"a DuckDB-file catalog is single-process and cannot\
+    \ serve concurrent \"\n            \"worker writers plus backend readers (torn\
+    \ merges corrupt the catalog). \"\n            f\"Got: {DUCKLAKE_CATALOG!r}\"\n\
+    \        )\n    metadata_dsn = os.getenv(\"METADATA_DSN\", \"\")\n    if not metadata_dsn.startswith((\"\
+    postgres://\", \"postgresql://\")):\n        raise RuntimeError(\n           \
+    \ \"DEPLOYMENT_MODE=high_throughput requires METADATA_DSN to be a Postgres DSN\
+    \ \u2014 \"\n            \"per-service SQLite metadata is a pod-local file, so\
+    \ the cron lease \"\n            \"(job_runs), the ingest ledger, and the ingested-file\
+    \ manifest would \"\n            \"each be private to one process: every worker\
+    \ would re-discover and \"\n            \"re-convert the same objects and no lease\
+    \ could serialize them. A \"\n            \"shared multi-writer metadata database\
+    \ (Postgres DSN) is REQUIRED. \"\n            f\"Got: {metadata_dsn!r}\"\n   \
+    \     )\n"
+  dashboard.py: "\"\"\"Dashboard-shaped reads for services owned by the high-scale\
+    \ data plane.\"\"\"\n\nfrom __future__ import annotations\n\nimport concurrent.futures\n\
+    from datetime import datetime\nfrom typing import Any\n\nfrom backend.high_scale.aggregate_query\
+    \ import query_clickhouse_aggregate\nfrom backend.high_scale.aggregates import\
+    \ AggregateRequest\nfrom backend.high_scale.registry import HighScaleService\n\
+    from backend.models.dashboard import (\n    AggregatesRequest,\n    AggregatesResponse,\n\
+    \    FieldAggregate,\n    FieldTopEntry,\n    MapPoint,\n    TimeSeriesPoint,\n\
+    )\nfrom backend.models.security import SecurityTopBotsResponse\n\n_FIELD_DIMENSIONS\
+    \ = {\n    \"url\": \"url\",\n    \"country\": \"country\",\n    \"ip\": \"client_ip\"\
+    ,\n    \"asn\": \"asn\",\n    \"host\": \"host\",\n    \"method\": \"method\"\
+    ,\n    \"status\": \"status\",\n    \"cache\": \"cache\",\n    \"proto\": \"proto\"\
+    ,\n    \"ua\": \"ua\",\n    \"referer\": \"referer\",\n    \"cookie_session\"\
+    : \"cookie_session\",\n    \"resp_header_content_encoding\": \"resp_header_content_encoding\"\
+    ,\n    \"ttl\": \"ttl\",\n    \"age\": \"age\",\n    \"hits\": \"hits\",\n   \
+    \ \"digest\": \"digest\",\n    \"city\": \"city\",\n    \"region\": \"region\"\
+    ,\n    \"metro\": \"metro\",\n    \"transport\": \"transport\",\n    \"c_speed\"\
+    : \"c_speed\",\n    \"c_type\": \"c_type\",\n    \"pop\": \"pop\",\n    \"backend\"\
+    : \"backend\",\n    \"edge\": \"edge\",\n    \"server_region\": \"server_region\"\
+    ,\n    \"tls\": \"tls\",\n    \"is_ipv6\": \"is_ipv6\",\n    \"conn_requests\"\
+    : \"conn_requests\",\n    \"waf\": \"waf\",\n    \"waf_resp\": \"waf_resp\",\n\
+    \    \"waf_ms\": \"waf_ms\",\n    \"p_type\": \"p_type\",\n    \"p_desc\": \"\
+    p_desc\",\n    \"ja3\": \"ja3\",\n    \"ja4\": \"ja4\",\n    \"tls_ciphers_sha\"\
+    : \"tls_ciphers_sha\",\n    \"io_input_format\": \"io_input_format\",\n    \"\
+    io_output_format\": \"io_output_format\",\n}\n_HEADER_TABLES = {\n    \"request\"\
+    : \"request_facts\",\n    \"rum_vitals\": \"rum_vitals_facts\",\n    \"rum_errors\"\
+    : \"rum_error_facts\",\n}\n\n\ndef _range_value(value: str | None) -> datetime\
+    \ | None:\n    if value is None:\n        return None\n    return datetime.fromisoformat(value.replace(\"\
+    Z\", \"+00:00\"))\n\n\ndef header_metrics(service: HighScaleService) -> dict[str,\
+    \ Any]:\n    \"\"\"Return visible ClickHouse row counts and event-time extents\
+    \ for the header.\"\"\"\n    totals: dict[str, int] = {}\n    latest: dict[str,\
+    \ str | None] = {}\n    for domain, table in _HEADER_TABLES.items():\n       \
+    \ rows = service.client.execute(\n            f\"SELECT count() AS total_rows,\
+    \ max(event_timestamp) AS latest_log_at \"\n            f\"FROM {table} \"\n \
+    \           \"WHERE service_id={service_id:String} \"\n            \"AND 1=1 \"\
+    \n            \"AND batch_id IN (\"\n            \"SELECT batch_id FROM high_scale_batch_publications\
+    \ FINAL \"\n            \"WHERE service_id={service_id:String} AND domain={domain:String}\
+    \ \"\n            \"AND 1=1\"\n            \")\",\n            {\"service_id\"\
+    : service.service_id, \"domain\": domain},\n        )\n        row = rows[0] if\
+    \ rows else {}\n        total_rows = int(row.get(\"total_rows\") or 0)\n     \
+    \   latest_value: object = row.get(\"latest_log_at\")\n        if isinstance(latest_value,\
+    \ datetime):\n            latest_value = latest_value.isoformat()\n        totals[domain]\
+    \ = total_rows\n        latest[domain] = str(latest_value) if latest_value is\
+    \ not None else None\n\n    rum_total = totals[\"rum_vitals\"] + totals[\"rum_errors\"\
+    ]\n    rum_latest_values = [latest[\"rum_vitals\"], latest[\"rum_errors\"]]\n\
+    \    rum_latest = max((value for value in rum_latest_values if value is not None),\
+    \ default=None)\n    request_total = totals[\"request\"]\n    request_latest =\
+    \ latest[\"request\"]\n    return {\n        \"request\": {\n            \"latest_log_at\"\
+    : request_latest,\n            \"total_rows\": request_total,\n            \"\
+    last_sync_at\": None,\n        },\n        \"rum\": {\n            \"latest_log_at\"\
+    : rum_latest,\n            \"total_rows\": rum_total,\n            \"last_sync_at\"\
+    : None,\n        },\n        \"latest_log_at\": request_latest,\n        \"local_rows\"\
+    : request_total + rum_total,\n    }\n\n\ndef _aggregate(\n    service: HighScaleService,\n\
+    \    *,\n    start_time: str | None,\n    end_time: str | None,\n    dimension:\
+    \ str,\n):\n    start = _range_value(start_time)\n    end = _range_value(end_time)\n\
+    \    return query_clickhouse_aggregate(\n        service.client,\n        AggregateRequest(\n\
+    \            service_id=service.service_id,\n            domain=\"request\",\n\
+    \            start=start,\n            end=end,\n            dimension=dimension,\n\
+    \        ),\n        watermark=service.watermark_for(\"request\"),\n    )\n\n\n\
+    def _time_series(service: HighScaleService, start_time: str | None, end_time:\
+    \ str | None) -> list[TimeSeriesPoint]:\n    start = _range_value(start_time)\n\
+    \    end = _range_value(end_time)\n    clauses = [\n        \"service_id={service_id:String}\"\
+    ,\n        \"1=1\",\n    ]\n    params: dict[str, Any] = {\"service_id\": service.service_id}\n\
+    \    if start is not None and end is not None:\n        clauses.extend([\"bucket_start\
+    \ >= {start:DateTime64(3)}\", \"bucket_start < {end:DateTime64(3)}\"])\n     \
+    \   params.update({\"start\": start, \"end\": end})\n    rows = service.client.execute(\n\
+    \        \"SELECT bucket_start, sum(request_count) AS value \"\n        \"FROM\
+    \ request_aggregates \"\n        f\"WHERE {' AND '.join(clauses)} \"\n       \
+    \ \"GROUP BY bucket_start ORDER BY bucket_start\",\n        params,\n    )\n \
+    \   return [TimeSeriesPoint(time=str(row[\"bucket_start\"]), value=float(row[\"\
+    value\"])) for row in rows]\n\n\ndef _build_clickhouse_filters(filters: dict[str,\
+    \ Any]) -> tuple[str, dict[str, Any]]:\n    if not filters:\n        return \"\
+    1=1\", {}\n    import logging\n\n    logging.getLogger(__name__).warning(\"DEBUG\
+    \ FILTERS TYPE filters=%s type=%s\", filters, type(filters))\n    for k, v in\
+    \ filters.items():\n        logging.getLogger(__name__).warning(\"DEBUG FILTERS\
+    \ ITEM k=%s v=%s type=%s\", k, v, type(v))\n\n    clauses = []\n    params = {}\n\
+    \n    for i, (field, config) in enumerate(filters.items()):\n        if isinstance(config,\
+    \ dict):\n            mode = config.get(\"mode\", \"include\")\n            values\
+    \ = config.get(\"values\", [])\n        else:\n            mode = getattr(config,\
+    \ \"mode\", \"include\")\n            values = getattr(config, \"values\", [])\n\
+    \n        if values is None or not values:\n            continue\n\n        col_name\
+    \ = _FIELD_DIMENSIONS.get(field)\n        if not col_name:\n            continue\n\
+    \n        if col_name in {\"client_ip\", \"country\", \"url\", \"cmcd\", \"custom_fields\"\
+    }:\n            sql_col = col_name\n        elif col_name in {\"age\", \"ttl\"\
+    }:\n            sql_col = f\"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}']))\
+    \ AS INTEGER) AS VARCHAR)\"\n        else:\n            sql_col = f\"custom_fields['{col_name}']\"\
+    \n\n        op = \"IN\" if mode == \"include\" else \"NOT IN\"\n        keys =\
+    \ []\n        for j, val in enumerate(values):\n            p_name = f\"filter_{i}_{j}\"\
+    \n            params[p_name] = str(val)\n            keys.append(f\"{{{p_name}:String}}\"\
+    )\n\n        if keys:\n            clauses.append(f\"{sql_col} {op} ({', '.join(keys)})\"\
+    )\n        else:\n            clauses.append(\"1=0\" if mode == \"include\" else\
+    \ \"1=1\")\n\n    where_sql = \" AND \".join(clauses) if clauses else \"1=1\"\n\
+    \    import logging\n\n    logging.getLogger(__name__).warning(\"BUILD_CLICKHOUSE_FILTERS\
+    \ END: filters=%s -> %s %s\", filters, where_sql, params)\n    import logging\n\
+    \n    logging.getLogger(__name__).warning(\n        \"BUILD_CLICKHOUSE_FILTERS\
+    \ clauses=%s params=%s filters=%s\", clauses, params, filters\n    )\n    return\
+    \ where_sql, params\n\n\ndef _filtered_aggregates(\n    service: HighScaleService,\
+    \ req: AggregatesRequest, start_time: str | None, end_time: str | None\n):\n \
+    \   start = _range_value(start_time)\n    end = _range_value(end_time)\n\n   \
+    \ if not req.filters:\n        filter_dict = {}\n    elif hasattr(req.filters,\
+    \ \"model_dump\"):\n        filter_dict = req.filters.model_dump()\n    elif hasattr(req.filters,\
+    \ \"dict\"):\n        filter_dict = req.filters.dict()\n    else:\n        filter_dict\
+    \ = req.filters\n    where_sql, filter_params = _build_clickhouse_filters(filter_dict)\n\
+    \    import logging\n\n    logging.getLogger(__name__).warning(\n        \"DEBUG\
+    \ FILTERS filter_dict=%s mode=%s values=%s clauses=%s\",\n        filter_dict,\n\
+    \        type(filter_dict),\n        filter_params,\n        where_sql,\n    )\n\
+    \n    clauses = [\"service_id={service_id:String}\", \"1=1\", where_sql]\n\n \
+    \   params: dict[str, Any] = {\"service_id\": service.service_id, **filter_params}\n\
+    \n    if start is not None and end is not None:\n        clauses.append(\"event_timestamp\
+    \ >= {start:DateTime64(3)}\")\n        clauses.append(\"event_timestamp < {end:DateTime64(3)}\"\
+    )\n        params.update({\"start\": start, \"end\": end})\n\n    where_clause\
+    \ = \" AND \".join(clauses)\n    import logging\n\n    logging.getLogger(__name__).warning(\"\
+    DEBUG EXACT QUERY: %s params: %s\", where_clause, params)\n\n    requested_fields\
+    \ = req.fields or list(_FIELD_DIMENSIONS)\n\n    def fetch_field(field: str):\n\
+    \        if field not in _FIELD_DIMENSIONS:\n            return field, []\n  \
+    \      col_name = _FIELD_DIMENSIONS[field]\n\n        if col_name in {\"client_ip\"\
+    , \"country\", \"url\", \"cmcd\", \"custom_fields\"}:\n            sql_col = col_name\n\
+    \        elif col_name in {\"age\", \"ttl\"}:\n            sql_col = f\"CAST(CAST(ROUND(toFloat64OrZero(custom_fields['{col_name}']))\
+    \ AS INTEGER) AS VARCHAR)\"\n        else:\n            sql_col = f\"custom_fields['{col_name}']\"\
+    \n\n        q = f\"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE\
+    \ {where_clause} AND {sql_col} != '' GROUP BY v ORDER BY c DESC LIMIT 10\"\n \
+    \       try:\n            rows = service.client.execute(q, params)\n         \
+    \   return field, [(str(r[\"v\"]), int(r[\"c\"])) for r in rows]\n        except\
+    \ Exception as e:\n            import logging\n\n            logging.getLogger(__name__).error(\"\
+    FILTER ERROR field %s: %s\", field, e)\n            return field, []\n\n    with\
+    \ concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:\n        field_results\
+    \ = dict(ex.map(fetch_field, requested_fields))\n\n    try:\n        total_rows_result\
+    \ = service.client.execute(\n            f\"SELECT count() AS c FROM request_facts\
+    \ WHERE {where_clause}\", params\n        )\n        total_count = int(total_rows_result[0][\"\
+    c\"]) if total_rows_result else 0\n    except Exception as e:\n        import\
+    \ logging\n\n        logging.getLogger(__name__).error(\"FILTER ERROR total: %s\"\
+    , e)\n        total_count = 0\n\n    data = {\n        field: FieldAggregate(\n\
+    \            top=[FieldTopEntry(value=v, count=c) for v, c in top_values],\n \
+    \           total=total_count,\n        )\n        for field, top_values in field_results.items()\n\
+    \    }\n\n    map_data = [MapPoint(country=v, count=c) for v, c in field_results.get(\"\
+    country\", [])]\n\n    time_series = []\n    if req.include_time_series is not\
+    \ False:\n        interval_sql = \"toStartOfMinute(event_timestamp)\"\n      \
+    \  if req.chart_interval == \"5 minute\":\n            interval_sql = \"toStartOfFiveMinutes(event_timestamp)\"\
+    \n        elif req.chart_interval == \"1 hour\":\n            interval_sql = \"\
+    toStartOfInterval(event_timestamp, INTERVAL 1 hour)\"\n        elif req.chart_interval\
+    \ == \"1 day\":\n            interval_sql = \"toStartOfDay(event_timestamp)\"\n\
+    \n        ts_q = f\"SELECT {interval_sql} AS bucket_start, count() AS value FROM\
+    \ request_facts WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start\"\
+    \n        try:\n            ts_rows = service.client.execute(ts_q, params)\n \
+    \           time_series = [TimeSeriesPoint(time=str(r[\"bucket_start\"]), value=float(r[\"\
+    value\"])) for r in ts_rows]\n        except Exception:\n            time_series\
+    \ = []\n\n    return AggregatesResponse.with_telemetry(\n        data=data,\n\
+    \        time_series=time_series,\n        map_data=map_data,\n        where_clause=\"\
+    high-scale ClickHouse (filtered)\",\n        interval=req.chart_interval,\n  \
+    \      metric=req.chart_metric,\n        total_rows=total_count,\n        total_rows_total=total_count,\n\
+    \        earliest_log_at=None,\n        latest_log_at=None,\n    )\n\n\ndef aggregates(service:\
+    \ HighScaleService, req: AggregatesRequest, start_time: str | None, end_time:\
+    \ str | None):\n    if req.filters:\n        return _filtered_aggregates(service,\
+    \ req, start_time, end_time)\n\n    requested_fields = req.fields or list(_FIELD_DIMENSIONS)\n\
+    \    responses = {\n        field: _aggregate(\n            service,\n       \
+    \     start_time=start_time,\n            end_time=end_time,\n            dimension=_FIELD_DIMENSIONS[field],\n\
+    \        )\n        for field in requested_fields\n        if field in _FIELD_DIMENSIONS\n\
+    \    }\n    total = responses.get(\"url\")\n    if total is None:\n        total\
+    \ = _aggregate(service, start_time=start_time, end_time=end_time, dimension=\"\
+    url\")\n\n    data = {\n        field: FieldAggregate(\n            top=[FieldTopEntry(value=value,\
+    \ count=count) for value, count in response.top_values],\n            total=response.request_count,\n\
+    \        )\n        for field, response in responses.items()\n    }\n    map_response\
+    \ = responses.get(\"country\")\n    map_data = (\n        [MapPoint(country=value,\
+    \ count=count) for value, count in map_response.top_values]\n        if map_response\
+    \ is not None\n        else []\n    )\n    time_series = _time_series(service,\
+    \ start_time, end_time)\n    return AggregatesResponse.with_telemetry(\n     \
+    \   data=data,\n        time_series=time_series,\n        map_data=map_data,\n\
+    \        where_clause=\"high-scale ClickHouse\",\n        interval=req.chart_interval,\n\
+    \        metric=req.chart_metric,\n        total_rows=total.request_count,\n \
+    \       total_rows_total=total.request_count,\n        earliest_log_at=None,\n\
+    \        latest_log_at=None,\n    )\n\n\ndef bundle(\n    service: HighScaleService,\n\
+    \    req: AggregatesRequest,\n    start_time: str | None,\n    end_time: str |\
+    \ None,\n) -> dict[str, Any]:\n    from backend.utils.telemetry import get_queries,\
+    \ get_sqlite_queries, get_tracked_calls\n\n    res_aggregates = aggregates(service,\
+    \ req, start_time, end_time)\n    res_top_bots = SecurityTopBotsResponse.with_telemetry(bots=[],\
+    \ ngwaf_bots=[])\n\n    return {\n        \"aggregates\": res_aggregates,\n  \
+    \      \"top_bots\": res_top_bots,\n        \"debug_queries\": get_queries(),\n\
+    \        \"debug_calls\": get_tracked_calls(),\n        \"debug_sqlite\": list(get_sqlite_queries()),\n\
+    \    }\n"
+  sync_status.py: "\"\"\"Sync-status surface: cached snapshot reader, full /sync-status,\n\
+    analyst-safe /log-extents, and /admin/ingested-files.\"\"\"\n\nfrom __future__\
+    \ import annotations\n\nimport asyncio\nimport json\nimport logging\nimport os\n\
+    from collections.abc import AsyncIterator\n\nfrom fastapi import APIRouter, Depends,\
+    \ HTTPException, Query, Request\nfrom sse_starlette.sse import EventSourceResponse\n\
+    \nfrom backend.deps import get_service_id, get_source\nfrom backend.models.admin\
+    \ import IngestedFilesResponse, LogExtentsResponse, SyncStatusResponse\nfrom backend.models.errors\
+    \ import DEFAULT_ERROR_RESPONSES\nfrom backend.sync_status_publisher import publisher\
+    \ as sync_status_publisher\nfrom backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS,\
+    \ make_error, query_errors, raise_internal\nfrom backend.utils.sse_subscription\
+    \ import iter_with_disconnect_ping\n\nlogger = logging.getLogger(__name__)\n\n\
+    from ._dir_size import _get_dir_size\nfrom ._router import router\n\n# Dedicated\
+    \ router for the analyst-safe sync-status siblings (/api/log-extents\n# + /stream).\
+    \ FastAPI MERGES router-level and route-level tags, so a bare\n# ``tags=[\"meta\"\
+    ]`` on the decorators would yield ``[\"admin\", \"meta\"]`` and\n# leave the misleading\
+    \ \"admin\" audience signal the shared admin router stamps.\n# A separate router\
+    \ carrying only the neutral \"meta\" tag is the clean way to\n# drop \"admin\"\
+    \ while keeping the same /api paths and canonical error responses.\n# Runtime\
+    \ audience is enforced by RemoteAccessMiddleware (path-based), not the\n# OpenAPI\
+    \ tag, so this is a docs-only distinction. Included alongside\n# ``admin.router``\
+    \ in backend/main.py.\nmeta_router = APIRouter(prefix=\"/api\", tags=[\"meta\"\
+    ], responses=DEFAULT_ERROR_RESPONSES)\n\n\n# Implementation moved to backend/sync_status_snapshot.py\
+    \ so cron jobs can\n# publish post-commit snapshots without a cron -> routers\
+    \ import edge\n# (import-linter). Re-exported here for the historical import path;\
+    \ tests\n# patch this module-level binding, so keep the name bound here.\nfrom\
+    \ backend.sync_status_snapshot import compute_sync_status_cached  # noqa: E402,\
+    \ F401\n\n\n@router.get(\"/sync-status\", response_model=SyncStatusResponse)\n\
+    def sync_status(\n    service_id: str | None = Depends(get_service_id),\n    skip_fos:\
+    \ bool = Query(default=False),\n    force: bool = Query(default=False),\n) ->\
+    \ SyncStatusResponse:\n    from backend import config as svcconfig\n    from backend.core\
+    \ import duckdb as _db\n    from backend.core.duckdb import get_sync_status\n\
+    \    from backend.utils.telemetry import clear_queries\n\n    clear_queries()\n\
+    \n    src: dict | None = None\n    if service_id:\n        src = _db.get_source_for_service(service_id)\n\
+    \    if not src or not service_id:\n        resp_empty: SyncStatusResponse = SyncStatusResponse.with_telemetry(configured=False)\n\
+    \        return resp_empty\n\n    try:\n        from backend.high_scale.registry\
+    \ import get_high_scale_service_registry\n\n        high_scale_service = get_high_scale_service_registry().resolve(service_id)\n\
+    \        if high_scale_service is not None:\n            cached = compute_sync_status_cached(service_id)\n\
+    \            if cached is not None:\n                high_scale_response: SyncStatusResponse\
+    \ = SyncStatusResponse.with_telemetry(**cached)\n                return high_scale_response\n\
+    \n        # Fast path: skip_fos=true callers (FilterBar polling, badge in\n  \
+    \      # the page header, etc.) only need the cached snapshot that the\n     \
+    \   # sync cron refreshes every minute. Return it without grabbing a\n       \
+    \ # DuckDB connection, so that a busy dashboard load \u2014 agg/raw/\n       \
+    \ # bots all racing for connections \u2014 doesn't starve sync-status\n      \
+    \  # and trigger 503s when its max_wait expires.\n        if skip_fos and not\
+    \ force:\n            cached = compute_sync_status_cached(service_id)\n      \
+    \      if cached is not None:\n                resp_cached: SyncStatusResponse\
+    \ = SyncStatusResponse.with_telemetry(**cached)\n                return resp_cached\n\
+    \n        from backend.core.duckdb import get_connection\n\n        is_durable\
+    \ = svcconfig.is_durable_serving_mode(src)\n        _con = get_connection(source=src,\
+    \ max_wait=5, skip_view_update=True, read_only=is_durable)\n        try:\n   \
+    \         status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)\n\
+    \        finally:\n            _con.close()\n\n        db_path = src.get(\"duckdb_path\"\
+    ) or svcconfig.duckdb_path(service_id)\n        db_exists = os.path.exists(db_path)\n\
+    \        db_size = os.path.getsize(db_path) if db_exists else 0\n\n        cache_size\
+    \ = _get_dir_size(_db._cache_dir(src))\n\n        status[\"duckdb_size_bytes\"\
+    ] = db_size + cache_size\n        status[\"duckdb_exists\"] = db_exists\n\n  \
+    \      from backend.cron_progress import get_latest_progress_for_service\n\n \
+    \       active_run = get_latest_progress_for_service(service_id)\n        if active_run:\n\
+    \            status[\"active_run\"] = active_run\n            status[\"busy\"\
+    ] = True\n\n        cfg = svcconfig.load_config(service_id) or {}\n        status[\"\
+    ngwaf_workspace_id\"] = cfg.get(\"ngwaf_workspace_id\")\n\n        resp: SyncStatusResponse\
+    \ = SyncStatusResponse.with_telemetry(**status)\n        return resp\n    except\
+    \ _db.DBBusyError as e:\n        raise HTTPException(status_code=503, detail=make_error(\"\
+    db_busy\", str(e), busy=True))\n    except Exception as e:\n        raise_internal(logger,\
+    \ e, code=\"sync_status_failed\")\n\n\n@meta_router.get(\"/log-extents\", response_model=LogExtentsResponse)\n\
+    def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsResponse:\n\
+    \    \"\"\"Return only the earliest/latest log timestamps for the FilterBar.\n\
+    \n    Analyst-safe sibling of ``/api/sync-status``: same cached-status fast\n\
+    \    path but projected down to the two fields the FilterBar actually\n    reads.\
+    \ ``/api/sync-status`` is blocked for analysts because it leaks\n    ``ngwaf_workspace_id``\
+    \ and active cron-task state; this endpoint\n    drops both, so the middleware\
+    \ lets it through and the FilterBar's\n    snap-to-extents UX works for analysts\
+    \ too.\n\n    Reads only the persisted status snapshot \u2014 no DuckDB connection\n\
+    \    grabbed, no contention with cron, no 503 path. The snapshot is\n    refreshed\
+    \ by the sync cron every minute so a freshly started\n    service sees populated\
+    \ extents within ~60s.\n    \"\"\"\n    from backend import config as svcconfig\n\
+    \    from backend.core import duckdb as _db\n\n    if not service_id:\n      \
+    \  empty1: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)\n\
+    \        return empty1\n    src = _db.get_source_for_service(service_id)\n   \
+    \ if not src:\n        empty2: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)\n\
+    \        return empty2\n\n    cached = svcconfig.get_status(src[\"name\"]) or\
+    \ {}\n    request_status = cached.get(\"request\")\n    latest = request_status.get(\"\
+    latest_log_at\") if isinstance(request_status, dict) else cached.get(\"latest_log_at\"\
+    )\n    resp: LogExtentsResponse = LogExtentsResponse.with_telemetry(\n       \
+    \ configured=True,\n        earliest_log_at=cached.get(\"earliest_log_at\"),\n\
+    \        latest_log_at=latest,\n    )\n    return resp\n\n\n@meta_router.get(\"\
+    /log-extents/stream\")\nasync def log_extents_stream(\n    request: Request,\n\
+    \    service_id: str | None = Depends(get_service_id),\n) -> EventSourceResponse:\n\
+    \    \"\"\"Analyst-safe SSE projection of the cached sync-status snapshot.\n\n\
+    \    Re-uses the existing ``sync_status_publisher`` (the admin\n    ``/api/sync-status/stream``\
+    \ endpoint subscribes to the same\n    publisher) but projects every payload down\
+    \ to the two fields the\n    header badge actually renders \u2014 ``latest_log_at``\
+    \ + ``local_rows``\n    \u2014 so analysts can receive real-time badge updates\
+    \ without leaking\n    ``ngwaf_workspace_id``, ``active_run``, ``cdn_service_id``,\
+    \ etc.\n\n    Path lives under ``/api/log-extents/*`` (the analyst-safe sibling\n\
+    \    of ``/api/sync-status``) so middleware does NOT auto-block it.\n    Belt-and-suspenders:\
+    \ also listed in ``_ANALYST_SSE_ALLOWLIST`` in\n    ``backend/utils/remote_access.py``\
+    \ so the analyst-side firewall's\n    SSE-defaults-off policy documents this opening\
+    \ explicitly.\n    \"\"\"\n    if not service_id:\n        raise HTTPException(status_code=422,\
+    \ detail=make_error(\"x_service_id_required\"))\n\n    def _project(snap: dict\
+    \ | None) -> dict | None:\n        if snap is None:\n            return None\n\
+    \        return {\n            \"latest_log_at\": snap.get(\"latest_log_at\"),\n\
+    \            \"local_rows\": snap.get(\"local_rows\"),\n            \"rum\": snap.get(\"\
+    rum\"),\n            \"request\": snap.get(\"request\"),\n        }\n\n    async\
+    \ def stream() -> AsyncIterator[str]:\n        # Initial snapshot so a freshly\
+    \ mounted analyst page doesn't\n        # blank-flash waiting for the first cron\
+    \ tick.\n        # compute_sync_status_cached touches disk (os.path.getsize +\n\
+    \        # directory traversal via _get_dir_size); calling it directly on\n  \
+    \      # the SSE coroutine stalled the asyncio event loop for the\n        # duration\
+    \ of the I/O, denying service to every other concurrent\n        # request on\
+    \ the same worker. Off-load to a worker thread.\n        initial = _project(await\
+    \ asyncio.to_thread(compute_sync_status_cached, service_id))\n        if initial\
+    \ is not None:\n            yield json.dumps(initial)\n\n        # Race the publisher\
+    \ against disconnect detection \u2014 see\n        # backend.utils.sse_subscription.\
+    \ Shields the long-lived\n        # __anext__() task across timeouts so the publisher\
+    \ queue stays\n        # parked between pings (a bare wait_for would cancel the\n\
+    \        # generator's q.get() and silently end the subscriber).\n        async\
+    \ for payload in iter_with_disconnect_ping(\n            sync_status_publisher.subscribe(service_id),\
+    \ request, ping_seconds=15\n        ):\n            projected = _project(payload)\n\
+    \            if projected is not None:\n                yield json.dumps(projected)\n\
+    \n    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)\n\
+    \n\n@router.get(\"/admin/ingested-files\", response_model=IngestedFilesResponse)\n\
+    @query_errors(status_code=500)\ndef ingested_files(source: dict = Depends(get_source))\
+    \ -> IngestedFilesResponse:\n    from backend.core.duckdb import get_ingested_files\n\
+    \n    res = get_ingested_files(None, source)\n    response: IngestedFilesResponse\
+    \ = IngestedFilesResponse.with_telemetry(files=res)\n    return response\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: "{\"apiVersion\":\"v1\",\"data\"\
+      :{\"config.py\":\"\\\"\\\"\\\"Service configuration management for multi-service\
+      \ support.\\n\\nEach service is stored as a JSON file in the configs/ directory.\\\
+      nThe filename is the Fastly logging service ID (e.g. abcdefg12345abcdef1234.json).\\\
+      n\\nConfig file schema:\\n{\\n    \\\"service_id\\\": \\\"abcdefg12345abcdef1234\\\
+      \",   # Fastly logging service ID (matches filename)\\n    \\\"name\\\": \\\"\
+      My Production Site\\\",               # Human-readable label (from Fastly API)\\\
+      n    \\\"access_level\\\": \\\"read_write\\\",               # \\\"read_write\\\
+      \" or \\\"read_only\\\"\\n    \\\"fos_endpoint\\\": \\\"us-east-1.object.fastlystorage.app\\\
+      \",\\n    \\\"fos_access_key_id\\\": \\\"...\\\",\\n    \\\"fos_secret_access_key\\\
+      \": \\\"...\\\",\\n    \\\"fos_bucket\\\": \\\"...\\\",\\n    \\\"fos_prefix\\\
+      \": \\\"\\\",\\n    \\\"raw_layout_version\\\": 3,\\n    \\\"fos_region\\\"\
+      : \\\"us-east-1\\\",\\n    \\\"cdn_url\\\": \\\"https://...\\\",\\n    \\\"\
+      cdn_secret\\\": \\\"...\\\",\\n    \\\"cdn_service_id\\\": \\\"...\\\",    \
+      \                # The CDN VCL service fronting FOS\\n    \\\"fastly_api_key\\\
+      \": \\\"...\\\",                    # Account-wide Fastly API key\\n    \\\"\
+      provisioning\\\": {                           # Embedded provisioning state\
+      \ for teardown\\n        \\\"endpoint_name\\\": \\\"Fastly Object Storage Logs\\\
+      \",\\n        \\\"temp_admin_key_id\\\": null\\n    }\\n}\\n\\\"\\\"\\\"\\n\\\
+      nimport copy\\nimport json\\nimport logging\\nimport math\\nimport os\\nimport\
+      \ re\\nimport sys\\nimport tempfile\\nimport threading\\nimport time\\nfrom\
+      \ dataclasses import dataclass, field\\nfrom ipaddress import ip_address\\nfrom\
+      \ pathlib import Path\\n\\nlogger = logging.getLogger(__name__)\\n\\n_ROOT_DIR\
+      \ = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\\n\\nCONFIGS_DIR\
+      \ = _ROOT_DIR / \\\"configs\\\"\\nDATA_DIR = _ROOT_DIR / \\\"data\\\"\\n\\n#\
+      \ Sub-directories for organized data storage\\nSERVICES_DATA_DIR = DATA_DIR\
+      \ / \\\"services\\\"\\nNGWAF_DATA_DIR = DATA_DIR / \\\"ngwaf\\\"\\nCACHE_DATA_DIR\
+      \ = DATA_DIR / \\\"cache\\\"\\nSYSTEM_DATA_DIR = DATA_DIR / \\\"system\\\"\\\
+      n\\n# Deployment topology is deployment-wide rather than per-service. Define\
+      \ this\\n# before the default source is built so config_to_source() can safely\
+      \ include\\n# it during module import.\\nDEPLOYMENT_MODE = os.getenv(\\\"DEPLOYMENT_MODE\\\
+      \", \\\"standard\\\").strip().lower()\\n\\n\\n@dataclass(frozen=True)\\nclass\
+      \ ClickHouseConfig:\\n    \\\"\\\"\\\"Deployment-only HTTP settings; loaded\
+      \ at startup, never from service JSON.\\\"\\\"\\\"\\n\\n    host: str\\n   \
+      \ port: int\\n    database: str\\n    user: str\\n    password: str = field(repr=False)\\\
+      n    secure: bool = True\\n    connect_timeout_s: float = 5.0\\n    query_timeout_s:\
+      \ float = 30.0\\n    insert_timeout_s: float = 30.0\\n    pool_timeout_s: float\
+      \ = 5.0\\n    pool_max_size: int = 8\\n\\n\\ndef _clickhouse_bool(name: str,\
+      \ default: str) -\\u003e bool:\\n    raw = os.getenv(name, default).strip().lower()\\\
+      n    if raw in {\\\"1\\\", \\\"true\\\", \\\"yes\\\", \\\"on\\\"}:\\n      \
+      \  return True\\n    if raw in {\\\"0\\\", \\\"false\\\", \\\"no\\\", \\\"off\\\
+      \"}:\\n        return False\\n    raise ValueError(f\\\"{name} must be a boolean\\\
+      \")\\n\\n\\ndef _clickhouse_number(name: str, default: float, maximum: float,\
+      \ *, integer: bool = False):\\n    try:\\n        raw = os.getenv(name, str(default))\\\
+      n        value = int(raw) if integer else float(raw)\\n        if math.isfinite(value)\
+      \ and (1 if integer else 0.01) \\u003c= value \\u003c= maximum:\\n         \
+      \   return value\\n    except (ValueError, OverflowError):\\n        pass\\\
+      n    raise ValueError(f\\\"{name} must be finite and between {1 if integer else\
+      \ 0.01} and {maximum}\\\")\\n\\n\\ndef load_clickhouse_config() -\\u003e ClickHouseConfig\
+      \ | None:\\n    \\\"\\\"\\\"CLICKHOUSE_ENABLED is opt-in; disabled mode ignores\
+      \ all other settings.\\n\\n    Enabled mode requires HOST (bare DNS/IP), DATABASE\
+      \ and USER. SECURE defaults\\n    to true (verified HTTPS, port 8443; HTTP uses\
+      \ 8123). A missing PASSWORD is\\n    permitted only for explicitly insecure\
+      \ loopback test instances. Operators\\n    must opt into SECURE=false for a\
+      \ trusted private-network HTTP deployment.\\n    CONNECT/POOL_TIMEOUT_S are\
+      \ 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;\\n    POOL_MAX_SIZE is 1..64.\
+      \ Environment changes require a process restart.\\n    \\\"\\\"\\\"\\n    if\
+      \ not _clickhouse_bool(\\\"CLICKHOUSE_ENABLED\\\", \\\"false\\\"):\\n      \
+      \  return None\\n    required = {}\\n    for key in (\\\"HOST\\\", \\\"DATABASE\\\
+      \", \\\"USER\\\"):\\n        value = os.getenv(f\\\"CLICKHOUSE_{key}\\\", \\\
+      \"\\\").strip()\\n        if not value:\\n            raise ValueError(f\\\"\
+      CLICKHOUSE_{key} is required when enabled\\\")\\n        required[key] = value\\\
+      n    host = required[\\\"HOST\\\"]\\n    loopback = host == \\\"localhost\\\"\
+      \\n    try:\\n        loopback = ip_address(host).is_loopback\\n    except ValueError:\\\
+      n        if len(host) \\u003e 253 or not all(\\n            re.fullmatch(r\\\
+      \"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\\", label) for label in host.split(\\\
+      \".\\\")\\n        ):\\n            raise ValueError(\\\"CLICKHOUSE_HOST must\
+      \ be a bare hostname or IP address\\\") from None\\n    if not re.fullmatch(r\\\
+      \"[A-Za-z_][A-Za-z0-9_]{0,127}\\\", required[\\\"DATABASE\\\"]):\\n        raise\
+      \ ValueError(\\\"CLICKHOUSE_DATABASE must be a simple identifier\\\")\\n   \
+      \ if not re.fullmatch(r\\\"[A-Za-z0-9_.@-]{1,128}\\\", required[\\\"USER\\\"\
+      ]):\\n        raise ValueError(\\\"CLICKHOUSE_USER contains unsupported characters\\\
+      \")\\n    secure = _clickhouse_bool(\\\"CLICKHOUSE_SECURE\\\", \\\"true\\\"\
+      )\\n    password = os.getenv(\\\"CLICKHOUSE_PASSWORD\\\", \\\"\\\")\\n    if\
+      \ not password.strip() and (secure or not loopback):\\n        raise ValueError(\\\
+      \"CLICKHOUSE_PASSWORD is required except for explicit HTTP loopback tests\\\"\
+      )\\n    query_timeout = _clickhouse_number(\\\"CLICKHOUSE_QUERY_TIMEOUT_S\\\"\
+      , 30, 300)\\n    return ClickHouseConfig(\\n        host=host,\\n        port=_clickhouse_number(\\\
+      \"CLICKHOUSE_PORT\\\", 8443 if secure else 8123, 65535, integer=True),\\n  \
+      \      database=required[\\\"DATABASE\\\"],\\n        user=required[\\\"USER\\\
+      \"],\\n        password=password,\\n        secure=secure,\\n        connect_timeout_s=_clickhouse_number(\\\
+      \"CLICKHOUSE_CONNECT_TIMEOUT_S\\\", 5, 60),\\n        query_timeout_s=query_timeout,\\\
+      n        insert_timeout_s=_clickhouse_number(\\\"CLICKHOUSE_INSERT_TIMEOUT_S\\\
+      \", query_timeout, 300),\\n        pool_timeout_s=_clickhouse_number(\\\"CLICKHOUSE_POOL_TIMEOUT_S\\\
+      \", 5, 60),\\n        pool_max_size=_clickhouse_number(\\\"CLICKHOUSE_POOL_MAX_SIZE\\\
+      \", 8, 64, integer=True),\\n    )\\n\\n\\n# Cache for Fastly service names:\
+      \ {service_id: {\\\"name\\\": str, \\\"fetched_at\\\": float}}\\n_name_cache:\
+      \ dict = {}\\n_name_cache_lock = threading.Lock()\\n_name_refresh_in_flight:\
+      \ set[str] = set()\\n_name_refresh_lock = threading.Lock()\\n_NAME_CACHE_TTL\
+      \ = 300  # 5 minutes\\n\\n# Cache for parsed configs: {service_id: (mtime_ns,\
+      \ parsed_dict)}.\\n# Revalidated by stat() on each load_config call AND explicitly\
+      \ invalidated\\n# by save_config \u2014 mtime alone is not enough because Linux\
+      \ ext4/tmpfs can\\n# produce identical st_mtime_ns for two writes within the\
+      \ same microsecond.\\n# Hot paths (sync-status polls, every cron tick, every\
+      \ dashboard request)\\n# hit this enough that skipping the open+read on the\
+      \ no-change path adds up.\\n_config_cache: dict[str, tuple[int, dict]] = {}\\\
+      n_config_cache_lock = threading.Lock()\\n\\n# Path-keyed memo for _ensure_dirs().\
+      \ Called from every list_configs /\\n# save_config / save_usage_logging_config\
+      \ so the mkdir(exist_ok=True)\\n# syscall storm shows up under load. Tests that\
+      \ monkeypatch CONFIGS_DIR\\n# get fresh entries because the tmp_path is a different\
+      \ Path object.\\n_ensured_dirs: set[Path] = set()\\n\\n\\ndef _ensure_dirs():\\\
+      n    dirs = (CONFIGS_DIR, DATA_DIR, SERVICES_DATA_DIR, NGWAF_DATA_DIR, CACHE_DATA_DIR,\
+      \ SYSTEM_DATA_DIR)\\n    missing = [d for d in dirs if d not in _ensured_dirs]\\\
+      n    if not missing:\\n        return\\n    for d in missing:\\n        d.mkdir(exist_ok=True)\\\
+      n        _ensured_dirs.add(d)\\n\\n\\n# Alphabet shared with backend.deps.ServiceId.\
+      \ Public so the FastAPI\\n# Path validator can reuse the same pattern instead\
+      \ of redefining it.\\nSERVICE_ID_PATTERN = r\\\"^[A-Za-z0-9_-]+$\\\"\\n_SERVICE_ID_RE\
+      \ = re.compile(SERVICE_ID_PATTERN)\\n_SERVICE_ID_MAX_LEN = 64\\n\\n\\ndef _validate_service_id(service_id:\
+      \ str) -\\u003e str:\\n    \\\"\\\"\\\"Security: defense in depth against path\
+      \ traversal in any helper\\n    that builds a path from ``service_id``.\\n\\\
+      n    Real Fastly service IDs are opaque 22-char alphanumeric strings, but the\\\
+      n    test suite and a handful of legacy provisioning paths use hyphenated\\\
+      n    IDs like ``svc-1`` / ``test-service-id``. The regex therefore accepts\\\
+      n    ``[A-Za-z0-9_-]+`` \u2014 every character allowed is safe inside a filename\\\
+      n    and contains no path-separator / dot / null-byte. Without this,\\n    ``service_id=\\\
+      \"/etc/passwd\\\"`` or ``service_id=\\\"../../tmp/x\\\"`` would\\n    compose\
+      \ with ``pathlib`` semantics \u2014 absolute paths discard the base\\n    entirely,\
+      \ relative ``..`` traverses out, and ``\\\\\\\\x00`` truncates on\\n    some\
+      \ kernels.\\n\\n    Length cap (64) is well above the longest legitimate Fastly\
+      \ ID (22)\\n    and bounds memory in error-logging paths.\\n    \\\"\\\"\\\"\
+      \\n    if not isinstance(service_id, str):\\n        raise ValueError(f\\\"\
+      invalid service_id type {type(service_id).__name__}: must be str (security)\\\
+      \")\\n    if not service_id or len(service_id) \\u003e _SERVICE_ID_MAX_LEN:\\\
+      n        raise ValueError(\\n            f\\\"invalid service_id length {len(service_id)\
+      \ if service_id else 0}: \\\"\\n            f\\\"1..{_SERVICE_ID_MAX_LEN} characters\
+      \ required (security)\\\"\\n        )\\n    if not _SERVICE_ID_RE.match(service_id):\\\
+      n        raise ValueError(f\\\"invalid service_id {service_id!r}: must be alphanumeric\
+      \ / dash / underscore (security)\\\")\\n    return service_id\\n\\n\\ndef config_path(service_id:\
+      \ str) -\\u003e Path:\\n    _validate_service_id(service_id)\\n    return CONFIGS_DIR\
+      \ / f\\\"{service_id}.json\\\"\\n\\n\\ndef duckdb_path(service_id: str) -\\\
+      u003e str:\\n    _validate_service_id(service_id)\\n    return str(SERVICES_DATA_DIR\
+      \ / f\\\"{service_id}.duckdb\\\")\\n\\n\\ndef load_config(service_id: str |\
+      \ None) -\\u003e dict | None:\\n    \\\"\\\"\\\"Load a single service config\
+      \ by ID. Returns None if not found.\\n\\n    Returns a freshly-parsed dict on\
+      \ every call \u2014 callers that mutate the\\n    result (e.g. update_status)\
+      \ won't poison the cache. The on-disk file is\\n    revalidated via st_mtime_ns,\
+      \ so external edits and save_config writes\\n    are picked up on the next call\
+      \ without explicit invalidation.\\n\\n    Returns ``None`` (not a raised exception)\
+      \ for invalid service IDs,\\n    including ``None`` itself \u2014 several call\
+      \ sites in the iceberg/\\n    submodules pass ``src.get(\\\"name\\\")`` (typed\
+      \ as ``Any | None``) and\\n    rely on the None response to mean \\\"no config\\\
+      \". Security's validation\\n    in ``config_path`` is still what blocks path-traversal;\
+      \ this just\\n    makes the helper friendlier at call sites that don't pre-validate.\\\
+      n    \\\"\\\"\\\"\\n    if service_id is None:\\n        return None\\n    try:\\\
+      n        path = config_path(service_id)\\n    except ValueError:\\n        return\
+      \ None\\n    try:\\n        mtime_ns = path.stat().st_mtime_ns\\n    except\
+      \ FileNotFoundError:\\n        return None\\n\\n    cached = _config_cache.get(service_id)\\\
+      n    if cached is not None and cached[0] == mtime_ns:\\n        return copy.deepcopy(cached[1])\\\
+      n\\n    with open(path, \\\"rb\\\") as f:\\n        raw = f.read()\\n    parsed\
+      \ = json.loads(raw)\\n    with _config_cache_lock:\\n        _config_cache[service_id]\
+      \ = (mtime_ns, parsed)\\n    return copy.deepcopy(parsed)\\n\\n\\ndef _atomic_write_json(path,\
+      \ data: dict) -\\u003e None:\\n    \\\"\\\"\\\"Write ``data`` to ``path`` atomically\
+      \ (unique tmp file + os.replace).\\n\\n    Shared by :func:`save_config` and\
+      \ :func:`save_usage_logging_config`,\\n    which used to paste identical mkstemp\
+      \ / fdopen / json.dump / os.replace\\n    blocks. Uses a UNIQUE tmp file (per-call\
+      \ random suffix) so concurrent\\n    callers cannot clobber each other's tmp\
+      \ file mid-write. The shared-tmp\\n    variant produced corrupted JSON (a stray\
+      \ ``}`` appended to the rendered\\n    file) and bricked the backend on next\
+      \ read; we hit it twice in one\\n    debugging session before fixing.\\n   \
+      \ \\\"\\\"\\\"\\n    fd, tmp_path = tempfile.mkstemp(prefix=f\\\".{path.name}.\\\
+      \", suffix=\\\".tmp\\\", dir=str(path.parent))\\n    try:\\n        with os.fdopen(fd,\
+      \ \\\"w\\\") as f:\\n            json.dump(data, f, indent=2)\\n        os.replace(tmp_path,\
+      \ path)\\n    except Exception:\\n        try:\\n            os.unlink(tmp_path)\\\
+      n        except OSError:\\n            pass\\n        raise\\n\\n\\ndef save_config(service_id:\
+      \ str, cfg: dict):\\n    \\\"\\\"\\\"Write a service config atomically. See\
+      \ :func:`_atomic_write_json`.\\\"\\\"\\\"\\n    global _cdn_service_id_map\\\
+      n    _ensure_dirs()\\n    if \\\"created_at\\\" not in cfg or not cfg[\\\"created_at\\\
+      \"]:\\n        import datetime as _dt\\n\\n        cfg[\\\"created_at\\\"] =\
+      \ _dt.datetime.now(_dt.UTC).isoformat()\\n    try:\\n        _atomic_write_json(config_path(service_id),\
+      \ cfg)\\n    except (OSError, PermissionError) as e:\\n        if getattr(e,\
+      \ \\\"errno\\\", None) == 30 or \\\"read-only\\\" in str(e).lower():\\n    \
+      \        logger.warning(\\\"save_config_skipped_read_only_fs service_id=%s:\
+      \ %s\\\", service_id, e)\\n            return\\n        raise\\n    # Invalidate\
+      \ the load_config cache. The cache uses st_mtime_ns as its\\n    # revalidation\
+      \ key, which is normally fine \u2014 but on Linux ext4/tmpfs two\\n    # os.replace()\
+      \ calls within the same microsecond can produce identical\\n    # mtime_ns values,\
+      \ so a cached (old_mtime, old_raw) entry can stay\\n    # \\\"fresh\\\" after\
+      \ this write and serve stale bytes. update_status() does\\n    # exactly that:\
+      \ load \u2192 mutate \u2192 save \u2192 and the next load can see the\\n   \
+      \ # pre-mutation cached copy. Drop the entry so the next load re-reads.\\n \
+      \   with _config_cache_lock:\\n        _config_cache.pop(service_id, None)\\\
+      n    _cdn_service_id_map = None\\n\\n\\ndef update_status(service_id: str, status:\
+      \ dict):\\n    \\\"\\\"\\\"Partially update the 'status' section of a service\
+      \ config.\\\"\\\"\\\"\\n    cfg = load_config(service_id)\\n    if not cfg:\\\
+      n        return\\n\\n    current_status = cfg.get(\\\"status\\\", {})\\n   \
+      \ current_status.update(status)\\n    current_status[\\\"updated_at\\\"] = time.time()\\\
+      n    cfg[\\\"status\\\"] = current_status\\n    save_config(service_id, cfg)\\\
+      n\\n\\ndef get_status(service_id: str) -\\u003e dict:\\n    \\\"\\\"\\\"Return\
+      \ the 'status' section of a service config.\\\"\\\"\\\"\\n    cfg = load_config(service_id)\\\
+      n    if not cfg:\\n        return {}\\n    return cfg.get(\\\"status\\\", {})\\\
+      n\\n\\ndef delete_config(service_id: str):\\n    \\\"\\\"\\\"Remove a service\
+      \ config file.\\\"\\\"\\\"\\n    global _cdn_service_id_map\\n    path = config_path(service_id)\\\
+      n    if path.exists():\\n        path.unlink()\\n    _cdn_service_id_map = None\\\
+      n    with _config_cache_lock:\\n        _config_cache.pop(service_id, None)\\\
+      n\\n\\n_cdn_service_id_map: dict[str, str] | None = None\\n\\n\\ndef get_cdn_service_id_map()\
+      \ -\\u003e dict[str, str]:\\n    \\\"\\\"\\\"Return a mapping of CDN service\
+      \ IDs to their logging service IDs. Memoized.\\\"\\\"\\\"\\n    global _cdn_service_id_map\\\
+      n    if _cdn_service_id_map is not None:\\n        return _cdn_service_id_map\\\
+      n\\n    m = {}\\n    for c in list_configs():\\n        cdn_sid = c.get(\\\"\
+      cdn_service_id\\\")\\n        if cdn_sid:\\n            m[cdn_sid] = c[\\\"\
+      service_id\\\"]\\n    _cdn_service_id_map = m\\n    return m\\n\\n\\ndef list_service_ids()\
+      \ -\\u003e list[str]:\\n    \\\"\\\"\\\"Return all configured service IDs (sorted).\\\
+      \"\\\"\\\"\\n    _ensure_dirs()\\n    return sorted(p.stem for p in CONFIGS_DIR.glob(\\\
+      \"*.json\\\"))\\n\\n\\ndef list_configs() -\\u003e list[dict]:\\n    \\\"\\\"\
+      \\\"Return all service configs as a list, sorted by service ID.\\\"\\\"\\\"\\\
+      n    return [c for sid in list_service_ids() if (c := load_config(sid)) is not\
+      \ None]\\n\\n\\ndef get_active_service_id(fallback_to_first: bool = True) -\\\
+      u003e str | None:\\n    \\\"\\\"\\\"Return the first configured service ID as\
+      \ a fallback default.\\n\\n    The actual active service is tracked client-side\
+      \ in localStorage and\\n    passed via the ?service= query param. This is used\
+      \ server-side when\\n    no service is specified (e.g. health checks, cron jobs).\\\
+      n    \\\"\\\"\\\"\\n    ids = list_service_ids()\\n    if not ids:\\n      \
+      \  return None\\n    return ids[0] if fallback_to_first else None\\n\\n\\ndef\
+      \ config_to_source(cfg: dict) -\\u003e dict:\\n    \\\"\\\"\\\"Convert a service\
+      \ config dict to the db.py 'source' dict format.\\\"\\\"\\\"\\n    if is_high_throughput_mode()\
+      \ and cfg.get(\\\"raw_layout_version\\\") != 3:\\n        raise RuntimeError(\\\
+      n            f\\\"service {cfg.get('service_id', '\\u003cunknown\\u003e')} uses\
+      \ the v2 raw-log layout; \\\"\\n            \\\"tear it down and reprovision\
+      \ it for v3 before enabling high-throughput deployment\\\"\\n        )\\n  \
+      \  actual_db_path = duckdb_path(cfg.get(\\\"service_id\\\", \\\"default\\\"\
+      ))\\n\\n    region = cfg.get(\\\"fos_region\\\", \\\"us-east-1\\\")\\n\\n  \
+      \  # Native FOS endpoint \u2014 used by boto3 for ListObjectsV2/PutObject/DeleteObject\\\
+      n    # etc. The CDN VCL only proxies GET/HEAD on object keys, not bucket-listing\\\
+      n    # requests, so writes and lists must go direct.\\n    native_endpoint =\
+      \ cfg.get(\\\"fos_endpoint\\\", f\\\"{region}.object.fastlystorage.app\\\")\\\
+      n\\n    # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet\
+      \ GETs)\\n    # so we benefit from caching and free egress.\\n    cdn_url =\
+      \ cfg.get(\\\"cdn_url\\\")\\n    if cdn_url:\\n        endpoint = cdn_url.replace(\\\
+      \"https://\\\", \\\"\\\").replace(\\\"http://\\\", \\\"\\\").split(\\\"/\\\"\
+      )[0]\\n    else:\\n        endpoint = native_endpoint\\n\\n    prov = cfg.get(\\\
+      \"provisioning\\\", {})\\n\\n    log_fields = cfg.get(\\\"log_fields\\\") or\
+      \ {}\\n    if log_fields and \\\"format_hash\\\" not in log_fields:\\n     \
+      \   try:\\n            from backend.core import log_fields as lf_module\\n\\\
+      n            log_fields = dict(log_fields)\\n            log_fields[\\\"format_hash\\\
+      \"] = lf_module.format_hash(log_fields)\\n        except Exception:\\n     \
+      \       pass\\n\\n    return {\\n        \\\"name\\\": cfg.get(\\\"service_id\\\
+      \", \\\"default\\\"),\\n        \\\"service_id\\\": cfg.get(\\\"service_id\\\
+      \", \\\"default\\\"),\\n        \\\"service_name\\\": cfg.get(\\\"name\\\",\
+      \ \\\"\\\"),\\n        \\\"endpoint\\\": endpoint,\\n        \\\"fos_native_endpoint\\\
+      \": native_endpoint,\\n        \\\"access_key_id\\\": cfg.get(\\\"fos_access_key_id\\\
+      \", \\\"\\\"),\\n        \\\"secret_access_key\\\": cfg.get(\\\"fos_secret_access_key\\\
+      \", \\\"\\\"),\\n        \\\"bucket\\\": cfg.get(\\\"fos_bucket\\\", \\\"\\\"\
+      ),\\n        \\\"prefix\\\": \\\"\\\",\\n        \\\"region\\\": region,\\n\
+      \        \\\"cdn_url\\\": cfg.get(\\\"cdn_url\\\", \\\"\\\"),\\n        \\\"\
+      cdn_secret\\\": cfg.get(\\\"cdn_secret\\\", \\\"\\\"),\\n        \\\"cdn_service_id\\\
+      \": cfg.get(\\\"cdn_service_id\\\", \\\"\\\"),\\n        \\\"logging_service_id\\\
+      \": cfg.get(\\\"service_id\\\", \\\"\\\"),\\n        \\\"duckdb_path\\\": actual_db_path,\\\
+      n        \\\"deployment_mode\\\": DEPLOYMENT_MODE,\\n        \\\"access_level\\\
+      \": cfg.get(\\\"access_level\\\", \\\"read_write\\\"),\\n        \\\"storage_mode\\\
+      \": cfg.get(\\\"storage_mode\\\", \\\"cloud\\\"),\\n        \\\"log_period\\\
+      \": int(cfg.get(\\\"log_period\\\", 60)),\\n        \\\"log_fields\\\": log_fields,\\\
+      n        \\\"provisioning\\\": prov,\\n        \\\"rum_enabled\\\": cfg.get(\\\
+      \"rum_enabled\\\", False) or (cfg.get(\\\"rum\\\") or {}).get(\\\"enabled\\\"\
+      , False),\\n        \\\"rum\\\": cfg.get(\\\"rum\\\", {}),\\n    }\\n\\n\\ndef\
+      \ fetch_service_name(service_id: str, api_key: str) -\\u003e str | None:\\n\
+      \    \\\"\\\"\\\"Fetch the human-readable service name from the Fastly API.\\\
+      n\\n    Routes through the shared ``fastly()`` client with ``timeout=10`` +\\\
+      n    ``max_retries=1`` so the worst-case cold-path tail stays bounded\\n   \
+      \ (~21 s vs the client default of ~127 s). The caller is behind a\\n    300\
+      \ s name cache (see :func:`refresh_service_name`) so steady-state\\n    cost\
+      \ is one call per service per 5 min.\\n\\n    Returns None on failure (caller\
+      \ should use the cached name).\\n    \\\"\\\"\\\"\\n    from backend.core.fastly.client\
+      \ import fastly\\n\\n    try:\\n        data = fastly(\\\"GET\\\", f\\\"/service/{service_id}\\\
+      \", token=api_key, timeout=10, max_retries=1)\\n        return data.get(\\\"\
+      name\\\")\\n    except Exception:\\n        return None\\n\\n\\ndef refresh_service_name(service_id:\
+      \ str, api_key: str | None = None) -\\u003e str:\\n    \\\"\\\"\\\"Return service\
+      \ name, using cache. Refreshes from API if cache is stale.\\n\\n    Falls back\
+      \ to name in config, then to service_id itself.\\n    \\\"\\\"\\\"\\n    now\
+      \ = time.time()\\n    with _name_cache_lock:\\n        entry = _name_cache.get(service_id)\\\
+      n        if entry and (now - entry[\\\"fetched_at\\\"]) \\u003c _NAME_CACHE_TTL:\\\
+      n            return entry[\\\"name\\\"]\\n\\n    # Try to fetch from API\\n\
+      \    api_name = None\\n    if api_key and api_key.strip():\\n        api_name\
+      \ = fetch_service_name(service_id, api_key)\\n        if api_name:\\n      \
+      \      with _name_cache_lock:\\n                _name_cache[service_id] = {\\\
+      \"name\\\": api_name, \\\"fetched_at\\\": now}\\n\\n            # Persist to\
+      \ config if it has changed or was the ID\\n            cfg = load_config(service_id)\\\
+      n            if cfg and (cfg.get(\\\"name\\\") != api_name or cfg.get(\\\"name\\\
+      \") == service_id):\\n                cfg[\\\"name\\\"] = api_name\\n      \
+      \          save_config(service_id, cfg)\\n            return api_name\\n\\n\
+      \    # Fall back to config\\n    cfg = load_config(service_id)\\n    if cfg:\\\
+      n        name = cfg.get(\\\"name\\\") or service_id\\n        with _name_cache_lock:\\\
+      n            # On failure, don't try again for 2 minutes\\n            _name_cache[service_id]\
+      \ = {\\\"name\\\": name, \\\"fetched_at\\\": now - _NAME_CACHE_TTL + 120}\\\
+      n        return name\\n\\n    return service_id\\n\\n\\ndef _refresh_service_names_bg(misses_args:\
+      \ list[tuple[str, str | None]]) -\\u003e None:\\n    try:\\n        for sid,\
+      \ api_key in misses_args:\\n            try:\\n                refresh_service_name(sid,\
+      \ api_key)\\n            except Exception:\\n                pass\\n    finally:\\\
+      n        with _name_refresh_lock:\\n            for sid, _ in misses_args:\\\
+      n                _name_refresh_in_flight.discard(sid)\\n\\n\\ndef refresh_all_service_names(configs:\
+      \ list[dict], _sync: bool = False) -\\u003e dict[str, str]:\\n    \\\"\\\"\\\
+      \"Refresh service names for all configs. Returns {service_id: name}.\\n\\n \
+      \   Stale-while-revalidate asynchronous refresh by default to completely avoid\\\
+      n    blocking web requests or spawning a ThreadPoolExecutor on the request thread.\\\
+      n    Returns the best available name (cached or from JSON config) immediately\\\
+      n    and spins off a background thread to update the cache in the background.\\\
+      n\\n    For testing/synchronous usage, specify _sync=True.\\n    \\\"\\\"\\\"\
+      \\n    now = time.time()\\n    name_map: dict[str, str] = {}\\n    misses: list[dict]\
+      \ = []\\n    with _name_cache_lock:\\n        for cfg in configs:\\n       \
+      \     sid = cfg.get(\\\"service_id\\\", \\\"\\\")\\n            entry = _name_cache.get(sid)\\\
+      n            if entry and (now - entry[\\\"fetched_at\\\"]) \\u003c _NAME_CACHE_TTL:\\\
+      n                name_map[sid] = entry[\\\"name\\\"]\\n            else:\\n\
+      \                misses.append(cfg)\\n\\n    if not misses:\\n        return\
+      \ name_map\\n\\n    if _sync:\\n        import concurrent.futures\\n\\n    \
+      \    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:\\\
+      n            futures = {\\n                executor.submit(refresh_service_name,\
+      \ cfg.get(\\\"service_id\\\", \\\"\\\"), cfg.get(\\\"fastly_api_key\\\", \\\"\
+      \\\")): cfg\\n                for cfg in misses\\n            }\\n         \
+      \   for future in concurrent.futures.as_completed(futures):\\n             \
+      \   cfg = futures[future]\\n                sid = cfg.get(\\\"service_id\\\"\
+      , \\\"\\\")\\n                try:\\n                    name_map[sid] = future.result()\\\
+      n                except Exception:\\n                    name_map[sid] = cfg.get(\\\
+      \"name\\\") or sid\\n        return name_map\\n\\n    # Asynchronous stale-while-revalidate\
+      \ path\\n    to_schedule = []\\n    with _name_refresh_lock:\\n        for cfg\
+      \ in misses:\\n            sid = cfg.get(\\\"service_id\\\", \\\"\\\")\\n  \
+      \          entry = _name_cache.get(sid)\\n            best_effort = sid\\n \
+      \           if entry:\\n                best_effort = entry[\\\"name\\\"]\\\
+      n            elif cfg.get(\\\"name\\\"):\\n                best_effort = cfg[\\\
+      \"name\\\"]\\n            name_map[sid] = best_effort\\n\\n            if sid\
+      \ not in _name_refresh_in_flight:\\n                _name_refresh_in_flight.add(sid)\\\
+      n                to_schedule.append((sid, cfg.get(\\\"fastly_api_key\\\")))\\\
+      n\\n    if to_schedule:\\n        try:\\n            threading.Thread(\\n  \
+      \              target=_refresh_service_names_bg,\\n                args=(to_schedule,),\\\
+      n                name=\\\"refresh-service-names-bg\\\",\\n                daemon=True,\\\
+      n            ).start()\\n        except Exception:\\n            with _name_refresh_lock:\\\
+      n                for sid, _ in to_schedule:\\n                    _name_refresh_in_flight.discard(sid)\\\
+      n\\n    return name_map\\n\\n\\n# \u2500\u2500 Fastly credential helpers \u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n\\n\\ndef _get_cfg_field(field:\
+      \ str, service_id: str | None, default):\\n    \\\"\\\"\\\"Return ``cfg[field]``\
+      \ for ``service_id`` (or the active service), or\\n    ``default`` when nothing\
+      \ is configured.\\n\\n    Shared by the four near-identical fastly + ngwaf accessors\
+      \ below. All\\n    four used to paste the same ``sid = service_id or get_active_service_id();\\\
+      n    if sid: cfg = load_config(sid); if cfg: return cfg.get(field, ...)``\\\
+      n    block. Pulling the dispatch up means adding another accessor is a\\n  \
+      \  one-line tuple addition.\\n    \\\"\\\"\\\"\\n    sid = service_id or get_active_service_id()\\\
+      n    if sid:\\n        cfg = load_config(sid)\\n        if cfg:\\n         \
+      \   return cfg.get(field, default)\\n    return default\\n\\n\\ndef get_fastly_api_key(service_id:\
+      \ str | None = None) -\\u003e str:\\n    \\\"\\\"\\\"Return the Fastly API key\
+      \ for a service (or the active service).\\\"\\\"\\\"\\n    return _get_cfg_field(\\\
+      \"fastly_api_key\\\", service_id, \\\"\\\")\\n\\n\\ndef get_fastly_service_id(service_id:\
+      \ str | None = None) -\\u003e str:\\n    \\\"\\\"\\\"Return the CDN service\
+      \ ID for a service.\\\"\\\"\\\"\\n    return _get_cfg_field(\\\"cdn_service_id\\\
+      \", service_id, \\\"\\\")\\n\\n\\ndef get_fastly_logging_service_id(service_id:\
+      \ str | None = None) -\\u003e str:\\n    \\\"\\\"\\\"Return the logging service\
+      \ ID (the FOS logging endpoint's parent service).\\\"\\\"\\\"\\n    return _get_cfg_field(\\\
+      \"service_id\\\", service_id, \\\"\\\")\\n\\n\\ndef ngwaf_db_path() -\\u003e\
+      \ str:\\n    \\\"\\\"\\\"Return the path to the shared NGWAF bot cache SQLite\
+      \ file.\\\"\\\"\\\"\\n    return str(DATA_DIR / \\\"ngwaf_bot_cache.db\\\")\\\
+      n\\n\\ndef get_ngwaf_workspace_id(service_id: str) -\\u003e str | None:\\n \
+      \   \\\"\\\"\\\"Return the ngwaf_workspace_id for a service, or None if not\
+      \ configured.\\\"\\\"\\\"\\n    return _get_cfg_field(\\\"ngwaf_workspace_id\\\
+      \", service_id, None) or None\\n\\n\\n# \u2500\u2500 Global usage logging config\
+      \ \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+      \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n\\n_USAGE_LOGGING_CONFIG_PATH\
+      \ = SYSTEM_DATA_DIR / \\\"usage_logging.json\\\"\\n\\n_USAGE_LOGGING_DEFAULTS:\
+      \ dict = {\\n    \\\"enabled\\\": False,\\n    \\\"retention_days\\\": 30,\\\
+      n    \\\"class_a_rate_per_1k\\\": 0.005,\\n    \\\"class_b_rate_per_10k\\\"\
+      : 0.01,\\n    \\\"cdn_egress_rate_per_gb\\\": 0.12,\\n    \\\"storage_rate_per_gb_month\\\
+      \": 0.02,\\n    \\\"min_billed_days\\\": 30,\\n    # When true, every DuckDB\
+      \ connection enables HTTP-only structured logging\\n    # so we can record httpfs\
+      \ FOS GETs (parquet scans) as Class B ops. Adds\\n    # tiny per-query overhead\
+      \ (one in-memory log scan + truncate at close).\\n    \\\"track_duckdb_httpfs\\\
+      \": True,\\n}\\n\\n\\ndef load_usage_logging_config() -\\u003e dict:\\n    \\\
+      \"\\\"\\\"Return the global usage logging config, creating defaults if missing.\\\
+      \"\\\"\\\"\\n    _ensure_dirs()\\n    if _USAGE_LOGGING_CONFIG_PATH.exists():\\\
+      n        try:\\n            with open(_USAGE_LOGGING_CONFIG_PATH) as f:\\n \
+      \               stored = json.load(f)\\n            return {**_USAGE_LOGGING_DEFAULTS,\
+      \ **stored}\\n        except Exception:\\n            pass\\n    return dict(_USAGE_LOGGING_DEFAULTS)\\\
+      n\\n\\ndef save_usage_logging_config(cfg: dict):\\n    \\\"\\\"\\\"Persist the\
+      \ global usage logging config atomically. See\\n    :func:`_atomic_write_json`.\\\
+      \"\\\"\\\"\\n    _ensure_dirs()\\n    _atomic_write_json(_USAGE_LOGGING_CONFIG_PATH,\
+      \ cfg)\\n\\n\\ndef is_usage_logging_enabled() -\\u003e bool:\\n    \\\"\\\"\\\
+      \"Quick check: is usage logging enabled globally?\\n\\n    Always returns False\
+      \ during unit tests to avoid pollution and overhead.\\n    \\\"\\\"\\\"\\n \
+      \   if \\\"pytest\\\" in sys.modules:\\n        return False\\n    return load_usage_logging_config().get(\\\
+      \"enabled\\\", False)\\n\\n\\nfrom backend.utils.cache_registry import CacheRegistry\
+      \ as _CacheRegistry  # noqa: E402\\n\\n_CacheRegistry.register(\\\"config._name_cache\\\
+      \", _name_cache)\\n_CacheRegistry.register(\\\"config._name_refresh_in_flight\\\
+      \", _name_refresh_in_flight)\\n\\n# Cloud / Scalability Overrides (Phase 2+)\\\
+      nCELERY_BROKER_URL = os.getenv(\\\"CELERY_BROKER_URL\\\", \\\"\\\")\\nDUCKLAKE_CATALOG\
+      \ = os.getenv(\\\"DUCKLAKE_CATALOG\\\", \\\"\\\")\\nDUCKLAKE_DATA_PATH = os.getenv(\\\
+      \"DUCKLAKE_DATA_PATH\\\", \\\"\\\")\\nHOT_S3_ENDPOINT = os.getenv(\\\"HOT_S3_ENDPOINT\\\
+      \", \\\"\\\")\\nHOT_S3_KEY = os.getenv(\\\"HOT_S3_KEY\\\", \\\"\\\")\\nHOT_S3_SECRET\
+      \ = os.getenv(\\\"HOT_S3_SECRET\\\", \\\"\\\")\\nSSE_BACKPLANE = os.getenv(\\\
+      \"SSE_BACKPLANE\\\", \\\"local\\\")\\nSCHEDULER_MODE = os.getenv(\\\"SCHEDULER_MODE\\\
+      \", \\\"inprocess\\\")\\n\\n\\ndef high_scale_shared_source_enabled(cfg: dict\
+      \ | None) -\\u003e bool:\\n    \\\"\\\"\\\"Return whether this service's raw\
+      \ request/RUM stream is shared with an\\n    out-of-band high-scale consumer\
+      \ (``provisioning.cron_sync.high_scale_shared_source``).\\n\\n    While this\
+      \ is set, the high-scale archive deletion controller\\n    (``backend/high_scale/deletion.py``)\
+      \ is the sole raw-deletion authority for\\n    this service's stream \u2014\
+      \ every legacy raw-deletion path (standard sync's\\n    ``delete_after``, celery-mode\
+      \ ``finalize_committed_raw``, RUM cleanup) must\\n    stand down regardless\
+      \ of its own ``delete_after`` setting. See\\n    ``resolve_raw_delete_after``,\
+      \ the single place that enforces this.\\n    \\\"\\\"\\\"\\n    return bool((cfg\
+      \ or {}).get(\\\"provisioning\\\", {}).get(\\\"cron_sync\\\", {}).get(\\\"high_scale_shared_source\\\
+      \", False))\\n\\n\\ndef resolve_raw_delete_after(cfg: dict | None, requested:\
+      \ bool | None = None) -\\u003e bool:\\n    \\\"\\\"\\\"Resolve the effective\
+      \ delete_after decision for raw FOS objects.\\n\\n    ``requested`` lets a caller\
+      \ pass an explicit override the way a cron\\n    argument normally would; ``None``\
+      \ falls back to the configured\\n    ``provisioning.cron_sync.delete_after``\
+      \ (default True). A high-scale\\n    shared source always forces this to False\
+      \ \u2014 see\\n    ``high_scale_shared_source_enabled`` \u2014 because raw-deletion\
+      \ authority for\\n    that stream belongs to the high-scale deletion controller,\
+      \ not legacy sync.\\n    \\\"\\\"\\\"\\n    if high_scale_shared_source_enabled(cfg):\\\
+      n        return False\\n    if requested is not None:\\n        return bool(requested)\\\
+      n    return bool((cfg or {}).get(\\\"provisioning\\\", {}).get(\\\"cron_sync\\\
+      \", {}).get(\\\"delete_after\\\", True))\\n\\n\\ndef is_durable_serving_mode(source:\
+      \ dict | None = None) -\\u003e bool:\\n    \\\"\\\"\\\"Return whether serving\
+      \ must use durable shared state only.\\n\\n    The durable serving mode is intentionally\
+      \ restricted to the Celery\\n    topology with a Postgres DuckLake catalog.\
+      \ Sync/file mode keeps its\\n    existing native per-service DuckDB file and\
+      \ local-buffer behavior.\\n    \\\"\\\"\\\"\\n    return is_high_throughput_mode(source)\
+      \ and DUCKLAKE_CATALOG.startswith((\\\"postgres://\\\", \\\"postgresql://\\\"\
+      ))\\n\\n\\ndef is_high_throughput_mode(source: dict | None = None) -\\u003e\
+      \ bool:\\n    \\\"\\\"\\\"Return whether the deployment uses the high-throughput\
+      \ topology.\\\"\\\"\\\"\\n    mode = (source or {}).get(\\\"deployment_mode\\\
+      \") or DEPLOYMENT_MODE\\n    return mode == \\\"high_throughput\\\"\\n\\n\\\
+      ndef validate_deployment_mode() -\\u003e None:\\n    \\\"\\\"\\\"Fail fast on\
+      \ incoherent high-throughput configuration.\\n\\n    Called from the backend\
+      \ lifespan AND celery worker init so both\\n    processes refuse to run rather\
+      \ than degrade invisibly:\\n\\n    - Celery mode without a broker: discovery\
+      \ would dispatch into nothing.\\n    - Celery mode on a DuckDB-FILE DuckLake\
+      \ catalog: worker processes write\\n      while the backend reads, which a file\
+      \ catalog cannot support (single\\n      process holds the file lock; concurrent\
+      \ merges tear the catalog and\\n      leave it referencing parquet that never\
+      \ landed \u2014 observed live as\\n      404 NoSuchKey on reads). A transactional\
+      \ multi-writer catalog\\n      (Postgres DSN) is REQUIRED.\\n    - Celery mode\
+      \ on per-pod SQLite metadata: the cron lease, the ingest\\n      ledger, and\
+      \ ingested-file bookkeeping would each be private to one\\n      process, so\
+      \ nothing serializes the fleet. A shared Postgres metadata\\n      database\
+      \ (``METADATA_DSN``) is REQUIRED. See ADR-15.\\n\\n    ``METADATA_DSN`` is read\
+      \ from the environment here rather than captured\\n    as a module constant\
+      \ so this gate and\\n    ``metadata.pg_connection.is_postgres()`` (which also\
+      \ reads it live)\\n    can never disagree about which backend is active.\\n\
+      \    \\\"\\\"\\\"\\n    if DEPLOYMENT_MODE not in {\\\"standard\\\", \\\"high_throughput\\\
+      \"}:\\n        raise RuntimeError(\\\"DEPLOYMENT_MODE must be either 'standard'\
+      \ or 'high_throughput'\\\")\\n    if DEPLOYMENT_MODE != \\\"high_throughput\\\
+      \":\\n        return\\n    if not CELERY_BROKER_URL:\\n        raise RuntimeError(\\\
+      \"DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL to be set\\\")\\\
+      n    if not DUCKLAKE_CATALOG.startswith((\\\"postgres://\\\", \\\"postgresql://\\\
+      \")):\\n        raise RuntimeError(\\n            \\\"DEPLOYMENT_MODE=high_throughput\
+      \ requires DUCKLAKE_CATALOG to be a Postgres DSN \u2014 \\\"\\n            \\\
+      \"a DuckDB-file catalog is single-process and cannot serve concurrent \\\"\\\
+      n            \\\"worker writers plus backend readers (torn merges corrupt the\
+      \ catalog). \\\"\\n            f\\\"Got: {DUCKLAKE_CATALOG!r}\\\"\\n       \
+      \ )\\n    metadata_dsn = os.getenv(\\\"METADATA_DSN\\\", \\\"\\\")\\n    if\
+      \ not metadata_dsn.startswith((\\\"postgres://\\\", \\\"postgresql://\\\")):\\\
+      n        raise RuntimeError(\\n            \\\"DEPLOYMENT_MODE=high_throughput\
+      \ requires METADATA_DSN to be a Postgres DSN \u2014 \\\"\\n            \\\"\
+      per-service SQLite metadata is a pod-local file, so the cron lease \\\"\\n \
+      \           \\\"(job_runs), the ingest ledger, and the ingested-file manifest\
+      \ would \\\"\\n            \\\"each be private to one process: every worker\
+      \ would re-discover and \\\"\\n            \\\"re-convert the same objects and\
+      \ no lease could serialize them. A \\\"\\n            \\\"shared multi-writer\
+      \ metadata database (Postgres DSN) is REQUIRED. \\\"\\n            f\\\"Got:\
+      \ {metadata_dsn!r}\\\"\\n        )\\n\",\"dashboard.py\":\"\\\"\\\"\\\"Dashboard-shaped\
+      \ reads for services owned by the high-scale data plane.\\\"\\\"\\\"\\n\\nfrom\
+      \ __future__ import annotations\\n\\nimport concurrent.futures\\nfrom datetime\
+      \ import datetime\\nfrom typing import Any\\n\\nfrom backend.high_scale.aggregate_query\
+      \ import query_clickhouse_aggregate\\nfrom backend.high_scale.aggregates import\
+      \ AggregateRequest\\nfrom backend.high_scale.registry import HighScaleService\\\
+      nfrom backend.models.dashboard import (\\n    AggregatesRequest,\\n    AggregatesResponse,\\\
+      n    FieldAggregate,\\n    FieldTopEntry,\\n    MapPoint,\\n    TimeSeriesPoint,\\\
+      n)\\nfrom backend.models.security import SecurityTopBotsResponse\\n\\n_FIELD_DIMENSIONS\
+      \ = {\\n    \\\"url\\\": \\\"url\\\",\\n    \\\"country\\\": \\\"country\\\"\
+      ,\\n    \\\"ip\\\": \\\"client_ip\\\",\\n    \\\"asn\\\": \\\"asn\\\",\\n  \
+      \  \\\"host\\\": \\\"host\\\",\\n    \\\"method\\\": \\\"method\\\",\\n    \\\
+      \"status\\\": \\\"status\\\",\\n    \\\"cache\\\": \\\"cache\\\",\\n    \\\"\
+      proto\\\": \\\"proto\\\",\\n    \\\"ua\\\": \\\"ua\\\",\\n    \\\"referer\\\"\
+      : \\\"referer\\\",\\n    \\\"cookie_session\\\": \\\"cookie_session\\\",\\n\
+      \    \\\"resp_header_content_encoding\\\": \\\"resp_header_content_encoding\\\
+      \",\\n    \\\"ttl\\\": \\\"ttl\\\",\\n    \\\"age\\\": \\\"age\\\",\\n    \\\
+      \"hits\\\": \\\"hits\\\",\\n    \\\"digest\\\": \\\"digest\\\",\\n    \\\"city\\\
+      \": \\\"city\\\",\\n    \\\"region\\\": \\\"region\\\",\\n    \\\"metro\\\"\
+      : \\\"metro\\\",\\n    \\\"transport\\\": \\\"transport\\\",\\n    \\\"c_speed\\\
+      \": \\\"c_speed\\\",\\n    \\\"c_type\\\": \\\"c_type\\\",\\n    \\\"pop\\\"\
+      : \\\"pop\\\",\\n    \\\"backend\\\": \\\"backend\\\",\\n    \\\"edge\\\": \\\
+      \"edge\\\",\\n    \\\"server_region\\\": \\\"server_region\\\",\\n    \\\"tls\\\
+      \": \\\"tls\\\",\\n    \\\"is_ipv6\\\": \\\"is_ipv6\\\",\\n    \\\"conn_requests\\\
+      \": \\\"conn_requests\\\",\\n    \\\"waf\\\": \\\"waf\\\",\\n    \\\"waf_resp\\\
+      \": \\\"waf_resp\\\",\\n    \\\"waf_ms\\\": \\\"waf_ms\\\",\\n    \\\"p_type\\\
+      \": \\\"p_type\\\",\\n    \\\"p_desc\\\": \\\"p_desc\\\",\\n    \\\"ja3\\\"\
+      : \\\"ja3\\\",\\n    \\\"ja4\\\": \\\"ja4\\\",\\n    \\\"tls_ciphers_sha\\\"\
+      : \\\"tls_ciphers_sha\\\",\\n    \\\"io_input_format\\\": \\\"io_input_format\\\
+      \",\\n    \\\"io_output_format\\\": \\\"io_output_format\\\",\\n}\\n_HEADER_TABLES\
+      \ = {\\n    \\\"request\\\": \\\"request_facts\\\",\\n    \\\"rum_vitals\\\"\
+      : \\\"rum_vitals_facts\\\",\\n    \\\"rum_errors\\\": \\\"rum_error_facts\\\"\
+      ,\\n}\\n\\n\\ndef _range_value(value: str | None) -\\u003e datetime | None:\\\
+      n    if value is None:\\n        return None\\n    return datetime.fromisoformat(value.replace(\\\
+      \"Z\\\", \\\"+00:00\\\"))\\n\\n\\ndef header_metrics(service: HighScaleService)\
+      \ -\\u003e dict[str, Any]:\\n    \\\"\\\"\\\"Return visible ClickHouse row counts\
+      \ and event-time extents for the header.\\\"\\\"\\\"\\n    totals: dict[str,\
+      \ int] = {}\\n    latest: dict[str, str | None] = {}\\n    for domain, table\
+      \ in _HEADER_TABLES.items():\\n        rows = service.client.execute(\\n   \
+      \         f\\\"SELECT count() AS total_rows, max(event_timestamp) AS latest_log_at\
+      \ \\\"\\n            f\\\"FROM {table} \\\"\\n            \\\"WHERE service_id={service_id:String}\
+      \ \\\"\\n            \\\"AND 1=1 \\\"\\n            \\\"AND batch_id IN (\\\"\
+      \\n            \\\"SELECT batch_id FROM high_scale_batch_publications FINAL\
+      \ \\\"\\n            \\\"WHERE service_id={service_id:String} AND domain={domain:String}\
+      \ \\\"\\n            \\\"AND 1=1\\\"\\n            \\\")\\\",\\n           \
+      \ {\\\"service_id\\\": service.service_id, \\\"domain\\\": domain},\\n     \
+      \   )\\n        row = rows[0] if rows else {}\\n        total_rows = int(row.get(\\\
+      \"total_rows\\\") or 0)\\n        latest_value: object = row.get(\\\"latest_log_at\\\
+      \")\\n        if isinstance(latest_value, datetime):\\n            latest_value\
+      \ = latest_value.isoformat()\\n        totals[domain] = total_rows\\n      \
+      \  latest[domain] = str(latest_value) if latest_value is not None else None\\\
+      n\\n    rum_total = totals[\\\"rum_vitals\\\"] + totals[\\\"rum_errors\\\"]\\\
+      n    rum_latest_values = [latest[\\\"rum_vitals\\\"], latest[\\\"rum_errors\\\
+      \"]]\\n    rum_latest = max((value for value in rum_latest_values if value is\
+      \ not None), default=None)\\n    request_total = totals[\\\"request\\\"]\\n\
+      \    request_latest = latest[\\\"request\\\"]\\n    return {\\n        \\\"\
+      request\\\": {\\n            \\\"latest_log_at\\\": request_latest,\\n     \
+      \       \\\"total_rows\\\": request_total,\\n            \\\"last_sync_at\\\"\
+      : None,\\n        },\\n        \\\"rum\\\": {\\n            \\\"latest_log_at\\\
+      \": rum_latest,\\n            \\\"total_rows\\\": rum_total,\\n            \\\
+      \"last_sync_at\\\": None,\\n        },\\n        \\\"latest_log_at\\\": request_latest,\\\
+      n        \\\"local_rows\\\": request_total + rum_total,\\n    }\\n\\n\\ndef\
+      \ _aggregate(\\n    service: HighScaleService,\\n    *,\\n    start_time: str\
+      \ | None,\\n    end_time: str | None,\\n    dimension: str,\\n):\\n    start\
+      \ = _range_value(start_time)\\n    end = _range_value(end_time)\\n    return\
+      \ query_clickhouse_aggregate(\\n        service.client,\\n        AggregateRequest(\\\
+      n            service_id=service.service_id,\\n            domain=\\\"request\\\
+      \",\\n            start=start,\\n            end=end,\\n            dimension=dimension,\\\
+      n        ),\\n        watermark=service.watermark_for(\\\"request\\\"),\\n \
+      \   )\\n\\n\\ndef _time_series(service: HighScaleService, start_time: str |\
+      \ None, end_time: str | None) -\\u003e list[TimeSeriesPoint]:\\n    start =\
+      \ _range_value(start_time)\\n    end = _range_value(end_time)\\n    clauses\
+      \ = [\\n        \\\"service_id={service_id:String}\\\",\\n        \\\"1=1\\\"\
+      ,\\n    ]\\n    params: dict[str, Any] = {\\\"service_id\\\": service.service_id}\\\
+      n    if start is not None and end is not None:\\n        clauses.extend([\\\"\
+      bucket_start \\u003e= {start:DateTime64(3)}\\\", \\\"bucket_start \\u003c {end:DateTime64(3)}\\\
+      \"])\\n        params.update({\\\"start\\\": start, \\\"end\\\": end})\\n  \
+      \  rows = service.client.execute(\\n        \\\"SELECT bucket_start, sum(request_count)\
+      \ AS value \\\"\\n        \\\"FROM request_aggregates \\\"\\n        f\\\"WHERE\
+      \ {' AND '.join(clauses)} \\\"\\n        \\\"GROUP BY bucket_start ORDER BY\
+      \ bucket_start\\\",\\n        params,\\n    )\\n    return [TimeSeriesPoint(time=str(row[\\\
+      \"bucket_start\\\"]), value=float(row[\\\"value\\\"])) for row in rows]\\n\\\
+      n\\ndef _build_clickhouse_filters(filters: dict[str, Any]) -\\u003e tuple[str,\
+      \ dict[str, Any]]:\\n    if not filters:\\n        return \\\"1=1\\\", {}\\\
+      n    import logging\\n\\n    logging.getLogger(__name__).warning(\\\"DEBUG FILTERS\
+      \ TYPE filters=%s type=%s\\\", filters, type(filters))\\n    for k, v in filters.items():\\\
+      n        logging.getLogger(__name__).warning(\\\"DEBUG FILTERS ITEM k=%s v=%s\
+      \ type=%s\\\", k, v, type(v))\\n\\n    clauses = []\\n    params = {}\\n\\n\
+      \    for i, (field, config) in enumerate(filters.items()):\\n        if isinstance(config,\
+      \ dict):\\n            mode = config.get(\\\"mode\\\", \\\"include\\\")\\n \
+      \           values = config.get(\\\"values\\\", [])\\n        else:\\n     \
+      \       mode = getattr(config, \\\"mode\\\", \\\"include\\\")\\n           \
+      \ values = getattr(config, \\\"values\\\", [])\\n\\n        if values is None\
+      \ or not values:\\n            continue\\n\\n        col_name = _FIELD_DIMENSIONS.get(field)\\\
+      n        if not col_name:\\n            continue\\n\\n        if col_name in\
+      \ {\\\"client_ip\\\", \\\"country\\\", \\\"url\\\", \\\"cmcd\\\", \\\"custom_fields\\\
+      \"}:\\n            sql_col = col_name\\n        elif col_name in {\\\"age\\\"\
+      , \\\"ttl\\\"}:\\n            sql_col = f\\\"CAST(CAST(ROUND(CAST(custom_fields['{col_name}']\
+      \ AS Float64)) AS INTEGER) AS VARCHAR)\\\"\\n        else:\\n            sql_col\
+      \ = f\\\"custom_fields['{col_name}']\\\"\\n\\n        op = \\\"IN\\\" if mode\
+      \ == \\\"include\\\" else \\\"NOT IN\\\"\\n        keys = []\\n        for j,\
+      \ val in enumerate(values):\\n            p_name = f\\\"filter_{i}_{j}\\\"\\\
+      n            params[p_name] = str(val)\\n            keys.append(f\\\"{{{p_name}:String}}\\\
+      \")\\n\\n        if keys:\\n            clauses.append(f\\\"{sql_col} {op} ({',\
+      \ '.join(keys)})\\\")\\n        else:\\n            clauses.append(\\\"1=0\\\
+      \" if mode == \\\"include\\\" else \\\"1=1\\\")\\n\\n    where_sql = \\\" AND\
+      \ \\\".join(clauses) if clauses else \\\"1=1\\\"\\n    import logging\\n\\n\
+      \    logging.getLogger(__name__).warning(\\\"BUILD_CLICKHOUSE_FILTERS END: filters=%s\
+      \ -\\u003e %s %s\\\", filters, where_sql, params)\\n    import logging\\n\\\
+      n    logging.getLogger(__name__).warning(\\n        \\\"BUILD_CLICKHOUSE_FILTERS\
+      \ clauses=%s params=%s filters=%s\\\", clauses, params, filters\\n    )\\n \
+      \   return where_sql, params\\n\\n\\ndef _filtered_aggregates(\\n    service:\
+      \ HighScaleService, req: AggregatesRequest, start_time: str | None, end_time:\
+      \ str | None\\n):\\n    start = _range_value(start_time)\\n    end = _range_value(end_time)\\\
+      n\\n    if not req.filters:\\n        filter_dict = {}\\n    elif hasattr(req.filters,\
+      \ \\\"model_dump\\\"):\\n        filter_dict = req.filters.model_dump()\\n \
+      \   elif hasattr(req.filters, \\\"dict\\\"):\\n        filter_dict = req.filters.dict()\\\
+      n    else:\\n        filter_dict = req.filters\\n    where_sql, filter_params\
+      \ = _build_clickhouse_filters(filter_dict)\\n    import logging\\n\\n    logging.getLogger(__name__).warning(\\\
+      n        \\\"DEBUG FILTERS filter_dict=%s mode=%s values=%s clauses=%s\\\",\\\
+      n        filter_dict,\\n        type(filter_dict),\\n        filter_params,\\\
+      n        where_sql,\\n    )\\n\\n    clauses = [\\\"service_id={service_id:String}\\\
+      \", \\\"1=1\\\", where_sql]\\n\\n    params: dict[str, Any] = {\\\"service_id\\\
+      \": service.service_id, **filter_params}\\n\\n    if start is not None and end\
+      \ is not None:\\n        clauses.append(\\\"event_timestamp \\u003e= {start:DateTime64(3)}\\\
+      \")\\n        clauses.append(\\\"event_timestamp \\u003c {end:DateTime64(3)}\\\
+      \")\\n        params.update({\\\"start\\\": start, \\\"end\\\": end})\\n\\n\
+      \    where_clause = \\\" AND \\\".join(clauses)\\n    import logging\\n\\n \
+      \   logging.getLogger(__name__).warning(\\\"DEBUG EXACT QUERY: %s params: %s\\\
+      \", where_clause, params)\\n\\n    requested_fields = req.fields or list(_FIELD_DIMENSIONS)\\\
+      n\\n    def fetch_field(field: str):\\n        if field not in _FIELD_DIMENSIONS:\\\
+      n            return field, []\\n        col_name = _FIELD_DIMENSIONS[field]\\\
+      n\\n        if col_name in {\\\"client_ip\\\", \\\"country\\\", \\\"url\\\"\
+      , \\\"cmcd\\\", \\\"custom_fields\\\"}:\\n            sql_col = col_name\\n\
+      \        elif col_name in {\\\"age\\\", \\\"ttl\\\"}:\\n            sql_col\
+      \ = f\\\"CAST(CAST(ROUND(CAST(custom_fields['{col_name}'] AS Float64)) AS INTEGER)\
+      \ AS VARCHAR)\\\"\\n        else:\\n            sql_col = f\\\"custom_fields['{col_name}']\\\
+      \"\\n\\n        q = f\\\"SELECT {sql_col} AS v, count() AS c FROM request_facts\
+      \ WHERE {where_clause} AND {sql_col} != '' GROUP BY v ORDER BY c DESC LIMIT\
+      \ 10\\\"\\n        try:\\n            rows = service.client.execute(q, params)\\\
+      n            return field, [(str(r[\\\"v\\\"]), int(r[\\\"c\\\"])) for r in\
+      \ rows]\\n        except Exception as e:\\n            import logging\\n\\n\
+      \            logging.getLogger(__name__).error(\\\"FILTER ERROR field %s: %s\\\
+      \", field, e)\\n            return field, []\\n\\n    with concurrent.futures.ThreadPoolExecutor(max_workers=8)\
+      \ as ex:\\n        field_results = dict(ex.map(fetch_field, requested_fields))\\\
+      n\\n    try:\\n        total_rows_result = service.client.execute(\\n      \
+      \      f\\\"SELECT count() AS c FROM request_facts WHERE {where_clause}\\\"\
+      , params\\n        )\\n        total_count = int(total_rows_result[0][\\\"c\\\
+      \"]) if total_rows_result else 0\\n    except Exception as e:\\n        import\
+      \ logging\\n\\n        logging.getLogger(__name__).error(\\\"FILTER ERROR total:\
+      \ %s\\\", e)\\n        total_count = 0\\n\\n    data = {\\n        field: FieldAggregate(\\\
+      n            top=[FieldTopEntry(value=v, count=c) for v, c in top_values],\\\
+      n            total=total_count,\\n        )\\n        for field, top_values\
+      \ in field_results.items()\\n    }\\n\\n    map_data = [MapPoint(country=v,\
+      \ count=c) for v, c in field_results.get(\\\"country\\\", [])]\\n\\n    time_series\
+      \ = []\\n    if req.include_time_series is not False:\\n        interval_sql\
+      \ = \\\"toStartOfMinute(event_timestamp)\\\"\\n        if req.chart_interval\
+      \ == \\\"5 minute\\\":\\n            interval_sql = \\\"toStartOfFiveMinutes(event_timestamp)\\\
+      \"\\n        elif req.chart_interval == \\\"1 hour\\\":\\n            interval_sql\
+      \ = \\\"toStartOfInterval(event_timestamp, INTERVAL 1 hour)\\\"\\n        elif\
+      \ req.chart_interval == \\\"1 day\\\":\\n            interval_sql = \\\"toStartOfDay(event_timestamp)\\\
+      \"\\n\\n        ts_q = f\\\"SELECT {interval_sql} AS bucket_start, count() AS\
+      \ value FROM request_facts WHERE {where_clause} GROUP BY bucket_start ORDER\
+      \ BY bucket_start\\\"\\n        try:\\n            ts_rows = service.client.execute(ts_q,\
+      \ params)\\n            time_series = [TimeSeriesPoint(time=str(r[\\\"bucket_start\\\
+      \"]), value=float(r[\\\"value\\\"])) for r in ts_rows]\\n        except Exception:\\\
+      n            time_series = []\\n\\n    return AggregatesResponse.with_telemetry(\\\
+      n        data=data,\\n        time_series=time_series,\\n        map_data=map_data,\\\
+      n        where_clause=\\\"high-scale ClickHouse (filtered)\\\",\\n        interval=req.chart_interval,\\\
+      n        metric=req.chart_metric,\\n        total_rows=total_count,\\n     \
+      \   total_rows_total=total_count,\\n        earliest_log_at=None,\\n       \
+      \ latest_log_at=None,\\n    )\\n\\n\\ndef aggregates(service: HighScaleService,\
+      \ req: AggregatesRequest, start_time: str | None, end_time: str | None):\\n\
+      \    if req.filters:\\n        return _filtered_aggregates(service, req, start_time,\
+      \ end_time)\\n\\n    requested_fields = req.fields or list(_FIELD_DIMENSIONS)\\\
+      n    responses = {\\n        field: _aggregate(\\n            service,\\n  \
+      \          start_time=start_time,\\n            end_time=end_time,\\n      \
+      \      dimension=_FIELD_DIMENSIONS[field],\\n        )\\n        for field in\
+      \ requested_fields\\n        if field in _FIELD_DIMENSIONS\\n    }\\n    total\
+      \ = responses.get(\\\"url\\\")\\n    if total is None:\\n        total = _aggregate(service,\
+      \ start_time=start_time, end_time=end_time, dimension=\\\"url\\\")\\n\\n   \
+      \ data = {\\n        field: FieldAggregate(\\n            top=[FieldTopEntry(value=value,\
+      \ count=count) for value, count in response.top_values],\\n            total=response.request_count,\\\
+      n        )\\n        for field, response in responses.items()\\n    }\\n   \
+      \ map_response = responses.get(\\\"country\\\")\\n    map_data = (\\n      \
+      \  [MapPoint(country=value, count=count) for value, count in map_response.top_values]\\\
+      n        if map_response is not None\\n        else []\\n    )\\n    time_series\
+      \ = _time_series(service, start_time, end_time)\\n    return AggregatesResponse.with_telemetry(\\\
+      n        data=data,\\n        time_series=time_series,\\n        map_data=map_data,\\\
+      n        where_clause=\\\"high-scale ClickHouse\\\",\\n        interval=req.chart_interval,\\\
+      n        metric=req.chart_metric,\\n        total_rows=total.request_count,\\\
+      n        total_rows_total=total.request_count,\\n        earliest_log_at=None,\\\
+      n        latest_log_at=None,\\n    )\\n\\n\\ndef bundle(\\n    service: HighScaleService,\\\
+      n    req: AggregatesRequest,\\n    start_time: str | None,\\n    end_time: str\
+      \ | None,\\n) -\\u003e dict[str, Any]:\\n    from backend.utils.telemetry import\
+      \ get_queries, get_sqlite_queries, get_tracked_calls\\n\\n    res_aggregates\
+      \ = aggregates(service, req, start_time, end_time)\\n    res_top_bots = SecurityTopBotsResponse.with_telemetry(bots=[],\
+      \ ngwaf_bots=[])\\n\\n    return {\\n        \\\"aggregates\\\": res_aggregates,\\\
+      n        \\\"top_bots\\\": res_top_bots,\\n        \\\"debug_queries\\\": get_queries(),\\\
+      n        \\\"debug_calls\\\": get_tracked_calls(),\\n        \\\"debug_sqlite\\\
+      \": list(get_sqlite_queries()),\\n    }\\n\",\"sync_status.py\":\"\\\"\\\"\\\
+      \"Sync-status surface: cached snapshot reader, full /sync-status,\\nanalyst-safe\
+      \ /log-extents, and /admin/ingested-files.\\\"\\\"\\\"\\n\\nfrom __future__\
+      \ import annotations\\n\\nimport asyncio\\nimport json\\nimport logging\\nimport\
+      \ os\\nfrom collections.abc import AsyncIterator\\n\\nfrom fastapi import APIRouter,\
+      \ Depends, HTTPException, Query, Request\\nfrom sse_starlette.sse import EventSourceResponse\\\
+      n\\nfrom backend.deps import get_service_id, get_source\\nfrom backend.models.admin\
+      \ import IngestedFilesResponse, LogExtentsResponse, SyncStatusResponse\\nfrom\
+      \ backend.models.errors import DEFAULT_ERROR_RESPONSES\\nfrom backend.sync_status_publisher\
+      \ import publisher as sync_status_publisher\\nfrom backend.utils.router_utils\
+      \ import SSE_PASSTHROUGH_HEADERS, make_error, query_errors, raise_internal\\\
+      nfrom backend.utils.sse_subscription import iter_with_disconnect_ping\\n\\nlogger\
+      \ = logging.getLogger(__name__)\\n\\nfrom ._dir_size import _get_dir_size\\\
+      nfrom ._router import router\\n\\n# Dedicated router for the analyst-safe sync-status\
+      \ siblings (/api/log-extents\\n# + /stream). FastAPI MERGES router-level and\
+      \ route-level tags, so a bare\\n# ``tags=[\\\"meta\\\"]`` on the decorators\
+      \ would yield ``[\\\"admin\\\", \\\"meta\\\"]`` and\\n# leave the misleading\
+      \ \\\"admin\\\" audience signal the shared admin router stamps.\\n# A separate\
+      \ router carrying only the neutral \\\"meta\\\" tag is the clean way to\\n#\
+      \ drop \\\"admin\\\" while keeping the same /api paths and canonical error responses.\\\
+      n# Runtime audience is enforced by RemoteAccessMiddleware (path-based), not\
+      \ the\\n# OpenAPI tag, so this is a docs-only distinction. Included alongside\\\
+      n# ``admin.router`` in backend/main.py.\\nmeta_router = APIRouter(prefix=\\\"\
+      /api\\\", tags=[\\\"meta\\\"], responses=DEFAULT_ERROR_RESPONSES)\\n\\n\\n#\
+      \ Implementation moved to backend/sync_status_snapshot.py so cron jobs can\\\
+      n# publish post-commit snapshots without a cron -\\u003e routers import edge\\\
+      n# (import-linter). Re-exported here for the historical import path; tests\\\
+      n# patch this module-level binding, so keep the name bound here.\\nfrom backend.sync_status_snapshot\
+      \ import compute_sync_status_cached  # noqa: E402, F401\\n\\n\\n@router.get(\\\
+      \"/sync-status\\\", response_model=SyncStatusResponse)\\ndef sync_status(\\\
+      n    service_id: str | None = Depends(get_service_id),\\n    skip_fos: bool\
+      \ = Query(default=False),\\n    force: bool = Query(default=False),\\n) -\\\
+      u003e SyncStatusResponse:\\n    from backend import config as svcconfig\\n \
+      \   from backend.core import duckdb as _db\\n    from backend.core.duckdb import\
+      \ get_sync_status\\n    from backend.utils.telemetry import clear_queries\\\
+      n\\n    clear_queries()\\n\\n    src: dict | None = None\\n    if service_id:\\\
+      n        src = _db.get_source_for_service(service_id)\\n    if not src or not\
+      \ service_id:\\n        resp_empty: SyncStatusResponse = SyncStatusResponse.with_telemetry(configured=False)\\\
+      n        return resp_empty\\n\\n    try:\\n        from backend.high_scale.registry\
+      \ import get_high_scale_service_registry\\n\\n        high_scale_service = get_high_scale_service_registry().resolve(service_id)\\\
+      n        if high_scale_service is not None:\\n            cached = compute_sync_status_cached(service_id)\\\
+      n            if cached is not None:\\n                high_scale_response: SyncStatusResponse\
+      \ = SyncStatusResponse.with_telemetry(**cached)\\n                return high_scale_response\\\
+      n\\n        # Fast path: skip_fos=true callers (FilterBar polling, badge in\\\
+      n        # the page header, etc.) only need the cached snapshot that the\\n\
+      \        # sync cron refreshes every minute. Return it without grabbing a\\\
+      n        # DuckDB connection, so that a busy dashboard load \u2014 agg/raw/\\\
+      n        # bots all racing for connections \u2014 doesn't starve sync-status\\\
+      n        # and trigger 503s when its max_wait expires.\\n        if skip_fos\
+      \ and not force:\\n            cached = compute_sync_status_cached(service_id)\\\
+      n            if cached is not None:\\n                resp_cached: SyncStatusResponse\
+      \ = SyncStatusResponse.with_telemetry(**cached)\\n                return resp_cached\\\
+      n\\n        from backend.core.duckdb import get_connection\\n\\n        is_durable\
+      \ = svcconfig.is_durable_serving_mode(src)\\n        _con = get_connection(source=src,\
+      \ max_wait=5, skip_view_update=True, read_only=is_durable)\\n        try:\\\
+      n            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)\\\
+      n        finally:\\n            _con.close()\\n\\n        db_path = src.get(\\\
+      \"duckdb_path\\\") or svcconfig.duckdb_path(service_id)\\n        db_exists\
+      \ = os.path.exists(db_path)\\n        db_size = os.path.getsize(db_path) if\
+      \ db_exists else 0\\n\\n        cache_size = _get_dir_size(_db._cache_dir(src))\\\
+      n\\n        status[\\\"duckdb_size_bytes\\\"] = db_size + cache_size\\n    \
+      \    status[\\\"duckdb_exists\\\"] = db_exists\\n\\n        from backend.cron_progress\
+      \ import get_latest_progress_for_service\\n\\n        active_run = get_latest_progress_for_service(service_id)\\\
+      n        if active_run:\\n            status[\\\"active_run\\\"] = active_run\\\
+      n            status[\\\"busy\\\"] = True\\n\\n        cfg = svcconfig.load_config(service_id)\
+      \ or {}\\n        status[\\\"ngwaf_workspace_id\\\"] = cfg.get(\\\"ngwaf_workspace_id\\\
+      \")\\n\\n        resp: SyncStatusResponse = SyncStatusResponse.with_telemetry(**status)\\\
+      n        return resp\\n    except _db.DBBusyError as e:\\n        raise HTTPException(status_code=503,\
+      \ detail=make_error(\\\"db_busy\\\", str(e), busy=True))\\n    except Exception\
+      \ as e:\\n        raise_internal(logger, e, code=\\\"sync_status_failed\\\"\
+      )\\n\\n\\n@meta_router.get(\\\"/log-extents\\\", response_model=LogExtentsResponse)\\\
+      ndef log_extents(service_id: str | None = Depends(get_service_id)) -\\u003e\
+      \ LogExtentsResponse:\\n    \\\"\\\"\\\"Return only the earliest/latest log\
+      \ timestamps for the FilterBar.\\n\\n    Analyst-safe sibling of ``/api/sync-status``:\
+      \ same cached-status fast\\n    path but projected down to the two fields the\
+      \ FilterBar actually\\n    reads. ``/api/sync-status`` is blocked for analysts\
+      \ because it leaks\\n    ``ngwaf_workspace_id`` and active cron-task state;\
+      \ this endpoint\\n    drops both, so the middleware lets it through and the\
+      \ FilterBar's\\n    snap-to-extents UX works for analysts too.\\n\\n    Reads\
+      \ only the persisted status snapshot \u2014 no DuckDB connection\\n    grabbed,\
+      \ no contention with cron, no 503 path. The snapshot is\\n    refreshed by the\
+      \ sync cron every minute so a freshly started\\n    service sees populated extents\
+      \ within ~60s.\\n    \\\"\\\"\\\"\\n    from backend import config as svcconfig\\\
+      n    from backend.core import duckdb as _db\\n\\n    if not service_id:\\n \
+      \       empty1: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)\\\
+      n        return empty1\\n    src = _db.get_source_for_service(service_id)\\\
+      n    if not src:\\n        empty2: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)\\\
+      n        return empty2\\n\\n    cached = svcconfig.get_status(src[\\\"name\\\
+      \"]) or {}\\n    request_status = cached.get(\\\"request\\\")\\n    latest =\
+      \ request_status.get(\\\"latest_log_at\\\") if isinstance(request_status, dict)\
+      \ else cached.get(\\\"latest_log_at\\\")\\n    resp: LogExtentsResponse = LogExtentsResponse.with_telemetry(\\\
+      n        configured=True,\\n        earliest_log_at=cached.get(\\\"earliest_log_at\\\
+      \"),\\n        latest_log_at=latest,\\n    )\\n    return resp\\n\\n\\n@meta_router.get(\\\
+      \"/log-extents/stream\\\")\\nasync def log_extents_stream(\\n    request: Request,\\\
+      n    service_id: str | None = Depends(get_service_id),\\n) -\\u003e EventSourceResponse:\\\
+      n    \\\"\\\"\\\"Analyst-safe SSE projection of the cached sync-status snapshot.\\\
+      n\\n    Re-uses the existing ``sync_status_publisher`` (the admin\\n    ``/api/sync-status/stream``\
+      \ endpoint subscribes to the same\\n    publisher) but projects every payload\
+      \ down to the two fields the\\n    header badge actually renders \u2014 ``latest_log_at``\
+      \ + ``local_rows``\\n    \u2014 so analysts can receive real-time badge updates\
+      \ without leaking\\n    ``ngwaf_workspace_id``, ``active_run``, ``cdn_service_id``,\
+      \ etc.\\n\\n    Path lives under ``/api/log-extents/*`` (the analyst-safe sibling\\\
+      n    of ``/api/sync-status``) so middleware does NOT auto-block it.\\n    Belt-and-suspenders:\
+      \ also listed in ``_ANALYST_SSE_ALLOWLIST`` in\\n    ``backend/utils/remote_access.py``\
+      \ so the analyst-side firewall's\\n    SSE-defaults-off policy documents this\
+      \ opening explicitly.\\n    \\\"\\\"\\\"\\n    if not service_id:\\n       \
+      \ raise HTTPException(status_code=422, detail=make_error(\\\"x_service_id_required\\\
+      \"))\\n\\n    def _project(snap: dict | None) -\\u003e dict | None:\\n     \
+      \   if snap is None:\\n            return None\\n        return {\\n       \
+      \     \\\"latest_log_at\\\": snap.get(\\\"latest_log_at\\\"),\\n           \
+      \ \\\"local_rows\\\": snap.get(\\\"local_rows\\\"),\\n            \\\"rum\\\"\
+      : snap.get(\\\"rum\\\"),\\n            \\\"request\\\": snap.get(\\\"request\\\
+      \"),\\n        }\\n\\n    async def stream() -\\u003e AsyncIterator[str]:\\\
+      n        # Initial snapshot so a freshly mounted analyst page doesn't\\n   \
+      \     # blank-flash waiting for the first cron tick.\\n        # compute_sync_status_cached\
+      \ touches disk (os.path.getsize +\\n        # directory traversal via _get_dir_size);\
+      \ calling it directly on\\n        # the SSE coroutine stalled the asyncio event\
+      \ loop for the\\n        # duration of the I/O, denying service to every other\
+      \ concurrent\\n        # request on the same worker. Off-load to a worker thread.\\\
+      n        initial = _project(await asyncio.to_thread(compute_sync_status_cached,\
+      \ service_id))\\n        if initial is not None:\\n            yield json.dumps(initial)\\\
+      n\\n        # Race the publisher against disconnect detection \u2014 see\\n\
+      \        # backend.utils.sse_subscription. Shields the long-lived\\n       \
+      \ # __anext__() task across timeouts so the publisher queue stays\\n       \
+      \ # parked between pings (a bare wait_for would cancel the\\n        # generator's\
+      \ q.get() and silently end the subscriber).\\n        async for payload in iter_with_disconnect_ping(\\\
+      n            sync_status_publisher.subscribe(service_id), request, ping_seconds=15\\\
+      n        ):\\n            projected = _project(payload)\\n            if projected\
+      \ is not None:\\n                yield json.dumps(projected)\\n\\n    return\
+      \ EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)\\n\\\
+      n\\n@router.get(\\\"/admin/ingested-files\\\", response_model=IngestedFilesResponse)\\\
+      n@query_errors(status_code=500)\\ndef ingested_files(source: dict = Depends(get_source))\
+      \ -\\u003e IngestedFilesResponse:\\n    from backend.core.duckdb import get_ingested_files\\\
+      n\\n    res = get_ingested_files(None, source)\\n    response: IngestedFilesResponse\
+      \ = IngestedFilesResponse.with_telemetry(files=res)\\n    return response\\\
+      n\"},\"kind\":\"ConfigMap\",\"metadata\":{\"annotations\":{},\"creationTimestamp\"\
+      :\"2026-09-16T08:45:56Z\",\"name\":\"backend-hotfix\",\"namespace\":\"se-demo\"\
+      ,\"resourceVersion\":\"1789689157708735014\",\"uid\":\"a945420e-c634-498f-9df5-2d0f1e78226f\"\
+      }}\n"
+  creationTimestamp: '2026-09-16T08:45:56Z'
+  name: backend-hotfix
+  namespace: se-demo
+  resourceVersion: '1789689429802591014'
+  uid: a945420e-c634-498f-9df5-2d0f1e78226f

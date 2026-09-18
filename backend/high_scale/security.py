@@ -117,6 +117,10 @@ def security_aggregates(
         for r in bot_rows
     ]
 
+    # Fetch top bots and proxies since they are now part of aggregates
+    bots_res = top_bots(service, req, start_time, end_time)
+    proxies_res = get_proxies_data(service, req, start_time, end_time)
+
     return SecurityAggregatesResponse.with_telemetry(
         tls_fingerprints=tls_fp_rows,
         req_size_dist=size_rows,
@@ -129,6 +133,14 @@ def security_aggregates(
         wellknown_bots=[],
         fingerprint_coverage={"tls_ciphers_sha": 1.0},
         ngwaf_configured=True if ngwaf_verified_bots else False,
+        bots=bots_res.bots,
+        ngwaf_bots=bots_res.ngwaf_bots,
+        active_proxies_count=proxies_res.active_proxies_count,
+        tunnel_requests_count=proxies_res.tunnel_requests_count,
+        distance_mismatches_count=proxies_res.distance_mismatches_count,
+        traffic_quality=proxies_res.traffic_quality,
+        suspicious_isps=proxies_res.suspicious_isps,
+        active_clients=proxies_res.active_clients,
     )
 
 

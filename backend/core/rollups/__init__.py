@@ -113,6 +113,7 @@ from .day_bundles import (
     backfill_day_bundles,
     bundle_days,
     compact_closed_days_to_daily,
+    compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
@@ -130,6 +131,7 @@ from .hour_bundles import (
     _cleanup_per_field_after_bundle,
     bundle_hours,
 )
+from .network_quality import backfill_network_quality_bundles, build_network_quality_bundles
 from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
 from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
 from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
@@ -181,6 +183,8 @@ __all__ = [
     "build_network_summary_bundles",
     "backfill_network_summary_bundles",
     "build_network_speed_bundles",
+    "build_network_quality_bundles",
+    "backfill_network_quality_bundles",
     "backfill_network_speed_bundles",
     "build_ngwaf_bots_bundles",
     "backfill_ngwaf_bots_bundles",
@@ -203,6 +207,7 @@ __all__ = [
     "compact_origin_dims_closed_days_to_daily",
     "compact_origin_latency_ts_closed_days_to_daily",
     "compact_network_rtt_closed_days_to_daily",
+    "compact_network_quality_closed_days_to_daily",
     "compact_network_speed_closed_days_to_daily",
     "compact_ngwaf_bots_closed_days_to_daily",
     "compact_verified_bots_ts_closed_days_to_daily",

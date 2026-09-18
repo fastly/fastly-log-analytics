@@ -71,6 +71,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     import logging
 
     from backend.core.rollups import (
+        backfill_network_quality_bundles,
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
         backfill_network_summary_bundles,
@@ -86,6 +87,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_slow_urls_bundles,
         backfill_verified_bots_ts_bundles,
         backfill_wellknown_bots_rollup,
+        compact_network_quality_closed_days_to_daily,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
         compact_ngwaf_bots_closed_days_to_daily,
@@ -138,6 +140,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts = backfill_origin_latency_ts_bundles(sid, source)
     n_nr = backfill_network_rtt_bundles(sid, source)
     n_ns = backfill_network_speed_bundles(sid, source)
+    n_nq = backfill_network_quality_bundles(sid, source)
     n_vbts = backfill_verified_bots_ts_bundles(sid, source)
     n_perf = backfill_perf_latency_bundles(sid, source)
     n_ph = backfill_pop_health_bundles(sid, source)
@@ -166,6 +169,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
     n_nr_day = compact_network_rtt_closed_days_to_daily(sid, source)
     n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
+    n_nq_day = compact_network_quality_closed_days_to_daily(sid, source)
     n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
     n_ph_day = compact_pop_health_closed_days_to_daily(sid, source)
@@ -185,6 +189,8 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "network_rtt_days": n_nr_day,
         "network_speed": n_ns,
         "network_speed_days": n_ns_day,
+        "network_quality": n_nq,
+        "network_quality_days": n_nq_day,
         "verified_bots_ts": n_vbts,
         "verified_bots_ts_days": n_vbts_day,
         "perf_latency": n_perf,

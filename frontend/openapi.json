@@ -4816,380 +4816,6 @@
         }
       }
     },
-    "/api/security/top-bots": {
-      "post": {
-        "tags": [
-          "security"
-        ],
-        "summary": "Top Bots",
-        "operationId": "top_bots_api_security_top_bots_post",
-        "parameters": [
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilteredRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecurityTopBotsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/security/proxies": {
-      "post": {
-        "tags": [
-          "security"
-        ],
-        "summary": "Get Proxies Data",
-        "operationId": "get_proxies_data_api_security_proxies_post",
-        "parameters": [
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SecurityProxiesRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecurityProxiesResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/security/proxies/export": {
       "get": {
         "tags": [
@@ -45790,43 +45416,6 @@
         "title": "FilterSpec",
         "description": "Multi-value filter for a single column.\n\nExample POST body:\n    {\"country\": {\"mode\": \"include\", \"values\": [\"US\", \"CA\"]}}"
       },
-      "FilteredRequest": {
-        "properties": {
-          "start_time": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start Time"
-          },
-          "end_time": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End Time"
-          },
-          "filters": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/FilterSpec"
-            },
-            "type": "object",
-            "title": "Filters",
-            "default": {}
-          }
-        },
-        "type": "object",
-        "title": "FilteredRequest",
-        "description": "Base for POST bodies that carry both a date range and column filters."
-      },
       "GdprErasePayload": {
         "properties": {
           "email": {
@@ -57944,7 +57533,9 @@
                     "top_ips_header",
                     "ipv6_adoption",
                     "proxy_dist",
-                    "conn_reuse_dist"
+                    "conn_reuse_dist",
+                    "proxies",
+                    "top_bots"
                   ]
                 },
                 "type": "array"
@@ -58120,6 +57711,65 @@
             "type": "array",
             "title": "Wellknown Bots",
             "default": []
+          },
+          "bots": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Bots",
+            "default": []
+          },
+          "ngwaf_bots": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Ngwaf Bots",
+            "default": []
+          },
+          "active_proxies_count": {
+            "type": "integer",
+            "title": "Active Proxies Count",
+            "default": 0
+          },
+          "tunnel_requests_count": {
+            "type": "integer",
+            "title": "Tunnel Requests Count",
+            "default": 0
+          },
+          "distance_mismatches_count": {
+            "type": "integer",
+            "title": "Distance Mismatches Count",
+            "default": 0
+          },
+          "traffic_quality": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Traffic Quality",
+            "default": []
+          },
+          "suspicious_isps": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Suspicious Isps",
+            "default": []
+          },
+          "active_clients": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveClientItem"
+            },
+            "type": "array",
+            "title": "Active Clients",
+            "default": []
           }
         },
         "type": "object",
@@ -58191,146 +57841,6 @@
         },
         "type": "object",
         "title": "SecurityMetrics"
-      },
-      "SecurityProxiesRequest": {
-        "properties": {
-          "start_time": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start Time"
-          },
-          "end_time": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End Time"
-          },
-          "filters": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/FilterSpec"
-            },
-            "type": "object",
-            "title": "Filters",
-            "default": {}
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
-          }
-        },
-        "type": "object",
-        "title": "SecurityProxiesRequest"
-      },
-      "SecurityProxiesResponse": {
-        "properties": {
-          "_debug_queries": {
-            "items": {
-              "$ref": "#/components/schemas/DebugQuery"
-            },
-            "type": "array",
-            "title": "Debug Queries"
-          },
-          "_debug_calls": {
-            "items": {
-              "$ref": "#/components/schemas/DebugCall"
-            },
-            "type": "array",
-            "title": "Debug Calls"
-          },
-          "_debug_sqlite": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Sqlite"
-          },
-          "_is_cached": {
-            "type": "boolean",
-            "title": "Is Cached",
-            "default": false
-          },
-          "_section_timings": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Section Timings"
-          },
-          "active_proxies_count": {
-            "type": "integer",
-            "title": "Active Proxies Count",
-            "default": 0
-          },
-          "tunnel_requests_count": {
-            "type": "integer",
-            "title": "Tunnel Requests Count",
-            "default": 0
-          },
-          "distance_mismatches_count": {
-            "type": "integer",
-            "title": "Distance Mismatches Count",
-            "default": 0
-          },
-          "traffic_quality": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Traffic Quality",
-            "default": []
-          },
-          "suspicious_isps": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Suspicious Isps",
-            "default": []
-          },
-          "active_clients": {
-            "items": {
-              "$ref": "#/components/schemas/ActiveClientItem"
-            },
-            "type": "array",
-            "title": "Active Clients",
-            "default": []
-          }
-        },
-        "type": "object",
-        "title": "SecurityProxiesResponse"
       },
       "SecurityTopBotsResponse": {
         "properties": {

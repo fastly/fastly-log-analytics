@@ -459,40 +459,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/security/top-bots": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Top Bots */
-        post: operations["top_bots_api_security_top_bots_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/security/proxies": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Get Proxies Data */
-        post: operations["get_proxies_data_api_security_proxies_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/security/proxies/export": {
         parameters: {
             query?: never;
@@ -7365,23 +7331,6 @@ export interface components {
             values: unknown[];
         };
         /**
-         * FilteredRequest
-         * @description Base for POST bodies that carry both a date range and column filters.
-         */
-        FilteredRequest: {
-            /** Start Time */
-            start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /**
-             * Filters
-             * @default {}
-             */
-            filters: {
-                [key: string]: components["schemas"]["FilterSpec"];
-            };
-        };
-        /**
          * GdprErasePayload
          * @description Body for ``POST /api/share-admin/gdpr/erase`` — GDPR right-to-be-
          *     forgotten request for an analyst email.
@@ -11889,7 +11838,7 @@ export interface components {
              */
             bucket_seconds: number;
             /** Sections */
-            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist")[] | null;
+            sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
             /** Range Token */
             range_token?: string | null;
             /** Anchor */
@@ -11996,65 +11945,18 @@ export interface components {
             wellknown_bots: {
                 [key: string]: unknown;
             }[];
-        };
-        /** SecurityMetrics */
-        SecurityMetrics: {
-            /** Waf Blocked */
-            waf_blocked?: number | null;
-            /** Waf Logged */
-            waf_logged?: number | null;
-            /** Waf Passed */
-            waf_passed?: number | null;
-            /** Total Requests */
-            total_requests?: number | null;
             /**
-             * Threat Time Series
+             * Bots
              * @default []
              */
-            threat_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
-            /**
-             * Top Waf Signals
-             * @default []
-             */
-            top_waf_signals: {
-                [key: string]: unknown;
-            }[];
-        };
-        /** SecurityProxiesRequest */
-        SecurityProxiesRequest: {
-            /** Start Time */
-            start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /**
-             * Filters
-             * @default {}
-             */
-            filters: {
-                [key: string]: components["schemas"]["FilterSpec"];
-            };
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
-        };
-        /** SecurityProxiesResponse */
-        SecurityProxiesResponse: {
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
+            bots: {
                 [key: string]: unknown;
             }[];
             /**
-             * Is Cached
-             * @default false
+             * Ngwaf Bots
+             * @default []
              */
-            _is_cached: boolean;
-            /** Section Timings */
-            _section_timings?: {
+            ngwaf_bots: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12091,6 +11993,29 @@ export interface components {
              * @default []
              */
             active_clients: components["schemas"]["ActiveClientItem"][];
+        };
+        /** SecurityMetrics */
+        SecurityMetrics: {
+            /** Waf Blocked */
+            waf_blocked?: number | null;
+            /** Waf Logged */
+            waf_logged?: number | null;
+            /** Waf Passed */
+            waf_passed?: number | null;
+            /** Total Requests */
+            total_requests?: number | null;
+            /**
+             * Threat Time Series
+             * @default []
+             */
+            threat_time_series: components["schemas"]["backend__models__value__TimeSeriesPoint"][];
+            /**
+             * Top Waf Signals
+             * @default []
+             */
+            top_waf_signals: {
+                [key: string]: unknown;
+            }[];
         };
         /** SecurityTopBotsResponse */
         SecurityTopBotsResponse: {
@@ -16402,228 +16327,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SecurityAggregatesResponse"];
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    top_bots_api_security_top_bots_post: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FilteredRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityTopBotsResponse"];
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    get_proxies_data_api_security_proxies_post: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SecurityProxiesRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityProxiesResponse"];
                 };
             };
             /** @description Bad request */
