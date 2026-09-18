@@ -99,6 +99,17 @@ We now have a dedicated local high-scale topology leveraging Docker Compose over
 
 *Reminder: Always confirm your port forwards are running and haven't dropped after triggering redeployments or container restarts.*
 
+## Fastly Service ID Mappings
+
+The project currently maintains 4 isolated deployments for testing, each fronted by its own dedicated Fastly service:
+
+| Environment | Architecture | Fastly Service ID | Notes |
+|---|---|---|---|
+| **Local** | Standard | `ZU15BvY2LX7WcEp43T9VwU` | Uses `fla-local-standard-test.global.ssl.fastly.net` |
+| **Local** | High-Scale | `qI4D8yXXFYOIpZEMrkJy65` | Isolated via Docker Compose overrides on port 8081 |
+| **GCE** | Standard | `cVnu9mYB3Cvmob3lsqjQU3` | Long-lived test environment with active traffic |
+| **Elevation** | High-Scale | `ZEZ4mcAjoSFDTg7tpkDKV2` | Kubernetes cluster environment for high load |
+
 ## Missing Architecture Gaps & Auto-Discovery
 
 As we work through the finalization of "high-scale" (v3.0.0-beta1), our approach is to tackle issues one at a time, auto-discovering edge cases and bugs during testing, and continuously updating this document.
