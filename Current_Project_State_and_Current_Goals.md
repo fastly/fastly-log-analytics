@@ -71,6 +71,7 @@ The GCE deployment uses a direct SSH tunnel to forward the internal loops to you
    `gcloud compute ssh fastly-log-analysis --project=se-development-9566 --zone=us-central1-a -- -N -L 3001:127.0.0.1:3000 -L 8001:127.0.0.1:8000`
 2. Access the Admin UI locally at: `http://localhost:3001/admin`
 3. Access the Analyst view via the public Fastly URL at `/share-login`.
+4. Confirm the footer shows that we're connected to the GCE host.
 
 **For "High-Scale" Architecture (Elevation cluster):**
 The Elevation cluster uses standard Kubernetes port-forwarding to the `se-demo` namespace.
@@ -79,12 +80,14 @@ The Elevation cluster uses standard Kubernetes port-forwarding to the `se-demo` 
 2. Forward the backend service:
    `kubectl port-forward svc/backend-svc -n se-demo 8002:8000`
 3. Check the UI locally at `http://localhost:3002/admin`
+4. Confirm the footer shows that we're connected to the Elevation cluster.
 
 **For Local Development (Native):**
 If you are running the stack natively on your laptop (e.g., using `uv run` and `npm run dev`):
 1. The frontend typically runs on `http://localhost:3000`
 2. The backend typically runs on `http://localhost:8000`
 3. Check the UI locally at `http://localhost:3000/admin`
+4. Confirm the footer shows that we're connected to the local laptop.
 
 *Reminder: Always confirm your port forwards are running and haven't dropped after triggering redeployments or container restarts.*
 
