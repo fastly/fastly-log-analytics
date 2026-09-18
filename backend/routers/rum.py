@@ -729,7 +729,7 @@ async def rum_analytics(
             # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_vitals AS SELECT * FROM client_vitals WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_vitals AS SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname FROM client_vitals WHERE {where_sql}",
                 params,
                 "rum_temp_vitals_create",
             ):
@@ -737,7 +737,7 @@ async def rum_analytics(
 
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_errors AS SELECT * FROM client_errors WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_errors AS SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col FROM client_errors WHERE {where_sql}",
                 params,
                 "rum_temp_errors_create",
             ):
