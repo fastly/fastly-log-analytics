@@ -8,6 +8,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
 import { AppLayout } from "@/components/AppLayout";
+import { ServerFooter } from "@/components/ServerFooter";
 import { HydrateAdminToken } from "@/components/HydrateAdminToken";
 import { StoreHydrator } from "@/components/StoreHydrator";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
@@ -225,6 +226,7 @@ export default async function RootLayout({
               initialCollapsed={initialSidebarCollapsed}
               ssrActiveServiceId={sid}
               ssrIsRumEnabled={isRumEnabled}
+              serverFooter={<ServerFooter />}
             >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>

@@ -280,11 +280,13 @@ export function AppLayout({
   initialCollapsed = false,
   ssrActiveServiceId,
   ssrIsRumEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -900,6 +902,7 @@ export function AppLayout({
             </div>
           ) : children}
           {debugEnabled && <DebugPanel />}
+          {serverFooter && !isAnalyst && serverFooter}
         </main>
       </div>
       </TooltipProvider>
