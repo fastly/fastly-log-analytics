@@ -544,19 +544,19 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 with _ConnectionHolder(rum_source, read_only=True) as rum_con:
 
                     def _query_rum_bootstrap(con):
-                        distinct_id = (
-                            "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
-                        )
-                        cnt = (
-                            con.execute(
-                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
-                            ).fetchone()[0]
-                            or 0
-                        )
-                        l_row = con.execute(
-                            "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
-                        ).fetchone()
-                        l_ts = l_row[0] if l_row else None
+                        cnt_v = con.execute("SELECT count(*) FROM client_vitals").fetchone()
+                        cnt_e = con.execute("SELECT count(*) FROM client_errors").fetchone()
+                        cnt = (cnt_v[0] if cnt_v else 0) + (cnt_e[0] if cnt_e else 0)
+
+                        ts_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
+                        ts_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()
+
+                        ts_list = []
+                        if ts_v and ts_v[0]:
+                            ts_list.append(ts_v[0])
+                        if ts_e and ts_e[0]:
+                            ts_list.append(ts_e[0])
+                        l_ts = max(ts_list) if ts_list else None
                         return cnt, l_ts
 
                     rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, _query_rum_bootstrap)
