@@ -63,13 +63,23 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
                         0, 100 - vitals[m]["distribution"]["good"] - vitals[m]["distribution"]["poor"]
                     )
 
+    error_count = 0
+    try:
+        err_query = "SELECT count() as c FROM fastly_log_analytics.rum_error_facts WHERE service_id={service_id:String} AND publication_state='visible'"
+        if start and end:
+            err_query += " AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp <= {end:DateTime64(3)}"
+        err_res = service.client.execute(err_query, {"service_id": service.service_id, "start": start, "end": end})
+        error_count = err_res[0].get("c", 0) if err_res else 0
+    except Exception:
+        pass
+
     return {
         "is_mock": False,
         "no_data": False,
         "beacon_count": health["beacons"],
         "pageview_count": total_pageviews,
         "interaction_count": 0,
-        "error_count": 0,
+        "error_count": error_count,
         "vitals": vitals,
         "worst_pages": [],
         "errors": [],
@@ -99,12 +109,33 @@ def rum_live_events(
         metric_rating,
         client_id as cid,
         request_event_id as req_id,
-        country
+        country,
+        '' as error_message
     FROM fastly_log_analytics.rum_vitals_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
       AND event_timestamp >= {start_time:DateTime64(3)}
       AND event_timestamp <= {end_time:DateTime64(3)}
+
+    UNION ALL
+
+    SELECT
+        event_timestamp as timestamp,
+        'error' as type,
+        pathname,
+        '' as metric_name,
+        0.0 as metric_value,
+        '' as metric_rating,
+        client_id as cid,
+        request_event_id as req_id,
+        country,
+        error_message
+    FROM fastly_log_analytics.rum_error_facts
+    WHERE service_id = {service_id:String}
+      AND publication_state = 'visible'
+      AND event_timestamp >= {start_time:DateTime64(3)}
+      AND event_timestamp <= {end_time:DateTime64(3)}
+
     ORDER BY timestamp DESC
     LIMIT {limit:UInt32}
     """
@@ -129,49 +160,72 @@ def rum_live_events(
         ts = d["timestamp"].isoformat() if hasattr(d["timestamp"], "isoformat") else str(d["timestamp"])
         ts = ts.replace("+00:00", "Z") if "+" in ts else ts + "Z"
 
+        etype = d.get("type", "vitals")
         mname = d.get("metric_name")
         mrating = d.get("metric_rating")
         mval = d.get("metric_value")
+        emsg = d.get("error_message")
 
-        desc = "Page loaded successfully"
-        if mname:
-            desc = f"Metric {mname.upper()}: {mval}"
-            if mrating:
-                desc += f" ({mrating.upper()})"
+        if etype == "error":
+            desc = emsg or "Unknown JavaScript Error"
+            raw_log = {
+                "meta": {
+                    "browser": {"name": "Unknown"},
+                    "os": {"name": "Unknown"},
+                    "device": {"type": "Unknown"},
+                    "page": {"url": d.get("pathname") or "/"},
+                },
+                "events": [{"type": "error", "value": emsg}],
+                "cid": d.get("cid"),
+                "req_id": d.get("req_id"),
+                "city": "Unknown",
+                "region": "Unknown",
+                "country": d.get("country") or "Unknown",
+                "pop": "Unknown",
+                "tls": "Unknown",
+                "ttfb": 0,
+            }
+        else:
+            desc = "Page loaded successfully"
+            if mname:
+                desc = f"Metric {mname.upper()}: {mval}"
+                if mrating:
+                    desc += f" ({mrating.upper()})"
+            raw_log = {
+                "meta": {
+                    "browser": {"name": "Unknown"},
+                    "os": {"name": "Unknown"},
+                    "device": {"type": "Unknown"},
+                    "page": {"url": d.get("pathname") or "/"},
+                },
+                "measurements": [
+                    {
+                        "type": "web-vitals",
+                        "values": {mname: mval} if mname else {},
+                        "context": {"rating": mrating or ""},
+                    }
+                ]
+                if mname
+                else [],
+                "cid": d.get("cid"),
+                "req_id": d.get("req_id"),
+                "city": "Unknown",
+                "region": "Unknown",
+                "country": d.get("country") or "Unknown",
+                "pop": "Unknown",
+                "tls": "Unknown",
+                "ttfb": 0,
+            }
 
         events.append(
             {
                 "time": ts,
-                "type": "vitals",
+                "type": etype,
                 "path": d.get("pathname") or "/",
                 "desc": desc,
                 "browser": "Unknown",
                 "os": "Unknown",
-                "raw_log": {
-                    "meta": {
-                        "browser": {"name": "Unknown"},
-                        "os": {"name": "Unknown"},
-                        "device": {"type": "Unknown"},
-                        "page": {"url": d.get("pathname") or "/"},
-                    },
-                    "measurements": [
-                        {
-                            "type": "web-vitals",
-                            "values": {mname: mval} if mname else {},
-                            "context": {"rating": mrating or ""},
-                        }
-                    ]
-                    if mname
-                    else [],
-                    "cid": d.get("cid"),
-                    "req_id": d.get("req_id"),
-                    "city": "Unknown",
-                    "region": "Unknown",
-                    "country": d.get("country") or "Unknown",
-                    "pop": "Unknown",
-                    "tls": "Unknown",
-                    "ttfb": 0,
-                },
+                "raw_log": raw_log,
             }
         )
     return events
