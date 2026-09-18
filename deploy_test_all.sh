@@ -48,7 +48,7 @@ sleep 15
 echo "Verifying local environment on http://localhost..."
 cd frontend
 export NODE_PATH=$(npm root)
-node ../scripts/verify_dashboard.js "http://localhost" || echo "WARNING: Local check failed"
+node ../scripts/verify_dashboard.js "http://127.0.0.1/dashboard" || echo "WARNING: Local check failed"
 cd ..
 
 echo "========================================"
@@ -68,7 +68,7 @@ echo "Waiting 15s for tunnel and GCE containers..."
 sleep 15
 cd frontend
 export NODE_PATH=$(npm root)
-node ../scripts/verify_dashboard.js "http://localhost:3001" || echo "WARNING: GCE check failed"
+node ../scripts/verify_dashboard.js "http://127.0.0.1:3001/dashboard" || echo "WARNING: GCE check failed"
 cd ..
 
 echo "========================================"
@@ -101,7 +101,7 @@ echo "Waiting 10s for port forward..."
 sleep 10
 cd frontend
 export NODE_PATH=$(npm root)
-node ../scripts/verify_dashboard.js "http://localhost:3002" || echo "WARNING: Elevation check failed"
+node ../scripts/verify_dashboard.js "http://127.0.0.1:3002/dashboard" || echo "WARNING: Elevation check failed"
 cd ..
 
 echo "========================================"
