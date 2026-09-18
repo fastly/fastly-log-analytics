@@ -12082,6 +12082,8 @@ export interface components {
             logging_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /** Analyst Path A Supported */
+            analyst_path_a_supported?: boolean | null;
         };
         /**
          * ServiceCredentialsBody

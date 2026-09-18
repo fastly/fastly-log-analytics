@@ -67,6 +67,7 @@ class ServiceConfig(BaseModel):
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
+    analyst_path_a_supported: bool | None = None
 
 
 class ServicesListResponse(BaseResponse):

@@ -58061,6 +58061,17 @@
               }
             ],
             "title": "Rum Enabled"
+          },
+          "analyst_path_a_supported": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analyst Path A Supported"
           }
         },
         "type": "object",
