@@ -94,6 +94,8 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
         row = rows[0] if rows else {}
         total_rows = int(row.get("total_rows") or 0)
         latest_value: object = row.get("latest_log_at")
+        if total_rows == 0:
+            latest_value = None
         if isinstance(latest_value, datetime):
             latest_value = latest_value.isoformat()
         totals[domain] = total_rows
