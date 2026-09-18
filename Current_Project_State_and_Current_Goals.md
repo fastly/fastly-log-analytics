@@ -95,7 +95,7 @@ We now have a dedicated local high-scale topology leveraging Docker Compose over
    `docker compose -p fla-hs -f docker-compose.multipod.yml -f docker-compose.clickhouse-prototype.yml -f docker-compose.high-scale-local.yml up -d`
 2. The high-scale frontend/proxy is mapped to `127.0.0.1:8081`.
 3. Check the UI locally at `http://127.0.0.1:8081/admin`
-4. We are using the test service `ZU15BvY2LX7WcEp43T9VwU` with the domain `fla-local-standard-test.global.ssl.fastly.net` for this environment.
+4. We are using the dedicated test service `qI4D8yXXFYOIpZEMrkJy65` with the domain `fla-local-hs-test.demo.fastly.com` for this environment.
 
 *Reminder: Always confirm your port forwards are running and haven't dropped after triggering redeployments or container restarts.*
 
