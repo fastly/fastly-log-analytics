@@ -18,8 +18,26 @@ def query_endpoint(
     sql = re.sub(r"\bclient_vitals\b", "fastly_log_analytics.rum_vitals_facts", sql, flags=re.IGNORECASE)
     sql = re.sub(r"\bclient_errors\b", "fastly_log_analytics.rum_error_facts", sql, flags=re.IGNORECASE)
 
+    from backend.high_scale.dashboard import _FIELD_DIMENSIONS
+
+    for field in _FIELD_DIMENSIONS.values():
+        if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
+            continue
+        elif field in {"age", "ttl"}:
+            # Instead of a complex cast which might break generic SQL, we just extract it.
+            # In a WHERE clause `age = 2367`, it's easier to just use the raw string or let ClickHouse cast it.
+            # But the UI sends `age = '2367'` or `age IN ('2367')`
+            sql = re.sub(rf"\b{field}\b", f"custom_fields['{field}']", sql)
+        else:
+            sql = re.sub(rf"\b{field}\b", f"custom_fields['{field}']", sql)
+
     # Inject time bounds
-    time_cond = f"service_id = '{service.service_id}' AND event_timestamp >= parseDateTime64BestEffort('{start_time}') AND event_timestamp <= parseDateTime64BestEffort('{end_time}')"
+    time_clauses = [f"service_id = '{service.service_id}'"]
+    if start_time:
+        time_clauses.append(f"event_timestamp >= parseDateTime64BestEffort('{start_time}')")
+    if end_time:
+        time_clauses.append(f"event_timestamp <= parseDateTime64BestEffort('{end_time}')")
+    time_cond = " AND ".join(time_clauses)
 
     if "WHERE" in sql.upper():
         sql = re.sub(r"\bWHERE\b", f"WHERE {time_cond} AND ", sql, flags=re.IGNORECASE)

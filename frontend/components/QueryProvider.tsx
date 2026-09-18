@@ -102,7 +102,7 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
           {children}
         </HydrationBoundary>
       </NuqsAdapter>
-      {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />}
+      <ReactQueryDevtools initialIsOpen={false} />
     </QueryClientProvider>
   )
 }
