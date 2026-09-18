@@ -104,6 +104,13 @@ def main() -> None:
         raise RuntimeError("ClickHouse prototype is disabled")
     try:
         create_clickhouse_schema(client)
+        
+        try:
+            from backend.high_scale.schema_install import install_clickhouse_schema
+            install_clickhouse_schema()
+        except ImportError:
+            pass
+            
         logging.getLogger(__name__).info("ClickHouse schema v%s verified", CLICKHOUSE_SCHEMA_VERSION)
     finally:
         client.close()

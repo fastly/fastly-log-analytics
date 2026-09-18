@@ -267,10 +267,12 @@ def reset_service_logs(
         con.execute("DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute("DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute(
-            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE 'client_vitals%' AND buffer_filename NOT LIKE 'client_errors%'"
+            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE ? AND buffer_filename NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE 'client_vitals%' AND file_name NOT LIKE 'client_errors%'"
+            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE ? AND file_name NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
         con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
@@ -297,6 +299,27 @@ def reset_service_logs(
             {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history},
             actor=actor,
         )
+
+
+        if os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                from backend.core.clickhouse_client import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
+
+                yield {"type": "status", "message": "Purging ClickHouse high-scale tables..."}
+                client = get_clickhouse_client()
+                if client:
+                    for table in CLICKHOUSE_HIGH_SCALE_TABLES:
+                        client.execute(
+                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
+                            {"service_id": service_id},
+                        )
+                    yield {
+                        "type": "status",
+                        "message": f"Cleared data from {len(CLICKHOUSE_HIGH_SCALE_TABLES)} ClickHouse table(s).",
+                    }
+            except Exception as e:
+                logger.error("Failed to purge ClickHouse tables: %s", e)
+                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse tables: {e}"}
 
         yield {
             "type": "done",

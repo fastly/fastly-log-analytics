@@ -138,6 +138,9 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
     configs = svcconfig.list_configs()
     name_map = svcconfig.refresh_all_service_names(configs)
 
+    hs_enabled = os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    hs_service_ids = {s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip()}
+
     result = []
     for cfg in configs:
         sid = cfg.get("service_id", "")
@@ -162,6 +165,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "name": name,
                 "access_level": cfg.get("access_level", "read_write"),
                 "storage_mode": cfg.get("storage_mode", "cloud"),
+                "is_high_scale": hs_enabled and sid in hs_service_ids,
                 "log_period": cfg.get("log_period", 60),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),

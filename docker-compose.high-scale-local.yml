@@ -1,0 +1,43 @@
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:8081:80"
+
+  backend:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=ZU15BvY2LX7WcEp43T9VwU
+      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - CLICKHOUSE_ENABLED=true
+    volumes: !override
+      - ./configs-hs:/app/configs
+      - hs-data:/app/data
+      - hs-cache:/app/cache
+
+  worker:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=ZU15BvY2LX7WcEp43T9VwU
+      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - CLICKHOUSE_ENABLED=true
+    volumes: !override
+      - ./configs-hs:/app/configs
+      - hs-data:/app/data
+      - hs-cache:/app/cache
+
+  beat:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=ZU15BvY2LX7WcEp43T9VwU
+      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - CLICKHOUSE_ENABLED=true
+    volumes: !override
+      - ./configs-hs:/app/configs
+
+  clickhouse-schema-init:
+    volumes: !override
+      - ./configs-hs:/app/configs:ro
+
+volumes:
+  hs-data:
+  hs-cache:

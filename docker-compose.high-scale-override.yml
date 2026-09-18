@@ -1,0 +1,26 @@
+# docker-compose.high-scale-override.yml
+# Use this alongside the main compose file to run a second local environment
+# without copying the entire repository folder.
+# Usage: docker compose -p fla-high-scale -f docker-compose.yml -f docker-compose.high-scale-override.yml up -d
+services:
+  frontend:
+    ports:
+      - "3003:3000"
+    environment:
+      - PORT=3000
+
+  backend:
+    ports:
+      - "8001:8000"
+    environment:
+      - HIGH_SCALE_ENABLED=1
+    volumes:
+      # Isolate data so it doesn't collide with the standard environment
+      - ./configs-hs:/app/configs
+      - ./data-hs:/app/data
+      - ./cache-hs:/app/cache
+
+  caddy:
+    ports:
+      - "8080:80"
+      - "8443:443"

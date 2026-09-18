@@ -12084,6 +12084,8 @@ export interface components {
             rum_enabled?: boolean | null;
             /** Analyst Path A Supported */
             analyst_path_a_supported?: boolean | null;
+            /** Is High Scale */
+            is_high_scale?: boolean | null;
         };
         /**
          * ServiceCredentialsBody

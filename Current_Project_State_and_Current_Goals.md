@@ -55,7 +55,7 @@ To repeat, all funtionality and pages and interactions need to be tested for bot
 
 You have full control over the v3.0.0-beta1 branch as well as the GCE machine, my local laptop and Elevation dev-usc1 cluster for compiling and testing everything. You are free to build and deploy to those systems as needed, and if you need image tags from me for Elevation deploys please ask.
 
-The cVnu9mYB3Cvmob3lsqjQU3 site deployed on GCE has active traffic and existing logs, do not delete any logs but you can send additional test traffic or synthetic logs as needed. The ZEZ4mcAjoSFDTg7tpkDKV2 site deployed to Elevation has no active traffic but is a real Fastly service. The ZU15BvY2LX7WcEp43T9VwU site is deployed locally but has no active traffic but is a real Fastly service. You are welcome to upload to each service's raw log bucket as many logs as you want or send real synthetic traffic and delete log data at will if needed. You are also authorized to deploy VCL updates during testing to either service or its ancillary services using the tokens from the existing services or better yet using the mechanisms already built into the code and UI.
+The cVnu9mYB3Cvmob3lsqjQU3 site deployed on GCE has active traffic and existing logs, do not delete any logs but you can send additional test traffic or synthetic logs as needed. The ZEZ4mcAjoSFDTg7tpkDKV2 site deployed to Elevation has no active traffic but is a real Fastly service. The ZU15BvY2LX7WcEp43T9VwU site is deployed locally but has no active traffic but is a real Fastly service. You are welcome to upload to each service's raw log bucket as many logs as you want or send real synthetic traffic and also delete log data at will if needed. You are also authorized to deploy VCL updates during testing to either service or its ancillary services using the tokens from the existing services or better yet using the mechanisms already built into the code and UI.
 
 If you do send real traffic, do not go over 25k RPS. You can push sythetic logs to simulate traffic higher than that.
 
@@ -82,12 +82,20 @@ The Elevation cluster uses standard Kubernetes port-forwarding to the `se-demo` 
 3. Check the UI locally at `http://localhost:3002/admin`
 4. Confirm the footer shows that we're connected to the Elevation cluster.
 
-**For Local Development (Native):**
-If you are running the stack natively on your laptop (e.g., using `uv run` and `npm run dev`):
-1. The frontend typically runs on `http://localhost:3000`
+**For Local Development (Native Standard):**
+If you are running the standard stack natively on your laptop (e.g., using `docker compose -p fla-standard up -d`):
+1. The frontend typically runs on `http://localhost:3000` (via Caddy on `localhost:80`)
 2. The backend typically runs on `http://localhost:8000`
-3. Check the UI locally at `http://localhost:3000/admin`
+3. Check the UI locally at `http://localhost/admin`
 4. Confirm the footer shows that we're connected to the local laptop.
+
+**For Local Development (High-Scale):**
+We now have a dedicated local high-scale topology leveraging Docker Compose overrides to isolate ports and data.
+1. Run this command on your laptop to start the local high-scale cluster:
+   `docker compose -p fla-hs -f docker-compose.multipod.yml -f docker-compose.clickhouse-prototype.yml -f docker-compose.high-scale-local.yml up -d`
+2. The high-scale frontend/proxy is mapped to `127.0.0.1:8081`.
+3. Check the UI locally at `http://127.0.0.1:8081/admin`
+4. We are using the test service `ZU15BvY2LX7WcEp43T9VwU` with the domain `fla-local-standard-test.global.ssl.fastly.net` for this environment.
 
 *Reminder: Always confirm your port forwards are running and haven't dropped after triggering redeployments or container restarts.*
 
