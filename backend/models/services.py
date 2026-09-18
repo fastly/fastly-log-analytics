@@ -70,6 +70,7 @@ class ServiceConfig(BaseModel):
     analyst_path_a_supported: bool | None = None
     is_high_scale: bool | None = None
 
+
 class ServicesListResponse(BaseResponse):
     services: list[ServiceConfig]
 

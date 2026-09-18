@@ -58072,6 +58072,17 @@
               }
             ],
             "title": "Analyst Path A Supported"
+          },
+          "is_high_scale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is High Scale"
           }
         },
         "type": "object",
