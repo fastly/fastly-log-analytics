@@ -59,6 +59,35 @@ The cVnu9mYB3Cvmob3lsqjQU3 site deployed on GCE has active traffic and existing 
 
 If you do send real traffic, do not go over 25k RPS. You can push sythetic logs to simulate traffic higher than that.
 
+## Local Access & Port Forwarding
+
+When testing locally, it is critical to confirm that port forwarding is active and functioning correctly after every deployment so you can view and test the changes alongside the automated tools.
+
+**Note:** GCE and Elevation architectures run the frontend in production mode (via `next build` and Next.js Turbopack where applicable) to validate true production performance. The Local instance runs in dev mode (`next dev`) for easier debugging.
+
+**For "Standard" Architecture (GCE):**
+The GCE deployment uses a direct SSH tunnel to forward the internal loops to your local machine.
+1. Run this command on your laptop to start the tunnel:
+   `gcloud compute ssh fastly-log-analysis --project=se-development-9566 --zone=us-central1-a -- -N -L 3001:127.0.0.1:3000 -L 8001:127.0.0.1:8000`
+2. Access the Admin UI locally at: `http://localhost:3001/admin`
+3. Access the Analyst view via the public Fastly URL at `/share-login`.
+
+**For "High-Scale" Architecture (Elevation cluster):**
+The Elevation cluster uses standard Kubernetes port-forwarding to the `se-demo` namespace.
+1. Forward the frontend service to your local machine:
+   `kubectl port-forward svc/frontend-svc -n se-demo 3002:3000`
+2. Forward the backend service:
+   `kubectl port-forward svc/backend-svc -n se-demo 8002:8000`
+3. Check the UI locally at `http://localhost:3002/admin`
+
+**For Local Development (Native):**
+If you are running the stack natively on your laptop (e.g., using `uv run` and `npm run dev`):
+1. The frontend typically runs on `http://localhost:3000`
+2. The backend typically runs on `http://localhost:8000`
+3. Check the UI locally at `http://localhost:3000/admin`
+
+*Reminder: Always confirm your port forwards are running and haven't dropped after triggering redeployments or container restarts.*
+
 ## Missing Architecture Gaps & Auto-Discovery
 
 As we work through the finalization of "high-scale" (v3.0.0-beta1), our approach is to tackle issues one at a time, auto-discovering edge cases and bugs during testing, and continuously updating this document.
@@ -90,11 +119,12 @@ To properly validate both "standard" and "high-scale" architectures, we need a r
 
 We will tackle these one at a time, auto-discovering issues and updating this list dynamically.
 
+- [x] Stabilize "standard" architecture (GCE) — fixed DuckDB connection pool saturation and stuck cron ingestion.
+- [x] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster). Redeployed from scratch with all log fields including `cmcd` enabled.
 - [ ] Disable Analyst Path A for high-scale architectures.
 - [ ] Develop a best-in-class Playwright E2E performance testing harness.
 - [ ] Develop synthetic log generator for 5M RPS load testing.
 - [ ] Execute baseline performance tests on the "standard" architecture (GCE).
-- [ ] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster).
 - [ ] Execute baseline performance tests on the "high-scale" architecture.
 - [ ] Validate all 16 pages, sub-pages, filters, and modals under both architectures.
 - [ ] Investigate and validate all aspects of ingestion, cron jobs, and general system robustness under expected load.
