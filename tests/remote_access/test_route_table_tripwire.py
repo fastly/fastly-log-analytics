@@ -226,8 +226,6 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/dashboard/field-values"),
     ("POST", "/api/dashboard/raw/csv"),
     ("POST", "/api/security/aggregates"),
-    ("POST", "/api/security/top-bots"),
-    ("POST", "/api/security/proxies"),
     ("POST", "/api/origin/aggregates"),
     ("POST", "/api/origin/ip-health"),
     ("POST", "/api/origin/path-breakdown"),
