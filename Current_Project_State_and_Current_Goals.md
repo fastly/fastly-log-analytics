@@ -59,8 +59,46 @@ The cVnu9mYB3Cvmob3lsqjQU3 site deployed on GCE has active traffic and existing 
 
 If you do send real traffic, do not go over 25k RPS. You can push sythetic logs to simulate traffic higher than that.
 
-## First Steps
+## Missing Architecture Gaps & Auto-Discovery
 
-The first step is to complete this document with a more robust plan including a harness and testing plan along with all to-dos. The first to-do will be to complete the "high-scale" architecture while keeping in mind all notes from this document.
+As we work through the finalization of "high-scale" (v3.0.0-beta1), our approach is to tackle issues one at a time, auto-discovering edge cases and bugs during testing, and continuously updating this document.
+
+A few immediate architecture decisions/gaps to address:
+- [ ] **Disable Analyst Path A (Standalone Mode) for High-Scale**: Since the DuckLake cutover means the catalog is no longer FOS-resident, Analyst Path A (where analysts use FOS credentials to download files locally/standalone) is incompatible with high-scale. We will disable this flow entirely for high-scale services rather than building a workaround.
+- [ ] **Broad System Robustness**: Investigate all aspects of ingestion and the serving tier to ensure absolute robustness. This includes auto-discovering and fixing any concurrency or pipeline recovery issues as they arise under load.
+
+## Expanded Testing Plan & Harness
+
+To properly validate both "standard" and "high-scale" architectures, we need a robust testing harness:
+
+1.  **Automated End-to-End (E2E) & Performance Harness**:
+    - Build a best-in-class Playwright testing harness following industry best practices.
+    - Automatically load each of the 16 top-level pages (and their sub-tabs/modals) for all roles.
+    - Capture network HAR files, API call durations, and page interactive timings (LCP, INP, fully loaded) during runs to calculate p95 metrics over repeated iterations.
+    - Implement a synthetic log generator script capable of pushing sustained 2M RPS (with 5M bursts) to push limits.
+
+2.  **Comprehensive Ingestion & System Robustness**:
+    - Investigate all aspects of the ingest pipelines (both standard and high-scale) under heavy load.
+    - Ensure all fault-tolerance mechanisms, state recoveries, and data retention policies are fully robust and operate flawlessly without impacting the serving tier.
+
+3.  **Role & Topology Validation**:
+    - **Roles**: Test as Admin (read_write) vs Analyst Path B (live shared instance). (Analyst Path A will be disabled for high-scale).
+    - **Provisioning**: Test the full Provision Wizard flow to ensure new high-scale services can be instantiated from scratch. *Note: We are authorized to repeatedly tear down the existing test service `ZEZ4mcAjoSFDTg7tpkDKV2` and its ancillary services on the Elevation cluster to start fresh and validate the full provisioning lifecycle.*
+    - **VCL Deployments**: Confirm that deploying VCL updates from the UI correctly propagates to the Fastly edge.
+
+## To-Dos
+
+We will tackle these one at a time, auto-discovering issues and updating this list dynamically.
+
+- [ ] Disable Analyst Path A for high-scale architectures.
+- [ ] Develop a best-in-class Playwright E2E performance testing harness.
+- [ ] Develop synthetic log generator for 5M RPS load testing.
+- [ ] Execute baseline performance tests on the "standard" architecture (GCE).
+- [ ] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster).
+- [ ] Execute baseline performance tests on the "high-scale" architecture.
+- [ ] Validate all 16 pages, sub-pages, filters, and modals under both architectures.
+- [ ] Investigate and validate all aspects of ingestion, cron jobs, and general system robustness under expected load.
+
+## First Steps
 
 Keep this document updated as we go and track it in git. We'll delete it and squash the branch at the end when we're done and record everything we accomplish in the docs and ADRs.
