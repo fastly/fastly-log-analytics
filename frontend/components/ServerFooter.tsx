@@ -13,7 +13,7 @@ export function ServerFooter() {
   }
 
   const machineName = process.env.POD_NAME || os.hostname()
-  
+
   const isHighScale = ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
   const architecture = isHighScale ? 'high-scale' : 'standard'
 
