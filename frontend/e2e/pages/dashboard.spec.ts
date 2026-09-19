@@ -73,11 +73,11 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('4. Time range presets update time window', async ({ page }) => {
+  test('4. Time range presets and adaptive history extents', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Time preset dropdown or buttons in ReportLayout
+    // Time presets in FilterBar (defaults to 24h for >=24h data, or max extent for <24h data)
     const timePresetBtn = page.getByRole('button', { name: /24h|1h|7d|last/i }).first()
     await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
   })

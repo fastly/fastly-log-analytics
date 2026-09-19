@@ -73,9 +73,33 @@ docs/pages/
 | `/admin/trends` | System Trends | Metric history, ingestion latency, CPU/memory over time | *Pending* |
 | `/admin/usage-log` | FOS Usage Ledger | Per-route and per-cron attribution for FOS storage costs | *Pending* |
 
+
 ---
 
-## 3. Template for New Page Specifications
+## 3. Global Time-Range & History Default Contract (App-Wide Standard)
+
+Across almost all analytics pages in this application (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/logs`, `/query`), the default display window must adhere to this unified time-window contract:
+
+1. **Default Window (Mature Services with >= 24h Data):**
+   - Loads the **last 24 hours of data** (`[now - 24h, now]`) by default.
+   - Provides an immediate high-fidelity rolling view of recent operational traffic and performance.
+
+2. **Adaptive Max-Range Fallback (Services with < 24h Data):**
+   - If the active service has **less than 24 hours of total data** in the system (e.g. newly provisioned services, fresh staging environments, test topologies, or any dataset where `latest_log_at - earliest_log_at < 24h`):
+     - The page **must dynamically display the current maximum available range of data** (`[earliest_log_at, latest_log_at]` or `[earliest_log_at, now]`).
+     - It must **not** render a naive 24-hour window where 90%+ of the time-series is blank space or squashed against the right edge.
+     - The time controls and filter bar reflect this discovered extent without throwing zero-width window errors (`clamped time range is empty`).
+
+3. **Smooth Maturation:**
+   - As new log batches arrive and continuous ingest pushes the history span past 24 hours, the default rolling window smoothly transitions to capping at 24 hours.
+
+4. **Page Exemptions:**
+   - **Real-Time Stream Tailing:** `/control-room`, `/streaming`, and `/sessions/stream` operate on live sliding event buffers (e.g. last 100–1,000 events or 1m–5m live window) rather than the 24h historical window.
+   - **Admin Operational Trend Vitals:** `/admin/trends` and `/admin/usage-log` use administrative monitoring windows (e.g. 7d or 30d host vitals / FOS ledger).
+
+---
+
+## 4. Template for New Page Specifications
 
 When creating or updating a page specification, use the following standard structure:
 

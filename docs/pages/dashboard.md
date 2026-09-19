@@ -23,9 +23,9 @@ The **Dashboard** is the primary operational and analytical landing page of Fast
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `service` | string | Active / first service | Fastly Service ID to display (e.g. `<SERVICE_ID>`). |
-| `from` | ISO string | `now - 24h` | Start timestamp of the query window (UTC). |
-| `to` | ISO string | `now` | End timestamp of the query window (UTC). |
-| `range` | string | `24h` | Relative preset token: `1h`, `6h`, `12h`, `24h`, `7d`, `30d`. |
+| `from` | ISO string | `now - 24h` (or `earliest_log_at`) | Start timestamp of the query window (UTC). Defaults to `now - 24h` for mature services (>=24h history); dynamically adapts to the service's max available range (`earliest_log_at`) when <24h history exists. |
+| `to` | ISO string | `now` (or `latest_log_at`) | End timestamp of the query window (UTC). |
+| `range` | string | `24h` (or adaptive max) | Relative preset token: `1h`, `6h`, `12h`, `24h`, `7d`, `30d`. When total history < 24h, displays max available span. |
 | `anchor` | ISO string | Quantized 60s | Time anchor for server-reproducible caching and SSR byte-matching. |
 | `filters` | JSON string | `{}` | Serialized URL-encoded filter object (e.g. `{"status": ["500", "503"]}`). |
 | `metric` | string | `requests` | Active chart metric: `requests`, `5xx`, `4xx`, `hit_rate`, `p50_latency`, `p95_latency`, `p99_latency`, `throughput`, `req_size`, `ttfb`. |
@@ -210,9 +210,12 @@ Displays Top-N rankings grouped into 9 collapsible categories. Each section reta
   - Updates the URL search query parameters without a full page reload.
   - Displays the active filter chip in the top filter bar.
 
-### 2. Time Range Selection & Drag Zoom
-- Selecting a preset (`1h`, `24h`, `7d`, `30d`) re-anchors the time window.
-- Dragging a bounding box across `TrafficChart` sets `from` and `to` to the exact drag timestamps and sets range to `custom`.
+### 2. Time Range Selection, Drag Zoom & History Extents
+- **Default Rolling Window (>= 24h Data):** For mature services with at least 24 hours of data, the dashboard loads the **last 24 hours** (`[now - 24h, now]`) by default.
+- **Adaptive Max-Range Fallback (< 24h Data):** If the service has less than 24 hours of data (e.g. brand-new service, fresh staging environment, or test dataset where `latest_log_at - earliest_log_at < 24h`), the dashboard automatically adapts to show the **current maximum available range of data** (`[earliest_log_at, latest_log_at]` or `[earliest_log_at, now]`). This prevents rendering an empty 24-hour chart where 90%+ is blank and guarantees no zero-width clamped range errors.
+- **Presets & Custom Zoom:**
+  - Selecting a preset (`1h`, `6h`, `12h`, `24h`, `7d`, `30d`) re-anchors the time window.
+  - Dragging a bounding box across `TrafficChart` sets `from` and `to` to the exact drag timestamps and sets range to `custom`.
 
 ### 3. Customize Cards Visibility
 - Click **Cards** in `DashboardHeader`.
@@ -256,8 +259,11 @@ Any AI session tasked with validating the `/dashboard` page must execute and ver
 - [ ] **3. Metric Switching:**
   - Click `Reqs`, `5xx`, `4xx`, `CHR`, `Throughput` buttons and `Latency` dropdown.
   - Verify `TrafficChart` updates traces and y-axis units correctly.
-- [ ] **4. Time Range Presets:**
-  - Cycle through `1h`, `24h`, `7d`.
+- [ ] **4. Time Range Presets & History Extents:**
+  - Verify default load window:
+    - If service history >= 24h: loads rolling last 24 hours (`[now - 24h, now]`).
+    - If service history < 24h: verifies dashboard dynamically adapts to show the max available range of data (`[earliest_log_at, latest_log_at]` / `[earliest_log_at, now]`) without rendering blank charts or triggering empty clamped window errors.
+  - Cycle through `1h`, `6h`, `24h`, `7d` presets.
   - Confirm URL parameters update and chart x-axis scales accordingly.
 - [ ] **5. Click-to-Filter Drill-down:**
   - Click the top row in the **Status** card (e.g. `200`).
