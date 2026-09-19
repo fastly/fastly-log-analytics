@@ -46,32 +46,32 @@ docs/pages/
 | Route | Page Name | Primary Focus | Spec Status |
 |---|---|---|---|
 | `/dashboard` | [Dashboard](dashboard.md) | Top-level KPIs, multi-trace traffic chart, geo map, categorized Top-N cards | **Complete** |
-| `/control-room` | Control Room | Real-time operations, live throughput, recent error stream | *Pending* |
-| `/fastly-value` | Service Summary / Value | Bandwidth saved, edge compute efficiency, cost avoidance | *Pending* |
-| `/performance` | Performance | Edge delivery latency, TTFB, TTLB, regional performance | *Pending* |
-| `/origin` | Origin Health | Backend latency, connect times, shielding ratio, retries | *Pending* |
-| `/security` | Security | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | *Pending* |
-| `/insights` | Insights | 45 automated anomaly detectors across 5 category tabs | *Pending* |
-| `/network` | Network Path | TCP RTT, packet loss, retransmits, ASN health heatmap | *Pending* |
-| `/streaming` | Streaming | Live SSE log tailing, regex search, inspect modal | *Pending* |
-| `/rum` | RUM | Real user telemetry, LCP, INP, CLS, client errors | *Pending* |
-| `/sessions` | Sessions | Session graph, threat scoring, suspicious session inspection | *Pending* |
-| `/sessions/stream` | Sessions Stream | Real-time session transitions, score escalation alerts | *Pending* |
-| `/usage` | Usage & Cost | FOS storage, Class A/B API calls, interactive cost estimator | *Pending* |
-| `/query` | SQL Query Pad | Direct DuckDB SQL runner, schema explorer, CSV download | *Pending* |
-| `/alerts` | Alerts | Alert rules list, status history, notification channels | *Pending* |
-| `/logs` | Raw Logs | High-throughput paginated log viewer, column toggle, drill-down | *Pending* |
-| `/assets-shield` | Assets & Shield | Origin shielding efficiency, PoP topology, asset types | *Pending* |
-| `/high-scale/request-facts` | High-Scale Facts | ClickHouse raw facts table explorer (High-Scale only) | *Pending* |
-| `/share-login` | Analyst Share Login | Passcode & SSO authentication, TOS acceptance gate | *Pending* |
-| `/admin` | Admin Overview | Sync status, compaction, storage usage, services CRUD | *Pending* |
-| `/admin/queries` | Live Query Monitor | Running & recent SQLite/DuckDB queries, durations, locks | *Pending* |
-| `/admin/queue` | Task Queue | Ingestion ledger claims, Celery queue depth, RedBeat | *Pending* |
-| `/admin/rum` | RUM Ingestion | Beacon ingestion status, sample rates, client scripts | *Pending* |
-| `/admin/session-scoring` | Session Scoring Config | Matrix weights, threshold overrides, model retrain | *Pending* |
-| `/admin/share` | Live Share Admin | Invites CRUD, active sessions, audit trail, server switch | *Pending* |
-| `/admin/trends` | System Trends | Metric history, ingestion latency, CPU/memory over time | *Pending* |
-| `/admin/usage-log` | FOS Usage Ledger | Per-route and per-cron attribution for FOS storage costs | *Pending* |
+| `/control-room` | [Control Room](control-room.md) | Real-time operations, live throughput, recent error stream | **Scaffolded (Pending AI Verification)** |
+| `/fastly-value` | [Service Summary / Value](fastly-value.md) | Bandwidth saved, edge compute efficiency, cost avoidance | **Scaffolded (Pending AI Verification)** |
+| `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Scaffolded (Pending AI Verification)** |
+| `/origin` | [Origin Health](origin.md) | Backend latency, connect times, shielding ratio, retries | **Scaffolded (Pending AI Verification)** |
+| `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Scaffolded (Pending AI Verification)** |
+| `/insights` | [Insights](insights.md) | 45 automated anomaly detectors across 5 category tabs | **Scaffolded (Pending AI Verification)** |
+| `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Scaffolded (Pending AI Verification)** |
+| `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Scaffolded (Pending AI Verification)** |
+| `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Scaffolded (Pending AI Verification)** |
+| `/sessions` | [Sessions](sessions.md) | Session graph, threat scoring, suspicious session inspection | **Scaffolded (Pending AI Verification)** |
+| `/sessions/stream` | [Sessions Stream](sessions-stream.md) | Real-time session transitions, score escalation alerts | **Scaffolded (Pending AI Verification)** |
+| `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Scaffolded (Pending AI Verification)** |
+| `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Scaffolded (Pending AI Verification)** |
+| `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Scaffolded (Pending AI Verification)** |
+| `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Scaffolded (Pending AI Verification)** |
+| `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Scaffolded (Pending AI Verification)** |
+| `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer (High-Scale only) | **Scaffolded (Pending AI Verification)** |
+| `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Scaffolded (Pending AI Verification)** |
+| `/admin` | [Admin Overview](admin/overview.md) | Sync status, compaction, storage usage, services CRUD | **Scaffolded (Pending AI Verification)** |
+| `/admin/queries` | [Live Query Monitor](admin/queries.md) | Running & recent SQLite/DuckDB queries, durations, locks | **Scaffolded (Pending AI Verification)** |
+| `/admin/queue` | [Task Queue](admin/queue.md) | Ingestion ledger claims, Celery queue depth, RedBeat | **Scaffolded (Pending AI Verification)** |
+| `/admin/rum` | [RUM Ingestion](admin/rum.md) | Beacon ingestion status, sample rates, client scripts | **Scaffolded (Pending AI Verification)** |
+| `/admin/session-scoring` | [Session Scoring Config](admin/session-scoring.md) | Matrix weights, threshold overrides, model retrain | **Scaffolded (Pending AI Verification)** |
+| `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Scaffolded (Pending AI Verification)** |
+| `/admin/trends` | [System Trends](admin/trends.md) | Metric history, ingestion latency, CPU/memory over time | **Scaffolded (Pending AI Verification)** |
+| `/admin/usage-log` | [FOS Usage Ledger](admin/usage-log.md) | Per-route and per-cron attribution for FOS storage costs | **Scaffolded (Pending AI Verification)** |
 
 
 ---
@@ -187,6 +187,15 @@ Fastly Log Analytics features an integrated observability and telemetry architec
   - **Propriety Audit:** Confirm strict tenancy (`service_id` isolation), parameterized SQL templates, correct caller attribution, and proper error/status codes.
   - **Latency & Resource Budgets:** Confirm database execution time, connection acquisition wait time (`app.thread_wait_ms`), and total page load time fall well within the page's defined p95 performance budget.
 
+### 5.6 Scheduled Jobs & Cron Testing Contract
+In addition to user-facing page requests, Fastly Log Analytics relies on 23 background automation jobs that continuously drive ingest, compaction, table optimization, snapshot expiry, and metadata housekeeping across Standard and High-Scale modes.
+- **Authoritative Specification:** See [docs/cron/README.md](../cron/README.md) for the exhaustive breakdown of all scheduled jobs, intervals, database locks, execution lifecycles, and testing runbooks.
+- **Cron Testing Mandate:** Any testing session or automated test suite verifying system health MUST verify:
+  1. **Scheduler Registration:** All expected jobs for the deployment mode (`standard` vs `high_throughput`) are registered in `APScheduler` or `RedBeat`.
+  2. **Manual Triggerability:** Admin trigger endpoints (`POST /api/admin/sync/{id}`, `POST /api/admin/commit/{id}`, etc.) respond with HTTP 200 and complete successfully.
+  3. **Zero Dark Cron Work:** All database operations and FOS API calls made by background jobs must be attributed in `usage_log.db` and recorded in `cron_runs`.
+  4. **Error Recovery & Dead-Letter:** Crash-recovery jobs (`ledger_sweep`, `gap_heal`) must be verified to reclaim orphaned tasks without data loss.
+
 ---
 
 ## 6. Template for New Page Specifications
@@ -202,3 +211,4 @@ When creating or updating a page specification, use the following standard struc
 7. **Interactive Workflows & Edge Cases:** Filters, time presets, drill-downs, empty states, zero-data.
 8. **Performance, Cost & Telemetry Budgets:** Target p95 latencies, query limits, OTel spans.
 9. **AI Session Automated Verification Checklist:** Step-by-step checklist for Playwright/curl verification.
+10. **Automated Test Suite & Traffic Generation:** Playwright spec files and traffic profile requirements.

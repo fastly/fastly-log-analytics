@@ -180,7 +180,8 @@ We will tackle these one at a time, auto-discovering issues and updating this li
 - [x] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster). Redeployed from scratch with all log fields including `cmcd` enabled.
 - [x] Establish page specification architecture in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/) and create master index [`docs/pages/README.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/README.md).
 - [x] Create comprehensive functional & testing specification for [Dashboard (`/dashboard`)](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md).
-- [ ] Author remaining page specifications across the 26 analytics and admin pages in `docs/pages/`.
+- [x] Create comprehensive background automation & cron jobs specification in [`docs/cron/README.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/README.md) cataloging all 25 jobs across Standard and High-Scale architectures.
+- [x] Author and scaffold all 26 analytics and admin page specifications in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/) with standard template, role/architecture matrices, and pending verification TODOs.
 - [ ] Disable Analyst Path A for high-scale architectures.
 - [ ] Develop a best-in-class Playwright E2E performance testing harness.
 - [ ] Develop synthetic log generator for 5M RPS load testing.
