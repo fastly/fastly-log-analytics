@@ -99,7 +99,36 @@ Across almost all analytics pages in this application (`/dashboard`, `/origin`, 
 
 ---
 
-## 4. Template for New Page Specifications
+## 4. Global UI/UX Responsiveness & Layout Architecture Standard
+
+To deliver a best-in-class, instantaneous, and fluid user experience across all pages, every page implementation and test must strictly enforce these frontend architectural standards:
+
+1. **Instant Page Shell Render (< 400ms FCP):**
+   - The page shell, global navigation, service selector, filter bar, and panel grid containers must paint immediately upon navigation without blocking on analytical backend queries.
+   - Server-side rendering (SSR) seeds initial keys and quantization metadata so the browser paints the complete layout structure on first frame.
+
+2. **Pre-Allocated Layout & Zero Cumulative Layout Shift (CLS = 0.00):**
+   - **No Pop-In or Layout Jumping:** Under no circumstances may panels, tables, or charts pop in late and shove other content down the page.
+   - Every chart, map, and card container must reserve its full vertical and horizontal space in advance using CSS layout containment (e.g. `h-[300px]`, `contain-intrinsic-size: 300px`, `[content-visibility:auto]`).
+   - Static categories and section skeletons render immediately, even before the dynamic catalog query returns.
+
+3. **In-Place Per-Panel Skeletons with Contextual Loading Messages:**
+   - While data is fetching or computing, each individual panel renders an unobtrusive skeleton inside its pre-allocated container featuring an animated pulse and a clear, contextual loading message:
+     - **Time-Series Charts:** `"Crunching logs..."` (or `"Initializing..."` during warm-up).
+     - **Geographic Maps:** `"Mapping traffic..."` (or `"Loading map..."`).
+     - **Top-N Metric Cards:** `"Loading..."` inside reserved 300px card boxes.
+     - **Raw Log Grids:** Reserved table row skeletons with pulse indicators.
+
+4. **Progressive Hydration & Non-Destructive Background Refresh:**
+   - As data arrives, skeletons transition smoothly to rendered visuals (`transition-opacity duration-100`).
+   - **Preserve Visual Context:** When the user changes a filter, modifies a time range, or an auto-refresh fires, already-rendered panels must **never** collapse back into blank skeletons. Instead, they remain visible with a subtle dim (`opacity-40 pointer-events-none`) while background queries execute, ensuring uninterrupted context.
+
+5. **Main-Thread Responsiveness & Web Worker Offloading:**
+   - Heavy data transformations (such as multi-trace time-series grouping, percentile interpolations, and client-side histogram computations) are offloaded to dedicated Web Workers, preserving a continuous 60fps main thread with no scroll stutter or input lag.
+
+---
+
+## 5. Template for New Page Specifications
 
 When creating or updating a page specification, use the following standard structure:
 

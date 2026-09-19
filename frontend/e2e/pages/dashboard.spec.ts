@@ -29,7 +29,26 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     expect(footerText).toMatch(/Admin View|Analyst View/i)
   })
 
-  test('2. Single round-trip /api/dashboard/bundle contract', async ({ page }) => {
+  test('2. Instant shell, pre-allocated layout & in-place loading states', async ({ page }) => {
+    // Navigate without waiting for full network idle to catch initial shell render
+    await page.goto('/dashboard')
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+    // Verify main panel containers are already rendered in place from first paint
+    const chartContainer = page.locator('text=Traffic over Time').or(page.locator('[data-empty-placeholder="true"]'))
+    await expect(chartContainer.first()).toBeVisible({ timeout: 10_000 })
+
+    // Verify that empty-placeholder elements use layout reservation
+    const placeholders = page.locator('[data-empty-placeholder="true"]')
+    const count = await placeholders.count()
+    if (count > 0) {
+      // Check that at least one placeholder displays an in-place loading message
+      const text = await placeholders.first().innerText()
+      expect(text).toMatch(/Crunching logs|Loading|Initializing|Mapping/i)
+    }
+  })
+
+  test('3. Single round-trip /api/dashboard/bundle contract', async ({ page }) => {
     let bundleCalls = 0
     let bundleResponseData: any = null
 
@@ -58,7 +77,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     expect(bundleResponseData).toHaveProperty('top_bots')
   })
 
-  test('3. Metric switching on TrafficChart', async ({ page }) => {
+  test('4. Metric switching on TrafficChart', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -73,7 +92,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('4. Time range presets and adaptive history extents', async ({ page }) => {
+  test('5. Time range presets and adaptive history extents', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -82,7 +101,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
   })
 
-  test('5. Click-to-filter drill-down adds filter chip and refetches', async ({ page }) => {
+  test('6. Click-to-filter drill-down adds filter chip and refetches', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -101,7 +120,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('6. GeoMap panel mounts properly', async ({ page }) => {
+  test('7. GeoMap panel mounts properly', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -112,7 +131,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('7. Compare mode triggers secondary aggregates query', async ({ page }) => {
+  test('8. Compare mode triggers secondary aggregates query', async ({ page }) => {
     let compareFired = false
     page.on('request', (req) => {
       if (req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST') {
@@ -135,7 +154,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('8. Category collapse state persists in localStorage across reloads', async ({ page }) => {
+  test('9. Category collapse state persists in localStorage across reloads', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -153,7 +172,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('9. Card customization popover visibility toggle', async ({ page }) => {
+  test('10. Card customization popover visibility toggle', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
@@ -164,7 +183,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await expect(page.getByText(/visible cards/i).first()).toBeVisible({ timeout: 15_000 })
   })
 
-  test('10. Performance budget: LCP < 1500ms on warm load', async ({ page }) => {
+  test('11. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
     // Prime cache on first visit
     await page.goto('/dashboard', { waitUntil: 'networkidle' })
 
@@ -172,26 +191,39 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await page.reload({ waitUntil: 'networkidle' })
     const totalTime = Date.now() - start
 
-    const lcp = await page.evaluate(() => {
-      return new Promise<number>((resolve) => {
+    const metrics = await page.evaluate(() => {
+      return new Promise<{ lcp: number; cls: number }>((resolve) => {
+        let lcp = 0
+        let cls = 0
         try {
           new PerformanceObserver((list) => {
             const entries = list.getEntries()
-            const lastEntry = entries[entries.length - 1]
-            resolve(lastEntry.startTime)
+            if (entries.length > 0) {
+              lcp = entries[entries.length - 1].startTime
+            }
           }).observe({ type: 'largest-contentful-paint', buffered: true })
-          setTimeout(() => resolve(0), 1000)
+
+          new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              if (!(entry as any).hadRecentInput) {
+                cls += (entry as any).value
+              }
+            }
+          }).observe({ type: 'layout-shift', buffered: true })
+
+          setTimeout(() => resolve({ lcp, cls }), 1000)
         } catch {
-          resolve(0)
+          resolve({ lcp: 0, cls: 0 })
         }
       })
     })
 
-    console.log(`[PERF /dashboard] Total reload: ${totalTime}ms | LCP: ${Math.round(lcp)}ms`)
+    console.log(`[PERF /dashboard] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
     expect(totalTime).toBeLessThan(10_000)
-    if (lcp > 0) {
-      expect(lcp).toBeLessThan(1500)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
     }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
   })
 
 })

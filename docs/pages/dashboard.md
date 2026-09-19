@@ -7,7 +7,8 @@ The **Dashboard** is the primary operational and analytical landing page of Fast
 ## 1. Overview & Objectives
 
 - **Primary Goal:** Enable operators and analysts to rapidly assess traffic volume, health, anomalies, and top contributors across all dimensions with sub-second drill-down capabilities across single or multiple fields.
-- **Key Tenet:** Single round-trip composite loading (`/api/dashboard/bundle`) with zero layout shift (CLS = 0) and non-blocking asynchronous data transformation for heavy multi-day datasets via Web Workers.
+- **Best-in-Class UI Responsiveness & Instant Shell:** The page shell paints instantly upon navigation with all panel boundaries, grid structures, and card containers pre-rendered in place. Each panel displays a contextual loading message while data fetches in the background, achieving **zero layout shift (CLS = 0.00)** and eliminating jarring late content pop-in.
+- **Key Tenet:** Single round-trip composite loading (`/api/dashboard/bundle`) and non-blocking asynchronous data transformation for heavy multi-day datasets via Web Workers.
 - **Drill-down Philosophy:** Every dimension across all Top-N tables and the world map is interactive: clicking a row or country instantly applies a global inclusive or exclusive filter, updating all visual elements across the dashboard.
 - **Raw Inspector Handoff:** Dedicated deep-link handoff CTA to `/query` pre-populated with active service, time bounds, and filter payload for arbitrary SQL/log exploration.
 
@@ -198,6 +199,16 @@ Displays Top-N rankings grouped into 9 collapsible categories. Each section reta
 - Located below the card grid.
 - Hands off active `service`, `start_time`, `end_time`, and serialized `filters` via query parameters directly to `/query` for deep drill-down.
 
+### 7. Instant Shell, Pre-Allocated Layout & Per-Panel Skeletons
+To achieve best-in-class responsiveness and eliminate visual jarring, the dashboard implements a pre-allocated layout strategy:
+- **Instant Paint:** The global header, filter bar, metric buttons, chart boundary, map container, and all 9 category sections are painted immediately on initial render.
+- **Per-Panel Contextual Loading Skeletons:** While data is in-flight from `/api/dashboard/bundle`, every panel renders a reserved placeholder with an animated pulse indicator:
+  - **Traffic Time-Series Chart:** Pre-allocated `h-[300px]` container displaying `"Crunching logs..."` (or `"Initializing..."` during warm-up).
+  - **Choropleth Map:** Pre-allocated `min-h-[300px]` container displaying `"Mapping traffic..."` (or `"Loading map..."`).
+  - **Top-N Cards Grid:** Pre-allocated `h-[300px]` card boxes across all static categories displaying `"Loading..."` (or `"Initializing..."`).
+- **Zero Layout Shift (CLS = 0.00):** Containers use explicit CSS containment (`contain-intrinsic-size: 300px`, `content-visibility: auto`). When analytical data hydrates, charts and tables replace skeletons inside identical boundaries—eliminating vertical jumping or late pop-in.
+- **Preserved Context on Background Updates:** When applying filters or modifying time presets, existing rendered charts and tables stay visible under a subtle dim (`opacity-40 pointer-events-none`) rather than collapsing back to blank skeletons, keeping the user oriented.
+
 ---
 
 ## 7. Interactive Workflows & Edge Cases
@@ -251,40 +262,44 @@ Any AI session tasked with validating the `/dashboard` page must execute and ver
 - [ ] **1. Route Accessibility:**
   - `GET /dashboard?service=<SERVICE_ID>` returns HTTP 200.
   - Check footer string confirms expected environment mode (`standard` or `high-scale`).
-- [ ] **2. Data Bundle Contract:**
+- [ ] **2. Instant Shell, Pre-Allocated Skeletons & Zero Layout Shift (CLS = 0.00):**
+  - Verify page shell, filter bar, chart box, map box, and all 9 category sections are in the DOM on initial paint.
+  - Verify each panel displays an in-place loading skeleton with contextual loading copy (`Crunching logs...`, `Mapping traffic...`, `Loading...`) while `/api/dashboard/bundle` is in-flight.
+  - Verify that when data returns, panels hydrate inside identical boundaries with zero vertical jumping (CLS = 0.00).
+- [ ] **3. Data Bundle Contract:**
   - Intercept `/api/dashboard/bundle` response.
   - Verify HTTP 200 and schema contains `aggregates` and `top_bots`.
   - Verify `aggregates.data` has active dimension dictionaries.
   - Verify total round-trips for dashboard data is exactly 1 on cold load (no duplicate calls).
-- [ ] **3. Metric Switching:**
+- [ ] **4. Metric Switching:**
   - Click `Reqs`, `5xx`, `4xx`, `CHR`, `Throughput` buttons and `Latency` dropdown.
   - Verify `TrafficChart` updates traces and y-axis units correctly.
-- [ ] **4. Time Range Presets & History Extents:**
+- [ ] **5. Time Range Presets & History Extents:**
   - Verify default load window:
     - If service history >= 24h: loads rolling last 24 hours (`[now - 24h, now]`).
     - If service history < 24h: verifies dashboard dynamically adapts to show the max available range of data (`[earliest_log_at, latest_log_at]` / `[earliest_log_at, now]`) without rendering blank charts or triggering empty clamped window errors.
   - Cycle through `1h`, `6h`, `24h`, `7d` presets.
   - Confirm URL parameters update and chart x-axis scales accordingly.
-- [ ] **5. Click-to-Filter Drill-down:**
+- [ ] **6. Click-to-Filter Drill-down:**
   - Click the top row in the **Status** card (e.g. `200`).
   - Verify filter chip appears in `ReportLayout` (`status = 200`).
   - Confirm `/api/dashboard/bundle` refetches with `{"status": ["200"]}`.
   - Remove filter chip and confirm data returns to unfiltered baseline.
-- [ ] **6. Map Interaction:**
+- [ ] **7. Map Interaction:**
   - Verify `GeoMap` renders SVG canvas without WebGL or rendering errors.
   - Click on a country polygon and confirm country filter is applied.
-- [ ] **7. Compare Mode:**
+- [ ] **8. Compare Mode:**
   - Toggle **Compare** switch ON.
   - Verify secondary `/api/dashboard/aggregates` query fires for prior period.
   - Verify comparison traces render on `TrafficChart`.
-- [ ] **8. Section Collapse Persistence:**
+- [ ] **9. Section Collapse Persistence:**
   - Click header of `Geography` section to collapse it.
   - Refresh the browser page.
   - Verify `Geography` section remains collapsed from `localStorage` (`dashboard_collapsed_sections`).
-- [ ] **9. Role Testing:**
+- [ ] **10. Role Testing:**
   - Test as **Admin** on port 3000/3001/8081: all controls, views, and raw IPs accessible.
   - Test as **Analyst Path B** via `/share-login`: verify read-only restrictions, masked IPs (if enabled), and absence of administrative mutations.
-- [ ] **10. Architecture Performance Verification:**
+- [ ] **11. Architecture Performance Verification:**
   - Capture HAR file during page load.
   - Assert p95 response time meets budget (< 300ms warm standard, < 200ms warm high-scale).
 
