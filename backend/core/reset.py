@@ -300,7 +300,6 @@ def reset_service_logs(
             actor=actor,
         )
 
-
         if os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
             try:
                 from backend.core.clickhouse_client import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client

@@ -110,6 +110,8 @@ services:
     # would classify server-side requests through the public proxy path.
     - API_PROXY_URL=http://backend:8000
     - NODE_OPTIONS=--max_old_space_size=1024
+    - COMMIT_HASH=${COMMIT_HASH:-unknown}
+    - ENV_NAME=local-high-scale
     networks:
     - app-network
     restart: unless-stopped

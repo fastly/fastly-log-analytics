@@ -52,7 +52,7 @@ repos:
         # falsely flag them here. Helm templates are Go templates, not
         # parseable YAML — `make deploy-validate` (helm lint/template)
         # validates those.
-        exclude: '^(docker-compose\.prod\.yml|deploy/chart/.*/templates/.*)$'
+        exclude: '^(docker-compose\.(prod|high-scale-local)\.yml|deploy/chart/.*/templates/.*)$'
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements

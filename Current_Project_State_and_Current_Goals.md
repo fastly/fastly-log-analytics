@@ -55,7 +55,7 @@ To repeat, all funtionality and pages and interactions need to be tested for bot
 
 You have full control over the v3.0.0-beta1 branch as well as the GCE machine, my local laptop and Elevation dev-usc1 cluster for compiling and testing everything. You are free to build and deploy to those systems as needed, and if you need image tags from me for Elevation deploys please ask.
 
-The cVnu9mYB3Cvmob3lsqjQU3 site deployed on GCE has active traffic and existing logs, do not delete any logs but you can send additional test traffic or synthetic logs as needed. The ZEZ4mcAjoSFDTg7tpkDKV2 site deployed to Elevation has no active traffic but is a real Fastly service. The ZU15BvY2LX7WcEp43T9VwU site is deployed locally but has no active traffic but is a real Fastly service. You are welcome to upload to each service's raw log bucket as many logs as you want or send real synthetic traffic and also delete log data at will if needed. You are also authorized to deploy VCL updates during testing to either service or its ancillary services using the tokens from the existing services or better yet using the mechanisms already built into the code and UI.
+You are welcome to upload to each service's raw log bucket as many logs as you want or send real synthetic traffic and also delete log data at will if needed. You are also authorized to deploy VCL updates during testing to either service or its ancillary services using the tokens from the existing services or better yet using the mechanisms already built into the code and UI.
 
 If you do send real traffic, do not go over 25k RPS. You can push sythetic logs to simulate traffic higher than that.
 

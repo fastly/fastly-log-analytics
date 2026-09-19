@@ -3,11 +3,15 @@ services:
     ports: !override
       - "127.0.0.1:8081:80"
 
+  frontend:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+
   backend:
     environment:
       - HIGH_SCALE_ENABLED=1
-      - HIGH_SCALE_SERVICE_IDS=qI4D8yXXFYOIpZEMrkJy65
-      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - CLICKHOUSE_ENABLED=true
     volumes: !override
       - ./configs-hs:/app/configs
@@ -17,8 +21,8 @@ services:
   worker:
     environment:
       - HIGH_SCALE_ENABLED=1
-      - HIGH_SCALE_SERVICE_IDS=qI4D8yXXFYOIpZEMrkJy65
-      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - CLICKHOUSE_ENABLED=true
     volumes: !override
       - ./configs-hs:/app/configs
@@ -28,8 +32,8 @@ services:
   beat:
     environment:
       - HIGH_SCALE_ENABLED=1
-      - HIGH_SCALE_SERVICE_IDS=qI4D8yXXFYOIpZEMrkJy65
-      - HIGH_SCALE_CURSOR_SECRET=testsecret
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - CLICKHOUSE_ENABLED=true
     volumes: !override
       - ./configs-hs:/app/configs

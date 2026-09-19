@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const url = process.argv[2];
+const expectedCommit = process.argv[3];
 
 if (!url) {
   console.error("Please provide a URL to check.");
@@ -24,6 +25,17 @@ if (!url) {
       await page.waitForTimeout(3000);
       const title = await page.title();
       console.log(`[${url}] Success! Title: '${title}'`);
+
+      if (expectedCommit) {
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        if (!bodyText.includes(`commit:${expectedCommit}`)) {
+          console.error(`[${url}] Verification Failed: Expected commit hash 'commit:${expectedCommit}' not found in body text.`);
+          console.error(`Body text sample:\n${bodyText.slice(-300)}`);
+          await browser.close();
+          process.exit(1);
+        }
+        console.log(`[${url}] Verified commit hash is active: ${expectedCommit}`);
+      }
     } catch (e) {
       console.error(`[${url}] Timed out waiting for content. Error: ${e.message}`);
       await browser.close();

@@ -77,6 +77,8 @@ services:
       # Loopback in the shared namespace (NOT backend:8000 — a service-name
       # address would resolve to the bridge IP and be classified remote → 400).
       - API_PROXY_URL=http://127.0.0.1:8000
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+      - ENV_NAME=local-standard
     depends_on:
       backend:
         condition: service_healthy
