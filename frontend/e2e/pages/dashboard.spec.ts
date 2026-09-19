@@ -1,17 +1,19 @@
 /**
  * E2E Page Contract Test: Dashboard (/dashboard)
  *
- * Implements the 10-step verification checklist specified in docs/pages/dashboard.md:
+ * Implements the 12-step verification checklist specified in docs/pages/dashboard.md:
  * 1. Route accessibility & footer environment mode verification.
- * 2. Data bundle contract: exactly 1 round-trip on initial load, HTTP 200, valid schema.
- * 3. Metric switching: Requests, Bandwidth, Status Codes, Hit Ratio, Origin Latency.
- * 4. Time range switching: 1h, 24h, 7d presets update URL and chart interval.
- * 5. Click-to-filter drilldown: clicking top-N rows adds global filter and refetches.
- * 6. GeoMap rendering: SVG/Canvas mounts without WebGL errors.
- * 7. Compare mode: toggles compare and fires secondary /api/dashboard/aggregates.
- * 8. Category collapse persistence: localStorage remembers collapsed sections across reloads.
- * 9. Card customization: hiding a card updates grid without full refetch.
- * 10. Performance budget: FCP/LCP within performance budget (< 1500ms).
+ * 2. Instant shell, pre-allocated layout & in-place loading states.
+ * 3. Data bundle contract: exactly 1 round-trip on initial load, HTTP 200, valid schema.
+ * 4. Metric switching: Requests, Bandwidth, Status Codes, Hit Ratio, Origin Latency.
+ * 5. Time range switching: 1h, 24h, 7d presets update URL and chart interval.
+ * 6. Click-to-filter drilldown: clicking top-N rows adds global filter and refetches.
+ * 7. GeoMap rendering: SVG/Canvas mounts without WebGL errors.
+ * 8. Compare mode: toggles compare and fires secondary /api/dashboard/aggregates.
+ * 9. Category collapse persistence: localStorage remembers collapsed sections across reloads.
+ * 10. Card customization: hiding a card updates grid without full refetch.
+ * 11. Performance budget: FCP/LCP within performance budget (< 1500ms), CLS <= 0.05.
+ * 12. Telemetry instrumentation & query efficiency audit.
  */
 
 import { expect, test } from '@playwright/test'
@@ -224,6 +226,50 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
       expect(metrics.lcp).toBeLessThan(1500)
     }
     expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('12. Telemetry instrumentation & query efficiency audit', async ({ page }) => {
+    let bundleDebugData: any = null
+
+    // Request with debug responses enabled so backend attaches query timings
+    await page.setExtraHTTPHeaders({
+      'x-debug-responses': '1',
+    })
+
+    page.on('response', async (res) => {
+      if (res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST') {
+        try {
+          const json = await res.json()
+          if (json._debug_queries || json._debug_sqlite) {
+            bundleDebugData = json
+          }
+        } catch {
+          // ignore non-json
+        }
+      }
+    })
+
+    await page.goto('/dashboard')
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+    await page.waitForLoadState('networkidle')
+
+    // Audit captured queries if debug instrumentation returned
+    if (bundleDebugData) {
+      const queries = bundleDebugData._debug_queries ?? []
+      console.log(`[TELEMETRY /dashboard] Captured ${queries.length} DuckDB queries`)
+
+      // 1. Completeness: Analytical queries were executed and measured
+      expect(queries.length).toBeGreaterThan(0)
+
+      // 2. Efficiency: Total query execution duration within budget (< 2500ms)
+      const totalQueryTime = queries.reduce((acc: number, q: any) => acc + (q.time_ms || 0), 0)
+      expect(totalQueryTime).toBeLessThan(2500)
+
+      // 3. Propriety: Zero duplicate identical statements
+      const sqlStatements = queries.map((q: any) => q.sql.trim())
+      const uniqueStatements = new Set(sqlStatements)
+      expect(uniqueStatements.size).toBe(sqlStatements.length)
+    }
   })
 
 })

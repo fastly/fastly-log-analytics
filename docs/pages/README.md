@@ -176,6 +176,17 @@ Every page's underlying queries, aggregations, and data pipelines must function 
 - Where appropriate, pages must expose and consume composite endpoints (e.g. `/api/dashboard/bundle` or section-level bundles) that assemble time-series aggregates, Top-N dimensions, and summary KPIs in a single round-trip query execution.
 - This prevents DuckDB connection pool starvation, minimizes network latency, and ensures all panels on a page hydrate concurrently without cascading layout reflows.
 
+### 5. Telemetry & Query Audit Contract (Comprehensive Observability)
+Fastly Log Analytics features an integrated observability and telemetry architecture (`X-Page-Load-ID`, `RequestTelemetry`, SQLite/DuckDB profilers, and the interactive Debug Panel). As we test and audit every page, we must rigorously verify telemetry capture and audit the resulting queries:
+- **100% Instrumentation (Zero "Dark" Queries or Calls):**
+  - Every DuckDB analytical query, SQLite metadata query, external Fastly/FOS API call, and logical execution section executed to render a page MUST be captured and attributed to that request's `X-Page-Load-ID` in `telemetry_queries`, `telemetry_sections`, and `usage_log`.
+  - No database query or network call may execute silently without instrumentation.
+- **Mandatory Query & Call Audit on Every Page Load:**
+  - Automated tests and AI verification sessions must fetch `/api/debug/page-telemetry?service_id={id}&page_load_id={id}` (or inspect the Debug Panel) after every page load.
+  - **Efficiency Audit:** Confirm queries utilize partition pruning, index hits, zero redundant or duplicate statements, no N+1 query loops, and appropriate rollup parquet over raw full-table scans.
+  - **Propriety Audit:** Confirm strict tenancy (`service_id` isolation), parameterized SQL templates, correct caller attribution, and proper error/status codes.
+  - **Latency & Resource Budgets:** Confirm database execution time, connection acquisition wait time (`app.thread_wait_ms`), and total page load time fall well within the page's defined p95 performance budget.
+
 ---
 
 ## 6. Template for New Page Specifications

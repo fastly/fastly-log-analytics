@@ -253,6 +253,8 @@ To achieve best-in-class responsiveness and eliminate visual jarring, the dashbo
 | **Bundle API Latency (Cold 7d)** | < 1,500 ms (p95) | < 800 ms (p95) | HAR log / API timing |
 | **Cumulative Layout Shift (CLS)** | 0.00 | 0.00 | Web Vitals / Skeleton layout reservation |
 | **Network Round Trips on Load** | Exactly 1 (`bundle`) | Exactly 1 (`bundle`) | Network tab inspection |
+| **Telemetry Query Capture** | 100% of queries/API calls captured | 100% of queries/API calls captured | `_debug_*` payload / `/api/debug/page-telemetry` |
+| **Telemetry Query Efficiency** | Exactly 1 composite DuckDB query; 0 redundant queries | Exactly 1 composite DuckDB query; 0 redundant queries | Query audit & execution time analysis |
 
 ---
 
@@ -303,6 +305,12 @@ Any AI session tasked with validating the `/dashboard` page must execute and ver
 - [ ] **11. Architecture Performance Verification:**
   - Capture HAR file during page load.
   - Assert p95 response time meets budget (< 300ms warm standard, < 200ms warm high-scale).
+- [ ] **12. Telemetry Instrumentation & Query Efficiency Audit:**
+  - Verify that all DuckDB queries, SQLite metadata lookups, FOS API calls, and section timings executing on load are captured under the page load's telemetry (`_debug_queries`, `_debug_sqlite`, `_debug_calls`, and `/api/debug/page-telemetry`).
+  - Audit the captured queries:
+    - **Efficiency:** Verify exactly 1 composite query is executed for dashboard metrics, with 0 redundant duplicate queries, 0 N+1 loops, and total database execution time is < 300ms.
+    - **Propriety:** Verify strict tenancy (`service_id` isolation), parameterized SQL, and valid caller attribution.
+    - Verify section timings and confirm no unmeasured "dark" operations occurred.
 
 ---
 
