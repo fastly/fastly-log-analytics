@@ -197,15 +197,15 @@ def build_request_context(
     try:
         yield ctx
     except HTTPException:
-        holder.__exit__(*sys.exc_info())
         telemetry.end_request(status_code=400)
         raise
-    except BaseException:
-        holder.__exit__(*sys.exc_info())
-        raise
-    else:
-        holder.__exit__(None, None, None)
     finally:
+        import sys
+
+        try:
+            holder.__exit__(*sys.exc_info())
+        except Exception:
+            pass
         telemetry.end_request()
     # Note on Live Query Monitor attribution: the attribution ContextVar is
     # set/restored by ``telemetry_middleware`` in backend/main.py, NOT here.

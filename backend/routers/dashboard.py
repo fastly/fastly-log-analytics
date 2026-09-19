@@ -270,13 +270,25 @@ async def dashboard_bundle(
         cm = checkout_connection(ctx.source, max_wait=0.2)
         return cm, cm.__enter__()
 
+    # Shield checkout to prevent connection leaks if client cancels mid-flight
+    checkout_result = []
+
+    async def _shielded_checkout():
+        res = await asyncio.to_thread(_checkout_second)
+        checkout_result.append(res)
+        return res
+
     try:
-        second_cm, second_con = await asyncio.to_thread(_checkout_second)
-        parallel = True
+        await asyncio.shield(_shielded_checkout())
+        if checkout_result:
+            second_cm, second_con = checkout_result[0]
+            parallel = True
     except _PoolBusy:
         second_cm = None
         second_con = None
     except Exception:
+        if checkout_result:
+            second_cm, _ = checkout_result[0]
         if second_cm is not None:
             try:
                 second_cm.__exit__(None, None, None)
@@ -334,10 +346,14 @@ async def dashboard_bundle(
             if isinstance(top_bots, BaseException):
                 raise top_bots
         finally:
-            try:
-                second_cm.__exit__(None, None, None)
-            except Exception:
-                pass
+            cm_to_exit = second_cm
+            if cm_to_exit is None and checkout_result:
+                cm_to_exit, _ = checkout_result[0]
+            if cm_to_exit is not None:
+                try:
+                    cm_to_exit.__exit__(None, None, None)
+                except Exception:
+                    pass
     else:
         t0 = time.perf_counter()
         task_agg = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))

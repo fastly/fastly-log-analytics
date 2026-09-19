@@ -48,54 +48,126 @@ for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.paren
 from backend.provision.log_paths import analytics_log_path  # noqa: E402
 from scripts.load_test.release_schedule import ReleaseReport, release_schedule  # noqa: E402
 
-COUNTRIES = ["US", "GB", "DE", "JP", "BR", "IN", "AU", "FR", "CA", "NL"]
-HOSTS = ["www.example.com", "api.example.com", "img.example.com"]
-BACKENDS = ["origin-primary", "origin-secondary"]
-POPS = ["IAD", "LHR", "NRT", "SYD", "SFO"]
+COUNTRIES = [
+    "US",
+    "GB",
+    "DE",
+    "JP",
+    "BR",
+    "IN",
+    "AU",
+    "FR",
+    "CA",
+    "NL",
+    "SG",
+    "ES",
+    "IT",
+    "SE",
+    "KR",
+    "MX",
+    "ZA",
+    "CH",
+    "PL",
+    "IE",
+]
+HOSTS = ["www.example.com", "api.example.com", "img.example.com", "assets.example.com"]
+BACKENDS = ["origin-primary", "origin-secondary", "origin-shield"]
+POPS = ["IAD", "LHR", "NRT", "SYD", "SFO", "FRA", "CDG", "SIN", "ORD", "DFW", "AMS", "HKG"]
 METHODS = ["GET", "GET", "GET", "GET", "POST", "HEAD"]
 PROTOS = ["2.0", "2.0", "3.0", "1.1"]
-STATUSES = [200, 200, 200, 200, 304, 404, 500]
-CACHE_STATUSES = ["HIT", "HIT", "HIT", "MISS", "PASS"]
+NORMAL_STATUSES = [200, 200, 200, 200, 200, 200, 301, 304, 404, 500]
+CACHE_STATUSES = ["HIT", "HIT", "HIT", "HIT", "MISS", "PASS"]
 TRANSPORTS = ["tcp", "tcp", "quic"]
 DIGESTS = ["digest-a", "digest-b", "digest-c"]
-TLS_FINGERPRINTS = ["ja3-synthetic-a", "ja3-synthetic-b"]
-ORIGIN_IPS = ["203.0.113.10", "203.0.113.11"]
+TLS_FINGERPRINTS = ["ja3-synthetic-a", "ja3-synthetic-b", "ja3-synthetic-bot", "ja3-synthetic-mobile"]
+ORIGIN_IPS = ["203.0.113.10", "203.0.113.11", "198.51.100.22"]
 IMAGE_FORMATS = ["jpeg", "webp", "avif"]
 USER_AGENTS = [
-    "Mozilla/5.0 (synthetic Chrome)",
-    "Mozilla/5.0 (synthetic Safari)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
     "synthetic-monitor/1.0",
 ]
-REFERERS = ["https://www.example.com/", "https://search.example.com/", "https://news.example.com/"]
-REGIONS = ["CA", "NY", "TX", "ON", "BE"]
-PROXY_TYPES = ["VPN", "VPN", "DCH", "DCH"]
-PROXY_DESCRIPTIONS = ["synthetic-vpn", "synthetic-vpn", "synthetic-datacenter", "synthetic-datacenter"]
+REFERERS = [
+    "https://www.google.com/",
+    "https://www.example.com/",
+    "https://search.example.com/",
+    "https://news.example.com/",
+    "https://twitter.com/",
+]
+REGIONS = ["CA", "NY", "TX", "ON", "BE", "LN", "TK", "IDF", "BY", "NSW"]
+PROXY_TYPES = ["VPN", "VPN", "DCH", "DCH", "PUB", "TOR"]
+PROXY_DESCRIPTIONS = ["synthetic-vpn", "synthetic-vpn", "synthetic-datacenter", "synthetic-datacenter", "synthetic-tor"]
 CONTENT_ENCODINGS = ["br", "gzip", "identity"]
 SERVER_REGIONS = ["NA", "EU", "APAC"]
-CONNECTION_SPEEDS = ["broadband", "cable", "mobile"]
+CONNECTION_SPEEDS = ["broadband", "cable", "mobile", "dialup"]
 CONNECTION_TYPES = ["residential", "commercial", "cellular"]
+COMMON_URLS = [
+    "/",
+    "/index.html",
+    "/api/v1/user/profile",
+    "/api/v2/items/featured",
+    "/products/detail/491",
+    "/search?q=fastly",
+    "/static/css/app.min.css",
+    "/static/js/bundle.min.js",
+    "/images/hero.webp",
+    "/checkout/cart",
+]
 
 
-def _synthetic_line(ts: datetime, service_id: str) -> dict:
-    status = random.choice(STATUSES)
+def _synthetic_line(ts: datetime, service_id: str, profile: str = "normal") -> dict:
     method = random.choice(METHODS)
+
+    if profile == "security-attack":
+        status = random.choice([403, 403, 403, 429, 400, 200])
+        cache_status = "PASS"
+        waf_sig = random.choice(["SQLI", "XSS", "TRAVERSAL", "CMD-INJECTION", "SUSPICIOUS-UA"])
+        url = random.choice(["/admin", "/wp-login.php", "/.env", "/api/eval", "/cgi-bin/test.cgi"])
+        is_waf = True
+    elif profile == "origin-outage":
+        status = random.choice([502, 503, 504, 500, 200])
+        cache_status = random.choice(["MISS", "PASS"])
+        waf_sig = None
+        url = random.choice(COMMON_URLS)
+        is_waf = False
+    elif profile == "cache-drop":
+        status = random.choice(NORMAL_STATUSES)
+        cache_status = random.choice(["MISS", "PASS", "PASS"])
+        waf_sig = None
+        url = random.choice(COMMON_URLS)
+        is_waf = random.random() < 0.05
+    else:  # normal
+        status = random.choice(NORMAL_STATUSES)
+        cache_status = random.choice(CACHE_STATUSES)
+        waf_sig = random.choice([None, None, None, "VERIFIED-BOT", "SQLI"])
+        url = random.choice(COMMON_URLS)
+        is_waf = waf_sig is not None
+
+    ottfb = random.randint(2000, 5000) if profile == "origin-outage" else random.randint(1_000, 300_000)
+    oconnect_ms = random.randint(200, 1000) if profile == "origin-outage" else random.randint(1, 100)
+
     return {
         "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ip": f"198.51.100.{random.randint(1, 254)}",
         "host": random.choice(HOSTS),
-        "url": f"/synthetic/{random.randint(1, 5000)}",
+        "url": url,
         "method": method,
         "proto": random.choice(PROTOS),
         "ua": random.choice(USER_AGENTS),
         "referer": random.choice(REFERERS),
         "status": status,
         "country": random.choice(COUNTRIES),
-        "city": random.choice(["San Francisco", "New York", "Toronto", "London", "Tokyo"]),
+        "city": random.choice(
+            ["San Francisco", "New York", "Toronto", "London", "Tokyo", "Paris", "Sydney", "Berlin", "Singapore"]
+        ),
         "region": random.choice(REGIONS),
-        "cache": random.choice(CACHE_STATUSES),
+        "cache": cache_status,
         "ttl": random.randint(60, 86_400),
         "age": random.randint(0, 3_600),
-        "hits": random.randint(1, 10_000),
+        "hits": 0 if cache_status in {"MISS", "PASS"} else random.randint(1, 10_000),
         "digest": random.choice(DIGESTS),
         "backend": random.choice(BACKENDS),
         "edge": random.choice([True, True, True, False]),
@@ -107,7 +179,7 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "lat": round(random.uniform(-60, 60), 4),
         "lon": round(random.uniform(-150, 150), 4),
         "metro": random.randint(500, 900),
-        "asn": random.randint(1_000, 65_000),
+        "asn": random.choice([15169, 13335, 16509, 32934, 714, 209, 1221, 2516, 3320]),
         "tcp_rtt": random.randint(8, 180_000),
         "transport": random.choice(TRANSPORTS),
         "ploss": round(random.uniform(0, 0.03), 6),
@@ -131,17 +203,17 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "ja4": random.choice(["ja4-synthetic-a", "ja4-synthetic-b"]),
         "tls_ciphers_sha": random.choice(["cipher-synthetic-a", "cipher-synthetic-b"]),
         "cookie_session": f"session-{random.randint(1, 10_000)}",
-        "waf": random.random() < 0.1,
-        "waf_resp": random.choice([200, 403]),
-        "waf_ms": 0,
+        "waf": is_waf,
+        "waf_resp": 403 if (is_waf and status == 403) else 200,
+        "waf_ms": random.randint(1, 15) if is_waf else 0,
         "waf_req_id": f"waf-{random.randint(1, 10_000)}",
         "q_rtt": random.randint(8, 180_000),
         "q_rtt_var": random.randint(1, 20_000),
         "q_lost": random.randint(0, 3),
         "q_cwnd": random.randint(10_000, 2_000_000),
-        "ottfb": random.randint(1_000, 300_000),
-        "ottlb": random.randint(2_000, 500_000),
-        "oconnect_ms": random.randint(1, 100),
+        "ottfb": ottfb,
+        "ottlb": ottfb + random.randint(500, 200_000),
+        "oconnect_ms": oconnect_ms,
         "ost": status,
         "obytes": random.randint(200, 150_000),
         "oip": random.choice(ORIGIN_IPS),
@@ -154,7 +226,7 @@ def _synthetic_line(ts: datetime, service_id: str) -> dict:
         "io_output_format": random.choice(IMAGE_FORMATS),
         "service_id": service_id,
         "cmcd": {"v": "1", "sid": f"sid-{random.randint(1, 1000)}", "br": "3000", "d": "4000"},
-        "waf_sig": random.choice(["VERIFIED-BOT", "SQLI", "XSS"]),
+        "waf_sig": waf_sig or ("VERIFIED-BOT" if random.random() < 0.1 else None),
     }
 
 
@@ -183,7 +255,7 @@ class TickResult:
 
 
 def _generate_shard(
-    period_start: datetime, service_id: str, lines_per_shard: int, shard: int
+    period_start: datetime, service_id: str, lines_per_shard: int, shard: int, profile: str = "normal"
 ) -> tuple[str, bytes, int]:
     """Top-level (picklable) so ProcessPoolExecutor can run it on a real
     core. json.dumps + string-join is CPU-bound pure-Python bytecode that
@@ -194,7 +266,7 @@ def _generate_shard(
     to keep up; process-level parallelism fixes the json.dumps part too.
     """
     lines = [
-        _synthetic_line(period_start + timedelta(seconds=random.uniform(0, 1)), service_id)
+        _synthetic_line(period_start + timedelta(seconds=random.uniform(0, 1)), service_id, profile=profile)
         for _ in range(lines_per_shard)
     ]
     if any(not line["ip"] for line in lines):
@@ -213,6 +285,7 @@ def _run_one_period(
     shards: int,
     dry_run: bool,
     pool: ProcessPoolExecutor,
+    profile: str = "normal",
 ) -> TickResult:
     def _upload(key: str, body: bytes) -> tuple[int, bool]:
         if dry_run:
@@ -226,7 +299,9 @@ def _run_one_period(
 
     t0 = time.monotonic()
     total_bytes = total_lines = errors = 0
-    gen_futures = [pool.submit(_generate_shard, period_start, service_id, lines_per_shard, s) for s in range(shards)]
+    gen_futures = [
+        pool.submit(_generate_shard, period_start, service_id, lines_per_shard, s, profile) for s in range(shards)
+    ]
     # Generation (CPU-bound, multi-process) and upload (I/O-bound, threaded)
     # overlap: each shard uploads as soon as ITS generation finishes rather
     # than waiting for all `shards` to complete first.
@@ -379,11 +454,18 @@ def _release_prepared(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--bucket", required=True)
-    p.add_argument("--service-id", required=True)
+    p.add_argument("--config", type=Path, help="Path to service config JSON (e.g. configs/<id>.json)")
+    p.add_argument("--bucket", default="")
+    p.add_argument("--service-id", default="")
     p.add_argument("--endpoint", default="")
     p.add_argument("--access-key-id", default="")
     p.add_argument("--secret-access-key", default="")
+    p.add_argument(
+        "--profile",
+        choices=["normal", "security-attack", "origin-outage", "cache-drop"],
+        default="normal",
+        help="Traffic simulation profile",
+    )
     p.add_argument("--target-rps", type=int, required=True)
     p.add_argument("--log-period-seconds", type=int, default=10)
     p.add_argument("--shards", type=int, default=20)
@@ -401,6 +483,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     p = build_parser()
     args = p.parse_args()
+
+    if args.config is not None:
+        if not args.config.is_file():
+            p.error(f"Config file not found: {args.config}")
+        with open(args.config, encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not args.bucket:
+            args.bucket = cfg.get("fos_bucket", "")
+        if not args.service_id:
+            args.service_id = cfg.get("service_id", "")
+        if not args.endpoint:
+            ep = cfg.get("fos_endpoint", "")
+            if ep and not ep.startswith("http"):
+                ep = f"https://{ep}"
+            args.endpoint = ep
+        if not args.access_key_id:
+            args.access_key_id = cfg.get("fos_access_key_id", "")
+        if not args.secret_access_key:
+            args.secret_access_key = cfg.get("fos_secret_access_key", "")
+
+    if not args.bucket:
+        p.error("--bucket is required (or specify via --config)")
+    if not args.service_id:
+        p.error("--service-id is required (or specify via --config)")
+
     if args.release_only and args.prepare_dir is None:
         p.error("--release-only requires --prepare-dir")
     if args.release_interval_seconds is not None and args.release_interval_seconds <= 0:
@@ -411,6 +518,8 @@ def main() -> int:
         args.log_period_seconds = manifest["period_seconds"]
         args.duration_seconds = manifest["duration_seconds"]
         args.shards = manifest["shards"]
+        if "profile" in manifest:
+            args.profile = manifest["profile"]
 
     service_id = args.service_id
     lines_per_period = args.target_rps * args.log_period_seconds
@@ -441,7 +550,8 @@ def main() -> int:
         )
 
     print(
-        f"target_rps={args.target_rps} log_period={args.log_period_seconds}s shards={args.shards} "
+        f"service_id={service_id} profile={args.profile} target_rps={args.target_rps} "
+        f"log_period={args.log_period_seconds}s shards={args.shards} "
         f"-> {lines_per_period} lines/period, {lines_per_shard} lines/shard/file, "
         f"{args.duration_seconds // args.log_period_seconds} periods over {args.duration_seconds}s"
         f"{' [DRY RUN]' if args.dry_run else ''}"
@@ -457,7 +567,7 @@ def main() -> int:
                 for i in range(n_periods):
                     period_start = start + timedelta(seconds=i * args.log_period_seconds)
                     futures = [
-                        pool.submit(_generate_shard, period_start, service_id, lines_per_shard, s)
+                        pool.submit(_generate_shard, period_start, service_id, lines_per_shard, s, args.profile)
                         for s in range(args.shards)
                     ]
                     periods.append(_write_prepared_period(args.prepare_dir, i, [future.result() for future in futures]))
@@ -503,6 +613,7 @@ def main() -> int:
                 args.shards,
                 args.dry_run,
                 pool,
+                profile=args.profile,
             )
             results.append(result)
             print(

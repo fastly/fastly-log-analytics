@@ -22,34 +22,48 @@ The "standard" deployment can also be run on my laptop.
 
 We need to complete all of the code for the "high-scale" architecture. We also need to confirm that the "standard" architecture still works flawlessly alongside it. This means that all pages on the site work the same with each architeture, the only difference being how they load the data for each page.
 
-Here is the current list of top-level pages:
+Here is the comprehensive inventory of top-level pages, sub-pages, and tabs, each mapped to its authoritative functional specification in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/):
 
-Dashboard
-Control Room
-Service Summary
-Performance
-Origin
-Security
-Insights
-Network
-Streaming
-RUM
-Sessions
-Usage & Cost
-Query
-Alerts
-Data Management
-Admin
+### Core Analytics & Monitoring Pages
+- [**Dashboard**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md) (`/dashboard`) — Top-level KPIs, multi-trace traffic chart, interactive world map, 9 categorized Top-N cards, drag-to-zoom, row click-to-filter.
+- [**Control Room**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/control-room.md) (`/control-room`) — Real-time operational command center, live throughput gauges, active error streams.
+- [**Service Summary / Value**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/fastly-value.md) (`/fastly-value`) — Fastly edge value metrics, bandwidth savings, compute offload, cache efficiency ROI.
+- [**Performance**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/performance.md) (`/performance`) — Edge delivery latency, TTFB, TTLB, regional percentiles, compression efficiency.
+- [**Origin Health**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/origin.md) (`/origin`) — Backend response times, connect latencies, shielding ratio, retries, origin error breakdown.
+- [**Security**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/security.md) (`/security`) — WAF rule triggers, Verified Bots, NGWAF signals, TLS JA3/JA4 fingerprints, suspicious actors.
+- [**Insights**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/insights.md) (`/insights`) — 45 automated anomaly detectors across 5 category tabs (Security, Origin, Edge, Network, Volumetrics).
+- [**Network Path**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/network.md) (`/network`) — TCP RTT, packet loss, retransmits, delivery rate, ASN health heatmap, congestion.
+- [**Streaming**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/streaming.md) (`/streaming`) — Live SSE log tailing, regex search filter, inspect modal with full JSON decode.
+- [**RUM (Real User Monitoring)**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/rum.md) (`/rum`) — Client Core Web Vitals (LCP, INP, CLS), client-side JS errors, browser/device breakdown.
+- [**Sessions**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/sessions.md) (`/sessions`) — Behavioral session tracking, threat scoring, score escalation, session inspection modal.
+- [**Sessions Stream**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/sessions-stream.md) (`/sessions/stream`) — Real-time stream of transitioning client sessions and threat scoring triggers.
+- [**Usage & Cost**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/usage-and-cost.md) (`/usage`) — Fastly Object Storage Class A/B operation breakdown, storage volume, interactive cost estimator.
+- [**SQL Query Editor**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/query.md) (`/query`) — Ad-hoc DuckDB SQL pad, schema tree, query history, CSV/JSON export.
+- [**Alerts**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/alerts.md) (`/alerts`) — Threshold alert rules, evaluation history, webhook notifications, status code gating.
+- [**Raw Logs Viewer**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/logs.md) (`/logs`) — High-throughput paginated raw log viewer, column customizer, click-to-filter drill-down.
+- [**Assets & Shield**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/assets-shield.md) (`/assets-shield`) — Origin shielding topology, asset caching performance, PoP-to-shield latency.
+- [**High-Scale Request Facts**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/high-scale-request-facts.md) (`/high-scale/request-facts`) — ClickHouse / High-Scale raw facts explorer (available in High-Scale deployments).
+- [**Analyst Share Login**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/share-login.md) (`/share-login`) — Remote analyst authentication portal (Passcode & SSO) and TOS acceptance gate.
 
-Some of those pages have sub-pages and/or tabs on them and we need to account for all of those pages and tabs as well (as well as their sub-pages and tabs). Some of the pages have modals and smoe of those modals have more links (like the modal for a streaming session).
+### Admin & Infrastructure Pages (`/admin/*`)
+- [**Admin Overview**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/overview.md) (`/admin`) — System health vitals, per-service sync status, compaction status, disk usage, service CRUD.
+- [**Live Query Monitor**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/queries.md) (`/admin/queries`) — Active and recent queries across DuckDB and SQLite, execution times, lock status.
+- [**Task Queue**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/queue.md) (`/admin/queue`) — Celery task queues, Ingest Ledger claim/commit state, RedBeat schedules.
+- [**RUM Beacon Settings**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/rum.md) (`/admin/rum`) — RUM ingestion toggle, sample rates, edge script injection status.
+- [**Session Scoring Admin**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/session-scoring.md) (`/admin/session-scoring`) — Scorer matrix weights, threshold tuners, model retrain triggers.
+- [**Live Share Management**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/share.md) (`/admin/share`) — Analyst invite generation, active session list, audit trail, server switch.
+- [**System Metric Trends**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/trends.md) (`/admin/trends`) — Long-term trend graphs for CPU, memory, ingest lag, and query latencies.
+- [**FOS Usage Ledger**](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/usage-log.md) (`/admin/usage-log`) — Attributed timeline of every Fastly Object Storage Class A / Class B API call.
 
-We also need to make sure everything works for both the admin role connected over SSH and an analyst viewing over the remote dashboard.
+Many of these pages feature sub-tabs (e.g. Insights has 5 category tabs, Admin has 8 sub-sections, Origin has shield vs backend tabs), modals with deep drill-down links (e.g. session scoring inspector, streaming log inspector), and filter propagation to `/logs` and `/dashboard`.
+
+We also need to make sure everything works for both the admin role (direct access / SSH port forward) and an analyst viewing over the remote share dashboard (`/share-login`).
 
 Many pages include the ability to filter that page by one or more fields, or to link to the dashboard pre-filtered. The dashboard itself also allows for filtering by one or more fields. We need to confirm that all filtering works on all pages (accounting for all sections on all of those pages).
 
-In additional to confirming that all functionality works, we also need to confirm that we're loading all data and pages in an optimal way. Log all queries that were involved in the page loads along with all API calls. Examine all of the queries and API calls to confirm they are appropriate and optimized for performance and cost. Also look for any queries or API we did not include in our logging properly and confirm they are included. We also need to confirm the user experience is optimal. Therefore, you should look at how quickly the page becomes interactive, how quickly all data loads in and how fast the page becomes fully interactive. Use real browser interactions and things like HAR files to analyze what is happening, and do it over repeated iterations to look at averages as well as things like p95 performance.
+In addition to confirming that all functionality works, we also need to confirm that we're loading all data and pages in an optimal way. Log all queries that were involved in the page loads along with all API calls. Examine all of the queries and API calls to confirm they are appropriate and optimized for performance and cost. Also look for any queries or API we did not include in our logging properly and confirm they are included. We also need to confirm the user experience is optimal. Therefore, you should look at how quickly the page becomes interactive, how quickly all data loads in and how fast the page becomes fully interactive. Use real browser interactions and things like HAR files to analyze what is happening, and do it over repeated iterations to look at averages as well as things like p95 performance.
 
-To repeat, all funtionality and pages and interactions need to be tested for both roles and both architecutres and while under expected load.
+To repeat, all functionality, pages, and interactions need to be tested for both roles and both architectures and while under expected load.
 
 ## What you are allowed to do
 
@@ -120,20 +134,28 @@ A few immediate architecture decisions/gaps to address:
 
 ## Expanded Testing Plan & Harness
 
-To properly validate both "standard" and "high-scale" architectures, we need a robust testing harness:
+To properly validate both "standard" and "high-scale" architectures, we need a robust testing harness driven by explicit per-page functional specifications in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/):
 
-1.  **Automated End-to-End (E2E) & Performance Harness**:
+1.  **Multi-AI Testing Session Protocol (Page-by-Page Focus)**:
+    - **Session Scope:** Each independent AI session will focus on exactly one page (or cohesive sub-domain), using the corresponding spec file in `docs/pages/<page>.md` as its contract.
+    - **Verification Matrix:** The session tests the page across all 4 environments (Local Standard, Local High-Scale, GCE VM Standard, Elevation K8s High-Scale) and applicable roles (Admin direct vs Analyst Path B remote share).
+    - **Automated Validation:** Follow the 10-step verification checklist at the bottom of the page's spec document using Playwright, curl, and network HAR analysis.
+    - **Telemetry & Query Attribution:** Inspect the Live Query Monitor (`/admin/queries`) and server logs to verify all queries fired during the page load have proper query runner attribution, use precomputed rollups where expected (e.g. 7d/30d), and do not execute duplicate or unindexed queries.
+    - **Performance Budget Enforcement:** Verify p95 load times meet the targets defined in the page spec (< 300ms warm bundle, < 800ms TTI, CLS = 0).
+    - **Issue Remediation & Bug Tracking:** Any auto-discovered bugs, race conditions, or layout shifts are fixed, verified, and documented directly in the page spec and PR commit.
+
+2.  **Automated End-to-End (E2E) & Performance Harness**:
     - Build a best-in-class Playwright testing harness following industry best practices.
-    - Automatically load each of the 16 top-level pages (and their sub-tabs/modals) for all roles.
+    - Automatically load each of the 27 top-level and sub-level pages (and their sub-tabs/modals) for all roles.
     - Capture network HAR files, API call durations, and page interactive timings (LCP, INP, fully loaded) during runs to calculate p95 metrics over repeated iterations.
     - Implement a synthetic log generator script capable of pushing sustained 2M RPS (with 5M bursts) to push limits.
 
-2.  **Comprehensive Ingestion & System Robustness**:
+3.  **Comprehensive Ingestion & System Robustness**:
     - Investigate all aspects of the ingest pipelines (both standard and high-scale) under heavy load.
     - Ensure all fault-tolerance mechanisms, state recoveries, and data retention policies are fully robust and operate flawlessly without impacting the serving tier.
 
-3.  **Role & Topology Validation**:
-    - **Roles**: Test as Admin (read_write) vs Analyst Path B (live shared instance). (Analyst Path A will be disabled for high-scale).
+4.  **Role & Topology Validation**:
+    - **Roles**: Test as Admin (`read_write`) vs Analyst Path B (live shared instance via `/share-login`). (Analyst Path A is disabled for high-scale).
     - **Provisioning**: Test the full Provision Wizard flow to ensure new high-scale services can be instantiated from scratch. *Note: We are authorized to repeatedly tear down the existing test service `ZEZ4mcAjoSFDTg7tpkDKV2` and its ancillary services on the Elevation cluster to start fresh and validate the full provisioning lifecycle.*
     - **VCL Deployments**: Confirm that deploying VCL updates from the UI correctly propagates to the Fastly edge.
 
@@ -143,12 +165,15 @@ We will tackle these one at a time, auto-discovering issues and updating this li
 
 - [x] Stabilize "standard" architecture (GCE) — fixed DuckDB connection pool saturation and stuck cron ingestion.
 - [x] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster). Redeployed from scratch with all log fields including `cmcd` enabled.
+- [x] Establish page specification architecture in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/) and create master index [`docs/pages/README.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/README.md).
+- [x] Create comprehensive functional & testing specification for [Dashboard (`/dashboard`)](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md).
+- [ ] Author remaining page specifications across the 26 analytics and admin pages in `docs/pages/`.
 - [ ] Disable Analyst Path A for high-scale architectures.
 - [ ] Develop a best-in-class Playwright E2E performance testing harness.
 - [ ] Develop synthetic log generator for 5M RPS load testing.
 - [ ] Execute baseline performance tests on the "standard" architecture (GCE).
 - [ ] Execute baseline performance tests on the "high-scale" architecture.
-- [ ] Validate all 16 pages, sub-pages, filters, and modals under both architectures.
+- [ ] Validate all 27 pages, sub-pages, filters, and modals under both architectures via dedicated AI test sessions.
 - [ ] Investigate and validate all aspects of ingestion, cron jobs, and general system robustness under expected load.
 
 ## First Steps
