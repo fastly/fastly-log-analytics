@@ -294,6 +294,7 @@ services:
       # Same passthrough rationale as the backend block — empty = no-op
       # on the SSR fetch.
       - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
+      - ENV_NAME=gce
 
   caddy:
     # Custom build with the caddy-ratelimit plugin (see caddy/Dockerfile).
