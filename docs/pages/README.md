@@ -128,7 +128,57 @@ To deliver a best-in-class, instantaneous, and fluid user experience across all 
 
 ---
 
-## 5. Template for New Page Specifications
+## 5. Universal Shared Primitives & Cross-Architecture, Cross-Role Parity
+
+To prevent fragmentation and duplicate logic as we implement and test individual pages, every page **must actively share common primitives** and adhere to universal cross-architecture and cross-role design contracts:
+
+### 1. Universal Frontend Shared Primitives
+- **Shared Page Shell (`ReportLayout`):**
+  - All analytics pages (`/dashboard`, `/origin`, `/security`, `/performance`, `/network`, `/fastly-value`, `/sessions`, `/assets-shield`, `/logs`, `/query`) must be wrapped in `ReportLayout`.
+  - It centralizes the service selector, time-range presets, quick filters, custom filter bar, timezone switcher, saved views dropdown, compare mode switch, sync health badge, and role footer.
+  - **No bespoke headers:** Individual pages must never reimplement their own filter bars, time pickers, or service dropdowns.
+- **Global Zustand Stores:**
+  - `useFilterStore`: Shared filter pills (`filters`, `addFilter`, `removeFilter`, `clearFilters`, `toggleNegate`). Filters applied on the dashboard persist when navigating to `/origin`, `/security`, or `/query`.
+  - `useTimeRangeStore`: Shared time bounds (`startTime`, `endTime`, `timezone`, `quickPreset`). Enforces the universal 24h default and adaptive history fallback across all pages.
+  - `useServiceStore`: Active service selection, service switching, and viewer/read-only mode flags.
+  - `useActiveLogFields`: Fastly VCL active logging fields catalog. Used across all pages to detect whether a dimension's field group is active in Fastly logging, gracefully rendering missing-field diagnostic instructions instead of empty or broken charts.
+- **Standardized Skeleton & Dimming Primitives:**
+  - Every panel on every page must use the unified layout reservation pattern: `data-empty-placeholder="true"`, fixed height/containment (`h-[300px]`, `min-h-[300px]`, `contain-intrinsic-size: 300px`, `[content-visibility:auto]`), and animated pulse copy.
+  - Every panel must implement non-destructive background re-fetch dimming (`transition-opacity duration-100`, `opacity-40 pointer-events-none`) so existing visuals remain visible during filter changes.
+- **Shared Visualization Components:**
+  - `TimeSeriesChart`: Standardized multi-trace time-series charts with synchronized tooltips, drag-to-zoom setting `useTimeRangeStore`, and off-thread Web Worker transform offloading (`buildTrafficDataAsync`).
+  - `TopNTable` / `CardGrid`: Uniform table rankings with click-to-filter drill-down (`onRowClick`), copy-to-clipboard, and bot-badge integration.
+  - `ChoroplethMap`: Client-only SVG world map with country click-to-filter drill-down.
+
+### 2. Multi-Role Parity Contract (Admin vs Remote Share vs Standalone)
+Every page feature, drill-down, and visualization must work properly across all three supported user personas:
+- **Admin (`read_write`):**
+  - Full access to all analytics, admin configuration (`/admin/*`), custom field management, alert rule creation, raw IPs, and SQL execution (`/query`).
+- **Analyst Path B (Remote Share - Live Instance):**
+  - Read-only analytics access through authenticated live share sessions (`/share-login`).
+  - Strict security boundaries: Administrative mutation endpoints are blocked; mutation buttons (e.g. "Save View", "Create Alert", "Edit Custom Fields") are hidden or read-only; IP addresses are masked if the administrator enabled privacy masking; direct filesystem and raw FOS credentials are never exposed.
+- **Analyst Path A (Standalone Instance - JSON Join):**
+  - Independent instance running against read-only FOS bucket credentials.
+- **Enforcement:** Tenancy, role permissions, and service isolation are enforced server-side via `RequestContext` (`backend/core/request_context.py`). No client-side bypass is possible.
+
+### 3. Multi-Architecture Parity Contract (Standard vs High-Scale)
+Every page's underlying queries, aggregations, and data pipelines must function identically across both deployment topologies:
+- **Standard Deployment Mode (`DEPLOYMENT_MODE=standard`):**
+  - Single-node synchronous ingest with local Parquet buffer and local DuckLake catalog.
+  - Serving queries execute against thread-local DuckDB connections stitching the local buffer and DuckLake table.
+- **High-Scale Deployment Mode (`DEPLOYMENT_MODE=high_throughput`):**
+  - Distributed Celery + Valkey + RedBeat worker ingest with shared Postgres DuckLake catalog (`DUCKLAKE_CATALOG`) and `ingest_ledger`.
+  - Serving queries execute against ephemeral in-memory DuckDB instances reading durable DuckLake parquet directly from cloud storage.
+- **No Local Filesystem Assumptions:** Analytics pages and queries must never assume local cache files or local buffer parquet exist when running under the high-throughput topology.
+
+### 4. Single-Round-Trip Composite API Pattern (No N+1 Waterfall)
+- Pages must avoid firing N separate HTTP requests for N different panels or cards.
+- Where appropriate, pages must expose and consume composite endpoints (e.g. `/api/dashboard/bundle` or section-level bundles) that assemble time-series aggregates, Top-N dimensions, and summary KPIs in a single round-trip query execution.
+- This prevents DuckDB connection pool starvation, minimizes network latency, and ensures all panels on a page hydrate concurrently without cascading layout reflows.
+
+---
+
+## 6. Template for New Page Specifications
 
 When creating or updating a page specification, use the following standard structure:
 

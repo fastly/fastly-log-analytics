@@ -194,6 +194,7 @@ Displays Top-N rankings grouped into 9 collapsible categories. Each section reta
 - **Lazy Rendering (`LazyMount`):** Only mounts Top-N tables near the viewport with a `600px` root margin, cutting initial DOM node count from ~860 down to ~100.
 - **Bot Integrations:** `_bot_name` and `_ngwaf_bot_name` render bot badges with dedicated retry states (`CardErrorState`).
 - **Interactive Row Click:** Clicking any value in any table adds that filter to `filterStore`.
+- **Shared Active Fields Integration (`useActiveLogFields`):** Uses the shared active fields hook to evaluate Fastly VCL group dependencies (e.g. Group A Request Identity, Group C Infrastructure, Geolocation) and render clear activation guidance if fields are absent from the service logging configuration.
 
 ### 6. Raw Request Log Inspector CTA
 - Located below the card grid.

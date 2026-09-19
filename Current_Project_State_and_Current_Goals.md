@@ -61,6 +61,16 @@ We also need to make sure everything works for both the admin role (direct acces
 
 Many pages include the ability to filter that page by one or more fields, or to link to the dashboard pre-filtered. The dashboard itself also allows for filtering by one or more fields. We need to confirm that all filtering works on all pages (accounting for all sections on all of those pages).
 
+### Core Architectural Principle: Universal Shared Primitives Across All Pages & Roles
+As we work on individual pages (starting with Dashboard, then Origin, Security, Performance, Network, etc.), **we must actively ensure that functionality is shared smartly and consistently across all pages rather than fragmented or duplicated**:
+1. **Shared Layout & Shell:** Every analytics page must leverage `ReportLayout` and `FilterBar`. Individual pages must never build bespoke navigation, time pickers, or filter inputs.
+2. **Shared State Stores:** Filters, time ranges, and active services must flow through the global Zustand stores (`useFilterStore`, `useTimeRangeStore`, `useServiceStore`, `useActiveLogFields`). Navigating between pages preserves active filters and time bounds seamlessly.
+3. **Universal Time-Window Standard:** Every page follows the rolling 24h default for mature datasets and the adaptive max-range fallback for datasets with <24h history.
+4. **Uniform Loading & Skeleton Pattern:** Every panel across every page must enforce pre-allocated geometry (`contain-intrinsic-size`, fixed container heights), in-place contextual loading skeletons (`Crunching logs...`, `Loading...`), zero layout shift (CLS = 0.00), and non-destructive background dimming (`opacity-40 pointer-events-none`).
+5. **Cross-Role Parity:** Every page must work properly for Admin (`read_write`), Analyst Path B (Remote Share read-only with IP masking), and Analyst Path A (JSON join). Administrative mutations must be securely blocked and cleanly disabled for analysts.
+6. **Cross-Architecture Parity:** Every page must work properly under both Standard (`DEPLOYMENT_MODE=standard`) and High-Scale (`DEPLOYMENT_MODE=high_throughput`), never assuming local filesystem buffers exist under high-scale.
+7. **Composite Data Loading:** Avoid N+1 waterfall requests; consolidate multi-panel telemetry into single-round-trip composite endpoints (`bundle`).
+
 In addition to confirming that all functionality works, we also need to confirm that we're loading all data and pages in an optimal way. Log all queries that were involved in the page loads along with all API calls. Examine all of the queries and API calls to confirm they are appropriate and optimized for performance and cost. Also look for any queries or API we did not include in our logging properly and confirm they are included. We also need to confirm the user experience is optimal. Therefore, you should look at how quickly the page becomes interactive, how quickly all data loads in and how fast the page becomes fully interactive. Use real browser interactions and things like HAR files to analyze what is happening, and do it over repeated iterations to look at averages as well as things like p95 performance.
 
 To repeat, all functionality, pages, and interactions need to be tested for both roles and both architectures and while under expected load.
