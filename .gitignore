@@ -131,3 +131,4 @@ compute/scorer/pkg/*
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 configs-hs/
+/deploy_test_all.sh
