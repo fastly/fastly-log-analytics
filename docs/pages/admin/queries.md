@@ -7,10 +7,10 @@
 
 ## 1. Overview & Objectives
 
-The **Live Query Monitor** provides real-time observability into all running and recently executed analytical SQL queries across DuckDB, SQLite metadata pools, and remote share databases. It surfaces active query durations, lock contention, thread wait times (`app.thread_wait_ms`), caller attribution (API route vs cron job), slow query logs, and supports query cancellation.
+The **Live Query Monitor** provides real-time observability into all running and recently executed analytical SQL queries across **DuckDB**, **ClickHouse** (`ClickHouseClient` internal queries and inserts registered with `query_registry.register("ClickHouse", ...)`), **Postgres** (multi-writer catalog and `ingest_ledger`), and **SQLite** metadata/usage pools. It surfaces active query durations, lock contention, thread wait times (`app.thread_wait_ms`), caller attribution (API route vs cron job), slow query logs, and supports query cancellation.
 
 ### Key Tenets:
-- **Zero Dark Queries:** Every database statement is surfaced in real time with duration, memory, and caller tags.
+- **Zero Dark Queries:** Every database statement across DuckDB, ClickHouse, Postgres, and SQLite is surfaced in real time with duration, memory, and caller tags.
 - **Lock Contention Forensics:** Visualizes SQLite thread locks and DuckDB connection pool saturation.
 - **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) users. Analysts receive HTTP 403.
 
@@ -21,6 +21,7 @@ The **Live Query Monitor** provides real-time observability into all running and
 - **Primary Route:** `/admin/queries`
 - **Supported Query Parameters:**
   - `service`: Filter queries by service ID or `__global_share__`.
+  - `engine`: Filter by `DuckDB`, `ClickHouse`, `SQLite`, `Postgres`.
   - `status`: Filter by `running`, `completed`, `slow`.
 
 ---
@@ -39,7 +40,7 @@ The **Live Query Monitor** provides real-time observability into all running and
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
 |---|---|---|
-| **Live Profiler** | Reads in-memory query tracker in `duckdb_pool` and `sqlite_pool`. | Reads in-memory query registry across web pods. |
+| **Live Profiler** | Reads in-memory query tracker in `duckdb_pool` and `sqlite_pool`. | Reads `query_registry` tracking DuckDB, ClickHouse, Postgres, and SQLite. |
 | **Slow Query Log** | SQLite `slow_queries` table. | Postgres or SQLite `slow_queries` table. |
 
 ---
@@ -48,14 +49,15 @@ The **Live Query Monitor** provides real-time observability into all running and
 
 ### Endpoints Hit:
 1. `GET /api/admin/queries/active`:
-   - Returns currently executing queries, durations, and connection pool states.
+   - Returns currently executing queries across DuckDB, ClickHouse, Postgres, and SQLite, durations, and connection pool states.
 2. `GET /api/admin/queries/slow`:
    - Returns historical slow queries exceeding threshold (e.g. > 1000ms).
 3. `POST /api/admin/queries/{query_id}/cancel`:
-   - Interrupts running DuckDB query execution.
+   - Interrupts running DuckDB query execution. (ClickHouse HTTP queries use strict `max_execution_time` timeouts).
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
+
 - Profiler queries themselves are excluded from recursive self-logging.
 
 ---

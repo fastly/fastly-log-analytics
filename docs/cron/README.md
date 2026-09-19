@@ -95,6 +95,7 @@ Fastly Log Analytics operates under two distinct deployment topologies governed 
 | `ngwaf_sync_{id}` | Every 5 min | APScheduler | Pod APScheduler | Admin | Security Bot Signals |
 | `share_audit_purge` | Daily 03:45 UTC | APScheduler | Pod APScheduler | Global / Admin | Security Compliance |
 | `duckdb_recycle` | Configurable (60m) | APScheduler | Pod APScheduler | Process-Wide | Memory Leak Guard |
+| `clickhouse_backup_{id}` | Scheduled / Event | N/A | Celery / Worker | Admin | Native Incremental Backup |
 
 ---
 
@@ -315,7 +316,19 @@ Fastly Log Analytics operates under two distinct deployment topologies governed 
   1. Closes idle pooled DuckDB connections.
   2. Re-initializes fresh connection pool instances with clean memory heaps.
 
+### 6.7 `clickhouse_backup_{service_id}` (High-Scale Incremental Backup)
+- **Purpose:** Issues native ClickHouse incremental table backups for high-scale serving tables (`request_facts`, `high_scale_batch_publications`, `cmcd_projection_facts`, and minute dimension rollups).
+- **Schedule:** Scheduled / Triggered post-publication.
+- **Execution Lifecycle:**
+  1. Calls `backend.high_scale.clickhouse_backup.run_incremental_clickhouse_backup`.
+  2. Validates target tables against `CLICKHOUSE_HIGH_SCALE_TABLES` allowlist.
+  3. Executes `BACKUP TABLE {table} TO Disk('{destination}', '{table}.zip')` against the configured ClickHouse storage disk (e.g. FOS-backed disk).
+  4. Parses ClickHouse backup status (`BACKUP_CREATED` -> `completed`, `BACKUP_FAILED` -> `failed`).
+  5. Returns a structured `BackupReceipt` recording `uncompressed_size`, `compressed_size`, and execution status.
+  6. **Durability Rule:** This is a durability *accelerator* only; FOS raw archive artifacts remain the authoritative recovery path via `PgManifest`. A backup failure never authorizes deletion of raw source files.
+
 ---
+
 
 ## 7. Observability, Telemetry & Audit Contract for Cron Jobs
 

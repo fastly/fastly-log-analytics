@@ -7,11 +7,11 @@
 
 ## 1. Overview & Objectives
 
-The **High-Scale Request Facts** page provides specialized deep-dive analytical querying and column inspection into high-scale request fact partitions (e.g. ClickHouse or distributed DuckLake). It is designed for multi-million requests/sec production environments requiring sub-second analytical aggregations across billions of rows.
+The **High-Scale Request Facts** page provides specialized deep-dive analytical querying, column inspection, and partition telemetry into high-scale request fact MergeTree tables in ClickHouse (`request_facts`, `high_scale_batch_publications`, `cmcd_projection_facts`, and minute-level dimensions). It is designed for multi-million requests/sec production environments requiring sub-second analytical aggregations across billions of rows.
 
 ### Key Tenets:
-- **Massive Scale Diagnostics:** Inspects raw request facts across distributed cluster shards.
-- **Partition Pruning:** Displays partition boundaries, primary sort keys, and compression ratios.
+- **Massive Scale Diagnostics:** Inspects raw request facts across ClickHouse cluster partitions (`request_facts` keyed by `service_id`, `batch_id`, `timestamp`).
+- **Partition & Column Pruning:** Displays partition boundaries, primary sort keys (`(service_id, toStartOfHour(timestamp), domain)`), compression ratios, and ClickHouse scan byte stats (`app_clickhouse_bytes_read`).
 - **Shared Primitives:** Conforms strictly to global navigation, layout primitives, and theme tokens.
 
 ---
@@ -22,7 +22,7 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 - **Supported Query Parameters:**
   - `service`: Fastly Service ID.
   - `from`, `to`: ISO timestamps or preset tokens (`now-1h`, `now-24h`).
-  - Standard drill-down filters: `status`, `pop`, `shard_id`.
+  - Standard drill-down filters: `status`, `pop`, `domain`, `country`, `batch_id`.
 
 ---
 
@@ -40,8 +40,9 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
 |---|---|---|
-| **Engine Availability** | Emulates facts view via DuckDB partitioned table scan. | Direct execution against ClickHouse / Postgres DuckLake cluster. |
-| **Scalability** | Up to tens of millions of rows. | Hundreds of millions to billions of rows. |
+| **Engine Availability** | Emulates facts view via DuckDB partitioned table scan. | Direct execution against ClickHouse MergeTree tables (`request_facts`, `high_scale_batch_publications`). |
+| **Scalability** | Up to tens of millions of rows. | Hundreds of millions to billions of rows at sustained 2M-5M RPS. |
+| **Data Plane** | Local Parquet buffer + DuckLake table. | Distributed Celery workers batch-inserting into ClickHouse via `ClickHouseClient.insert_rows()`, indexed by `PgManifest`. |
 
 ---
 
@@ -50,11 +51,13 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 ### Endpoints Hit:
 1. `GET /api/high-scale/request-facts`:
    - Parameters: `service_id`, `from`, `to`, `filters`, `limit`.
-   - Returns: Partition summary, facts rows, query execution duration, scanned bytes.
+   - Returns: Partition summary, facts rows, query execution duration, scanned bytes, ClickHouse query ID.
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
-- Database statements recorded in `telemetry_queries` and audited for efficiency.
+- Database statements registered via `query_registry.register("ClickHouse", ...)` and recorded in `telemetry_queries`.
+- Metrics exported to Prometheus via `app_clickhouse_query_duration_ms` and `app_clickhouse_bytes_read_bytes_total`.
+
 
 ---
 

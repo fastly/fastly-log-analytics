@@ -72,6 +72,7 @@ docs/pages/
 | `/admin/share` | [Live Share Admin](admin/share.md) | Invites CRUD, active sessions, audit trail, server switch | **Scaffolded (Pending AI Verification)** |
 | `/admin/trends` | [System Trends](admin/trends.md) | Metric history, ingestion latency, CPU/memory over time | **Scaffolded (Pending AI Verification)** |
 | `/admin/usage-log` | [FOS Usage Ledger](admin/usage-log.md) | Per-route and per-cron attribution for FOS storage costs | **Scaffolded (Pending AI Verification)** |
+| `/admin/clickhouse` | [ClickHouse Cluster Admin](admin/clickhouse.md) | Cluster health, schema alignment, dataset generation, bounded replay | **Scaffolded (Pending AI Verification)** |
 
 
 ---
@@ -162,13 +163,15 @@ Every page feature, drill-down, and visualization must work properly across all 
 - **Enforcement:** Tenancy, role permissions, and service isolation are enforced server-side via `RequestContext` (`backend/core/request_context.py`). No client-side bypass is possible.
 
 ### 3. Multi-Architecture Parity Contract (Standard vs High-Scale)
-Every page's underlying queries, aggregations, and data pipelines must function identically across both deployment topologies:
+Every page's underlying queries, aggregations, and data pipelines must function predictably across both deployment topologies:
 - **Standard Deployment Mode (`DEPLOYMENT_MODE=standard`):**
   - Single-node synchronous ingest with local Parquet buffer and local DuckLake catalog.
   - Serving queries execute against thread-local DuckDB connections stitching the local buffer and DuckLake table.
+  - SQLite WAL databases manage service metadata, cron logs, usage tracking, and NGWAF bot caches.
 - **High-Scale Deployment Mode (`DEPLOYMENT_MODE=high_throughput`):**
   - Distributed Celery + Valkey + RedBeat worker ingest with shared Postgres DuckLake catalog (`DUCKLAKE_CATALOG`) and `ingest_ledger`.
-  - Serving queries execute against ephemeral in-memory DuckDB instances reading durable DuckLake parquet directly from cloud storage.
+  - **ClickHouse Serving & Fact Engine:** Ingests massive event streams into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `cmcd_projection_facts`, and minute-level dimensions for origin, security, network, and performance). Supports bounded diagnostic replay via `PgManifest` and native incremental backup (`backend/high_scale/clickhouse_backup.py`).
+  - Serving queries execute against ephemeral in-memory DuckDB instances reading durable DuckLake parquet directly from cloud storage, with ClickHouse fact exploration via `/high-scale/request-facts`.
 - **No Local Filesystem Assumptions:** Analytics pages and queries must never assume local cache files or local buffer parquet exist when running under the high-throughput topology.
 
 ### 4. Single-Round-Trip Composite API Pattern (No N+1 Waterfall)
@@ -176,25 +179,34 @@ Every page's underlying queries, aggregations, and data pipelines must function 
 - Where appropriate, pages must expose and consume composite endpoints (e.g. `/api/dashboard/bundle` or section-level bundles) that assemble time-series aggregates, Top-N dimensions, and summary KPIs in a single round-trip query execution.
 - This prevents DuckDB connection pool starvation, minimizes network latency, and ensures all panels on a page hydrate concurrently without cascading layout reflows.
 
-### 5. Telemetry & Query Audit Contract (Comprehensive Observability)
-Fastly Log Analytics features an integrated observability and telemetry architecture (`X-Page-Load-ID`, `RequestTelemetry`, SQLite/DuckDB profilers, and the interactive Debug Panel). As we test and audit every page, we must rigorously verify telemetry capture and audit the resulting queries:
-- **100% Instrumentation (Zero "Dark" Queries or Calls):**
-  - Every DuckDB analytical query, SQLite metadata query, external Fastly/FOS API call, and logical execution section executed to render a page MUST be captured and attributed to that request's `X-Page-Load-ID` in `telemetry_queries`, `telemetry_sections`, and `usage_log`.
+### 5. Telemetry & Query Audit Contract (Comprehensive Observability Across All Engines)
+Fastly Log Analytics features an integrated observability and telemetry architecture (`X-Page-Load-ID`, `RequestTelemetry`, multi-engine query profilers, and the interactive Debug Panel). As we test and audit every page, we must rigorously verify telemetry capture and audit the resulting queries:
+- **100% Instrumentation (Zero "Dark" Queries or Calls Across All Engines):**
+  - Every analytical query across **DuckDB** and **ClickHouse** (`query_registry.register("ClickHouse", ...)`), operational query across **SQLite** and **Postgres**, external Fastly/FOS API call, and logical execution section executed to render a page MUST be captured and attributed to that request's `X-Page-Load-ID` in `telemetry_queries`, `telemetry_sections`, and `usage_log`.
+  - The UI Debug Panel explicitly surfaces both DuckDB and ClickHouse queries under `"Data Queries (DuckDB / ClickHouse)"` alongside SQLite and HTTP calls.
   - No database query or network call may execute silently without instrumentation.
 - **Mandatory Query & Call Audit on Every Page Load:**
   - Automated tests and AI verification sessions must fetch `/api/debug/page-telemetry?service_id={id}&page_load_id={id}` (or inspect the Debug Panel) after every page load.
-  - **Efficiency Audit:** Confirm queries utilize partition pruning, index hits, zero redundant or duplicate statements, no N+1 query loops, and appropriate rollup parquet over raw full-table scans.
+  - **Efficiency Audit:** Confirm queries utilize partition pruning, index hits, zero redundant or duplicate statements, no N+1 query loops, and appropriate rollup parquet or ClickHouse minute-level aggregates over raw full-table scans.
   - **Propriety Audit:** Confirm strict tenancy (`service_id` isolation), parameterized SQL templates, correct caller attribution, and proper error/status codes.
   - **Latency & Resource Budgets:** Confirm database execution time, connection acquisition wait time (`app.thread_wait_ms`), and total page load time fall well within the page's defined p95 performance budget.
 
-### 5.6 Scheduled Jobs & Cron Testing Contract
-In addition to user-facing page requests, Fastly Log Analytics relies on 23 background automation jobs that continuously drive ingest, compaction, table optimization, snapshot expiry, and metadata housekeeping across Standard and High-Scale modes.
+### 5.6 Full Tooling & Automation Ecosystem Contract
+All page specifications, tests, and deployment verification procedures must account for our full operational tooling stack:
+- **Fastly VCL Linter & Dialect Simulator (`falco`):** Any VCL generated for log format strings, custom field expressions (`vcl_log_expression`), or edge snippets must pass `falco lint` and simulation tests before edge deployment.
+- **Distributed Ingestion & Scheduler (Celery, RedBeat, Valkey/Redis):** Asynchronous task distribution, high-throughput ingest workers, crash-net recovery sweeps (`ledger_sweep`), and shared distributed state.
+- **Telemetry & Monitoring (OpenTelemetry, Prometheus, Grafana):** OTel tracing propagation, Prometheus scrape rules (`observability/clickhouse.rules.yml`, `observability/prometheus.yml`), and multi-pod dashboards (`observability/dashboards/fla-multipod.json`).
+- **End-to-End Testing & Verification (Playwright, Vitest, Pytest):** Dual-role Playwright E2E suites verifying Admin vs Analyst Path B access, network HAR performance capture, Core Web Vitals audits (LCP, INP, CLS), and unit tests (`pytest -n` with strict database test isolation).
+
+### 5.7 Scheduled Jobs & Cron Testing Contract
+In addition to user-facing page requests, Fastly Log Analytics relies on 25 background automation jobs that continuously drive ingest, compaction, table optimization, snapshot expiry, and metadata housekeeping across Standard and High-Scale modes.
 - **Authoritative Specification:** See [docs/cron/README.md](../cron/README.md) for the exhaustive breakdown of all scheduled jobs, intervals, database locks, execution lifecycles, and testing runbooks.
 - **Cron Testing Mandate:** Any testing session or automated test suite verifying system health MUST verify:
   1. **Scheduler Registration:** All expected jobs for the deployment mode (`standard` vs `high_throughput`) are registered in `APScheduler` or `RedBeat`.
   2. **Manual Triggerability:** Admin trigger endpoints (`POST /api/admin/sync/{id}`, `POST /api/admin/commit/{id}`, etc.) respond with HTTP 200 and complete successfully.
   3. **Zero Dark Cron Work:** All database operations and FOS API calls made by background jobs must be attributed in `usage_log.db` and recorded in `cron_runs`.
   4. **Error Recovery & Dead-Letter:** Crash-recovery jobs (`ledger_sweep`, `gap_heal`) must be verified to reclaim orphaned tasks without data loss.
+
 
 ---
 
