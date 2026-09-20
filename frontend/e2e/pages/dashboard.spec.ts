@@ -41,7 +41,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await expect(chartContainer.first()).toBeVisible({ timeout: 10_000 })
 
     // Verify that empty-placeholder elements use layout reservation
-    const placeholders = page.locator('[data-empty-placeholder="true"]')
+    const placeholders = page.locator('main [data-empty-placeholder="true"]')
     const count = await placeholders.count()
     if (count > 0) {
       // Check that at least one placeholder displays an in-place loading message

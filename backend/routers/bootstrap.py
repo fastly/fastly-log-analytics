@@ -127,7 +127,7 @@ async def bootstrap(
     # (a sync def run in the threadpool).
     is_remote = getattr(request.state, "is_remote", False)
     # Analyst / anonymous: per-session, cheap — never cached.
-    if is_remote:
+    if is_remote or bool(request.cookies.get("analyst_session_id")):
         return await run_in_threadpool(_bootstrap_sync, request, service_id)
 
     # Loopback admin: the check-cache / check-inflight / create-future
@@ -179,7 +179,7 @@ def _bootstrap_sync(
     # analysts still get the full response with their scoped services.
     analyst_session = getattr(request.state, "analyst_session", None)
     is_remote = getattr(request.state, "is_remote", False)
-    if is_remote and analyst_session is None:
+    if analyst_session is None:
         sid = request.cookies.get("analyst_session_id")
         if sid:
             from backend.utils.tunnel import get_tunnel_manager

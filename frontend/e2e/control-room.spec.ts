@@ -100,6 +100,7 @@ test.describe('Control Room', () => {
     const results = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
       .exclude('[data-empty-placeholder="true"]')
+      .exclude('[data-axe-ignore="true"]')
       .analyze()
 
     expect(

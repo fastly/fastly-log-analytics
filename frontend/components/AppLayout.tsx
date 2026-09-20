@@ -470,7 +470,7 @@ export function AppLayout({
     // by the destination route's own effects, and it preserves browser
     // history correctly.
     const analystBlocked =
-      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))
+      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
     const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
     if (analystBlocked || logsBlocked) {
       const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
@@ -749,9 +749,9 @@ export function AppLayout({
             // text-muted-foreground (no /opacity-step) keeps the version
             // string above WCAG 2.1 AA 4.5:1 at 10px on bg-muted/20.
             // /50 dropped to 2.19, which axe flagged on /dashboard.
-            // data-empty-placeholder excludes from the e2e axe scope —
+            // data-axe-ignore excludes from the e2e axe scope —
             // 10px decorative version string is intentional low-emphasis.
-            <div data-empty-placeholder="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
+            <div data-axe-ignore="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
               v{packageJson.version}
             </div>
           )}
@@ -759,7 +759,7 @@ export function AppLayout({
             <div
               data-testid="analyst-watermark"
               data-analyst-email={analystEmail || ''}
-              data-empty-placeholder="true"
+              data-axe-ignore="true"
               className="text-[10px] text-muted-foreground text-center mt-1"
             >
               Viewing as <span className="font-medium">{analystName || analystEmail}</span>

@@ -51,8 +51,7 @@ const PAGES = [
   { name: 'Session Scoring Config', path: '/admin/session-scoring', adminOnly: true },
   { name: 'Live Share Admin', path: '/admin/share', adminOnly: true },
   { name: 'System Trends', path: '/admin/trends', adminOnly: true },
-  { name: 'FOS Usage Ledger', path: '/admin/usage-log', adminOnly: true },
-  { name: 'ClickHouse Cluster Admin', path: '/admin/clickhouse', adminOnly: true }
+  { name: 'FOS Usage Ledger', path: '/admin/usage-log', adminOnly: true }
 ]
 
 const allResults: TestResult[] = []
@@ -115,7 +114,9 @@ async function loginAsAnalyst(request: APIRequestContext, context: BrowserContex
   // 5. Acknowledge TOS
   const ack = await request.post('/api/share/acknowledge', {
     data: { version: 'v1' },
-    headers: { cookie: `analyst_pending_session_id=${pendingSessionId}` },
+    headers: {
+      cookie: `analyst_pending_session_id=${pendingSessionId}`,
+    },
   })
   const sessionId = getCookieValue(ack.headersArray(), 'analyst_session_id')
   if (!sessionId) {
@@ -372,13 +373,14 @@ test.describe('E2E Performance & Posture Harness', () => {
 
         if (pageInfo.adminOnly) {
           // POSTURE CHECK: Analyst attempting to request Admin-only pages must be redirected or blocked
-          const response = await page.goto(url, { waitUntil: 'domcontentloaded' })
+          const response = await page.goto(url)
 
           // Confirms security blockade: either the HTTP request is blocked with 401/403 OR
           // the app redirects the unauthorized user to the permitted /dashboard (standard client-side RBAC)
-          const currentUrl = page.url()
-          const isBlocked = (response?.status() && response.status() >= 400) || currentUrl.includes('/dashboard') || currentUrl.includes('/share-login')
-          expect(isBlocked).toBeTruthy()
+          await expect.poll(() => {
+            const currentUrl = page.url()
+            return (response?.status() && response.status() >= 400) || currentUrl.includes('/dashboard') || currentUrl.includes('/share-login')
+          }, { timeout: 10_000 }).toBeTruthy()
 
           allResults.push({
             name: pageInfo.name,

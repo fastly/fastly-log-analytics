@@ -96,6 +96,7 @@ async function assertNoAxeViolations(page: import('@playwright/test').Page, rout
     .exclude('.recharts-wrapper')
     .exclude('[data-testid="plotly-host"]')
     .exclude('[data-empty-placeholder="true"]')
+    .exclude('[data-axe-ignore="true"]')
     // Interactive MapLibre maps are a documented known-limitation: their
     // container is aria-hidden (data is exposed via the adjacent accessible
     // tables), but MapLibre injects a focusable canvas + zoom controls that

@@ -26,7 +26,7 @@ import { ACTIVE_SERVICE_COOKIE } from './lib/active-service-cookie'
 //     understand nonces — modern browsers honouring CSP3 ignore it in
 //     the presence of a nonce.
 
-const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/logs']
+const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/logs', '/high-scale']
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
 
 // Same-origin /api/*, /js/* proxying for the production/
