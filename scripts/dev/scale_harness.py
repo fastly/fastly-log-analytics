@@ -350,7 +350,12 @@ def main() -> None:
         default=60,
         help="wait for delayed FOS delivery before the final checkpoint",
     )
-    run_parser.add_argument("--rum-ratio", type=float, default=0.0, help="Ratio of requests to send to /rum-beacon with randomized vitals payloads (0.0 to 1.0)")
+    run_parser.add_argument(
+        "--rum-ratio",
+        type=float,
+        default=0.0,
+        help="Ratio of requests to send to /rum-beacon with randomized vitals payloads (0.0 to 1.0)",
+    )
     run_parser.add_argument("--output", type=Path, default=Path("performance-report/scale-harness.json"))
     args = parser.parse_args()
     if args.max_in_flight < 1:

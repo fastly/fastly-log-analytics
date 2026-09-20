@@ -104,7 +104,7 @@ def load_dotenv_manually() -> None:
     """Manually parse .env file from the workspace root and set environment variables."""
     dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
     if os.path.exists(dotenv_path):
-        with open(dotenv_path, "r") as f:
+        with open(dotenv_path) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -141,10 +141,12 @@ def auto_resolve_remote_admin_token() -> str | None:
     if resolve_cmd:
         try:
             # Run the configured shell command
-            out = subprocess.check_output(resolve_cmd, shell=True, stderr=subprocess.DEVNULL, timeout=8).decode().strip()
+            out = (
+                subprocess.check_output(resolve_cmd, shell=True, stderr=subprocess.DEVNULL, timeout=8).decode().strip()
+            )
             if "=" in out:
                 return out.split("=", 1)[1].strip()
-            elif out and not "=" in out:
+            elif out and "=" not in out:
                 # If command directly outputs the token
                 return out
         except Exception:

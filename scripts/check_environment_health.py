@@ -24,7 +24,7 @@ def load_dotenv_manually() -> None:
     """Manually parse .env file from the workspace root and set environment variables."""
     dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     if os.path.exists(dotenv_path):
-        with open(dotenv_path, "r") as f:
+        with open(dotenv_path) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -87,7 +87,7 @@ ENVIRONMENTS: dict[str, EnvironmentTarget] = {
         remediation_cmd=os.getenv(
             "REMOTE_STANDARD_FORWARD_CMD",
             f"gcloud compute ssh {gce_vm_name} --project={gce_project} "
-            f"--zone={gce_zone} -- -N -L 3001:127.0.0.1:3000 -L 8001:127.0.0.1:8000"
+            f"--zone={gce_zone} -- -N -L 3001:127.0.0.1:3000 -L 8001:127.0.0.1:8000",
         ),
     ),
     "remote-high-scale": EnvironmentTarget(
@@ -99,7 +99,7 @@ ENVIRONMENTS: dict[str, EnvironmentTarget] = {
         remediation_cmd=os.getenv(
             "REMOTE_HIGH_SCALE_FORWARD_CMD",
             f"kubectl port-forward svc/frontend-svc -n {elevation_namespace} 3002:3000 & "
-            f"kubectl port-forward svc/backend-svc -n {elevation_namespace} 8002:8000"
+            f"kubectl port-forward svc/backend-svc -n {elevation_namespace} 8002:8000",
         ),
     ),
 }

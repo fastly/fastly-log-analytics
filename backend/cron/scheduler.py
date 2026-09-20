@@ -356,9 +356,6 @@ class Scheduler:
     """Thin wrapper around APScheduler's BackgroundScheduler."""
 
     def __init__(self) -> None:
-        import os
-
-        self.mode = os.environ.get("SCHEDULER_MODE", "inprocess")
         from apscheduler.schedulers.background import BackgroundScheduler
 
         self._sched = BackgroundScheduler(timezone=UTC)
@@ -367,39 +364,10 @@ class Scheduler:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    # Jobs that go to RedBeat (Celery workers) in external mode: the
-    # ledger/FOS family that never opens the per-service .duckdb file.
-    # EVERYTHING ELSE stays on this process's APScheduler even in external
-    # mode — rollup/compaction/alerts/view-refresh jobs read the pod-local
-    # DuckDB file and cache, which is single-writer across processes: run
-    # from a worker they either fight the backend's readers for the file
-    # lock or (metric_snapshot) sample the wrong process's vitals. The
-    # allowlist is deliberately tight so a NEW job defaults to backend-local
-    # unless explicitly promoted to the worker fleet.
-    _REDBEAT_JOB_PREFIXES = (
-        "log_discovery_",
-        "commit_",
-        "ledger_sweep_",
-        "full_sync_",
-        "gap_heal_",
-        "rum_discovery_",
-        "ledger_rum_sweep_",
-    )
-
-    def _routes_to_redbeat(self, job_id: str) -> bool:
-        return self.mode == "external" and str(job_id).startswith(self._REDBEAT_JOB_PREFIXES)
-
     def start(self) -> None:
-        if self.mode == "external":
-            logger.info(
-                "[scheduler] External mode: ledger/FOS jobs -> RedBeat (workers); "
-                "pod-local jobs (rollups/compaction/alerts/snapshots) -> in-process APScheduler."
-            )
-            self._sync_jobs()
-            self._sched.start()
-            return
         """Start the scheduler and register jobs for all configured services."""
         if dev_mode_no_crons():
+            import os
             logger.warning(
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
                 "(sync/full_sweep/gap_heal/commit/optimize/expire/ngwaf_sync/metadata_cleanup/"
@@ -421,6 +389,7 @@ class Scheduler:
 
         self._sync_jobs()
         self._sched.start()
+        import os
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
 
         # Initial metadata sync for analyst (read_only) services only.
@@ -713,16 +682,6 @@ class Scheduler:
 
         configs = svcconfig.list_configs()
         seen_ids: set[str] = set()
-
-        if self.mode == "external":
-            # RedBeat entry.save() is an upsert, so re-registering every
-            # redbeat-routed job on each reload is cheap and is what lets an
-            # interval change from a config edit take effect. ONLY the
-            # redbeat-routed ids are cleared — the pod-local jobs live on the
-            # real APScheduler where re-adding an existing id raises, and its
-            # reschedule path below handles their interval changes.
-            for jid in [j for j in self._job_ids if str(j).startswith(self._REDBEAT_JOB_PREFIXES)]:
-                del self._job_ids[jid]
 
         for cfg in configs:
             service_id = cfg.get("service_id", "")
@@ -1393,39 +1352,10 @@ class Scheduler:
         self._register_recycle_job(seen_ids)
 
         # Cleanup
-        if self.mode == "external":
-            # Sweep Redis itself, not just this process's _job_ids: RedBeat
-            # entries persist across restarts, so a renamed/removed/relocated
-            # job otherwise keeps firing forever (observed as a KeyError storm
-            # in the worker after the sync→log_discovery rename). An entry is
-            # stale if it isn't a currently-seen id OR isn't redbeat-routed at
-            # all (a pod-local job left behind in Redis from before the
-            # backend-local/worker split). Leave celery's internal entries
-            # (e.g. celery.backend_cleanup) alone.
-            from redbeat import RedBeatSchedulerEntry
-
-            from backend.celery_app import app
-            from backend.celery_status import redbeat_schedule_entries
-
-            for stale in redbeat_schedule_entries():
-                name = stale["name"]
-                if name.startswith("celery."):
-                    continue
-                if name in seen_ids and self._routes_to_redbeat(name):
-                    continue
-                try:
-                    RedBeatSchedulerEntry.from_key(f"redbeat:{name}", app=app).delete()
-                    logger.info("[scheduler] Removed stale RedBeat entry %s (task=%s).", name, stale.get("task"))
-                except Exception as e:
-                    logger.warning("[scheduler] Failed to remove stale RedBeat entry %s: %s", name, e)
-                if self._routes_to_redbeat(name):
-                    self._job_ids.pop(name, None)
-
-        # Pod-local jobs (all jobs in inprocess mode; the non-redbeat family
-        # in external mode) are removed from the live APScheduler when their
+        # Pod-local jobs are removed from the live APScheduler when their
         # service/config disappears.
         for jid in list(self._job_ids.keys()):
-            if jid in seen_ids or self._routes_to_redbeat(jid):
+            if jid in seen_ids:
                 continue
             try:
                 self._sched.remove_job(jid)
@@ -1437,61 +1367,8 @@ class Scheduler:
     def _add_job(self, func, trigger=None, **kwargs):
         job_id = kwargs.pop("id", None)
         args = kwargs.pop("args", [])
-
-        if self.mode == "external" and not self._routes_to_redbeat(job_id):
-            # Pod-local job in external mode: schedule on this process's
-            # APScheduler exactly like inprocess mode (see the
-            # _REDBEAT_JOB_PREFIXES note above for why the split exists).
-            self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
-            self._job_ids[job_id] = job_id
-            return
-
-        if self.mode == "external":
-            from celery.schedules import crontab as celery_crontab
-            from celery.schedules import schedule as celery_schedule
-            from redbeat import RedBeatSchedulerEntry
-
-            from backend.celery_app import app
-
-            celery_task = getattr(func, "celery_task", None)
-            if celery_task is None:
-                # Scheduling an unregistered name makes beat fire KeyErrors
-                # forever with zero work done — refuse loudly instead.
-                logger.error(
-                    "[scheduler] Cannot schedule %s.%s in external mode: it has no "
-                    "registered Celery task (wrap it with @cron_task/@global_job or "
-                    "attach .celery_task). Job %s NOT scheduled.",
-                    func.__module__,
-                    func.__name__,
-                    job_id,
-                )
-                return
-            task_name = celery_task.name
-
-            if trigger == "interval":
-                secs = kwargs.get("seconds", 0) + kwargs.get("minutes", 0) * 60 + kwargs.get("hours", 0) * 3600
-                schedule = celery_schedule(run_every=secs)
-            elif trigger == "cron":
-                # APScheduler's cron trigger defaults unspecified lower-order
-                # fields to their MINIMUM (hour=2 ⇒ minute 0, once daily);
-                # celery's crontab defaults minute='*' (hour=2 ⇒ 60 runs/hour).
-                # Mirror APScheduler so daily jobs stay daily.
-                h = kwargs.get("hour", "*")
-                m = kwargs.get("minute", 0 if "hour" in kwargs else "*")
-                dow = kwargs.get("day_of_week", "*")
-                schedule = celery_crontab(minute=m, hour=h, day_of_week=dow)
-            else:
-                schedule = celery_schedule(run_every=60)
-
-            # entry.save() is an upsert keyed by name, so re-registering an
-            # existing job updates its schedule in place (interval changes
-            # from a config edit take effect on the next reload).
-            entry = RedBeatSchedulerEntry(job_id, task_name, schedule, args=args, app=app)
-            entry.save()
-            self._job_ids[job_id] = job_id
-        else:
-            self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
-            self._job_ids[job_id] = job_id
+        self._sched.add_job(func, trigger, id=job_id, args=args, **kwargs)
+        self._job_ids[job_id] = job_id
 
     def reload(self) -> None:
         """Re-read service configs and update all jobs. Call after adding/removing a service."""
@@ -1504,14 +1381,7 @@ class Scheduler:
         self._sync_jobs()
 
     def get_job(self, job_id: str):
-        """Return the APScheduler Job object for a given job ID, or None.
-
-        RedBeat-routed jobs have no APScheduler object (their reschedule
-        happens via the upsert in ``_add_job``); pod-local jobs resolve
-        normally in both modes.
-        """
-        if self._routes_to_redbeat(job_id):
-            return None
+        """Return the APScheduler Job object for a given job ID, or None."""
         return self._sched.get_job(job_id)
 
 
