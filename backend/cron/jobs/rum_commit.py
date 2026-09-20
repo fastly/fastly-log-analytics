@@ -13,7 +13,7 @@ from backend.cron.decorators import cron_task
 logger = logging.getLogger(__name__)
 
 
-@cron_task("cron_rum_commit")
+@cron_task("cron_rum_commit", job_name="rum_commit")
 def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = None, **kwargs) -> None:
     """Compact RUM tables from DuckDB cache to Iceberg/FOS."""
     from backend import config as svcconfig
@@ -76,6 +76,12 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
             total_committed_errors = errors_res.get("rows_committed", 0)
             # Sync client_errors view/metadata
             db_iceberg.sync_data(src, table_name="client_errors")
+
+        # Raw RUM objects may only be deleted after both DuckLake commit paths
+        # have completed successfully and their publication is durable.
+        from backend.core.ingest import _mark_ledger_published
+
+        _mark_ledger_published(service_id, rum=True)
 
         # Also launch local compaction for BOTH tables
         try:

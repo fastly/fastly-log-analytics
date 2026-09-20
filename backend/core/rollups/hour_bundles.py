@@ -62,7 +62,9 @@ def bundle_hours(service_id: str, source: dict, hours: list[str]) -> int:
     # see the 2026-06-06 incident comment in that function). The bundling
     # COPY only needs to read existing parquets and write a new one; it
     # doesn't need any per-service catalog state.
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for hour in hours:
             if hour == active_hour:
@@ -280,7 +282,9 @@ def bundle_hours_ip_spread(service_id: str, source: dict, hours: list[str]) -> i
         return 0
 
     rebuilt = 0
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for hour in hours:
             if hour == active_hour:

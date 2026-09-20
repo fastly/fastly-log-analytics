@@ -11,8 +11,10 @@ from backend.cron.jobs.metric_snapshot import (
     _run_metric_snapshot,
     _safe_record,
     _sample_active_queries,
+    _sample_celery_queues,
     _sample_cron_duration,
     _sample_ingest_lag,
+    _sample_ingest_ledger,
     _sample_os_vitals,
 )
 
@@ -66,12 +68,50 @@ def test_safe_record_swallows_record_snapshot_exception():
         _safe_record("bogus", 1.0)  # must not raise
 
 
+def test_sample_celery_queues_records_reachability_and_known_queues():
+    with patch(
+        "backend.celery_status.celery_queue_depths",
+        return_value=({"q.ingest": 4}, True),
+    ):
+        _sample_celery_queues()
+
+    since = datetime.now(UTC) - timedelta(hours=1)
+    assert metric_snapshots.get_history("celery_broker_reachable", since=since)[-1]["value"] == 1.0
+    assert metric_snapshots.get_history("celery_queue_depth_q.ingest", since=since)[-1]["value"] == 4.0
+    assert metric_snapshots.get_history("celery_queue_depth_q.control", since=since)[-1]["value"] == 0.0
+    assert metric_snapshots.get_history("celery_queue_depth", since=since)[-1]["value"] == 4.0
+
+
+def test_sample_celery_queues_records_broker_unreachable():
+    with patch(
+        "backend.celery_status.celery_queue_depths",
+        return_value=({}, False),
+    ):
+        _sample_celery_queues()
+
+    since = datetime.now(UTC) - timedelta(hours=1)
+    assert metric_snapshots.get_history("celery_broker_reachable", since=since)[-1]["value"] == 0.0
+    assert metric_snapshots.get_history("celery_queue_depth", since=since)[-1]["value"] == 0.0
+
+
+def test_sample_ingest_ledger_records_each_state():
+    with patch(
+        "backend.celery_status.ingest_ledger_summary",
+        return_value={"discovered": 5, "claimed": 2, "committed": 9},
+    ):
+        _sample_ingest_ledger()
+
+    since = datetime.now(UTC) - timedelta(hours=1)
+    assert metric_snapshots.get_history("ingest_ledger_discovered", since=since)[-1]["value"] == 5.0
+    assert metric_snapshots.get_history("ingest_ledger_claimed", since=since)[-1]["value"] == 2.0
+
+
 # ── _sample_cron_duration: per-service iteration + error containment ──────────
 
 
 def _fake_row(task: str, secs: float) -> dict:
     """SQLite row_factory dict shape (con.row_factory=Row)."""
-    return {"task": task, "duration_seconds": secs}
+    return {"task": task, "duration_s": secs}
 
 
 def test_sample_cron_duration_records_per_service_per_task():

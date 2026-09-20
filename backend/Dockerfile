@@ -35,42 +35,15 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
-# --- Production Stage ---
-FROM python:3.13-slim-bookworm AS runner
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH" \
-    DUCKDB_MEMORY_LIMIT=4GB \
-    ARROW_DEFAULT_MEMORY_POOL=system
-
-WORKDIR /app
-
-# Install runtime dependencies (curl for healthcheck, tar for falco install).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    tar \
-    libjemalloc2 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Verify the jemalloc preload resolves at build time, so a broken setup fails
-# the BUILD instead of warning on every process at container start (LD_PRELOAD
-# is set at the end of this stage). Use the bare soname (resolved via ldconfig)
-# instead of an absolute multiarch path, so the SAME Dockerfile builds on amd64
-# (prod) and arm64 (e.g. Apple-Silicon local dev). The absolute
-# /usr/lib/x86_64-linux-gnu/... path only exists on amd64, so it produced a
-# harmless-but-noisy "cannot be preloaded: ignored" on arm64. bookworm ships jemalloc 5.3.
-RUN LD_PRELOAD=libjemalloc.so.2 python3 -c "print('jemalloc preload OK')"
+# Pre-install DuckDB's platform-specific extensions while the build
+# environment has network access. Runtime pods may not be able to reach
+# extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
+RUN /app/.venv/bin/python -c \
+    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('iceberg', 'avro', 'httpfs', 'parquet', 'ducklake')]; con.close()"
 
 # Falco — Fastly VCL static analyser (github.com/ysugimoto/falco).
-# Used by backend.utils.vcl_validator to lint the scoring recv snippet
-# before publishing a custom URL-exclusion regex. Required in
-# production: a missing binary triggers the validator's hard-fail
-# branch when SCORING_REQUIRE_FALCO=1 is set on the backend service.
-#
-# Pin to a specific release so a future falco-side change doesn't
-# surprise us; bump when you actively want a new version.
+# Download and unpack in builder so the runtime runner stage remains minimal
+# and doesn't require tar or network curl at runtime assembly.
 ARG FALCO_VERSION=2.3.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
@@ -84,6 +57,36 @@ RUN set -eux; \
     chmod +x /usr/local/bin/falco; \
     rm /tmp/falco.tar.gz; \
     falco --version
+
+# --- Production Stage ---
+FROM python:3.13-slim-bookworm AS runner
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    DUCKDB_MEMORY_LIMIT=4GB \
+    ARROW_DEFAULT_MEMORY_POOL=system
+
+WORKDIR /app
+
+# Install runtime dependencies (curl for healthcheck, libjemalloc2 for memory management).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libjemalloc2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify the jemalloc preload resolves at build time, so a broken setup fails
+# the BUILD instead of warning on every process at container start (LD_PRELOAD
+# is set at the end of this stage). Use the bare soname (resolved via ldconfig)
+# instead of an absolute multiarch path, so the SAME Dockerfile builds on amd64
+# (prod) and arm64 (e.g. Apple-Silicon local dev). The absolute
+# /usr/lib/x86_64-linux-gnu/... path only exists on amd64, so it produced a
+# harmless-but-noisy "cannot be preloaded: ignored" on arm64. bookworm ships jemalloc 5.3.
+RUN LD_PRELOAD=libjemalloc.so.2 python3 -c "print('jemalloc preload OK')"
+
+# Falco binary copied from builder stage (no tar or download tools needed at runtime)
+COPY --from=builder /usr/local/bin/falco /usr/local/bin/falco
 
 # Create a non-root runtime user so a foothold in the FastAPI process
 # can't write outside its mounts. UID/GID 1000 matches the host owner
@@ -114,26 +117,17 @@ RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer \
 
 # Copy the virtual environment from the builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 
-# Copy only the necessary backend files and root modules
-# This avoids pulling in the entire frontend/ directory
-COPY --chown=app:app backend/ ./backend/
+# Copy static assets, configuration, and helper scripts first.
+# Placing these before backend/ preserves Docker layer caching across application code changes.
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
-COPY --chown=app:app scripts/generate_openapi.py scripts/
-
-# Include the default empty scoring matrix. The trained matrix.json is
-# a build artifact (gitignored, produced by scripts/scoring/train.py)
-# so we can't bake it in at image build time. The backend's _load_matrix()
-# prefers matrix.json if present (operator dropped it in via a volume
-# mount or post-build copy) and falls back to matrix.default.json so
-# the /scoring/evaluation endpoint returns a meaningful "no signal"
-# response instead of erroring out.
+COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
 COPY --chown=app:app compute/scorer/matrix.default.json ./compute/scorer/matrix.default.json
-
-# Prebuilt, matrix-less scorer Wasm package. enable_scoring uploads this to
-# the customer's Compute service via the Fastly API (no Rust/Fastly-CLI
-# toolchain in this image). Committed + rebuilt off-VM via `make scorer-package`.
 COPY --chown=app:app compute/scorer/pkg/session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
+
+# Copy backend application source
+COPY --chown=app:app backend/ ./backend/
 
 # Route allocations through jemalloc so memory freed when a DuckDB instance is
 # recycled (backend.core.duckdb_recycle) is actually returned to the OS. Under
@@ -149,6 +143,10 @@ ENV LD_PRELOAD=libjemalloc.so.2 \
     MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
 USER app
+
+# Default container healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Expose the backend port
 EXPOSE 8000

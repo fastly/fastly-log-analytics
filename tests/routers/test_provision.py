@@ -8,14 +8,13 @@ from backend.main import app
 def test_lake_info_success():
     """Verify that lake-info returns table details correctly."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("backend.core.iceberg.get_table_info") as mock_info,
         patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_table = MagicMock()
-        mock_init.return_value = mock_table
+        mock_exists.return_value = True
 
         mock_info.return_value = {
             "min_timestamp": "2026-05-01T00:00:00Z",
@@ -52,11 +51,11 @@ def test_lake_info_success():
 def test_lake_info_not_found():
     """Verify that lake-info returns table_exists=False if table doesn't exist."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_init.return_value = None
+        mock_exists.return_value = False
 
         client = TestClient(app)
         response = client.post(
@@ -74,13 +73,13 @@ def test_lake_info_not_found():
 def test_lake_info_analyst_location():
     """Verify that lake-info uses the provided metadata location (important for analysts)."""
     with (
-        patch("backend.core.iceberg.init_iceberg_table") as mock_init,
+        patch("backend.core.iceberg.ducklake_table_exists") as mock_exists,
         patch("backend.core.iceberg.get_table_info") as mock_info,
         patch("backend.core.iceberg.get_snapshot_calendar") as mock_calendar,
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        mock_init.return_value = MagicMock()
+        mock_exists.return_value = True
         mock_info.return_value = {}
         mock_calendar.return_value = {}
 
@@ -97,8 +96,8 @@ def test_lake_info_analyst_location():
             },
         )
 
-        # Check that init_iceberg_table was called with the location in source
-        args, kwargs = mock_init.call_args
+        # Check that ducklake_table_exists was called with the location in source
+        args, kwargs = mock_exists.call_args
         src = args[0]
         assert src["iceberg_metadata_location"] == loc
 

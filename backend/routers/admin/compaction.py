@@ -68,7 +68,10 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
 
     Returns the count of bundles written per kind.
     """
+    import logging
+
     from backend.core.rollups import (
+        backfill_network_quality_bundles,
         backfill_network_rtt_bundles,
         backfill_network_speed_bundles,
         backfill_network_summary_bundles,
@@ -79,10 +82,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         backfill_overview_bundles,
         backfill_perf_dims_bundles,
         backfill_perf_latency_bundles,
+        backfill_pop_health_bundles,
         backfill_security_dims_bundles,
         backfill_slow_urls_bundles,
         backfill_verified_bots_ts_bundles,
         backfill_wellknown_bots_rollup,
+        compact_network_quality_closed_days_to_daily,
         compact_network_rtt_closed_days_to_daily,
         compact_network_speed_closed_days_to_daily,
         compact_ngwaf_bots_closed_days_to_daily,
@@ -92,11 +97,36 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         compact_overview_closed_days_to_daily,
         compact_perf_dims_closed_days_to_daily,
         compact_perf_latency_closed_days_to_daily,
+        compact_pop_health_closed_days_to_daily,
         compact_security_dims_closed_days_to_daily,
         compact_verified_bots_ts_closed_days_to_daily,
     )
+    from backend.core.rollups._common import (
+        SESSIONS_BUNDLE_FILENAME,
+        TIME_SERIES_BUNDLE_FILENAME,
+        backfill_missing_bundles,
+    )
+    from backend.core.rollups.sessions import build_session_bundles
+    from backend.core.rollups.time_series import build_time_series_bundles
 
     sid = source.get("service_id") or source.get("name") or ""
+    n_ts = backfill_missing_bundles(
+        sid,
+        source,
+        bundle_filename=TIME_SERIES_BUNDLE_FILENAME,
+        label="time_series",
+        builder=build_time_series_bundles,
+        logger=logging.getLogger(__name__),
+    )
+    n_sess = backfill_missing_bundles(
+        sid,
+        source,
+        bundle_filename=SESSIONS_BUNDLE_FILENAME,
+        label="sessions",
+        builder=build_session_bundles,
+        logger=logging.getLogger(__name__),
+    )
+
     n_su = backfill_slow_urls_bundles(sid, source)
     n_os = backfill_origin_summary_bundles(sid, source)
     # status_codes reads the existing all_fields.parquet bundle (no dedicated
@@ -110,8 +140,10 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts = backfill_origin_latency_ts_bundles(sid, source)
     n_nr = backfill_network_rtt_bundles(sid, source)
     n_ns = backfill_network_speed_bundles(sid, source)
+    n_nq = backfill_network_quality_bundles(sid, source)
     n_vbts = backfill_verified_bots_ts_bundles(sid, source)
     n_perf = backfill_perf_latency_bundles(sid, source)
+    n_ph = backfill_pop_health_bundles(sid, source)
     # security_dims: req_size / conn_reuse / topips / cov — the all-rows live
     # scans behind /api/security/aggregates' equivalent panels. EXACT.
     n_sd = backfill_security_dims_bundles(sid, source)
@@ -137,8 +169,10 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_olts_day = compact_origin_latency_ts_closed_days_to_daily(sid, source)
     n_nr_day = compact_network_rtt_closed_days_to_daily(sid, source)
     n_ns_day = compact_network_speed_closed_days_to_daily(sid, source)
+    n_nq_day = compact_network_quality_closed_days_to_daily(sid, source)
     n_vbts_day = compact_verified_bots_ts_closed_days_to_daily(sid, source)
     n_perf_day = compact_perf_latency_closed_days_to_daily(sid, source)
+    n_ph_day = compact_pop_health_closed_days_to_daily(sid, source)
     n_sd_day = compact_security_dims_closed_days_to_daily(sid, source)
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
@@ -155,9 +189,12 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "network_rtt_days": n_nr_day,
         "network_speed": n_ns,
         "network_speed_days": n_ns_day,
+        "network_quality": n_nq,
+        "network_quality_days": n_nq_day,
         "verified_bots_ts": n_vbts,
         "verified_bots_ts_days": n_vbts_day,
         "perf_latency": n_perf,
+        "pop_health": n_ph,
         "perf_latency_days": n_perf_day,
         "security_dims": n_sd,
         "security_dims_days": n_sd_day,

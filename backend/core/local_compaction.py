@@ -48,8 +48,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import duckdb
-
+from backend.core.duckdb import get_memory_connection
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
@@ -156,7 +155,11 @@ def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list
 
 
 def compact_local_partitions(
-    source: dict, min_files_per_partition: int = 1, dry_run: bool = False, table_name: str = "logs"
+    source: dict,
+    min_files_per_partition: int = 1,
+    dry_run: bool = False,
+    table_name: str = "logs",
+    compact_active_hour: bool = False,
 ) -> dict[str, Any]:
     """Merge small parquet files within each hour-partition directory into
     a single larger file. Additionally rolls partitions older than
@@ -221,15 +224,18 @@ def compact_local_partitions(
     if not dry_run:
         with publish_lock:
             result["stale_tmp_removed"] = _cleanup_stale_tmp(data_dir)
+            result["watermark_evicted"] = _enforce_disk_watermark(data_dir)
 
-    # ── Active-hour guard: do NOT compact the current UTC hour. The sync
+    # ── Active-hour guard: do NOT compact the current UTC hour (unless compact_active_hour is True). The sync
     # cron may be flushing buffer files into this partition mid-pass; our
     # delete-then-rename is atomic per-file but a half-second window after
     # we listdir() and before we delete is enough for a freshly-arrived
     # file to be in the listing of one operation and gone from the other.
     # Skipping the active hour is cheap and removes the race entirely.
     active_hour = datetime.now(UTC).strftime("timestamp_hour=%Y-%m-%d-%H")
-    result["active_hour_skipped"] = os.path.isdir(os.path.join(data_dir, active_hour))
+    result["active_hour_skipped"] = (
+        os.path.isdir(os.path.join(data_dir, active_hour)) if not compact_active_hour else False
+    )
 
     # Accumulate every basename we delete across all three tiers so we
     # can register them in one SQLite write at the end (vs N small writes).
@@ -237,7 +243,7 @@ def compact_local_partitions(
 
     # ── Hourly tier: walk each partition dir, merge if multi-file.
     for entry in sorted(os.listdir(data_dir)):
-        if entry == active_hour:
+        if entry == active_hour and not compact_active_hour:
             continue
         if entry in (_DAILY_DIR, _WEEKLY_DIR):
             continue  # daily/weekly rollup dirs handled in subsequent passes
@@ -355,6 +361,71 @@ def compact_local_partitions(
     return result
 
 
+def _enforce_disk_watermark(data_dir: str, threshold_pct: float = 0.85, target_pct: float = 0.70) -> int:
+    """Check disk pressure and aggressively evict oldest local parquet if exceeded.
+
+    Prevents high-volume services from exhausting the shared 64TB PVC by automatically
+    shrinking their local query cache. Ensures we gracefully degrade the local drill-down
+    window rather than crashing the pod. Rollups and S3 durable data are unaffected.
+    """
+    import shutil
+
+    try:
+        usage = shutil.disk_usage(data_dir)
+    except OSError:
+        return 0
+
+    current_pct = usage.used / max(usage.total, 1)
+    if current_pct <= threshold_pct:
+        return 0
+
+    target_used_bytes = usage.total * target_pct
+    bytes_to_free = usage.used - target_used_bytes
+
+    if bytes_to_free <= 0:
+        return 0
+
+    logger.warning(
+        "Disk pressure hit %.1f%% (threshold %.1f%%). Evicting oldest cache to reach %.1f%%...",
+        current_pct * 100,
+        threshold_pct * 100,
+        target_pct * 100,
+    )
+
+    files_with_mtime = []
+    for root, _, files in os.walk(data_dir):
+        for f in files:
+            if f.endswith(".parquet"):
+                path = os.path.join(root, f)
+                try:
+                    stat = os.stat(path)
+                    files_with_mtime.append((stat.st_mtime, stat.st_size, path))
+                except OSError:
+                    pass
+
+    # Sort oldest first
+    files_with_mtime.sort(key=lambda x: x[0])
+
+    freed = 0
+    removed_count = 0
+    for mtime, size, path in files_with_mtime:
+        if freed >= bytes_to_free:
+            break
+        try:
+            os.remove(path)
+            freed += size
+            removed_count += 1
+        except OSError:
+            pass
+
+    if removed_count > 0:
+        logger.warning(
+            "Evicted %d old cache files (%.2f MB) to relieve disk pressure.", removed_count, freed / (1024 * 1024)
+        )
+
+    return removed_count
+
+
 def _cleanup_stale_tmp(data_dir: str) -> int:
     """Walk data_dir and rm any *.parquet.tmp left over from crashed runs.
 
@@ -429,7 +500,7 @@ def _rollup_bins(
             tmp_path = os.path.join(out_root, f"{out_name}.tmp")
             out_path = os.path.join(out_root, out_name)
             try:
-                con = duckdb.connect(":memory:")
+                con = get_memory_connection()
                 try:
                     paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in bin_paths)
                     probe = (
@@ -670,7 +741,7 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     # Use in-memory DuckDB so we don't contend with the per-service writer
     # lock. read_parquet with explicit list + union_by_name matches the
     # view's semantics so the resulting file is query-compatible.
-    con = duckdb.connect(":memory:")
+    con = get_memory_connection()
     try:
         paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
         # Strip the computed `timestamp_hour` / `dt` columns from output

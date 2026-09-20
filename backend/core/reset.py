@@ -10,7 +10,8 @@ file + cache dir, and the SQLite ingestion ledgers (``ingested_files``,
 Preserves: ``sources``, ``views``, ``alerts``, ``audit_logs``,
 ``scoring_labels``, ``scoring_audit``, ``cron_runs``, ``slow_queries``,
 ``asn_names``, and everything under ``iceberg/meta/`` (admin_state.json,
-scoring_matrix.json). Raw logs under ``raw/`` are left alone by default —
+scoring_matrix.json). Raw request and RUM logs under ``raw/request/`` and
+``raw/rum/`` are left alone by default —
 see the re-ingestion-storm warning below.
 
 See ``local-docs/log_reset_design_plan.md`` for the full design rationale.
@@ -182,7 +183,7 @@ def reset_service_logs(
                 "message": (
                     "Warning: this source keeps raw logs after ingest (delete_after=False). "
                     "Deleting raw cloud logs now means the next full sync has no dedup record "
-                    "left and will re-ingest this service's ENTIRE history from raw/."
+                    "left and will re-ingest this service's ENTIRE request/RUM history."
                 ),
             }
 
@@ -248,21 +249,30 @@ def reset_service_logs(
             yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
 
         if delete_raw_logs:
-            raw_prefix = f"{prefix}/raw/" if prefix else "raw/"
+            raw_prefix = f"{prefix}/raw/request/" if prefix else "raw/request/"
             deleted_raw = yield from _purge_prefix(
-                fos, bucket, raw_prefix, _delete_objects_robust, label="raw object(s) under raw/"
+                fos, bucket, raw_prefix, _delete_objects_robust, label="request raw object(s) under raw/request/"
             )
-            yield {"type": "status", "message": f"Deleted {deleted_raw:,} raw object(s) under raw/."}
+            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+            deleted_rum = yield from _purge_prefix(
+                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
+            )
+            yield {
+                "type": "status",
+                "message": f"Deleted {deleted_raw:,} request and {deleted_rum:,} RUM raw object(s).",
+            }
 
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)
         con.execute("DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute("DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'", (service_id,))
         con.execute(
-            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE 'client_vitals%' AND buffer_filename NOT LIKE 'client_errors%'"
+            "DELETE FROM committed_buffers WHERE buffer_filename NOT LIKE ? AND buffer_filename NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute(
-            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE 'client_vitals%' AND file_name NOT LIKE 'client_errors%'"
+            "DELETE FROM local_compacted_files WHERE file_name NOT LIKE ? AND file_name NOT LIKE ?",
+            ("client_vitals%", "client_errors%"),
         )
         con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
         con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
@@ -278,7 +288,10 @@ def reset_service_logs(
         clear_source_caches(service_key)
         iceberg_core.init_iceberg_table(source, create=True)
         con2 = _db.get_connection(source)
-        update_iceberg_view(con2, source, force=True)
+        try:
+            update_iceberg_view(con2, source, force=True)
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,
@@ -286,6 +299,26 @@ def reset_service_logs(
             {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history},
             actor=actor,
         )
+
+        if os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                from backend.core.clickhouse_client import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
+
+                yield {"type": "status", "message": "Purging ClickHouse high-scale tables..."}
+                client = get_clickhouse_client()
+                if client:
+                    for table in CLICKHOUSE_HIGH_SCALE_TABLES:
+                        client.execute(
+                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
+                            {"service_id": service_id},
+                        )
+                    yield {
+                        "type": "status",
+                        "message": f"Cleared data from {len(CLICKHOUSE_HIGH_SCALE_TABLES)} ClickHouse table(s).",
+                    }
+            except Exception as e:
+                logger.error("Failed to purge ClickHouse tables: %s", e)
+                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse tables: {e}"}
 
         yield {
             "type": "done",
@@ -452,8 +485,11 @@ def reset_service_rum(
 
         # Pre-warm/initialize views on a standard connection
         con2 = _db.get_connection(rum_source)
-        update_iceberg_view(con2, source, force=True, target_table="client_vitals")
-        update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        try:
+            update_iceberg_view(con2, source, force=True, target_table="client_vitals")
+            update_iceberg_view(con2, source, force=True, target_table="client_errors")
+        finally:
+            con2.close()
 
         metadata_db.record_audit(
             service_id,

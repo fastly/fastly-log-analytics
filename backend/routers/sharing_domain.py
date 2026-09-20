@@ -101,6 +101,14 @@ def deploy_frontend(payload: SharingDeployRequest):
             except Exception as e:
                 logger.warning(f"Could not save remote_frontend to config of service {payload.service_id}: {e}")
 
+        # Automatically start sharing with this public endpoint
+        try:
+            from backend.utils.tunnel import get_tunnel_manager
+
+            get_tunnel_manager().start_sharing(public_endpoint=f"https://{res['domain_name']}")
+        except Exception as e:
+            logger.warning(f"Could not automatically activate sharing for {res['domain_name']}: {e}")
+
         return res
     except Exception as exc:
         raise_internal(logger, exc)

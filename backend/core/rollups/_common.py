@@ -81,18 +81,18 @@ def _safe_table_for(source: dict) -> str | None:
     Slugifies the same way the dashboard's view-builder does
     (``backend.core.duckdb._safe_table_name``: non-alphanumerics to ``_``,
     lowercased, ``logs_`` prefix) so the rollup COPY/SELECT targets the
-    same view name the dashboard creates. Reads ``service_id`` first (the
-    canonical slug in normalized source dicts) and falls back to ``name``
-    for callers that pass a raw on-disk config — both cases pass through
-    the slugifier identically.
+    same view name the dashboard creates. Reads ``name`` first (matching
+    ``update_iceberg_view``) and falls back to ``service_id`` for callers that
+    pass a raw on-disk config — both cases pass through the slugifier
+    identically.
     """
-    raw = source.get("service_id") or source.get("name") or ""
-    if not raw:
+    slug = source.get("name") or source.get("service_id")
+    if not slug:
         logger.warning("[rollups] no service_id/name in source dict; skipping rollup")
         return None
     from backend.core.duckdb import _safe_table_name
 
-    return _safe_table_name(raw)
+    return _safe_table_name(slug)
 
 
 def _get_fields(src: dict) -> list[str]:
@@ -106,8 +106,24 @@ def _get_fields(src: dict) -> list[str]:
     we now have a dedicated SQL builder (``_build_virtual_field_copy_query``)
     that does the unnest at write time so the dashboard reader doesn't
     have to rescan + unnest the raw window at query time.
+
+    Excludes every OTHER derived field (``vcl=None``: METRICS group like
+    requests/hit_rate/p95_latency, plus any VIRTUAL-group field with no
+    dedicated backing, plus INTERNAL) — those have no real per-row column
+    to SELECT. Checked via the registry's own ``is_derived``, not a hand-
+    maintained list: a hand list is exactly how this broke live (a VIRTUAL-
+    group field, ``_bot_name``, was never in the narrow ``_VIRTUAL_FIELDS``
+    tuple this used to filter against, so it slipped through as an "actual"
+    field). See AGENTS.md Trap #40.
     """
+    from backend.core.field_registry import try_get
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
+
+    def _is_unbacked_derived(code: str) -> bool:
+        if code in _VIRTUAL_FIELDS:
+            return False
+        spec = try_get(code)
+        return spec is not None and spec.is_derived
 
     lf_config = src.get("log_fields") or {}
     custom_field_names: list[str] = []
@@ -119,7 +135,9 @@ def _get_fields(src: dict) -> list[str]:
             logger.warning("[rollups] skipping custom field with unsafe name: %r", name)
             continue
         custom_field_names.append(name)
-    actual_fields = [f for f in FIELDS if f not in _VIRTUAL_FIELDS and _is_safe_ident(f)]
+    actual_fields = [
+        f for f in FIELDS if f not in _VIRTUAL_FIELDS and not _is_unbacked_derived(f) and _is_safe_ident(f)
+    ]
     virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
     return actual_fields + virtual_fields + custom_field_names
 
@@ -324,12 +342,17 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
     Callers (recompute_touched_hours / backfill_rollups) gate via
     ``_is_safe_ident`` and ``_safe_table_for``.
     """
+    if field in ("age", "ttl"):
+        val_expr = f'CAST(CAST(ROUND("{field}") AS INTEGER) AS VARCHAR)'
+    else:
+        val_expr = f'CAST("{field}" AS VARCHAR)'
+
     return f"""
         SELECT field, hour, value, count FROM (
             SELECT
                 '{field}' AS field,
                 strftime(timestamp, '%Y-%m-%d-%H') AS hour,
-                CAST("{field}" AS VARCHAR) AS value,
+                {val_expr} AS value,
                 COUNT(*) AS count,
                 ROW_NUMBER() OVER (
                     PARTITION BY strftime(timestamp, '%Y-%m-%d-%H')
@@ -338,7 +361,7 @@ def _build_copy_query(table_ident: str, field: str, where_sql: str) -> str:
             FROM {table_ident}
             WHERE {where_sql}
               AND "{field}" IS NOT NULL
-              AND NULLIF(CAST("{field}" AS VARCHAR), '') IS NOT NULL
+              AND NULLIF({val_expr}, '') IS NOT NULL
             GROUP BY 1, 2, 3
         ) WHERE rn <= {TOP_K}
     """
@@ -485,6 +508,11 @@ NETWORK_RTT_BUNDLE_FILENAME = "network_rtt.parquet"
 NETWORK_RTT_BUNDLE_TOP_K = 100
 NETWORK_RTT_BUNDLE_MIN_REQUESTS_PER_HOUR = 5
 
+NETWORK_QUALITY_COUNTRY_FILENAME = "network_quality_country.parquet"
+NETWORK_QUALITY_ASN_FILENAME = "network_quality_asn.parquet"
+NETWORK_QUALITY_REGION_FILENAME = "network_quality_region.parquet"
+NETWORK_QUALITY_POP_FILENAME = "network_quality_pop.parquet"
+
 # Filename for the per-hour per-ASN client-speed (c_speed) distribution
 # rollup feeding /api/network-health's speed_distribution_query (2.9 s
 # on prod 30 d). Schema: (asn, c_speed, count). Same top-K=100 ASNs
@@ -536,6 +564,7 @@ PERF_ASNS_MIN_REQUESTS_PER_HOUR = 10
 ORIGIN_POP_BUNDLE_FILENAME = "origin_pop.parquet"
 ORIGIN_IP_BUNDLE_FILENAME = "origin_ip.parquet"
 ORIGIN_PATH_BUNDLE_FILENAME = "origin_path.parquet"
+POP_HEALTH_BUNDLE_FILENAME = "pop_health.parquet"
 ORIGIN_DIMS_BUNDLE_TOP_K = 100
 # Per-hour minimum-request floor for the oip bundle (mirrors the slow_urls
 # noise cut; the live IP_HEALTH panel applies a window-level HAVING >= 10
@@ -686,6 +715,10 @@ def _origin_ip_bundle_path(source: dict, hour: str) -> str:
 
 def _origin_path_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_PATH_BUNDLE_FILENAME)
+
+
+def _pop_health_bundle_path(source: dict, hour: str) -> str:
+    return os.path.join(_hour_bundled_root(source), f"hour={hour}", POP_HEALTH_BUNDLE_FILENAME)
 
 
 def _origin_latency_ts_bundle_path(source: dict, hour: str) -> str:
@@ -871,7 +904,9 @@ def compact_closed_days(
     lock_key = source.get("name", "default")
 
     rebuilt = 0
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for bundle_filename, tmp_prefix, build_copy_sql in jobs:
             hours_by_day: dict[str, list[str]] = {}

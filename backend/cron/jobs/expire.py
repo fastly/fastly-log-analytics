@@ -15,7 +15,7 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("expire_snapshots")
+@cron_task("expire_snapshots", job_name="expire_snapshots")
 def _run_expire_snapshots(service_id: str) -> None:
     """Weekly job: perform cloud maintenance including data deletion, cache cleanup, and snapshot expiry."""
     from backend.core import iceberg as db_iceberg
@@ -33,7 +33,7 @@ def _run_expire_snapshots(service_id: str) -> None:
 
     svc_id = src.get("service_id", "unknown")
     display_name = _display_label(src, svc_id)
-    logger.info("▶️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
+    logger.info("🏎️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
 
     start_time = time.time()
     try:
@@ -86,4 +86,4 @@ def _run_expire_snapshots(service_id: str) -> None:
             run_id=run_id,
         )
 
-    logger.info("⏹️  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
+    logger.info("🏁  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)

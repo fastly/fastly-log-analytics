@@ -280,11 +280,13 @@ export function AppLayout({
   initialCollapsed = false,
   ssrActiveServiceId,
   ssrIsRumEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -442,7 +444,11 @@ export function AppLayout({
     // other layout/redirect logic kicks in. Skip while already there.
     if (needsLogin && !pathname.startsWith('/share-login')) {
       setRedirectAnnouncement('Sign in required. Redirecting to the sign-in page.')
-      React.startTransition(() => router.replace('/share-login'))
+      if (typeof window !== 'undefined') {
+        window.location.replace('/share-login')
+      } else {
+        React.startTransition(() => router.replace('/share-login'))
+      }
       return
     }
     // Analysts can't access admin pages, the Usage & Cost page, the Alerts
@@ -900,6 +906,7 @@ export function AppLayout({
             </div>
           ) : children}
           {debugEnabled && <DebugPanel />}
+          {serverFooter && !isAnalyst && serverFooter}
         </main>
       </div>
       </TooltipProvider>

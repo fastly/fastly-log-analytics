@@ -107,4 +107,11 @@ class RealtimeMetricsPublisher:
             return self._subscriber_counts.get(service_id, 0)
 
 
-publisher = RealtimeMetricsPublisher()
+from backend.config import SSE_BACKPLANE
+
+if SSE_BACKPLANE == "valkey":
+    from backend.utils.valkey_publisher import ValkeyPublisher
+
+    publisher: ValkeyPublisher | RealtimeMetricsPublisher = ValkeyPublisher("realtime", history_size=BUFFER_SIZE)
+else:
+    publisher = RealtimeMetricsPublisher()

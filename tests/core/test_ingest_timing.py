@@ -135,6 +135,39 @@ class TestIngestStartTimeExec:
 class TestIngestMaxSeconds:
     """max_seconds should stop ingestion gracefully, not crash."""
 
+    def test_expired_listing_budget_still_attempts_first_batch(self):
+        """A slow FOS LIST must not prevent every incremental run from making progress."""
+        from backend.core.ingest import ingest
+
+        src = _make_source()
+        fake_file = "s3://bucket/raw/request/year=2026/month=01/day=01/hour=00/minute=00/test.log.gz"
+
+        def fake_list_fos_files(**_kwargs):
+            yield {"type": "status", "message": "Discovering"}
+            return {
+                "new_files": [fake_file],
+                "file_sizes": {fake_file: 100},
+                "skipped_already": 0,
+                "stranded_already": [],
+            }
+
+        mock_con = MagicMock()
+        with (
+            patch("backend.core.ingest._ensure_source_registered"),
+            patch("backend.core.ingest._recover_in_flight", return_value={"promoted": 0, "dropped": 0}),
+            patch("backend.core.ingest._get_fos_client"),
+            patch("backend.core.ingest.metadata_db.get_ingested_filenames", return_value=set()),
+            patch("backend.core.ingest.list_fos_files", side_effect=fake_list_fos_files),
+            patch("backend.core.duckdb.get_memory_connection", return_value=mock_con),
+            patch("backend.core.ingest._download_chunk_to_local", return_value=({}, {})) as download,
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.core.ingest.time.time", side_effect=[1_000.0, 1_999.0, 1_999.0, 1_999.0]),
+        ):
+            events = _drain(ingest(source=src, max_seconds=240, incremental_only=True))
+
+        download.assert_called_once()
+        assert any("Processing 1 files in batch 1/1" in event.get("message", "") for event in events)
+
     def test_max_seconds_zero_does_not_crash(self):
         """max_seconds=None means no limit; 0 is falsy so also no limit."""
         from backend.core.ingest import ingest

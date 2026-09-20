@@ -1,7 +1,6 @@
 """Tests for the local telemetry proxy (backend/utils/telemetry_proxy.py).
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md
-Implementation plan: docs/superpowers/plans/2026-05-19-telemetry-proxy-phase1.md
+The implementation and tests below are the source of truth for proxy behavior.
 """
 
 from __future__ import annotations

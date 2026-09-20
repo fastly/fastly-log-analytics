@@ -1,0 +1,8 @@
+groups:
+  - name: clickhouse-otlp-names
+    interval: 15s
+    rules:
+      # Prometheus 3.5 suppresses a repeated "bytes" token when translating
+      # app.clickhouse_bytes_read (unit By). Preserve the dashboard contract.
+      - record: app_clickhouse_bytes_read_bytes_total
+        expr: app_clickhouse_bytes_read_total

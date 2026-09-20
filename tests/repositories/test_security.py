@@ -347,7 +347,7 @@ def test_security_aggregates_fingerprints_use_rollup_when_filters_empty(
     monkeypatch.setattr(QueryRunner, "execute", _spy)
 
     start = (closed_hour_dt - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (closed_hour_dt + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (closed_hour_dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     result = get_security_aggregates(
         con=in_memory_duckdb,
         src=test_service_source,

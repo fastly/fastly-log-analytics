@@ -58,11 +58,9 @@ router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR
 asset_router = APIRouter(tags=["rum-assets"], responses=DEFAULT_ERROR_RESPONSES)
 
 import re
-import uuid
 
 from fastapi import Response
 
-from backend.core.duckdb import get_source_for_service
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 
 _FARO_BUNDLE_CACHE: dict[str, bytes] = {}
@@ -186,244 +184,6 @@ async def get_faro_sdk(request: Request, service_id: str | None = None):
         media_type="application/javascript",
         headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
     )
-
-
-@asset_router.post("/rum-beacon")
-@asset_router.get("/rum-beacon")
-async def receive_rum_beacon(
-    request: Request,
-    service_id: str | None = None,
-    rum_metric_name: str | None = None,
-    rum_metric_value: float | None = None,
-    rum_metric_rating: str | None = None,
-    cid: str | None = None,
-    rum_pathname: str | None = None,
-    rum_error_message: str | None = None,
-    rum_error_file: str | None = None,
-    rum_error_line: int | None = None,
-    rum_error_col: int | None = None,
-):
-    # 1. Resolve service ID
-    sid = service_id
-    if not sid:
-        sid = request.headers.get("x-service-id")
-    if not sid:
-        sid = request.cookies.get("active_service_id")
-
-    if not sid:
-        sid = svcconfig.get_active_service_id(fallback_to_first=True)
-
-    if not sid:
-        return Response(status_code=204)
-
-    # Load service config
-    src = get_source_for_service(sid)
-    if not src:
-        # Fallback to the first configured service if missing
-        fallback_sid = svcconfig.get_active_service_id(fallback_to_first=True)
-        if fallback_sid:
-            sid = fallback_sid
-            src = get_source_for_service(sid)
-
-    if not src:
-        return Response(status_code=204)
-
-    # Get user agent details
-    ua = request.headers.get("user-agent", "")
-    browser, os_name, device = parse_ua_simple(ua)
-
-    # 2. Try to parse JSON body if present
-    body_payload = None
-    if request.method == "POST":
-        try:
-            body_bytes = await request.body()
-            if body_bytes:
-                body_payload = json.loads(body_bytes.decode("utf-8"))
-        except Exception:
-            pass
-
-    from datetime import UTC, datetime
-
-    import pyarrow as pa
-
-    from backend.core import iceberg as db_iceberg
-
-    dt = datetime.now(UTC)
-    filename = f"beacon_{uuid.uuid4().hex[:16]}.parquet"
-
-    # Extract edge connection variables from headers
-    city_val = (
-        request.headers.get("x-geo-city")
-        or request.headers.get("fastly-client-city")
-        or request.headers.get("x-client-city")
-        or request.headers.get("x-city")
-        or ""
-    )
-    region_val = (
-        request.headers.get("x-geo-region")
-        or request.headers.get("x-client-region")
-        or request.headers.get("x-region")
-        or ""
-    )
-    country_val = (
-        request.headers.get("x-geo-country")
-        or request.headers.get("x-client-country")
-        or request.headers.get("x-country")
-        or ""
-    )
-    pop_val = (
-        request.headers.get("fastly-pop") or request.headers.get("x-client-pop") or request.headers.get("x-pop") or ""
-    )
-    tls_val = (
-        request.headers.get("fastly-tls-version")
-        or request.headers.get("x-client-tls")
-        or request.headers.get("x-tls")
-        or ""
-    )
-
-    ttfb_val = None
-    ttfb_header = request.headers.get("x-client-ttfb") or request.headers.get("x-ttfb")
-    if ttfb_header:
-        try:
-            ttfb_val = float(ttfb_header)
-        except Exception:
-            pass
-
-    if body_payload and isinstance(body_payload, dict):
-        # Full Faro JSON payload batch
-        from backend.core.rum_ingest import extract_metrics_from_faro_payload
-
-        log_data = {
-            "browser": browser,
-            "os": os_name,
-            "url": str(request.url),
-            "rum_cid": cid or "",
-        }
-        try:
-            extracted = extract_metrics_from_faro_payload(body_payload, log_data)
-            vitals_rows = []
-            errors_rows = []
-
-            for m in extracted:
-                is_exception = (m.get("metric_name") == "exception") or m.get("error_message")
-                if is_exception:
-                    errors_rows.append(
-                        {
-                            "timestamp": dt,
-                            "error_message": m.get("error_message") or "Unknown error",
-                            "error_file": m.get("error_file") or "unknown.js",
-                            "error_line": int(m.get("error_line") or 0),
-                            "error_col": int(m.get("error_col") or 0),
-                            "pathname": m.get("pathname") or "/",
-                            "browser": browser,
-                            "os": os_name,
-                            "device": device,
-                            "cid": m.get("cid") or cid or "",
-                            "req_id": request.headers.get("x-request-id") or "",
-                            "city": city_val,
-                            "region": region_val,
-                            "country": country_val,
-                            "pop": pop_val,
-                            "tls": tls_val,
-                            "ttfb": ttfb_val,
-                        }
-                    )
-                else:
-                    val = m.get("metric_value")
-                    vitals_rows.append(
-                        {
-                            "timestamp": dt,
-                            "metric_name": m.get("metric_name") or "unknown",
-                            "metric_value": float(val) if val is not None else 0.0,
-                            "metric_rating": m.get("metric_rating") or "",
-                            "pathname": m.get("pathname") or "/",
-                            "browser": browser,
-                            "os": os_name,
-                            "device": device,
-                            "cid": m.get("cid") or cid or "",
-                            "req_id": request.headers.get("x-request-id") or "",
-                            "city": city_val,
-                            "region": region_val,
-                            "country": country_val,
-                            "pop": pop_val,
-                            "tls": tls_val,
-                            "ttfb": ttfb_val,
-                        }
-                    )
-
-            if vitals_rows:
-                from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
-
-                table = pa.Table.from_pylist(vitals_rows, schema=CLIENT_VITALS_ARROW_SCHEMA)
-                db_iceberg.write_to_buffer(src, table, filename, table_name="client_vitals")
-
-            if errors_rows:
-                from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA
-
-                table = pa.Table.from_pylist(errors_rows, schema=CLIENT_ERRORS_ARROW_SCHEMA)
-                db_iceberg.write_to_buffer(src, table, filename, table_name="client_errors")
-        except Exception as e:
-            logger.error(f"Failed to process RUM body payload: {e}")
-
-    else:
-        # Unrolled simple query beacons
-        pathname_val = rum_pathname or "/"
-        cid_val = cid or ""
-        req_id_val = request.headers.get("x-request-id") or ""
-
-        if rum_metric_name:
-            # client_vitals row
-            val = rum_metric_value if rum_metric_value is not None else 0.0
-            row = {
-                "timestamp": dt,
-                "metric_name": rum_metric_name,
-                "metric_value": float(val),
-                "metric_rating": rum_metric_rating or "",
-                "pathname": pathname_val,
-                "browser": browser,
-                "os": os_name,
-                "device": device,
-                "cid": cid_val,
-                "req_id": req_id_val,
-                "city": city_val,
-                "region": region_val,
-                "country": country_val,
-                "pop": pop_val,
-                "tls": tls_val,
-                "ttfb": ttfb_val,
-            }
-            from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
-
-            table = pa.Table.from_pylist([row], schema=CLIENT_VITALS_ARROW_SCHEMA)
-            db_iceberg.write_to_buffer(src, table, filename, table_name="client_vitals")
-
-        elif rum_error_message:
-            # client_errors row
-            row = {
-                "timestamp": dt,
-                "error_message": rum_error_message,
-                "error_file": rum_error_file or "unknown.js",
-                "error_line": int(rum_error_line or 0),
-                "error_col": int(rum_error_col or 0),
-                "pathname": pathname_val,
-                "browser": browser,
-                "os": os_name,
-                "device": device,
-                "cid": cid_val,
-                "req_id": req_id_val,
-                "city": city_val,
-                "region": region_val,
-                "country": country_val,
-                "pop": pop_val,
-                "tls": tls_val,
-                "ttfb": ttfb_val,
-            }
-            from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA
-
-            table = pa.Table.from_pylist([row], schema=CLIENT_ERRORS_ARROW_SCHEMA)
-            db_iceberg.write_to_buffer(src, table, filename, table_name="client_errors")
-
-    return Response(status_code=204)
 
 
 def _get_fastly_token(service_id: str) -> str:
@@ -795,6 +555,14 @@ async def rum_beacon_health(
     """Check if RUM beacons are arriving (validation endpoint for setup).
     Queries DuckDB views using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_beacon_health as hs_rum_health
+
+        return _inject_telemetry(hs_rum_health(high_scale_service))
+
     service_id = ctx.service_id
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
@@ -888,6 +656,15 @@ async def rum_analytics(
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_analytics as hs_rum_analytics
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return _inject_telemetry(hs_rum_analytics(high_scale_service, start_time, end_time))
+
     service_id = ctx.service_id
 
     # 1. Clamp timebounds against analyst session limits
@@ -952,7 +729,7 @@ async def rum_analytics(
             # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_vitals AS SELECT * FROM client_vitals WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_vitals AS SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname FROM client_vitals WHERE {where_sql}",
                 params,
                 "rum_temp_vitals_create",
             ):
@@ -960,7 +737,7 @@ async def rum_analytics(
 
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_errors AS SELECT * FROM client_errors WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_errors AS SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col FROM client_errors WHERE {where_sql}",
                 params,
                 "rum_temp_errors_create",
             ):
@@ -1392,12 +1169,53 @@ async def rum_analytics(
 
 @router.get("/{service_id}/rum/live-events")
 async def rum_live_events(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    filters: str | None = None,
     ctx: RequestContext = Depends(build_request_context),
 ) -> list[dict[str, Any]]:
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_live_events as hs_rum_live
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return hs_rum_live(high_scale_service, start_time, end_time, 50)
+
     service_id = ctx.service_id
+
+    # 1. Clamp timebounds against analyst session limits
+    start_time, end_time = ctx.clamp(start_time, end_time)
+
+    # 2. Establish fallback ranges
+    if not start_time and not end_time:
+        import datetime
+
+        from backend.utils.date_utils import iso_z
+
+        end_dt = datetime.datetime.now(datetime.UTC)
+        start_dt = end_dt - datetime.timedelta(hours=24)
+        start_time = iso_z(start_dt)
+        end_time = iso_z(end_dt)
+
+    # Parse JSON filters
+    parsed_filters = {}
+    if filters:
+        import json
+
+        try:
+            parsed_filters = json.loads(filters)
+        except Exception:
+            pass
+
+    from backend.repositories.utils.filters import build_where_clause
+
+    params, where_sql = build_where_clause(start_time, end_time, parsed_filters)
+
     rum_source = rum_source_for(ctx.source)
 
     try:
@@ -1405,7 +1223,7 @@ async def rum_live_events(
         def _get_live_events(con):
             from backend.utils.telemetry import track_query
 
-            query_str = """
+            query_str = f"""
             WITH vitals_base AS (
                 SELECT
                     'pageview' AS type,
@@ -1427,6 +1245,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_vitals
+                WHERE {where_sql}
             ),
             errors_base AS (
                 SELECT
@@ -1449,6 +1268,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_errors
+                WHERE {where_sql}
             ),
             combined AS (
                 SELECT * FROM vitals_base
@@ -1476,10 +1296,10 @@ async def rum_live_events(
                 ttfb
             FROM combined
             ORDER BY timestamp DESC
-            LIMIT 10
+            LIMIT 50
             """
 
-            with track_query(con, query_str, [], "rum_live_events") as cur:
+            with track_query(con, query_str, params * 2, "rum_live_events") as cur:
                 return cur.fetchall()
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
@@ -1529,7 +1349,7 @@ async def rum_live_events(
                 import hashlib
 
                 key = cid or req_id or path or "default"
-                idx = int(hashlib.md5(key.encode()).hexdigest(), 16) % len(fallback_profiles)
+                idx = int(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest(), 16) % len(fallback_profiles)
                 prof = fallback_profiles[idx]
                 city = city or prof["city"]
                 region = region or prof["region"]

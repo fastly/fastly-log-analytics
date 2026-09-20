@@ -9,13 +9,11 @@ import { queryKeys } from '@/lib/query-keys'
  * Analyst-safe sibling of ``useAdminEventStream``.
  *
  * Subscribes to ``/api/log-extents/stream`` — the projected, analyst-
- * safe header-badge channel (only ``latest_log_at`` + ``local_rows``,
+ * safe header-badge channel (request/RUM metrics and log extents,
  * no ``ngwaf_workspace_id`` / ``active_run`` / etc). Writes incoming
  * payloads into the SAME React Query slot the analyst bootstrap
- * already seeds (``['bootstrap']`` → ``settings.header_badge``), so
- * the existing ``SyncStatusBadge`` fallback chain
- * (``status?.latest_log_at || ... || headerBadge?.latest_log_at``)
- * picks up pushed values with zero render-side changes.
+ * already seeds (``['bootstrap']`` → ``header_badge``). Omitted fields
+ * preserve cached values; explicit nulls clear them after a reset.
  *
  * Closes Gap 3 from the badge SSE work: admins already get real-time
  * "Latest Log: Xs ago" / "Total Logs" updates via
@@ -28,8 +26,8 @@ interface StreamMetrics {
 }
 
 interface BootstrapHeaderBadge {
-  rum?: StreamMetrics
-  request?: StreamMetrics
+  rum?: StreamMetrics | null
+  request?: StreamMetrics | null
   latest_log_at?: string | null
   local_rows?: number | null
 }
@@ -40,8 +38,8 @@ interface BootstrapShape {
 }
 
 interface BadgeStreamEvent {
-  rum?: StreamMetrics
-  request?: StreamMetrics
+  rum?: StreamMetrics | null
+  request?: StreamMetrics | null
   latest_log_at?: string | null
   local_rows?: number | null
 }
@@ -79,10 +77,12 @@ export function useHeaderBadgeStream(enabled: boolean) {
             ...prev,
             header_badge: {
               ...(prev.header_badge ?? {}),
-              rum: payload.rum ? { ...prev.header_badge?.rum, ...payload.rum } : prev.header_badge?.rum,
-              request: payload.request ? { ...prev.header_badge?.request, ...payload.request } : prev.header_badge?.request,
-              latest_log_at: payload.latest_log_at ?? prev.header_badge?.latest_log_at ?? null,
-              local_rows: payload.local_rows ?? prev.header_badge?.local_rows ?? null,
+              rum: payload.rum === undefined ? prev.header_badge?.rum
+                : payload.rum === null ? null : { ...prev.header_badge?.rum, ...payload.rum },
+              request: payload.request === undefined ? prev.header_badge?.request
+                : payload.request === null ? null : { ...prev.header_badge?.request, ...payload.request },
+              latest_log_at: payload.latest_log_at !== undefined ? payload.latest_log_at : prev.header_badge?.latest_log_at ?? null,
+              local_rows: payload.local_rows !== undefined ? payload.local_rows : prev.header_badge?.local_rows ?? null,
             },
           }
         })

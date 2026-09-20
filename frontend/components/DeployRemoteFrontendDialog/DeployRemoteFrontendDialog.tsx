@@ -53,9 +53,9 @@ export function DeployRemoteFrontendDialog() {
   } | null>(null)
 
   // Step 2: Origin Configuration State
-  const [originHost, setOriginHost] = React.useState('34.123.30.195')
-  const [originPort, setOriginPort] = React.useState(80)
-  const [useSsl, setUseSsl] = React.useState(false)
+  const [originHost, setOriginHost] = React.useState(typeof window !== 'undefined' ? window.location.hostname : '34.123.30.195')
+  const [originPort, setOriginPort] = React.useState(typeof window !== 'undefined' && window.location.protocol === 'https:' ? 443 : 80)
+  const [useSsl, setUseSsl] = React.useState(typeof window !== 'undefined' && window.location.protocol === 'https:')
   const [overrideHost, setOverrideHost] = React.useState('')
 
   // Step 3: Trigger Deployment State

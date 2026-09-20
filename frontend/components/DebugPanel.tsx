@@ -19,6 +19,7 @@ interface DebugQuery {
   sql: string
   time_ms: number
   is_cached?: boolean
+  engine?: string
 }
 
 interface DebugCall {
@@ -302,8 +303,8 @@ export function DebugPanel() {
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
 
-  const duckDbCopyText = `DuckDB Queries (Total Time: ${totalQueryTime.toFixed(2)}ms)
-${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.is_cached ? ', Cached' : ''}):
+  const duckDbCopyText = `Data Queries (DuckDB/ClickHouse) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
   const sqliteCopyText = `SQLite Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
@@ -322,7 +323,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-primary/10 p-1.5 rounded-md">
                 <Database className="h-4 w-4 text-primary" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries (DuckDB / ClickHouse)</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -348,8 +349,14 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               {queries.map((q, i) => (
                 <div key={q.id} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
-                    <span className="text-muted-foreground font-semibold">
-                      QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
+                    <span className="text-muted-foreground font-semibold flex items-center gap-2">
+                      QUERY #{i + 1}
+                      {q.engine && (
+                        <Badge variant="outline" className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                          {q.engine}
+                        </Badge>
+                      )}
+                      {q.is_cached && <span className="text-blue-500 text-[10px]">(CACHED)</span>}
                     </span>
                     <Badge variant={q.time_ms > 1000 ? "destructive" : q.time_ms > 200 ? "secondary" : "outline"} className="font-mono">
                       {q.time_ms}ms

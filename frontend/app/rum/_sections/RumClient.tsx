@@ -306,10 +306,19 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId],
+    queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return [];
-      const res = await adminFetch(`/api/services/${serviceId}/rum/live-events`);
+      const params = new URLSearchParams();
+      if (startTime) params.append('start_time', startTime);
+      if (endTime) params.append('end_time', endTime);
+      if (filterPayload) {
+        params.append('filters', JSON.stringify(filterPayload));
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`;
+
+      const res = await adminFetch(url);
       return res.ok ? res.json() : [];
     },
     enabled: !!serviceId && !!status?.enabled,
@@ -353,6 +362,26 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
               </div>
               <p className="text-sm text-muted-foreground">
                 Make sure the RUM script is installed on your website and users are visiting your site to generate beacons.
+              </p>
+            </div>
+          </div>
+        </AnalyticsCard>
+      </div>
+    );
+  }
+
+  if (analytics.beacon_count === 0) {
+    return (
+      <div className="space-y-6">
+        <AnalyticsCard title="Real User Monitoring Dashboard">
+          <div className="space-y-6 text-center py-12">
+            <div>
+              <div className="mx-auto w-16 h-16 bg-muted/20 rounded-full flex items-center justify-center mb-4 border border-border">
+                <Activity className="h-8 w-8 text-muted-foreground/50" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">No data for this time period</p>
+              <p className="text-sm text-muted-foreground mt-2 max-w-sm mx-auto">
+                No real-time beacons were received during the selected time window. Try expanding your time range or check back later.
               </p>
             </div>
           </div>

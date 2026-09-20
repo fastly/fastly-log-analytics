@@ -57,7 +57,6 @@ class RequestContext:
 
     service_id: str
     source: dict
-    con: duckdb.DuckDBPyConnection
     telemetry: RequestTelemetry
     analyst_session: object | None = None
     read_only: bool = True
@@ -67,6 +66,20 @@ class RequestContext:
     # only for RequestContexts built outside the dependency (e.g. tests),
     # where ``clamp`` falls back to an open window.
     time_bounds: TimeBounds | None = None
+    _holder: _ConnectionHolder | None = field(default=None, repr=False, compare=False)
+    _con_override: duckdb.DuckDBPyConnection | None = field(default=None, repr=False)
+
+    @property
+    def con(self) -> duckdb.DuckDBPyConnection:
+        """Lazy-loaded DuckDB connection. Acquired on first access so high-scale
+        ClickHouse queries don't check out DuckDB pool slots and saturate them."""
+        if self._con_override is not None:
+            return self._con_override
+        if self._holder is not None:
+            if self._holder.con is None:
+                return self._holder.__enter__()
+            return self._holder.con
+        raise RuntimeError("RequestContext has no connection")
 
     def clamp(self, start: str | None, end: str | None) -> tuple[str | None, str | None]:
         """Clamp a request's start/end against this request's analyst window.
@@ -80,11 +93,6 @@ class RequestContext:
 
         tb = self.time_bounds if self.time_bounds is not None else TimeBounds()
         return clamp_or_400(tb, start, end, analyst_session=self.analyst_session)
-
-    # The connection holder is kept on the context so the dependency
-    # generator can hand it back to the pool on request end. Not part
-    # of the public surface; routes should never touch it.
-    _holder: _ConnectionHolder | None = field(default=None, repr=False, compare=False)
 
 
 def _enforce_service_access(
@@ -150,9 +158,18 @@ def build_request_context(
 
     # Build the RequestTelemetry root span. Cheap when the SDK is not
     # initialised (test mode); ~100ns when it is.
+    #
+    # Use the matched route TEMPLATE, not request.url.path — several routes
+    # embed service_id in the path (e.g. /api/services/{service_id}/scoring/
+    # dashboard), and the template is what keeps span-name cardinality
+    # bounded when a span-metrics processor (e.g. Tempo's) turns span names
+    # into per-route RED metrics. Depends() runs after routing, so the match
+    # is always present outside of 404s.
+    route = request.scope.get("route")
+    route_template = getattr(route, "path", None) or request.url.path
     telemetry = RequestTelemetry(
         request_method=request.method,
-        request_path=request.url.path,
+        request_path=route_template,
     )
     telemetry.start_request()
 
@@ -163,28 +180,33 @@ def build_request_context(
     from backend.utils.remote_access import get_analyst_time_bounds
 
     time_bounds = get_analyst_time_bounds(request)
+    ctx = RequestContext(
+        service_id=resolved_sid,
+        source=source,
+        telemetry=telemetry,
+        analyst_session=analyst_session,
+        read_only=True,
+        time_bounds=time_bounds,
+        _holder=holder,
+    )
+    # Park the context on request.state so downstream non-route
+    # code (middleware, error handlers) can read it.
+    request.state.ctx = ctx
+    import sys
+
     try:
-        with holder as con:
-            ctx = RequestContext(
-                service_id=resolved_sid,
-                source=source,
-                con=con,
-                telemetry=telemetry,
-                analyst_session=analyst_session,
-                read_only=True,
-                time_bounds=time_bounds,
-                _holder=holder,
-            )
-            # Park the context on request.state so downstream non-route
-            # code (middleware, error handlers) can read it.
-            request.state.ctx = ctx
-            try:
-                yield ctx
-            finally:
-                telemetry.end_request()
+        yield ctx
     except HTTPException:
         telemetry.end_request(status_code=400)
         raise
+    finally:
+        import sys
+
+        try:
+            holder.__exit__(*sys.exc_info())
+        except Exception:
+            pass
+        telemetry.end_request()
     # Note on Live Query Monitor attribution: the attribution ContextVar is
     # set/restored by ``telemetry_middleware`` in backend/main.py, NOT here.
     # FastAPI runs sync deps and the route handler in separate

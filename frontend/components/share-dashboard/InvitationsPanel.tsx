@@ -66,6 +66,8 @@ Login Email:  ${invite.email}
 ${credLines}
 Authorized Services: ${services}
 Valid Until:  ${invite.expires_at ? new Date(invite.expires_at).toUTCString() : 'Unlimited'}
+
+Note: You will be required to review and agree to the Terms of Access upon signing in before accessing the dashboard.
 ==================================================`
 }
 

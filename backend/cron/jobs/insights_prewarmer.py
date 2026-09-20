@@ -115,7 +115,7 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
     return ordered
 
 
-@cron_task("insights_prewarmer")
+@cron_task("insights_prewarmer", job_name="insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
     """Warm the default insights selection — the pair the adaptive frontend
     picker will request for this service's history, for the admin/unclamped
@@ -156,6 +156,16 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # boundaries is fine here (the next prewarmer tick will resolve
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
+
+        # OOM fix: Prewarmer is a solitary background task and shouldn't be
+        # clamped to the 512MB DUCKDB_POOL_CONN_MEMORY_LIMIT meant for concurrent queries.
+        try:
+            from backend.core.duckdb import DUCKDB_MEMORY_LIMIT
+
+            if DUCKDB_MEMORY_LIMIT:
+                con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}';")
+        except Exception:
+            pass
 
         # 1) Admin / unclamped default selection.
         get_insights(
@@ -233,7 +243,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
             error_message=str(e),
             run_id=run_id,
         )
-        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e)
+        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e, exc_info=True)
     finally:
         if con is not None:
             try:

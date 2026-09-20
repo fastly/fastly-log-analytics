@@ -127,6 +127,7 @@ def build_where_clause(
     params: list[Any] = []
 
     # Filter out empty or null client IP records (buffer leaks / empty ticks)
+
     if exclude_invalid_ips and actual_cols is not None and "ip" in actual_cols:
         conditions.append("ip IS NOT NULL AND ip != ''")
 
@@ -184,6 +185,20 @@ def build_where_clause(
 
         mode = spec.mode
         values = spec.values
+        if (
+            actual_cols is not None
+            and sql_col not in actual_cols
+            and not (is_bot_name or is_ngwaf_bot_name or is_tunnel_requests or is_signals_individual)
+        ):
+            if sql_col in ("browser", "os", "device"):
+                conditions.append("FALSE")
+                continue
+            if mode == "exclude":
+                pass
+            else:
+                conditions.append("FALSE")
+            continue
+
         if not values:
             continue
 
@@ -381,6 +396,14 @@ def build_where_clause(
                     op = "NOT IN" if mode == "exclude" else "IN"
                     if is_varchar:
                         sub_parts.append(f"{sql_clean_col} {op} ({placeholders})")
+                    elif sql_clean_col in ("age", "ttl"):
+                        # Fields whose underlying values are stored as FLOAT but represent
+                        # integer seconds (Fastly's obj.ttl / obj.age).
+                        # They are grouped as integers in top_n queries, so we must
+                        # cast them back to stringified integers to match the filter value.
+                        sub_parts.append(
+                            f"CAST(CAST(ROUND({sql_clean_col}) AS INTEGER) AS VARCHAR) {op} ({placeholders})"
+                        )
                     else:
                         sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} ({placeholders})")
 

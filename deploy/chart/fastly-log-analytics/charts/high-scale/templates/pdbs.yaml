@@ -1,0 +1,20 @@
+{{- if .Values.pdb.enabled }}
+{{- range $workload, $config := .Values.workloads }}
+{{- if $config.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "high-scale.workloadName" (dict "root" $ "workload" $workload) }}
+  labels:
+    {{- include "high-scale.workloadLabels" (dict "root" $ "workload" $workload) | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "high-scale.name" $ }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $workload }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

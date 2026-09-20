@@ -10,6 +10,8 @@ the cleanup-now SSE. Both call into per-service SQLite via the
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from backend.core import metadata as metadata_db
 from backend.core.metadata import reconciliation
 from backend.core.metadata import usage_log_db as _usage_log_db
@@ -149,6 +151,23 @@ def test_dedup_active_returns_false_when_delete_after_false(monkeypatch):
     assert reconciliation.is_ingested_files_dedup_active(sid) is False
 
 
+def test_dedup_active_returns_false_for_high_scale_shared_source_even_with_delete_after_true(monkeypatch):
+    """A high-scale shared source forces raw deletion off regardless of
+    ``delete_after`` — since raw files persist, ``ingested_files`` remains
+    the only thing stopping full_sync from re-ingesting everything."""
+    sid = "svc-high-scale-shared"
+
+    def _fake_load_config(s: str):
+        return {
+            "provisioning": {"cron_sync": {"delete_after": True, "high_scale_shared_source": True}},
+        }
+
+    from backend import config as svcconfig
+
+    monkeypatch.setattr(svcconfig, "load_config", _fake_load_config)
+    assert reconciliation.is_ingested_files_dedup_active(sid) is False
+
+
 # ── cleanup_metadata ─────────────────────────────────────────────────────────
 
 
@@ -264,11 +283,49 @@ def test_cleanup_non_int_retention_falls_back_to_disabled():
     assert result["deleted"]["usage_log"] == 0
 
 
+def test_postgres_retention_casts_text_timestamps():
+    assert reconciliation._retention_timestamp_expr("ingested_at", True) == "CAST(ingested_at AS TIMESTAMPTZ)"
+    assert reconciliation._retention_timestamp_expr("started_at", True) == "CAST(started_at AS TIMESTAMPTZ)"
+    assert reconciliation._retention_timestamp_expr("ingested_at", False) == "ingested_at"
+    assert reconciliation._table_uses_postgres("cron_runs", True) is True
+    assert reconciliation._table_uses_postgres("usage_log", True) is False
+
+
 def test_cleanup_rollups_skipped_when_rollups_days_zero():
     sid = "svc-cleanup-no-rollups"
     _seed_usage_log(sid, 1, days_ago=400)
     result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 1, "rollups_days": 0})
     assert result["rollups_deleted"] == 0
+
+
+def test_cleanup_skips_vacuum_under_postgres():
+    """auto_vacuum/incremental_vacuum/freelist_count are SQLite-file
+    concepts with no Postgres equivalent (Postgres reclaims space via its
+    own autovacuum daemon). Under a Postgres metadata backend the DELETE
+    trim must still run, but the vacuum branch must be skipped rather than
+    executing PRAGMA statements a Postgres connection can't run.
+
+    Patches ``pg_connection.is_postgres`` (the guard's own check) to
+    simulate Postgres mode, but forces ``reconciliation.get_con`` to still
+    hand back the real sandboxed SQLite connection (bypassing
+    ``base.get_con``'s OWN ``is_postgres()`` routing, which would otherwise
+    also flip and try to build a real Postgres pool). This isolates the
+    vacuum guard as a pure unit test with no network dependency on an
+    actual Postgres server.
+    """
+    from backend.core.metadata import base as _base
+    from backend.core.metadata import pg_connection
+
+    sid = "svc-cleanup-pg-skip"
+    _seed_usage_log(sid, 5, days_ago=10)
+    real_con = _base._pool.get(sid)
+
+    with patch.object(pg_connection, "is_postgres", return_value=True):
+        with patch.object(reconciliation, "get_con", return_value=real_con):
+            result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
+
+    assert result["deleted"]["usage_log"] == 5
+    assert result["vacuumed"] is False
 
 
 def test_cleanup_first_run_switches_db_to_incremental_vacuum_mode():

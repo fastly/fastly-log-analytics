@@ -1,6 +1,6 @@
 {
-  "name": "fastly-log-analysis-frontend",
-  "version": "2.4.1",
+  "name": "fastly-log-analytics",
+  "version": "3.0.0-beta1",
   "private": true,
   "engines": {
     "node": ">=24"
@@ -37,12 +37,13 @@
     "date-fns": "^4.2.1",
     "date-fns-tz": "^3.2.0",
     "lucide-react": "^1.31.0",
-    "maplibre-gl": "^6.5.0",
-    "next": "16.3.1",
+    "maplibre-gl": "^6.8.0",
+    "next": "^16.3.4",
     "next-themes": "^0.4.6",
     "nuqs": "^2.9.5",
     "openapi-fetch": "^0.17.0",
-    "plotly.js-cartesian-dist-min": "^3.7.0",
+    "plotly.js": "^4.1.0",
+    "plotly.js-cartesian-dist-min": "^4.1.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -58,7 +59,8 @@
     "ip-address": "10.2.0",
     "postcss": "8.5.14",
     "hono": "^4.12.25",
-    "js-yaml": "^4.3.1"
+    "js-yaml": "^4.3.1",
+    "maplibre-gl": "$maplibre-gl"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

@@ -1,0 +1,33 @@
+{{/*
+Template-time coherence gates for the deployment topology.
+*/}}
+{{- $mode := .Values.config.deploymentMode | default "" -}}
+{{- if not (has $mode (list "standard" "high_throughput")) -}}
+{{- fail (printf "config.deploymentMode must be \"standard\" or \"high_throughput\"; got %q." $mode) -}}
+{{- end -}}
+{{- if not (has (.Values.config.schedulerMode | default "") (list "inprocess" "external")) -}}
+{{- fail (printf "config.schedulerMode must be \"inprocess\" or \"external\"; got %q." (.Values.config.schedulerMode | default "")) -}}
+{{- end -}}
+{{- if not (has (.Values.config.sseBackplane | default "") (list "local" "valkey")) -}}
+{{- fail (printf "config.sseBackplane must be \"local\" or \"valkey\"; got %q." (.Values.config.sseBackplane | default "")) -}}
+{{- end -}}
+{{- if and (eq .Values.config.schedulerMode "external") (ne $mode "high_throughput") -}}
+{{- fail (printf "config.schedulerMode=external requires config.deploymentMode=high_throughput. Set config.deploymentMode=high_throughput (and its prerequisites), or config.schedulerMode=inprocess." $mode) -}}
+{{- end -}}
+{{- $hasBroker := or .Values.secrets.existingSecret .Values.secrets.celeryBrokerUrl -}}
+{{- if and (eq .Values.config.sseBackplane "valkey") (not $hasBroker) -}}
+{{- fail "config.sseBackplane=valkey requires a broker URL: set secrets.celeryBrokerUrl or secrets.existingSecret." -}}
+{{- end -}}
+{{- if eq $mode "high_throughput" -}}
+{{- $catalog := required "config.deploymentMode=high_throughput requires config.ducklakeCatalog to be a Postgres DSN (postgres:// or postgresql://)." .Values.config.ducklakeCatalog -}}
+{{- if not (or (hasPrefix "postgres://" $catalog) (hasPrefix "postgresql://" $catalog)) -}}
+{{- fail (printf "config.ducklakeCatalog must be a Postgres DSN (postgres:// or postgresql://) when config.deploymentMode=high_throughput; got %q." $catalog) -}}
+{{- end -}}
+{{- if not .Values.secrets.existingSecret -}}
+{{- $dsn := required "config.deploymentMode=high_throughput requires a shared Postgres metadata database; set secrets.metadataDsn or secrets.existingSecret." .Values.secrets.metadataDsn -}}
+{{- if not (or (hasPrefix "postgres://" $dsn) (hasPrefix "postgresql://" $dsn)) -}}
+{{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) when config.deploymentMode=high_throughput; got %q." $dsn) -}}
+{{- end -}}
+{{- $_ := required "config.deploymentMode=high_throughput requires a broker; set secrets.celeryBrokerUrl or secrets.existingSecret." .Values.secrets.celeryBrokerUrl -}}
+{{- end -}}
+{{- end -}}

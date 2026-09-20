@@ -154,9 +154,10 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
 
         # Locks held → raise the barrier so no NEW connection opens for this file.
         _db.set_recycle_barrier(db_path, True)
+        retired_pools = {}
         try:
-            _pool.begin_drain_pools(service_keys)
-            drained = _pool.wait_pools_drained(service_keys, drain_timeout)
+            retired_pools = _pool.begin_drain_pools(service_keys)
+            drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
 
             # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
             gc.collect()
@@ -166,7 +167,7 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
                 gc.collect()
             live = _db.live_connection_count(db_path)
         finally:
-            _pool.end_drain_pools(service_keys)
+            _pool.end_drain_pools(retired_pools or service_keys)
             _db.set_recycle_barrier(db_path, False)
     finally:
         for lock in reversed(acquired):

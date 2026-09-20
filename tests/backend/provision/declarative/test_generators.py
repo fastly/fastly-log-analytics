@@ -37,6 +37,27 @@ class TestGeneratorVCLStructure:
             duplicates = [v for v in set(var_decls) if var_decls.count(v) > 1]
             assert not duplicates, f"{subroutine}: duplicate var declarations {duplicates}"
 
+    def test_rum_beacon_fields_are_extracted_before_capture(self):
+        """RUM fields must be populated before the log capture promotes them."""
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+            }
+        )
+
+        vcl = generate_consolidated_snippet(state, "vcl_recv")
+
+        extraction = vcl.index(
+            'set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");'
+        )
+        capture = vcl.index("# Capture edge data for logging")
+        assert extraction < capture
+        assert 'querystring.get(req.url, "rum_metric_value")' in vcl
+        assert 'querystring.get(req.url, "rum_error_message")' in vcl
+
     def test_generator_builds_5_consolidated_snippets(self):
         """Verify desired_snippets returns 5 consolidated snippets."""
         state = FeatureState.from_config(
@@ -214,7 +235,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         main = [e for e in endpoints if e.name == "Fastly Log Analytics"]
         assert len(main) == 1, "Should have exactly one main endpoint"
-        assert "analytics_log" in main[0].path
+        assert "year=%Y" in main[0].path
 
     def test_generator_endpoints_use_null_placement(self):
         """Verify that S3 logging endpoints use None/null placement for Format Version Default."""
@@ -264,7 +285,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(state)
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
         assert len(rum) == 1, "Should have RUM endpoint when RUM enabled"
-        assert "/rum/raw/" in rum[0].path
+        assert "raw/rum/" in rum[0].path
         assert rum[0].response_condition == "rum_log_condition"
 
     def test_generator_rum_endpoint_not_created_when_disabled(self):

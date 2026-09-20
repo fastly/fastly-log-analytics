@@ -130,9 +130,17 @@ class FeatureState:
         Raises:
             ValueError: if validation fails.
         """
-        # Validate log_period range
-        if not (30 <= self.log_period <= 3600):
-            raise ValueError(f"log_period must be in range [30, 3600], got {self.log_period}")
+        # Validate log_period range. [30, 3600] was this codebase's own
+        # invention, not a Fastly constraint -- confirmed live against the
+        # real API (fastly service logging s3 update --period 1) and
+        # Fastly's own API reference (no min/max documented for this
+        # field): period=1 is accepted and stored as-is. The provisioning
+        # wizard's own dropdown (StorageStep.tsx) already offers 1/5/10/20
+        # second options that this floor was silently rejecting. Applies to
+        # both the request-log and RUM S3 endpoints (desired_logging_
+        # endpoints() shares this one field between them).
+        if not (1 <= self.log_period <= 3600):
+            raise ValueError(f"log_period must be in range [1, 3600], got {self.log_period}")
 
         # Validate sample_rate range
         if not (1 <= self.sample_rate <= 100):

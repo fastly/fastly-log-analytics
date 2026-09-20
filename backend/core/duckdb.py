@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import re
+import socket
 import threading
 import time
 import weakref
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # App-wide settings (not per-service)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
+DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
 
@@ -180,8 +182,8 @@ def _fos_glob(source: dict) -> str:
     prefix = source["prefix"].strip().strip("/")
     bucket = source["bucket"]
     if prefix:
-        return f"s3://{bucket}/{prefix}/raw/**/*.gz"
-    return f"s3://{bucket}/raw/**/*.gz"
+        return f"s3://{bucket}/{prefix}/raw/request/**/*.gz"
+    return f"s3://{bucket}/raw/request/**/*.gz"
 
 
 _httpfs_installed = False
@@ -191,26 +193,37 @@ _httpfs_lock = threading.Lock()
 # Why: DuckDB's SECRET catalog is MVCC-protected per database file. When
 # two connections on the same file race the CREATE concurrently, the loser
 # raises "TransactionContext Error: Catalog write-write conflict on create
-# with 'fos_proxy'", which surfaces as ASGI 500s and an empty dashboard
-# because every connection setup in _configure_fos crashes. The SECRET is
-# process-wide once created, so serialising the writes is sufficient.
+# with 'fos_proxy'", which surfaces as ASGI 500s and an empty dashboard.
+# The SECRET is per DuckDB connection, so serialising the writes and caching
+# each connection's fingerprint avoids both races and stale cross-connection
+# credentials.
 _fos_proxy_secret_lock = threading.Lock()
-_fos_secret_fingerprint: tuple[str, str, str, str] | None = None
+_fos_secret_fingerprints: weakref.WeakKeyDictionary[duckdb.DuckDBPyConnection, tuple[str, str, str, str]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _load_httpfs(con: duckdb.DuckDBPyConnection):
-    """Install (once) and load httpfs, serialised to prevent concurrent-init heap corruption.
+    """Load httpfs, installing once only when the image cache lacks it.
 
     DuckDB's process-level extension registry is not thread-safe during initialisation.
     Two connections calling LOAD httpfs simultaneously corrupts global state and causes
     an Abort trap / malloc heap corruption on macOS.  Holding the lock for both
-    INSTALL and LOAD eliminates that race.
+    INSTALL and LOAD eliminates that race. Prefer LOAD so runtime pods do not
+    need network access when the extension was baked into the image.
     """
     global _httpfs_installed
     with _httpfs_lock:
         if not _httpfs_installed:
-            con.execute("INSTALL httpfs;")
-            _httpfs_installed = True
+            try:
+                con.execute("LOAD httpfs;")
+            except duckdb.Error:
+                con.execute("INSTALL httpfs;")
+                _httpfs_installed = True
+                con.execute("LOAD httpfs;")
+            else:
+                _httpfs_installed = True
+            return
         try:
             con.execute("LOAD httpfs;")
         except duckdb.InvalidInputException as e:
@@ -226,6 +239,15 @@ def _proxy_target_for(source: dict) -> str:
     classifier (_service_for_target) tags the row as CDN. Otherwise returns
     the native FOS endpoint as-is — moto-style ``http://host:port`` strings
     are honored by the proxy's scheme-aware branch (telemetry_proxy.py:239).
+
+    This is READ-oriented on purpose, and it is the only choice available:
+    the httpfs SECRET below is per-connection, so one target has to serve
+    both reads and writes. Reads dominate and benefit from the CDN's cache,
+    so the secret points at the CDN; DuckLake's parquet WRITES are
+    redirected to the native endpoint (and SigV4-signed) by the proxy
+    itself, in ``_handle_request_inner``. Pointing this at the native
+    endpoint to "fix writes" therefore fixes nothing and sends every read
+    to origin instead — uncached, and against FOS's own rate limits.
     """
     cdn_url = (source.get("cdn_url") or "").strip()
     if cdn_url:
@@ -286,19 +308,9 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         proxy_ep,
         *headers.values(),
     ]
-    global _fos_secret_fingerprint
     fp = (secret_params[0], secret_params[1], secret_params[2], proxy_ep)
-    if _fos_secret_fingerprint == fp:
-        try:
-            con.execute("SET http_timeout=60;")
-            con.execute("SET http_retries=5;")
-            con.execute("SET httpfs_client_implementation = 'curl';")
-            con.execute("SET custom_user_agent = 'FastlyObjectStorageLogAnalysis/1.0';")
-            con.execute("SET http_keep_alive = true;")
-        except Exception:
-            con.execute("SET http_keep_alive = false;")
-        return
     with _fos_proxy_secret_lock:
+        secret_configured = _fos_secret_fingerprints.get(con) == fp
         # _load_httpfs above runs INSTALL/LOAD httpfs, which starts an implicit
         # transaction with a catalog snapshot taken BEFORE we acquired the lock.
         # If another thread committed its own CREATE OR REPLACE SECRET while we
@@ -307,19 +319,20 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         # discards the stale snapshot so CREATE OR REPLACE sees current catalog
         # state. The retry handles the rare case where the rollback itself
         # races with another commit (e.g. a third thread queued behind us).
-        for attempt in range(3):
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            try:
-                con.execute(create_secret_sql, secret_params)
-                _fos_secret_fingerprint = fp
-                break
-            except Exception as e:
-                if "write-write conflict" in str(e).lower() and attempt < 2:
-                    continue
-                raise
+        if not secret_configured:
+            for attempt in range(3):
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
+                try:
+                    con.execute(create_secret_sql, secret_params)
+                    _fos_secret_fingerprints[con] = fp
+                    break
+                except Exception as e:
+                    if "write-write conflict" in str(e).lower() and attempt < 2:
+                        continue
+                    raise
     try:
         con.execute("SET http_timeout=60;")
         con.execute("SET http_retries=5;")
@@ -526,7 +539,7 @@ def _cache_dir(source: dict) -> str:
 
 
 def get_raw_tree_node(source, prefix_filter="", root="raw"):
-    """Return a single level of files in Fastly Object Storage under a root (raw/ or iceberg/).
+    """Return a single level of files in Fastly Object Storage under a root.
 
     Calculates recursive folder sizes by listing up to 10,000 objects under the prefix.
     """
@@ -629,6 +642,21 @@ def close_all_connections():
 
 class DBBusyError(Exception):
     """Raised when a DuckDB connection cannot be acquired within the timeout."""
+
+
+def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, object]:
+    """Return safe topology metadata for a DuckDB file-lock diagnostic."""
+    catalog = os.getenv("DUCKLAKE_CATALOG", "")
+    catalog_mode = "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file"
+    return {
+        "service_id": source.get("logging_service_id") or source.get("name") or "unknown",
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "db_path": db_path,
+        "read_only": read_only,
+        "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standard"),
+        "catalog_mode": catalog_mode,
+    }
 
 
 # ── Lock-contention observability (TESTING_PLAN_3 item 13) ───────────────────
@@ -736,8 +764,16 @@ def _recycle_barrier_cap_s() -> float:
 
 
 def db_path_for_source(src: dict | None) -> str:
-    """Resolve the abspath DuckDB file for a source (the recycle unit)."""
+    """Resolve the DuckDB instance key for a source (the recycle unit).
+
+    Durable serving connections are independent in-memory databases. They
+    still need a service-scoped key for lifecycle accounting so one service's
+    pool/recycle operations cannot drain another service.
+    """
     s = src or _DEFAULT_SOURCE
+    if svcconfig.is_durable_serving_mode(s):
+        service_id = s.get("service_id") or s.get("name") or "default"
+        return f":memory:{service_id}"
     return os.path.abspath(s.get("duckdb_path") or DUCKDB_PATH)
 
 
@@ -896,9 +932,16 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
             pass
 
 
-def get_memory_connection(source: dict) -> duckdb.DuckDBPyConnection:
+def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Return a tracked DuckDB connection in memory."""
+    import os
+
     con = duckdb.connect(":memory:")
+
+    _temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    os.makedirs(_temp_dir, exist_ok=True)
+    con.execute(f"SET temp_directory = '{_temp_dir}';")
+
     # Copy relevant settings from main connection logic
     try:
         if DUCKDB_MEMORY_LIMIT:
@@ -906,13 +949,39 @@ def get_memory_connection(source: dict) -> duckdb.DuckDBPyConnection:
     except Exception:
         pass
 
+    try:
+        n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
+        con.execute(f"SET threads = {n_threads};")
+    except Exception:
+        pass
+
     con.execute("SET TimeZone='UTC';")
-    _configure_fos(con, source)
+    if source is not None:
+        _configure_fos(con, source)
 
     con.execute("SET enable_http_metadata_cache=true;")
     con.execute("SET enable_object_cache=true;")
 
     return con
+
+
+def open_serving_connection(
+    source: dict, mode: str = "read_only", *, max_wait: float = 300.0, skip_view_update: bool = False
+) -> duckdb.DuckDBPyConnection:
+    """Open a serving connection under the selected topology contract.
+
+    Serving is intentionally read-only. In durable Celery mode this resolves
+    to an independent in-memory DuckDB instance over the shared DuckLake
+    catalog; sync/file mode keeps its existing native-file connection.
+    """
+    if mode != "read_only":
+        raise ValueError(f"unsupported serving connection mode: {mode!r}")
+    return get_connection(
+        source=source,
+        max_wait=max_wait,
+        skip_view_update=skip_view_update,
+        read_only=True,
+    )
 
 
 def get_connection(
@@ -926,18 +995,19 @@ def get_connection(
     handler, wrap with ``await asyncio.to_thread(get_connection, ...)``
     so the event loop is never blocked.
 
-    ``read_only`` is accepted for API compatibility but always overridden
-    to False.  Within a single process DuckDB shares the database instance
-    across connections, so mixing ``read_only=True`` (pool / API) with
-    ``read_only=False`` (cron writes) raises "different configuration".
-    Using False everywhere avoids the conflict; concurrent reads are still
-    safe because DuckDB serialises via its internal WAL.
+    ``read_only`` defaults to False.
     """
-    read_only = False
-    src = source or _DEFAULT_SOURCE
 
-    # Use per-source duckdb_path if present, fall back to global DUCKDB_PATH
-    db_path = os.path.abspath(src.get("duckdb_path") or DUCKDB_PATH)
+    src = source or _DEFAULT_SOURCE
+    durable_serving = svcconfig.is_durable_serving_mode(src)
+    if durable_serving and not read_only:
+        raise RuntimeError("durable serving mode only permits read-only DuckDB connections")
+
+    # Use a service-scoped in-memory instance key in durable serving mode so
+    # no native service DuckDB file is opened. Sync/file mode keeps the
+    # existing per-service path unchanged.
+    db_path = db_path_for_source(src)
+    connect_path = ":memory:" if durable_serving else db_path
 
     # Per-source access level (from config) takes precedence over the global default
     src_access_level = src.get("access_level") or ACCESS_LEVEL
@@ -954,7 +1024,20 @@ def get_connection(
     _barrier_wait(db_path)
     while True:
         try:
-            con = duckdb.connect(db_path, read_only=read_only)
+            if read_only and not durable_serving and not os.path.exists(db_path):
+                # The database file must exist before we can attach it read-only.
+                # If it doesn't exist, connect read-write briefly to create it.
+                try:
+                    duckdb.connect(db_path, read_only=False).close()
+                except Exception:
+                    pass  # If this fails, let the connect below fail and trigger the retry loop
+            # DuckDB's native file lock is process-wide: opening the same
+            # service file once read-only and once read-write makes the second
+            # connection fail with "different configuration". The service
+            # process owns this file and must use one consistent file mode.
+            # The public ``read_only`` argument remains part of the connection
+            # API, but never changes the native service-file mode.
+            con = duckdb.connect(connect_path, read_only=False)
             _register_live_connection(con, db_path)
             break
         except Exception as e:
@@ -965,7 +1048,7 @@ def get_connection(
             # deleting the WAL (and potentially the DB). Since this app is designed for
             # stateless recovery (metadata/tracking is reconstructed from Iceberg/FOS),
             # deleting the local cache is safe.
-            if "failure while replaying wal file" in err_str and not read_only:
+            if "failure while replaying wal file" in err_str and not read_only and not durable_serving:
                 logger.error(f"[duckdb] WAL corruption detected for {db_path}: {e}")
                 logger.info(f"[duckdb] Attempting stateless recovery by deleting corrupted database: {db_path}")
                 for f in [db_path, db_path + ".wal"]:
@@ -989,8 +1072,13 @@ def get_connection(
             # so operational dashboards / tests can see contention.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                context = _lock_context(src, db_path, read_only)
+                logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
                 raise DBBusyError(
-                    "Database is locked by another process (cron job may be running). Try again in a few seconds."
+                    "Database is locked by another process "
+                    f"(path={db_path}, pid={os.getpid()}, read_only={read_only}, "
+                    f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
+                    "Try again in a few seconds."
                 ) from e
             _record_lock_retry()
             time.sleep(min(delay, remaining))
@@ -998,8 +1086,9 @@ def get_connection(
 
     # Apply per-connection settings. DuckDB applies these to the session only.
     try:
-        if DUCKDB_MEMORY_LIMIT:
-            con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
+        limit = DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT
+        if limit:
+            con.execute(f"SET max_memory = '{limit}';")
     except Exception:
         pass
     # DUCKDB_THREADS is consumed below inside _cached_n_threads initialization
@@ -1019,11 +1108,19 @@ def get_connection(
     # Configure DuckDB to read Iceberg tables from FOS
     try:
         from backend.core import iceberg
+        from backend.core.iceberg._ducklake import _ducklake_attach
 
         iceberg.configure_duckdb_s3(con)
         con.execute("SET unsafe_enable_version_guessing=true;")
+        attached = _ducklake_attach(con, src, read_only=True)
+        if not attached:
+            raise RuntimeError("failed to attach DuckLake catalog")
     except Exception:
-        pass
+        try:
+            con.close()
+        except Exception:
+            pass
+        raise
 
     con.execute("SET enable_http_metadata_cache=true;")
     con.execute("SET enable_object_cache=true;")
@@ -1034,7 +1131,10 @@ def get_connection(
         # Previously this ignored DUCKDB_THREADS because an early "SET threads"
         # block (now removed) was overridden by this SET — last SET wins in DuckDB.
         _cached_n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
-    con.execute(f"SET threads = {_cached_n_threads};")
+    try:
+        con.execute(f"SET threads = {_cached_n_threads};")
+    except Exception:
+        pass
     # CRITICAL: only auto-derive memory_limit when DUCKDB_MEMORY_LIMIT is
     # UNSET. Pre-fix, the env-based ``SET max_memory`` above was
     # silently overridden here by ``SET memory_limit`` (they're aliases
@@ -1052,9 +1152,16 @@ def get_connection(
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
     con.execute("SET checkpoint_threshold = '512MB';")
 
-    # Configure temp directory to be service-specific next to the database file
-    if db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
+    # File-backed connections keep temp files beside their database. Durable
+    # serving connections are in-memory and need an explicit writable path
+    # because the container root filesystem is read-only.
+    if durable_serving:
+        _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
         _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+    else:
+        _service_temp_dir = None
+    if _service_temp_dir:
         try:
             os.makedirs(_service_temp_dir, exist_ok=True)
             _escaped_dir = _service_temp_dir.replace("'", "''")
@@ -1091,6 +1198,9 @@ def get_connection(
             # ingest released its writer lock. The reader just sees whatever
             # view the last writer published. logger.debug instead of print
             # to keep stderr clean during the dashboard's RO query path.
+            if durable_serving:
+                con.close()
+                raise
             logger.debug("[duckdb] update_iceberg_view skipped on RO connection: %s", e)
 
     # Operational metadata (alerts, views, audit, cron, sources, ingested_files,

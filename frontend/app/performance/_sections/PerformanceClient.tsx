@@ -103,7 +103,7 @@ function PerformanceBody({
   const performanceQuery = useServiceQuery(
     ['performance', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
     async ({ signal }) => {
-      const { data } = await client.POST("/api/performance/aggregates", { signal,
+      const { data, error } = await client.POST("/api/performance/aggregates", { signal,
         body: {
           filters: filterPayload,
           sort_by: 'p99',
@@ -111,6 +111,7 @@ function PerformanceBody({
           ...rangeBody,
         }
       })
+      if (error) throw error
       return data
     }
   )

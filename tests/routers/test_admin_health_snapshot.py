@@ -43,6 +43,15 @@ def test_health_snapshot_returns_shape_with_known_collectors(client):
     assert "config_backup" in body
 
 
+def test_health_snapshot_celery_failure_keeps_valid_response(client):
+    with (
+        patch("backend.config.DEPLOYMENT_MODE", "high_throughput"),
+        patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("broker down")),
+    ):
+        body = _get_health(client)
+    assert body["celery"] is None
+
+
 # ── Failure paths: each collector under try/except. ────────────────────────
 
 

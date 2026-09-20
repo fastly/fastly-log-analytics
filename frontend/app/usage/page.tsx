@@ -89,7 +89,9 @@ function UsagePageContent({
   const isDark = theme === 'dark'
   const router = useRouter()
   const services = useServiceStore(s => s.services);
-        const isAnalyst = services.find((s: any) => s.id === activeServiceId)?.accessLevel === 'read_only'
+        const activeSvc = services.find((s: any) => s.id === activeServiceId)
+        const isAnalyst = (activeSvc as any)?.accessLevel === 'read_only'
+        const isRumEnabled = (activeSvc as any)?.rum_enabled ?? false
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
 
@@ -543,7 +545,7 @@ function UsagePageContent({
           <PlotlyChart data={logProcData as any[]} layout={baseLayout} height="100%" />
         </AnalyticsCard>
 
-        {rumBreakdown && (
+        {isRumEnabled && rumBreakdown && (
           <AnalyticsCard
             title="Real User Monitoring (RUM) Operations"
             description="RUM beacon volume and estimated FOS Class A operation cost"

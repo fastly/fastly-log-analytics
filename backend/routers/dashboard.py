@@ -91,6 +91,14 @@ def dashboard_aggregates(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = _clamp_window(req, ctx)
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.dashboard import aggregates as high_scale_aggregates
+
+        return high_scale_aggregates(high_scale_service, req, start_time, end_time)
+
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
     return repo.get_aggregates(
@@ -142,6 +150,7 @@ async def dashboard_bundle(
     every prod response.
     """
     from backend.core.duckdb_pool import _PoolBusy, checkout_connection
+    from backend.high_scale.registry import get_high_scale_service_registry
     from backend.repositories import security as security_repo
     from backend.repositories._base import SectionTimer
 
@@ -149,6 +158,11 @@ async def dashboard_bundle(
     # _run_top_bots) close over the same clamped window — neither can scan
     # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
     start_time, end_time = _clamp_window(req, ctx)
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.dashboard import bundle as high_scale_bundle
+
+        return high_scale_bundle(high_scale_service, req, start_time, end_time)
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
@@ -256,13 +270,25 @@ async def dashboard_bundle(
         cm = checkout_connection(ctx.source, max_wait=0.2)
         return cm, cm.__enter__()
 
+    # Shield checkout to prevent connection leaks if client cancels mid-flight
+    checkout_result = []
+
+    async def _shielded_checkout():
+        res = await asyncio.to_thread(_checkout_second)
+        checkout_result.append(res)
+        return res
+
     try:
-        second_cm, second_con = await asyncio.to_thread(_checkout_second)
-        parallel = True
+        await asyncio.shield(_shielded_checkout())
+        if checkout_result:
+            second_cm, second_con = checkout_result[0]
+            parallel = True
     except _PoolBusy:
         second_cm = None
         second_con = None
     except Exception:
+        if checkout_result:
+            second_cm, _ = checkout_result[0]
         if second_cm is not None:
             try:
                 second_cm.__exit__(None, None, None)
@@ -320,10 +346,14 @@ async def dashboard_bundle(
             if isinstance(top_bots, BaseException):
                 raise top_bots
         finally:
-            try:
-                second_cm.__exit__(None, None, None)
-            except Exception:
-                pass
+            cm_to_exit = second_cm
+            if cm_to_exit is None and checkout_result:
+                cm_to_exit, _ = checkout_result[0]
+            if cm_to_exit is not None:
+                try:
+                    cm_to_exit.__exit__(None, None, None)
+                except Exception:
+                    pass
     else:
         t0 = time.perf_counter()
         task_agg = asyncio.create_task(asyncio.to_thread(_run_aggregates, ctx.con))

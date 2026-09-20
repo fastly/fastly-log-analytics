@@ -259,7 +259,9 @@ def _enumerate_table_functions() -> frozenset[str]:
     is never silently turned off.
     """
     try:
-        con = duckdb.connect(":memory:")
+        from backend.core.duckdb import get_memory_connection
+
+        con = get_memory_connection()
         try:
             rows = con.execute(
                 "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"

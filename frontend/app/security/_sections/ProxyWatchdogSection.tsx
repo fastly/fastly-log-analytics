@@ -21,7 +21,7 @@ const ImpossibleDistanceModal = dynamic(
   { ssr: false }
 )
 
-type SecurityProxiesResponse = components['schemas']['SecurityProxiesResponse']
+type SecurityProxiesResponse = components['schemas']['SecurityAggregatesResponse']
 type ActiveClientItem = components['schemas']['ActiveClientItem']
 
 interface ProxyWatchdogSectionProps {

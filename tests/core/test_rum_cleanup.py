@@ -71,6 +71,28 @@ def test_delete_after_disabled_is_a_noop(mock_load_config, mock_get_source, fos_
 
 @patch("backend.core.rum_ingest.get_source_for_service")
 @patch("backend.config.load_config")
+def test_high_scale_shared_source_is_a_noop_even_with_delete_after_enabled(
+    mock_load_config, mock_get_source, fos_source
+):
+    """A high-scale shared source forces RUM cleanup off even when
+    ``rum.delete_after`` is enabled — raw-deletion authority for that stream
+    belongs to the high-scale archive deletion controller, RUM included.
+    Regression test for legacy cleanup racing an out-of-band high-scale
+    consumer of the same raw FOS stream."""
+    mock_load_config.return_value = {
+        "provisioning": {"cron_sync": {"high_scale_shared_source": True}},
+        "rum": {"delete_after": True},
+    }
+    mock_get_source.return_value = fos_source
+
+    files, freed = cleanup_old_rum_logs("svc1")
+
+    assert (files, freed) == (0, 0)
+    mock_get_source.assert_not_called()
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.config.load_config")
 def test_no_source_bucket_configured_returns_zero(mock_load_config, mock_get_source, fos_source):
     mock_load_config.return_value = {"rum": {"delete_after": 30}}
     mock_get_source.return_value = {**fos_source, "bucket": ""}
@@ -87,7 +109,7 @@ def test_deletes_only_objects_older_than_retention_window(mock_load_config, mock
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = source
 
-    _put(s3_mock, "test-prefix/rum/raw/old-file.log.gz", body=b"y" * 500)
+    _put(s3_mock, "test-prefix/raw/rum/old-file.log.gz", body=b"y" * 500)
     _put(s3_mock, "test-prefix/not-rum/other.log.gz", body=b"z" * 999)  # outside the rum/ prefix — must survive
 
     # Fast-forward "now" by 30 days so the (real-timestamped) object falls
@@ -100,7 +122,7 @@ def test_deletes_only_objects_older_than_retention_window(mock_load_config, mock
     remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="test-prefix/")
     remaining_keys = [o["Key"] for o in remaining.get("Contents", [])]
     assert "test-prefix/not-rum/other.log.gz" in remaining_keys
-    assert "test-prefix/rum/raw/old-file.log.gz" not in remaining_keys
+    assert "test-prefix/raw/rum/old-file.log.gz" not in remaining_keys
 
 
 @patch("backend.core.rum_ingest.get_source_for_service")
@@ -109,13 +131,13 @@ def test_objects_within_retention_window_are_kept(mock_load_config, mock_get_sou
     mock_load_config.return_value = {"rum": {"delete_after": 90}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "rum/raw/fresh-file.log.gz")
+    _put(s3_mock, "raw/rum/fresh-file.log.gz")
 
     with _patched_client(s3_mock):
         files, freed = cleanup_old_rum_logs("svc1")
 
     assert (files, freed) == (0, 0)
-    remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="rum/raw/")
+    remaining = s3_mock.list_objects_v2(Bucket="test-bucket", Prefix="raw/rum/")
     assert len(remaining.get("Contents", [])) == 1
 
 
@@ -125,7 +147,7 @@ def test_directory_marker_keys_are_skipped(mock_load_config, mock_get_source, s3
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "rum/raw/")  # a directory-marker-style key (trailing slash)
+    _put(s3_mock, "raw/rum/")  # a directory-marker-style key (trailing slash)
 
     with _patched_client(s3_mock), patch("backend.core.rum_ingest.datetime", _fast_forwarded(30)):
         files, freed = cleanup_old_rum_logs("svc1")
@@ -154,8 +176,8 @@ def test_per_object_delete_failure_is_swallowed_and_others_still_deleted(
     mock_load_config.return_value = {"rum": {"delete_after": 7}}
     mock_get_source.return_value = fos_source
 
-    _put(s3_mock, "rum/raw/a.log.gz", body=b"a" * 100)
-    _put(s3_mock, "rum/raw/b.log.gz", body=b"b" * 200)
+    _put(s3_mock, "raw/rum/a.log.gz", body=b"a" * 100)
+    _put(s3_mock, "raw/rum/b.log.gz", body=b"b" * 200)
 
     real_delete = s3_mock.delete_object
 

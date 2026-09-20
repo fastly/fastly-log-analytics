@@ -78,16 +78,40 @@ describe('useBootstrap (MSW)', () => {
 
     await waitFor(() => expect(mockSetServices).toHaveBeenCalled())
     expect(mockSetServices).toHaveBeenCalledWith([
-      { id: 'svc-1', name: 'My CDN', accessLevel: 'read_write' },
-      { id: 'svc-2', name: 'Staging', accessLevel: 'read_only' },
+      {
+        id: 'svc-1',
+        name: 'My CDN',
+        accessLevel: 'read_write',
+        cmcdEnabled: undefined,
+        rum_enabled: undefined,
+        analystPathASupported: true,
+        analystPathAReason: null,
+      },
+      {
+        id: 'svc-2',
+        name: 'Staging',
+        accessLevel: 'read_only',
+        cmcdEnabled: undefined,
+        rum_enabled: undefined,
+        analystPathASupported: true,
+        analystPathAReason: null,
+      },
     ])
   })
 
-  it('maps service_id → id, name → name, access_level → accessLevel', async () => {
+  it('maps service_id → id, name → name, access_level → accessLevel and topology capability', async () => {
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>
         HttpResponse.json({
-          services: [{ service_id: 'abc', name: 'Test', access_level: 'read_only' }],
+          services: [
+            {
+              service_id: 'abc',
+              name: 'Test',
+              access_level: 'read_only',
+              analyst_path_a_supported: false,
+              analyst_path_a_reason: 'Use Path B.',
+            },
+          ],
           active_service_id: null,
         }),
       ),
@@ -97,9 +121,18 @@ describe('useBootstrap (MSW)', () => {
 
     await waitFor(() => expect(mockSetServices).toHaveBeenCalled())
     const [mappedServices] = mockSetServices.mock.calls[0]
-    expect(mappedServices[0]).toEqual({ id: 'abc', name: 'Test', accessLevel: 'read_only' })
+    expect(mappedServices[0]).toEqual({
+      id: 'abc',
+      name: 'Test',
+      accessLevel: 'read_only',
+      cmcdEnabled: undefined,
+      rum_enabled: undefined,
+      analystPathASupported: false,
+      analystPathAReason: 'Use Path B.',
+    })
     expect(mappedServices[0].service_id).toBeUndefined()
     expect(mappedServices[0].access_level).toBeUndefined()
+    expect(mappedServices[0].analyst_path_a_supported).toBeUndefined()
   })
 
   it('reads active_service_id (not active_id) to set the default service', async () => {

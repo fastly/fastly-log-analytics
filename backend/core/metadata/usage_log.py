@@ -451,7 +451,7 @@ def _query_usage_log_aggregate_rollup(
             SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
             FROM usage_log
             WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
-        )
+        ) AS combined
         GROUP BY operation_class, operation_type
         """,
         # Interior rollup params

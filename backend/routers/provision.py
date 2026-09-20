@@ -152,6 +152,7 @@ def provision_validate(body: ProvisionValidateRequest):
 
         safe_service_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
         safe_service_id = re.sub(r"-+", "-", safe_service_id).strip("-")
+        safe_service_id_lower = safe_service_id.lower()
 
         return {
             "service_name": svc_name,
@@ -159,7 +160,7 @@ def provision_validate(body: ProvisionValidateRequest):
             "defaults": {
                 "endpoint_name": "Fastly Object Storage Logs",
                 "fos_region": "us-east-1",
-                "fos_bucket_name": f"fos-{safe_service_id}-logs",
+                "fos_bucket_name": f"fos-{safe_service_id_lower}-logs",
                 "fos_prefix": "",
                 "sample_rate": 100,
                 "edge_only": True,

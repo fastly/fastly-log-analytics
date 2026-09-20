@@ -56,7 +56,16 @@ def safe_iso(dt) -> str | None:
         if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
             s += "Z"
         return s
-    return str(dt)
+    s = str(dt).strip()
+    if not s:
+        return None
+    if " " in s:
+        s = s.replace(" ", "T")
+        if not s.endswith("Z") and "+" not in s:
+            s += "Z"
+    elif "T" in s and not s.endswith("Z") and "+" not in s:
+        s += "Z"
+    return s
 
 
 def parse_window_str_to_dt(s: str) -> datetime:

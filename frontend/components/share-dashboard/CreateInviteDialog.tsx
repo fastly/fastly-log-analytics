@@ -398,6 +398,9 @@ function CreateInviteDialogInner({
                 people can share this link — audit events won&apos;t distinguish between them.
               </p>
             </div>
+            <div className="md:col-span-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+              Note: Analysts are required to review and agree to the Terms of Access upon their first login before dashboard access is granted.
+            </div>
           </div>
         </div>
 

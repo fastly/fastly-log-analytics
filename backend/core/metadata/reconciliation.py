@@ -81,6 +81,18 @@ _SLOW_QUERIES_TABLE = "slow_queries"
 _USAGE_LOG_TABLE = "usage_log"
 
 
+def _retention_timestamp_expr(ts_col: str, postgres: bool) -> str:
+    """Return the timestamp expression used by a retention predicate."""
+    if postgres:
+        return f"CAST({ts_col} AS TIMESTAMPTZ)"
+    return ts_col
+
+
+def _table_uses_postgres(table: str, postgres: bool) -> bool:
+    """Return whether retention SQL should use the Postgres dialect."""
+    return postgres and table != _USAGE_LOG_TABLE
+
+
 def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
     """Open the per-service usage_log file if it exists; else None.
 
@@ -188,10 +200,10 @@ def is_ingested_files_dedup_active(service_id: str) -> bool:
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(service_id) or {}
-    delete_after = cfg.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
-    # Treat anything other than an explicit False as safe-to-trim. None,
-    # missing, truthy strings — all default to the safe path.
-    return delete_after is not False
+    # A high-scale shared source forces this the same as an explicit
+    # delete_after=False: raw files are not being deleted, so ingested_files
+    # remains the only thing stopping full_sync from re-ingesting everything.
+    return svcconfig.resolve_raw_delete_after(cfg)
 
 
 def cleanup_metadata(
@@ -260,6 +272,9 @@ def cleanup_metadata(
         cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
+    from backend.core.metadata.pg_connection import is_postgres
+
+    postgres = is_postgres() and not isinstance(con, sqlite3.Connection)
     t0 = _t.time()
 
     def _con_for(table: str) -> sqlite3.Connection:
@@ -307,6 +322,7 @@ def cleanup_metadata(
         # ``purge_cron_runs``). Each batch takes ~10-50ms; other writers interleave
         # between commits instead of queuing for the full duration.
         _BATCH = 5_000
+        table_postgres = _table_uses_postgres(table, postgres)
         try:
             total_n = 0
             while True:
@@ -314,16 +330,32 @@ def cleanup_metadata(
                     # Unix-epoch REAL cutoff for slow_queries — see
                     # ``_SLOW_QUERIES_TABLE`` comment above.
                     cutoff_epoch = _t.time() - days_int * 86400
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
-                        (cutoff_epoch, _BATCH),
-                    )
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
+                            (cutoff_epoch, _BATCH),
+                        )
                 else:
-                    cur = table_con.execute(
-                        f"DELETE FROM {table} WHERE rowid IN "
-                        f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
-                        (f"-{days_int} days", _BATCH),
-                    )
+                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} "
+                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                            (days_int, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
+                            (f"-{days_int} days", _BATCH),
+                        )
                 n = int(cur.rowcount or 0)
                 total_n += n
                 table_con.commit()
@@ -370,7 +402,14 @@ def cleanup_metadata(
             )
 
     vacuumed = False
-    if any(deleted.values()):
+    from backend.core.metadata.pg_connection import is_postgres
+
+    # File-vacuum (auto_vacuum/incremental_vacuum/freelist_count) is a
+    # SQLite-file concept with no Postgres equivalent — Postgres reclaims
+    # space via its own autovacuum daemon, outside app control. Skip the
+    # whole branch under a Postgres metadata backend; the DELETE trim above
+    # already ran and is what actually matters there.
+    if any(deleted.values()) and not is_postgres():
         # A bare VACUUM rewrites the whole file under an exclusive lock —
         # measured at 9.5s on a populated metadata.db, during which every
         # other writer to the SAME file (slow_queries batched insert,

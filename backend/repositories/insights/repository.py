@@ -63,7 +63,7 @@ def _execute_on_cursor(
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
     with debug_lock:
-        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms})
+        runner.debug_queries.append({"sql": _compact_sql_for_debug(sql), "time_ms": elapsed_ms, "engine": "DuckDB"})
     return res
 
 
@@ -655,7 +655,7 @@ def get_insights(
     # visibility AND in-memory storage. The scratch is unique per request
     # so two concurrent requests on the same pool connection don't collide.
     scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
-    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias}")
+    runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias} (READ_ONLY FALSE)")
     scratch_attached = True
     temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
 

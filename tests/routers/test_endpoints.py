@@ -159,7 +159,7 @@ def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_
     app.dependency_overrides[get_source] = lambda: custom_source
 
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=custom_source, con=in_memory_duckdb, path="/api/dashboard/aggregates"
+        source=custom_source, _con_override=in_memory_duckdb, path="/api/dashboard/aggregates"
     )
     try:
         with TestClient(app) as c:

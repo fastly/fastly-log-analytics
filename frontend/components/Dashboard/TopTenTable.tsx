@@ -110,13 +110,14 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     )
   }
 
-  const maxCount = Math.max(...data.top.map(item => item.count))
+  const topItems = data.top.slice(0, 10)
+  const maxCount = Math.max(...topItems.map(item => item.count))
   const compareMap = new Map(compareData?.top?.map(item => [item.value, item.count]) || [])
 
   const handleCopyCSV = (e: React.MouseEvent) => {
     e.stopPropagation()
     const header = `${field},count\n`
-    const rows = data.top.map(item => {
+    const rows = topItems.map(item => {
       // CSV/formula-injection hardening: log fields are attacker-controlled
       // (User-Agent, URL, Referer…). Prefix formula-leading values with a
       // single quote so spreadsheets treat them as text, and double any
@@ -165,7 +166,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
         </div>
       </div>
       <div className="flex flex-col gap-[2px] flex-1">
-        {data.top.map((item, i) => {
+        {topItems.map((item) => {
           const displayVal = item.label || formatValue(field, item.value as string | number)
           const compCount = compareMap.get(item.value)
           const delta = calculateDelta(item.count, compCount)
@@ -198,7 +199,12 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
                   fixed 65% cap — short values like IPs then fit fully while
                   long URLs/UAs still truncate. The badge is shrink-0 so it
                   always keeps its room. */}
-              <span className="relative z-10 truncate pr-4 min-w-0 flex-1">
+              <span
+                className={cn(
+                  "relative z-10 truncate pr-4 min-w-0",
+                  "flex-1",
+                )}
+              >
                 {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}
               </span>
               <div className="relative z-10 flex items-center gap-2 shrink-0">
@@ -242,7 +248,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
             // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
             // visual row layout is preserved via the reset classes.
             <button
-              key={i}
+              key={String(item.value)}
               type="button"
               className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
               onClick={() => onRowClick?.(field ?? '', item.value as string | number)}

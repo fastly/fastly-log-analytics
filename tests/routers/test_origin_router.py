@@ -12,7 +12,9 @@ this file just pins:
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.repositories._base import _safe_table
 from tests.conftest import MOCK_SERVICE_ID
@@ -316,3 +318,47 @@ def test_origin_aggregates_range_token(client, in_memory_duckdb, test_service_so
         )
     assert resp.status_code == 200
     assert "summary" in resp.json()
+
+
+def test_origin_aggregates_dispatches_registered_high_scale_service(
+    client,
+    monkeypatch,
+    test_service_source,
+):
+    expected = {
+        "has_data": True,
+        "total": 12,
+        "summary": {"total_misses": 7, "total_passes": 5},
+        "timeseries": {"has_data": True, "series": []},
+        "slow_urls": {"has_data": True, "rows": []},
+        "status_codes": {"has_data": True, "rows": []},
+        "path_breakdown": {"has_data": True, "shielding_detected": False, "rows": []},
+        "pop_latency": {"has_data": True, "requires_group_c": False, "rows": []},
+        "ip_health": {"has_data": True, "rows": []},
+    }
+    high_scale_aggregates = MagicMock(return_value=expected)
+    monkeypatch.setitem(
+        sys.modules,
+        "backend.high_scale.origin",
+        SimpleNamespace(aggregates=high_scale_aggregates),
+    )
+    service = SimpleNamespace(service_id=test_service_source["service_id"])
+    registry = SimpleNamespace(resolve=MagicMock(return_value=service))
+    monkeypatch.setattr(
+        "backend.high_scale.registry.get_high_scale_service_registry",
+        lambda: registry,
+    )
+    standard = AsyncMock(side_effect=AssertionError("standard Origin repository called"))
+    monkeypatch.setattr("backend.repositories.origin.get_aggregates", standard)
+
+    response = client.post(
+        "/api/origin/aggregates",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "sections": ["summary"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 12
+    high_scale_aggregates.assert_called_once()
+    assert high_scale_aggregates.call_args.kwargs["sections"] == {"summary"}
+    standard.assert_not_awaited()

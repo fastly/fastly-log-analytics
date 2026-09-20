@@ -173,8 +173,9 @@ function DashboardBody({
   // failure: no scary red banner, and keep the chart/cards on their
   // loading skeleton instead of flashing "No data available".
   const isStalePreparing = bundleQuery.isError && isStaleDashboardViewError(bundleQuery.error)
-  const isLoadingAggs = bundleQuery.isLoading || isStalePreparing
-  const isFetchingAggs = bundleQuery.isFetching
+  const hasDashboardData = Boolean(aggregates)
+  const isLoadingAggs = bundleQuery.isLoading || (isStalePreparing && !hasDashboardData)
+  const isFetchingAggs = bundleQuery.isFetching && !isStalePreparing
 
   const { data: compareAggregates, error: compareError, refetch: refetchCompare } = useQuery({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
@@ -231,6 +232,7 @@ function DashboardBody({
       compareMode,
       compareStartTime,
       startTime,
+      endTime,
       trend,
       timezone,
       metric,
@@ -238,7 +240,7 @@ function DashboardBody({
       hiddenCategories,
       catalog,
     }),
-    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
+    [aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
 
   const [trafficData, setTrafficData] = React.useState<any[]>(() => buildTrafficData(trafficParams))
@@ -509,7 +511,7 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
       defaultInterval="1 hour"
       headerActions={
         <DashboardHeader
-          visibleCardsCount={visibleCards.size}
+          visibleCardsCount={allCards.filter(c => visibleCards.has(c.id)).length}
           allCards={allCards}
           visibleCards={visibleCards}
           onToggleCard={toggleCard}

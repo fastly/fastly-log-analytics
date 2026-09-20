@@ -1,0 +1,92 @@
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1:8081:80"
+
+  frontend:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - API_PROXY_URL=http://backend:8000
+      - NODE_OPTIONS=--max_old_space_size=1024
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+      - ENV_NAME=local-high-scale
+
+  backend:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
+      - CLICKHOUSE_ENABLED=true
+    volumes: !override
+      - ./configs-hs:/app/configs
+      - hs-data:/app/data
+      - hs-cache:/app/cache
+
+  worker:
+    environment:
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
+      - CLICKHOUSE_ENABLED=true
+    volumes: !override
+      - ./configs-hs:/app/configs
+      - hs-data:/app/data
+      - hs-cache:/app/cache
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  high-scale-worker:
+    image: fastly-log-analytics-backend:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "backend.high_scale.worker"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
+      - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
+      - HIGH_SCALE_CLICKHOUSE_URL=http://clickhouse:8123
+      - HIGH_SCALE_FOS_BUCKET=prototype-bucket
+      - HIGH_SCALE_ARCHIVE_MANIFEST_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - HIGH_SCALE_WORKER_QUEUE_URL=redis://valkey:6379/0
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=fastly_logs
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - CELERY_BROKER_URL=redis://valkey:6379/0
+      - DEPLOYMENT_MODE=high_throughput
+    volumes:
+      - ./configs-hs:/app/configs
+      - hs-data:/app/data
+      - hs-cache:/app/cache
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f backend.high_scale.worker || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  clickhouse-schema-init:
+    volumes: !override
+      - ./configs-hs:/app/configs:ro
+
+volumes:
+  hs-data:
+  hs-cache:

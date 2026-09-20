@@ -27,6 +27,7 @@ from ._common import (
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
+    POP_HEALTH_BUNDLE_FILENAME,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
     SECURITY_COV_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
@@ -82,7 +83,9 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
     rebuilt = 0
     # :memory: DuckDB — see bundle_hours for the rationale (avoid
     # contention on the per-service .duckdb file held by uvicorn).
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         for day in days:
             if day == active_day:
@@ -313,7 +316,9 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
         except OSError:
             pass
 
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         # Field set spans both the per-field hour tree (live, not-yet-bundled
         # hours) AND any field that appears in a bundled-hour file (which is
@@ -1010,5 +1015,69 @@ def compact_overview_closed_days_to_daily(service_id: str, source: dict) -> int:
         service_id,
         source,
         jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
+        logger=logger,
+    )
+
+
+def compact_pop_health_closed_days_to_daily(service_id: str, source: dict) -> int:
+    """Consolidate closed-day per-hour pop_health parquets into per-day files."""
+
+    def _copy_sql(paths_sql: str, tmp_file: str) -> str:
+        return (
+            f"COPY ("
+            f"  SELECT "
+            f"      CAST(pop AS VARCHAR) AS pop, "
+            f"      CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"      CAST(SUM(errors) AS BIGINT) AS errors, "
+            f"      CAST(SUM(cache_hits) AS BIGINT) AS cache_hits, "
+            f"      CAST(SUM(bandwidth_bytes) AS BIGINT) AS bandwidth_bytes, "
+            f"      CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_rtt_us, "
+            f"      CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p95_ttfb_ms "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY pop"
+            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _copy_sql)],
+        logger=logger,
+    )
+
+
+import typing
+
+
+def compact_network_quality_closed_days_to_daily(service_id: str, source: dict) -> int:
+    from ._common import (
+        NETWORK_QUALITY_ASN_FILENAME,
+        NETWORK_QUALITY_COUNTRY_FILENAME,
+        NETWORK_QUALITY_POP_FILENAME,
+        NETWORK_QUALITY_REGION_FILENAME,
+    )
+
+    def _build_sql(dim_col: str, include_country: bool) -> typing.Callable[[str, str], str]:
+        country_select = ", country" if include_country else ""
+        return lambda paths_sql, tmp_file: (
+            f"COPY ("
+            f"  SELECT dim_val {country_select}, "
+            f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+            f"    CAST(SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) AS p50_us "
+            f"  FROM read_parquet([{paths_sql}]) "
+            f"  GROUP BY dim_val {country_select} "
+            f"  ORDER BY requests DESC LIMIT 100"
+            f") TO '{tmp_file}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+
+    return compact_closed_days(
+        service_id,
+        source,
+        jobs=[
+            (NETWORK_QUALITY_COUNTRY_FILENAME, ".tmp_nq_", _build_sql("country", False)),
+            (NETWORK_QUALITY_ASN_FILENAME, ".tmp_nq_", _build_sql("asn", False)),
+            (NETWORK_QUALITY_REGION_FILENAME, ".tmp_nq_", _build_sql("region", True)),
+            (NETWORK_QUALITY_POP_FILENAME, ".tmp_nq_", _build_sql("pop", False)),
+        ],
         logger=logger,
     )

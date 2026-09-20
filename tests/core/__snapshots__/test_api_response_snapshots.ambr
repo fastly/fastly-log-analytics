@@ -13,6 +13,7 @@
       'last_sync',
       'log_extents',
       'log_fields_catalog',
+      'ngwaf_configured',
       'ops_overview',
       'pop_geo',
       'pops',

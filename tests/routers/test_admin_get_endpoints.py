@@ -105,6 +105,40 @@ def test_sync_status_500s_on_unexpected_exception(client):
     assert resp.status_code == 500
 
 
+def test_sync_status_routes_high_scale_service_without_duckdb(client):
+    fake_src = {"name": "high_scale_svc", "service_id": "HS123", "bucket": "b"}
+    cached_metrics = {
+        "configured": True,
+        "local_rows": 1000,
+        "latest_log_at": "2026-09-16T06:00:00Z",
+    }
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.high_scale.registry.get_high_scale_service_registry") as mock_reg,
+        patch("backend.routers.admin.sync_status.compute_sync_status_cached", return_value=cached_metrics),
+        patch("backend.core.duckdb.get_connection") as mock_conn,
+    ):
+        mock_reg.return_value.resolve.return_value = object()
+        resp = client.get("/api/sync-status?service_id=HS123")
+        assert resp.status_code == 200
+        assert resp.json()["local_rows"] == 1000
+        mock_conn.assert_not_called()
+
+
+def test_sync_status_uses_read_only_in_durable_serving_mode(client):
+    fake_src = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "bucket": "b"}
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.is_durable_serving_mode", return_value=True),
+        patch("backend.core.duckdb.get_connection") as mock_conn,
+        patch("backend.core.duckdb.get_sync_status", return_value={"configured": True}),
+    ):
+        mock_conn.return_value = type("C", (), {"close": lambda self: None})()
+        resp = client.get("/api/sync-status", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+        assert resp.status_code == 200
+        mock_conn.assert_called_once_with(source=fake_src, max_wait=5, skip_view_update=True, read_only=True)
+
+
 # ── /api/log-extents ─────────────────────────────────────────────────
 
 

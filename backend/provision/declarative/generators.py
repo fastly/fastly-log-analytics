@@ -12,8 +12,10 @@ from backend.core.fastly.rum_provisioning import (
     RUM_ASSET_FETCH_NAME,
     RUM_FARO_FETCH_NAME,
     generate_rum_asset_fetch_vcl,
+    generate_rum_recv_parts,
     generate_rum_vcl,
 )
+from backend.provision import log_paths
 from backend.provision.declarative.diff import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
 from backend.provision.declarative.state import FeatureState
 from backend.provision.fastly_api import generate_capture_vcl
@@ -161,8 +163,18 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         edge_first_hop_statements.append("  # Mint a per-request ID for RUM beacons on fresh requests")
         edge_first_hop_statements.append("  set req.http.x-rum-req-id = randomstr(12);")
 
-    # C. Edge capture only (if logging enabled)
-    # MUST go before RUM beacon interception so the beacon inherits the geolocation / network headers!
+    # C. RUM extraction must precede generic capture so dedicated fields are
+    # promoted with the same edge data as every other log field.
+    if state.rum_enabled and state.logging_enabled:
+        rum_extraction, _ = generate_rum_recv_parts()
+        edge_first_hop_statements.append("  # Section 5: RUM field extraction (vcl_recv)")
+        edge_first_hop_statements.append('  if (req.url.path == "/rum-beacon") {')
+        for line in rum_extraction.splitlines():
+            edge_first_hop_statements.append(f"    {line}")
+        edge_first_hop_statements.append("  }")
+
+    # D. Edge capture only (if logging enabled)
+    # Runs after RUM extraction so the beacon inherits all promoted fields.
     if state.logging_enabled:
         from backend.provision.fastly_api import get_capture_vcl_statements
 
@@ -192,38 +204,17 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         for cap in get_capture_vcl_statements(log_fields_dict):
             edge_first_hop_statements.append(f"  {cap}")
 
-    # D. Beacon interception POST to /rum-beacon (Section 5 RUM)
-    # Placed AFTER the standard captures block!
+    # E. Beacon interception POST to /rum-beacon (Section 5 RUM)
+    # The response/termination block runs after standard capture.
     if state.rum_enabled:
+        _, rum_response = generate_rum_recv_parts()
         edge_first_hop_statements.append("  # Section 5: RUM (vcl_recv)")
-        edge_first_hop_statements.append("  # Handle RUM beacon POST to /rum-beacon")
         edge_first_hop_statements.append('  if (req.url.path == "/rum-beacon") {')
-        edge_first_hop_statements.append("      # Extract the essential fields from querystring:")
-        edge_first_hop_statements.append("      # - cid: session ID from rum_cid cookie (set in deliver)")
-        edge_first_hop_statements.append("      # - req: per-request ID (minted in recv)")
-        edge_first_hop_statements.append("      # - raw query: complete set of event_N_* params, parsed during ingest")
-        edge_first_hop_statements.append(
-            '      set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");'
-        )
-        edge_first_hop_statements.append(
-            '      set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");'
-        )
-        edge_first_hop_statements.append('      if (req.http.x-fos-edge-data:fastly_req_id == "") {')
-        edge_first_hop_statements.append(
-            "          set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;"
-        )
-        edge_first_hop_statements.append("      }")
-        edge_first_hop_statements.append("      set req.http.x-fos-edge-data:rum_raw_query = req.url;")
-        edge_first_hop_statements.append("      set req.http.x-fos-edge-data:rum_body = req.body;")
-        edge_first_hop_statements.append(
-            "      # Mark beacon to skip S3 logging (already logged separately to metadata DB)"
-        )
-        edge_first_hop_statements.append('      set req.http.x-skip-rum-logging = "1";')
-        edge_first_hop_statements.append("      # Synthetic 204 response (no origin round-trip needed)")
-        edge_first_hop_statements.append('      error 611 "No Content";')
+        for line in rum_response.splitlines():
+            edge_first_hop_statements.append(f"    {line}")
         edge_first_hop_statements.append("  }")
 
-    # E. Session Scoring first-pass routing (Section 4 Session Scoring)
+    # F. Session Scoring first-pass routing (Section 4 Session Scoring)
     # Placed at the very end of the consolidated block!
     if state.scoring.enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
@@ -554,7 +545,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             LoggingEndpoint(
                 name=state.logging_endpoint_name,
                 endpoint_type="s3",
-                path=f"{state.fos_prefix}/raw/%Y/%m/%d/%H/analytics_log_%M.json.gz",
+                path=log_paths.analytics_log_path(),
                 period=state.log_period,
                 response_condition="log_analytics_condition",
                 format_string=log_format,
@@ -576,7 +567,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
                 endpoint_type="s3",
-                path=f"{state.fos_prefix}/rum/raw/%Y/%m/%d/%H/rum_log_%M.json.gz",
+                path=log_paths.rum_log_path(),
                 period=state.log_period,
                 response_condition="rum_log_condition",
                 format_string=rum_format,

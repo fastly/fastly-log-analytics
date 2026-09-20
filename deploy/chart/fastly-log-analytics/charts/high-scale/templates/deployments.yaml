@@ -1,0 +1,131 @@
+{{- range $workload, $config := .Values.workloads }}
+{{- if $config.enabled }}
+{{- if and (ne $workload "ingest") (not $config.command) }}
+{{- fail (printf "high-scale workload %s requires an explicit command" $workload) }}
+{{- end }}
+{{- $root := $ }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "high-scale.workloadName" (dict "root" $root "workload" $workload) }}
+  labels:
+    {{- include "high-scale.workloadLabels" (dict "root" $root "workload" $workload) | nindent 4 }}
+spec:
+  replicas: {{ $config.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: {{ $workload }}
+  template:
+    metadata:
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "high-scale.workloadLabels" (dict "root" $root "workload" $workload) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "high-scale.serviceAccountName" $root }}
+      {{- with $root.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.workloadFairness.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $root.Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.workloadFairness.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if $root.Values.workloadFairness.podAntiAffinity.required }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+                  app.kubernetes.io/instance: {{ $root.Release.Name }}
+              topologyKey: {{ $root.Values.workloadFairness.podAntiAffinity.topologyKey }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ include "high-scale.name" $root }}
+                    app.kubernetes.io/instance: {{ $root.Release.Name }}
+                topologyKey: {{ $root.Values.workloadFairness.podAntiAffinity.topologyKey }}
+          {{- end }}
+      {{- end }}
+      {{- with $root.Values.workloadFairness.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $workload }}
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          {{- with $root.Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $config.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $config.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+          {{- with $root.Values.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+            - name: HIGH_SCALE_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- if or $root.Values.secret.existingName $root.Values.secret.create }}
+          envFrom:
+            - secretRef:
+                name: {{ default (printf "%s-connections" (include "high-scale.fullname" $root)) $root.Values.secret.existingName }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- if $root.Values.sharedState.existingClaim }}
+            - name: shared-state
+              mountPath: /app/configs
+              subPath: {{ $root.Values.sharedState.configSubPath }}
+            - name: shared-state
+              mountPath: /app/data
+              subPath: {{ $root.Values.sharedState.dataSubPath }}
+            - name: shared-state
+              mountPath: /app/cache
+              subPath: {{ $root.Values.sharedState.cacheSubPath }}
+          {{- else if $root.Values.sharedState.emptyDir }}
+            - name: cache
+              mountPath: /app/cache
+            - name: data
+              mountPath: /app/data
+          {{- end }}
+          resources:
+            {{- toYaml (default $root.Values.resources $config.resources) | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- if $root.Values.sharedState.existingClaim }}
+        - name: shared-state
+          persistentVolumeClaim:
+            claimName: {{ $root.Values.sharedState.existingClaim }}
+      {{- else if $root.Values.sharedState.emptyDir }}
+        - name: cache
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+      {{- end }}
+---
+{{- end }}
+{{- end }}

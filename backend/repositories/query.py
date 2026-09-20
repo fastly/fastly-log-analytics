@@ -307,7 +307,11 @@ def _run_validated_query(
         plan_rows = con.execute(explain_sql).fetchall()
         explain_plan = "\n".join(r[1] for r in plan_rows if r[1])
         _debug_queries.append(
-            {"sql": _compact_sql_for_debug(explain_sql), "time_ms": round((time.perf_counter() - t_exp) * 1000, 2)}
+            {
+                "sql": _compact_sql_for_debug(explain_sql),
+                "time_ms": round((time.perf_counter() - t_exp) * 1000, 2),
+                "engine": "DuckDB",
+            }
         )
         timer.mark("explain", t_exp)
 
@@ -336,7 +340,7 @@ def _run_validated_query(
     arrow_table = result.to_arrow_table()
     timer.mark("fetch_arrow", _t_fetch)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms})
+    _debug_queries.append({"sql": _compact_sql_for_debug(exec_sql.strip()), "time_ms": elapsed_ms, "engine": "DuckDB"})
 
     fetched_rows = arrow_table.num_rows
     if is_simple_select:

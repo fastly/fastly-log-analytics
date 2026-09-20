@@ -31,6 +31,8 @@ def test_summary_rollup_renders():
         cdn_ovh='MEDIAN("elapsed" - "ottlb") / 1000.0',
         ost_5xx='COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)',
         obytes_p50='MEDIAN("obytes")',
+        total_misses="1",
+        total_passes="1",
         table='"logs_xyz"',
         where="timestamp BETWEEN ? AND ?",
     )
@@ -52,6 +54,8 @@ def test_summary_rollup_placeholders_pinned():
             "cdn_ovh",
             "ost_5xx",
             "obytes_p50",
+            "total_misses",
+            "total_passes",
             "table",
             "where",
         ]

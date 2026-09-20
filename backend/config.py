@@ -13,6 +13,7 @@ Config file schema:
     "fos_secret_access_key": "...",
     "fos_bucket": "...",
     "fos_prefix": "",
+    "raw_layout_version": 3,
     "fos_region": "us-east-1",
     "cdn_url": "https://...",
     "cdn_secret": "...",
@@ -27,13 +28,19 @@ Config file schema:
 
 import copy
 import json
+import logging
+import math
 import os
 import re
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -45,6 +52,100 @@ SERVICES_DATA_DIR = DATA_DIR / "services"
 NGWAF_DATA_DIR = DATA_DIR / "ngwaf"
 CACHE_DATA_DIR = DATA_DIR / "cache"
 SYSTEM_DATA_DIR = DATA_DIR / "system"
+
+# Deployment topology is deployment-wide rather than per-service. Define this
+# before the default source is built so config_to_source() can safely include
+# it during module import.
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standard").strip().lower()
+
+
+@dataclass(frozen=True)
+class ClickHouseConfig:
+    """Deployment-only HTTP settings; loaded at startup, never from service JSON."""
+
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str = field(repr=False)
+    secure: bool = True
+    connect_timeout_s: float = 5.0
+    query_timeout_s: float = 30.0
+    insert_timeout_s: float = 30.0
+    pool_timeout_s: float = 5.0
+    pool_max_size: int = 8
+
+
+def _clickhouse_bool(name: str, default: str) -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _clickhouse_number(name: str, default: float, maximum: float, *, integer: bool = False):
+    try:
+        raw = os.getenv(name, str(default))
+        value = int(raw) if integer else float(raw)
+        if math.isfinite(value) and (1 if integer else 0.01) <= value <= maximum:
+            return value
+    except (ValueError, OverflowError):
+        pass
+    raise ValueError(f"{name} must be finite and between {1 if integer else 0.01} and {maximum}")
+
+
+def load_clickhouse_config() -> ClickHouseConfig | None:
+    """CLICKHOUSE_ENABLED is opt-in; disabled mode ignores all other settings.
+
+    Enabled mode requires HOST (bare DNS/IP), DATABASE and USER. SECURE defaults
+    to true (verified HTTPS, port 8443; HTTP uses 8123). A missing PASSWORD is
+    permitted only for explicitly insecure loopback test instances. Operators
+    must opt into SECURE=false for a trusted private-network HTTP deployment.
+    CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;
+    POOL_MAX_SIZE is 1..64. Environment changes require a process restart.
+    """
+    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "false"):
+        return None
+    required = {}
+    for key in ("HOST", "DATABASE", "USER"):
+        value = os.getenv(f"CLICKHOUSE_{key}", "").strip()
+        if not value:
+            raise ValueError(f"CLICKHOUSE_{key} is required when enabled")
+        required[key] = value
+    host = required["HOST"]
+    loopback = host == "localhost"
+    try:
+        loopback = ip_address(host).is_loopback
+    except ValueError:
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in host.split(".")
+        ):
+            raise ValueError("CLICKHOUSE_HOST must be a bare hostname or IP address") from None
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", required["DATABASE"]):
+        raise ValueError("CLICKHOUSE_DATABASE must be a simple identifier")
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", required["USER"]):
+        raise ValueError("CLICKHOUSE_USER contains unsupported characters")
+    secure = _clickhouse_bool("CLICKHOUSE_SECURE", "true")
+    password = os.getenv("CLICKHOUSE_PASSWORD", "")
+    if not password.strip() and (secure or not loopback):
+        raise ValueError("CLICKHOUSE_PASSWORD is required except for explicit HTTP loopback tests")
+    query_timeout = _clickhouse_number("CLICKHOUSE_QUERY_TIMEOUT_S", 30, 300)
+    return ClickHouseConfig(
+        host=host,
+        port=_clickhouse_number("CLICKHOUSE_PORT", 8443 if secure else 8123, 65535, integer=True),
+        database=required["DATABASE"],
+        user=required["USER"],
+        password=password,
+        secure=secure,
+        connect_timeout_s=_clickhouse_number("CLICKHOUSE_CONNECT_TIMEOUT_S", 5, 60),
+        query_timeout_s=query_timeout,
+        insert_timeout_s=_clickhouse_number("CLICKHOUSE_INSERT_TIMEOUT_S", query_timeout, 300),
+        pool_timeout_s=_clickhouse_number("CLICKHOUSE_POOL_TIMEOUT_S", 5, 60),
+        pool_max_size=_clickhouse_number("CLICKHOUSE_POOL_MAX_SIZE", 8, 64, integer=True),
+    )
+
 
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}
 _name_cache: dict = {}
@@ -69,14 +170,30 @@ _config_cache_lock = threading.Lock()
 _ensured_dirs: set[Path] = set()
 
 
+def _seed_configs_if_needed():
+    seed_dir_str = os.getenv("CONFIGS_SEED_DIR", "/app/seed_configs")
+    seed_dir = Path(seed_dir_str)
+    if seed_dir.is_dir() and CONFIGS_DIR.is_dir():
+        import shutil
+
+        for f in seed_dir.glob("*.json"):
+            dest = CONFIGS_DIR / f.name
+            if not dest.exists():
+                try:
+                    shutil.copy2(f, dest)
+                    logger.info("Seeded service config %s into %s", f.name, dest)
+                except Exception as e:
+                    logger.warning("Could not seed config %s: %e", f.name, e)
+
+
 def _ensure_dirs():
     dirs = (CONFIGS_DIR, DATA_DIR, SERVICES_DATA_DIR, NGWAF_DATA_DIR, CACHE_DATA_DIR, SYSTEM_DATA_DIR)
     missing = [d for d in dirs if d not in _ensured_dirs]
-    if not missing:
-        return
-    for d in missing:
-        d.mkdir(exist_ok=True)
-        _ensured_dirs.add(d)
+    if missing:
+        for d in missing:
+            d.mkdir(exist_ok=True)
+            _ensured_dirs.add(d)
+    _seed_configs_if_needed()
 
 
 # Alphabet shared with backend.deps.ServiceId. Public so the FastAPI
@@ -195,7 +312,13 @@ def save_config(service_id: str, cfg: dict):
         import datetime as _dt
 
         cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
-    _atomic_write_json(config_path(service_id), cfg)
+    try:
+        _atomic_write_json(config_path(service_id), cfg)
+    except (OSError, PermissionError) as e:
+        if getattr(e, "errno", None) == 30 or "read-only" in str(e).lower():
+            logger.warning("save_config_skipped_read_only_fs service_id=%s: %s", service_id, e)
+            return
+        raise
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
     # os.replace() calls within the same microsecond can produce identical
@@ -284,6 +407,11 @@ def get_active_service_id(fallback_to_first: bool = True) -> str | None:
 
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the db.py 'source' dict format."""
+    if is_high_throughput_mode() and cfg.get("raw_layout_version") != 3:
+        raise RuntimeError(
+            f"service {cfg.get('service_id', '<unknown>')} uses the v2 raw-log layout; "
+            "tear it down and reprovision it for v3 before enabling high-throughput deployment"
+        )
     actual_db_path = duckdb_path(cfg.get("service_id", "default"))
 
     region = cfg.get("fos_region", "us-east-1")
@@ -322,13 +450,14 @@ def config_to_source(cfg: dict) -> dict:
         "access_key_id": cfg.get("fos_access_key_id", ""),
         "secret_access_key": cfg.get("fos_secret_access_key", ""),
         "bucket": cfg.get("fos_bucket", ""),
-        "prefix": cfg.get("fos_prefix", ""),
+        "prefix": "",
         "region": region,
         "cdn_url": cfg.get("cdn_url", ""),
         "cdn_secret": cfg.get("cdn_secret", ""),
         "cdn_service_id": cfg.get("cdn_service_id", ""),
         "logging_service_id": cfg.get("service_id", ""),
         "duckdb_path": actual_db_path,
+        "deployment_mode": DEPLOYMENT_MODE,
         "access_level": cfg.get("access_level", "read_write"),
         "storage_mode": cfg.get("storage_mode", "cloud"),
         "log_period": int(cfg.get("log_period", 60)),
@@ -584,3 +713,117 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 
 _CacheRegistry.register("config._name_cache", _name_cache)
 _CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)
+
+# Cloud / Scalability Overrides (Phase 2+)
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
+DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
+DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
+HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
+HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")
+HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
+
+
+def _default_sse_backplane() -> str:
+    if explicit := os.getenv("SSE_BACKPLANE"):
+        return explicit.strip()
+    return "valkey" if (DEPLOYMENT_MODE == "high_throughput" or bool(CELERY_BROKER_URL)) else "local"
+
+
+SSE_BACKPLANE = _default_sse_backplane()
+SCHEDULER_MODE = os.getenv("SCHEDULER_MODE", "inprocess")
+
+
+def high_scale_shared_source_enabled(cfg: dict | None) -> bool:
+    """Return whether this service's raw request/RUM stream is shared with an
+    out-of-band high-scale consumer (``provisioning.cron_sync.high_scale_shared_source``).
+
+    While this is set, the high-scale archive deletion controller
+    (``backend/high_scale/deletion.py``) is the sole raw-deletion authority for
+    this service's stream — every legacy raw-deletion path (standard sync's
+    ``delete_after``, celery-mode ``finalize_committed_raw``, RUM cleanup) must
+    stand down regardless of its own ``delete_after`` setting. See
+    ``resolve_raw_delete_after``, the single place that enforces this.
+    """
+    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("high_scale_shared_source", False))
+
+
+def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) -> bool:
+    """Resolve the effective delete_after decision for raw FOS objects.
+
+    ``requested`` lets a caller pass an explicit override the way a cron
+    argument normally would; ``None`` falls back to the configured
+    ``provisioning.cron_sync.delete_after`` (default True). A high-scale
+    shared source always forces this to False — see
+    ``high_scale_shared_source_enabled`` — because raw-deletion authority for
+    that stream belongs to the high-scale deletion controller, not legacy sync.
+    """
+    if high_scale_shared_source_enabled(cfg):
+        return False
+    if requested is not None:
+        return bool(requested)
+    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
+
+
+def is_durable_serving_mode(source: dict | None = None) -> bool:
+    """Return whether serving must use durable shared state only.
+
+    The durable serving mode is intentionally restricted to the Celery
+    topology with a Postgres DuckLake catalog. Sync/file mode keeps its
+    existing native per-service DuckDB file and local-buffer behavior.
+    """
+    return is_high_throughput_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
+
+
+def is_high_throughput_mode(source: dict | None = None) -> bool:
+    """Return whether the deployment uses the high-throughput topology."""
+    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
+    return mode == "high_throughput"
+
+
+def validate_deployment_mode() -> None:
+    """Fail fast on incoherent high-throughput configuration.
+
+    Called from the backend lifespan AND celery worker init so both
+    processes refuse to run rather than degrade invisibly:
+
+    - Celery mode without a broker: discovery would dispatch into nothing.
+    - Celery mode on a DuckDB-FILE DuckLake catalog: worker processes write
+      while the backend reads, which a file catalog cannot support (single
+      process holds the file lock; concurrent merges tear the catalog and
+      leave it referencing parquet that never landed — observed live as
+      404 NoSuchKey on reads). A transactional multi-writer catalog
+      (Postgres DSN) is REQUIRED.
+    - Celery mode on per-pod SQLite metadata: the cron lease, the ingest
+      ledger, and ingested-file bookkeeping would each be private to one
+      process, so nothing serializes the fleet. A shared Postgres metadata
+      database (``METADATA_DSN``) is REQUIRED. See ADR-15.
+
+    ``METADATA_DSN`` is read from the environment here rather than captured
+    as a module constant so this gate and
+    ``metadata.pg_connection.is_postgres()`` (which also reads it live)
+    can never disagree about which backend is active.
+    """
+    if DEPLOYMENT_MODE not in {"standard", "high_throughput"}:
+        raise RuntimeError("DEPLOYMENT_MODE must be either 'standard' or 'high_throughput'")
+    if DEPLOYMENT_MODE != "high_throughput":
+        return
+    if not CELERY_BROKER_URL:
+        raise RuntimeError("DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL to be set")
+    if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "DEPLOYMENT_MODE=high_throughput requires DUCKLAKE_CATALOG to be a Postgres DSN — "
+            "a DuckDB-file catalog is single-process and cannot serve concurrent "
+            "worker writers plus backend readers (torn merges corrupt the catalog). "
+            f"Got: {DUCKLAKE_CATALOG!r}"
+        )
+    metadata_dsn = os.getenv("METADATA_DSN", "")
+    if not metadata_dsn.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            "DEPLOYMENT_MODE=high_throughput requires METADATA_DSN to be a Postgres DSN — "
+            "per-service SQLite metadata is a pod-local file, so the cron lease "
+            "(job_runs), the ingest ledger, and the ingested-file manifest would "
+            "each be private to one process: every worker would re-discover and "
+            "re-convert the same objects and no lease could serialize them. A "
+            "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
+            f"Got: {metadata_dsn!r}"
+        )

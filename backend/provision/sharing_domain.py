@@ -120,6 +120,10 @@ def deploy_remote_frontend(
     }
     if override_host:
         backend_payload["override_host"] = override_host
+    if use_ssl:
+        sni_host = override_host or origin_host
+        backend_payload["ssl_sni_hostname"] = sni_host
+        backend_payload["ssl_cert_hostname"] = sni_host
     _fastly_api_request("POST", url, headers, json_data=backend_payload, step=step)
 
     # Step 5: Activate Version

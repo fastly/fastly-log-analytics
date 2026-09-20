@@ -134,7 +134,9 @@ def recompute_wellknown_bots_rollup(
     # :memory: connection reads only static, already-committed parquet
     # files — never the buffer-including per-service view. Matches the
     # isolation bundle_hours / compact_closed_days / the rollup readers use.
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         # Validate the source has the columns we need before per-hour
         # work — saves N×(failed COPY) on services without UA/IP fields.
@@ -316,7 +318,9 @@ def backfill_wellknown_bots_rollup(service_id: str, source: dict) -> int:
         import duckdb
 
         all_paths = [p for paths in hour_paths.values() for p in paths]
-        con = duckdb.connect(":memory:")
+        from backend.core.duckdb import get_memory_connection
+
+        con = get_memory_connection()
         try:
             paths_sql = quote_path_list(all_paths)
             version_sql = version.replace("'", "''")
@@ -483,7 +487,9 @@ def read_wellknown_bots_rollup(
     # connection avoids contending with the per-service writer pool.
     import duckdb
 
-    con = duckdb.connect(":memory:")
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
     try:
         paths_sql = quote_path_list(paths)
         try:

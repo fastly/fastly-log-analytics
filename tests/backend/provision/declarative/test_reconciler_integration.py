@@ -1105,3 +1105,63 @@ class TestCdnReconciliation:
                     assert result.changes_applied["snippets_added"] > 0
                     assert result.changes_applied["backends_added"] > 0
                     assert result.changes_applied["dictionaries_added"] > 0
+
+    @patch("backend.provision.declarative.reconciler.fastly")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.clone_version")
+    @patch("backend.provision.declarative.reconciler._activate_draft")
+    @patch("backend.provision.declarative.reconciler._validate_draft")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.fetch_active_version")
+    def test_ensure_cdn_domain_adds_missing_domain_to_reused_service(
+        self,
+        mock_fetch_active_version,
+        mock_validate_draft,
+        mock_activate_draft,
+        mock_clone_version,
+        mock_fastly,
+    ):
+        """A CDN service adopted by name (not freshly created) must have its
+        domain reconciled too — the create branch adds the domain, but
+        find-by-name previously just adopted whatever domain the service
+        already had, silently diverging from a freshly-computed cdn_url and
+        causing every CDN read to 500 with Fastly's "unknown domain" error.
+        """
+        from backend.provision.declarative.reconciler import _ensure_cdn_domain
+
+        mock_fetch_active_version.return_value = 3
+        mock_clone_version.return_value = 4
+        mock_validate_draft.return_value = ""
+        # The service's ACTUAL domain differs from the target domain.
+        mock_fastly.side_effect = [
+            [{"name": "old-bucket-name.global.ssl.fastly.net"}],  # GET domain list
+            {"name": "test-cdn.drew.com"},  # POST domain add
+        ]
+
+        _ensure_cdn_domain("cdn_svc_existing", "test-cdn.drew.com", "token")
+
+        mock_clone_version.assert_called_once_with(
+            "cdn_svc_existing", 3, "token", "Add missing domain test-cdn.drew.com"
+        )
+        add_call = mock_fastly.call_args_list[1]
+        assert add_call[0][:2] == ("POST", "/service/cdn_svc_existing/version/4/domain")
+        assert add_call[0][2] == {"name": "test-cdn.drew.com"}
+        mock_activate_draft.assert_called_once_with("cdn_svc_existing", "token", 4)
+
+    @patch("backend.provision.declarative.reconciler.fastly")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.clone_version")
+    @patch("backend.provision.declarative.reconciler.fastly_integration.fetch_active_version")
+    def test_ensure_cdn_domain_skips_add_when_already_present(
+        self,
+        mock_fetch_active_version,
+        mock_clone_version,
+        mock_fastly,
+    ):
+        """No spurious clone/activate when the reused service's domain
+        already matches the target — this must stay a true no-op."""
+        from backend.provision.declarative.reconciler import _ensure_cdn_domain
+
+        mock_fetch_active_version.return_value = 3
+        mock_fastly.return_value = [{"name": "test-cdn.drew.com"}]
+
+        _ensure_cdn_domain("cdn_svc_existing", "test-cdn.drew.com", "token")
+
+        mock_clone_version.assert_not_called()

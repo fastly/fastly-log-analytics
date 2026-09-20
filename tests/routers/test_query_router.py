@@ -273,7 +273,7 @@ def test_analyst_request_forwards_clamped_window_and_mask(client, in_memory_duck
     # build_request_context resolves from get_analyst_time_bounds in prod).
     app.dependency_overrides[build_request_context] = override_request_context(
         source=test_service_source,
-        con=in_memory_duckdb,
+        _con_override=in_memory_duckdb,
         session=session,
         path="/api/query",
         time_bounds=TimeBounds(start=start, end=end),

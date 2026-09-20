@@ -142,8 +142,8 @@ export function QuickActionsBar({
         variant="outline"
         className="h-8 text-xs bg-background"
         onClick={() => {
-          const latestSync = recentCrons?.entries?.find((e: any) => e.task === 'sync') ||
-                             cronLogs?.entries?.find((e: any) => e.task === 'sync')
+          const latestSync = recentCrons?.entries?.find((e: any) => e.task === 'log_discovery') ||
+                             cronLogs?.entries?.find((e: any) => e.task === 'log_discovery')
           if (latestSync) {
             setDisplayedJobs(prev => {
               if (prev.some((j: any) => j.id === latestSync.id)) return prev

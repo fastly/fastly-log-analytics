@@ -121,7 +121,8 @@ async def fetch_available_faro_versions() -> list[str]:
     try:
         from backend.utils.telemetry import tracked_call
 
-        async with httpx.AsyncClient() as client:
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+        async with httpx.AsyncClient(transport=transport) as client:
             with tracked_call("GET", REGISTRY_URL, service="NPM Registry"):
                 response = await client.get(REGISTRY_URL, timeout=_TIMEOUT)
             response.raise_for_status()
@@ -304,7 +305,8 @@ async def fetch_faro_bundle(version: str) -> bytes:
     try:
         from backend.utils.telemetry import tracked_call
 
-        async with httpx.AsyncClient() as client:
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+        async with httpx.AsyncClient(transport=transport) as client:
             dist = await _fetch_version_dist(client, version)
             tarball_url = _tarball_url_from_dist(dist, version)
             with tracked_call("GET", tarball_url, service="NPM Registry"):

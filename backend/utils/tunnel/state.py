@@ -70,6 +70,24 @@ def restore_direct_state(state: TunnelState) -> bool:
 
         path = _state_file_path()
         if not os.path.exists(path):
+            try:
+                from backend import config
+
+                for cfg in config.list_configs():
+                    rf = cfg.get("remote_frontend")
+                    if isinstance(rf, dict) and rf.get("domain_name"):
+                        domain = rf["domain_name"].strip()
+                        state.public_endpoint = f"https://{domain}"
+                        state.forward_port = 3000
+                        state.direct_socket_addr = "0.0.0.0"
+                        state.started_at = iso_z_now()
+                        logger.info(
+                            "[tunnel] restored direct-mode share state from remote_frontend config for %s",
+                            state.public_endpoint,
+                        )
+                        return True
+            except Exception:
+                pass
             return False
         with open(path) as f:
             data = json.load(f)

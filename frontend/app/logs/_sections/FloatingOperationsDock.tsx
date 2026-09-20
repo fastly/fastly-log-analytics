@@ -96,7 +96,7 @@ export function FloatingOperationsDock({
 
               {/* Optional completed job statistics */}
               {backgroundCronToast.status !== 'running' && (
-                <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-500 font-mono">
+                <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400 font-mono">
                   {backgroundCronToast.rows_ingested !== undefined && (
                     <span>Ingested: <strong className="text-zinc-300">{backgroundCronToast.rows_ingested.toLocaleString()} rows</strong></span>
                   )}

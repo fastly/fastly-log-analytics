@@ -15,9 +15,6 @@ from backend.models.common import BaseResponse, FilteredRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesResponse,
-    SecurityProxiesRequest,
-    SecurityProxiesResponse,
-    SecurityTopBotsResponse,
 )
 from backend.repositories import security as repo
 from backend.utils.router_utils import make_section_expander, query_errors
@@ -42,6 +39,8 @@ SectionName = Literal[
     "ipv6_adoption",
     "proxy_dist",
     "conn_reuse_dist",
+    "proxies",
+    "top_bots",
 ]
 
 # Fingerprint cards share a single full-temp coverage scan
@@ -89,6 +88,14 @@ def security_aggregates(
     response: Response,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.security import security_aggregates as hs_aggregates
+
+        return hs_aggregates(high_scale_service, req, req.start_time, req.end_time)
+
     # Keyed path: resolve the scan window server-side from (range_token, anchor),
     # ignoring FE-supplied absolute bounds; clamp AFTER resolve so the invite
     # ceiling is enforced regardless of token. Mirrors routers/origin.py.
@@ -116,45 +123,6 @@ def security_aggregates(
     return SecurityAggregatesResponse.with_telemetry(**res)
 
 
-@router.post("/top-bots", response_model=SecurityTopBotsResponse)
-@query_errors()
-def top_bots(
-    req: FilteredRequest,
-    ctx: RequestContext = Depends(build_request_context),
-):
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    res = repo.get_top_bots(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-    )
-    return SecurityTopBotsResponse.with_telemetry(**res)
-
-
-@router.post("/proxies", response_model=SecurityProxiesResponse)
-@query_errors()
-def get_proxies_data(
-    req: SecurityProxiesRequest,
-    ctx: RequestContext = Depends(build_request_context),
-):
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    res = repo.get_security_proxies(
-        con=ctx.con,
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-    )
-    return SecurityProxiesResponse.with_telemetry(**res)
-
-
 @router.get("/proxies/export")
 @query_errors()
 def export_proxies_csv(
@@ -164,6 +132,12 @@ def export_proxies_csv(
     format: str = "fastly-acl",
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        raise ValueError("Exporting proxies is not yet supported in high-scale mode")
+
     # Enforce correct date-bounds tenancy
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
 
@@ -244,6 +218,14 @@ def get_security_threat_intel(
     end_time: str | None = Query(default=None),
 ):
     """Correlate client TLS fingerprints with active WAF triggers and proxy flags."""
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.security import get_security_threat_intel as hs_threat_intel
+
+        return hs_threat_intel(high_scale_service, start_time, end_time)
+
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
 
     if not resolved_start:

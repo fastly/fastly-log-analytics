@@ -3,7 +3,7 @@ and PyIceberg so we can centrally capture FOS/CDN telemetry, re-sign SigV4
 on behalf of unsigned clients, and apply policy guardrails (e.g. dashboard
 reads MUST NOT hit cloud).
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md
+The implementation and tests below are the source of truth for proxy behavior.
 """
 
 from __future__ import annotations
@@ -383,8 +383,17 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
     cdn_host = _cdn_host_for(cfg)
     # CDN routing uses ?key= auth — do NOT inject SigV4 there.
     if cdn_host and target_host == cdn_host:
+        if cfg.get("cdn_secret"):
+            headers["x-fastly-key"] = cfg["cdn_secret"]
         return headers
 
+    # Deliberately NO cdn_secret below this line. The native FOS endpoint
+    # authenticates with SigV4 over the FOS access keys; it neither reads
+    # nor needs the CDN service's secret, so forwarding it would hand a
+    # credential to a host that has no use for it. It also does not lift
+    # FOS's own rate limits — those are a property of the storage account,
+    # not of the CDN in front of it. Pinned by the *_native tests in
+    # tests/utils/test_telemetry_proxy_phase2.py.
     access_key = cfg.get("fos_access_key_id")
     secret_key = cfg.get("fos_secret_access_key")
     region = cfg.get("fos_region", "us-east-1")
@@ -456,6 +465,14 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
     target_host = request.headers.get("X-Fos-Target")
     if not target_host:
         return web.Response(status=400, text="Missing X-Fos-Target header")
+
+    service_id = request.headers.get("X-Telemetry-Service-Id")
+    if service_id and request.method in ("PUT", "POST", "DELETE"):
+        _cfg = _load_config_cached(service_id)
+        if _cfg:
+            _fos_native = (_cfg.get("fos_native_endpoint") or _cfg.get("fos_endpoint") or "").strip()
+            if _fos_native:
+                target_host = _fos_native.replace("https://", "").replace("http://", "").rstrip("/")
 
     # X-Fos-Target is normally a bare host (production: HTTPS implied).
     # Tests using moto run an http-only upstream on 127.0.0.1, so we
@@ -842,7 +859,10 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
     """
     native_target = source.get("fos_native_endpoint") or source["endpoint"]
     cdn_url = (source.get("cdn_url") or "").strip()
-    cdn_target = _scheme_host(cdn_url) if cdn_url else None
+    edge_only = source.get("provisioning", {}).get("edge_only")
+    if edge_only is None:
+        edge_only = source.get("edge_only")
+    cdn_target = _scheme_host(cdn_url) if (cdn_url and edge_only is not False) else None
     cdn_secret = source.get("cdn_secret") or ""
     service_id = source.get("service_id") or source.get("name", "default")
     # Only flip object downloads. LIST is HTTP GET too but the CDN
@@ -864,7 +884,14 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             if cdn_secret:
                 request.headers["x-fastly-key"] = cdn_secret
         else:
+            # Native FOS only: SigV4 authenticates these, so the CDN secret
+            # is not attached — see the note in _sign_request.
             request.headers["X-Fos-Target"] = native_target
+
+        # Force cache-bypassing on downloads to prevent Varnish stale cache hits
+        if op in _CDN_OPS:
+            request.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            request.headers["Pragma"] = "no-cache"
 
         request.headers["X-Telemetry-Service-Id"] = service_id
         hint = _BOTO3_CALLER_HINT.get()
