@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import math
+import random
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -58,11 +59,22 @@ async def _request(
         return 0, round((time.perf_counter() - started) * 1000)
 
 
+def build_request_url(base_url: str, rum_ratio: float) -> str:
+    if rum_ratio > 0 and random.random() < rum_ratio:
+        metric = random.choice(["LCP", "CLS", "INP", "FID", "TTFB", "FCP"])
+        value = random.choice([150, 250, 1200, 2500, 3500]) if metric != "CLS" else round(random.uniform(0.01, 0.45), 3)
+        cid = f"cid-{random.randint(1000, 99999)}"
+        path = random.choice(["/", "/dashboard", "/origin", "/security", "/performance"])
+        return f"{base_url.rstrip('/')}/rum-beacon?rum_metric_name={metric}&rum_metric_value={value}&rum_cid={cid}&rum_pathname={quote(path)}"
+    return base_url
+
+
 async def run_stage(
     config: StageConfig,
     session: aiohttp.ClientSession,
     request_url: str,
     headers: dict[str, str],
+    rum_ratio: float = 0.0,
 ) -> dict[str, Any]:
     started_at = datetime.now(UTC)
     started = time.perf_counter()
@@ -82,7 +94,8 @@ async def run_stage(
                 status, latency = task.result()
                 statuses[str(status)] += 1
                 latencies.append(latency)
-        pending.add(asyncio.create_task(_request(session, request_url, headers)))
+        request_url_final = build_request_url(request_url, rum_ratio)
+        pending.add(asyncio.create_task(_request(session, request_url_final, headers)))
         launched += 1
 
     if pending:
@@ -295,7 +308,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     connector = aiohttp.TCPConnector(limit=max(args.max_in_flight, 1), ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         for index, stage in enumerate(stages, 1):
-            result = await run_stage(stage, session, args.url, headers)
+            result = await run_stage(stage, session, args.url, headers, args.rum_ratio)
             checkpoint = sample_checkpoint(
                 args.backend,
                 args.service_id,
@@ -337,6 +350,7 @@ def main() -> None:
         default=60,
         help="wait for delayed FOS delivery before the final checkpoint",
     )
+    run_parser.add_argument("--rum-ratio", type=float, default=0.0, help="Ratio of requests to send to /rum-beacon with randomized vitals payloads (0.0 to 1.0)")
     run_parser.add_argument("--output", type=Path, default=Path("performance-report/scale-harness.json"))
     args = parser.parse_args()
     if args.max_in_flight < 1:
