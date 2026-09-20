@@ -20,6 +20,7 @@
 - **Configurable Overrides:**
   - `provisioning.cron_sync.interval_mins` (takes top UI priority).
   - `provisioning.cron_sync.interval_seconds` (written by provisioning scripts).
+  - `provisioning.cron_sync.lookback_minutes` (controls High-Scale discovery lookback; default: `10`, min: `3`, max: `30`).
   - Minimum hardcoded clamp: 5 seconds.
 - **Jitter & Misfire Policy:**
   - Jitter: 2 seconds (1s if interval < 5s).
@@ -31,7 +32,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads FOS `raw/request/**/*.gz`, transforms to Parquet in local buffer `cache/{bucket}/`, updates session DuckDB `logs` view. | Acquires per-service ingest lock. Gated by `FLA_DEV_NO_CRONS=1` (skips execution). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Issues FOS LIST, inserts discovered keys into PostgreSQL `ingest_ledger` with `discovered` state, claims batches, and dispatches Celery conversion tasks (`convert_batch`). | Distributed PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Never opens local DuckDB. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Scans rolling 10-minute window (`minute_list_prefix`), inserts discovered keys into PostgreSQL `ingest_ledger` with `discovered` state, claims batches, and dispatches Celery conversion tasks (`convert_batch_files`). | Distributed PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Never opens local DuckDB. |
 
 ---
 
