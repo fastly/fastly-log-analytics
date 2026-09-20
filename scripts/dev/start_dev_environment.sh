@@ -51,7 +51,7 @@ fi
 echo -e "\n${BOLD}3. Checking Local High-Scale Docker stack...${RESET}"
 if ! docker compose -p fla-hs ps --format json | grep -q "running"; then
     echo -e "${YELLOW}⚠️ Local High-Scale containers are not running. Starting high-scale stack...${RESET}"
-    docker compose -p fla-hs -f docker-compose.multipod.yml -f docker-compose.clickhouse-prototype.yml -f docker-compose.high-scale-local.yml up -d beat
+    docker compose -p fla-hs --profile donotstart -f docker-compose.multipod.yml -f docker-compose.clickhouse-prototype.yml -f docker-compose.high-scale-local.yml up -d
     echo -e "${GREEN}✅ Local High-Scale stack started.${RESET}"
 else
     echo -e "${GREEN}✅ Local High-Scale stack is already running.${RESET}"
