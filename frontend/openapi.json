@@ -3,7 +3,7 @@
   "info": {
     "title": "Fastly Log Analytics API",
     "description": "FastAPI backend for the Fastly Log Analytics tool. Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json.",
-    "version": "3.0.0-beta1"
+    "version": "3.0.0-beta2"
   },
   "paths": {
     "/api/dashboard/aggregates": {

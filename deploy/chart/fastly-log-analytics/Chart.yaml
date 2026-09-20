@@ -2,8 +2,8 @@ apiVersion: v2
 name: fastly-log-analytics
 description: Fastly Log Analytics Dashboard and Ingest Pipeline
 type: application
-version: 3.0.0-beta1
-appVersion: "3.0.0-beta1"
+version: 3.0.0-beta2
+appVersion: "3.0.0-beta2"
 dependencies:
   # The portable high-scale application plane is deliberately opt-in. Its
   # ClickHouse/Keeper endpoints are supplied by an external operator/chart;

@@ -2,7 +2,7 @@
 
 Enforces that every deployment topology in Current_Project_State_and_Current_Goals.md:
 1. Is operational and reachable via its assigned port forward.
-2. Returns HTTP 200 on /api/health with version 3.0.0-beta1.
+2. Returns HTTP 200 on /api/health with version 3.0.0-beta2.
 3. Resolves its exact designated Fastly service ID.
 4. Strictly enforces multi-tenant isolation (rejecting unauthorized service IDs).
 """
@@ -30,7 +30,7 @@ def test_environment_backend_health(env_name: str) -> None:
         f"Remediation: {target.remediation_cmd}"
     )
     assert result.status_code == 200
-    assert result.version == "3.0.0-beta1"
+    assert result.version == "3.0.0-beta2"
 
 
 @pytest.mark.parametrize("env_name", list(ENVIRONMENTS.keys()))
