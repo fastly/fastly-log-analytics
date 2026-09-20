@@ -61,11 +61,12 @@ services:
       - HIGH_SCALE_ARCHIVE_MANIFEST_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - HIGH_SCALE_WORKER_QUEUE_URL=redis://valkey:6379/0
       - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_SECURE=false
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
-      - CLICKHOUSE_DATABASE=fastly_logs
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla_prototype}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla_prototype}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-prototype_local_only}
       - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - CELERY_BROKER_URL=redis://valkey:6379/0

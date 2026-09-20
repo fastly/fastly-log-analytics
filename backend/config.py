@@ -115,14 +115,15 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
             raise ValueError(f"CLICKHOUSE_{key} is required when enabled")
         required[key] = value
     host = required["HOST"]
-    loopback = host == "localhost"
-    try:
-        loopback = ip_address(host).is_loopback
-    except ValueError:
-        if len(host) > 253 or not all(
-            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in host.split(".")
-        ):
-            raise ValueError("CLICKHOUSE_HOST must be a bare hostname or IP address") from None
+    loopback = host in ("localhost", "clickhouse")
+    if not loopback:
+        try:
+            loopback = ip_address(host).is_loopback
+        except ValueError:
+            if len(host) > 253 or not all(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in host.split(".")
+            ):
+                raise ValueError("CLICKHOUSE_HOST must be a bare hostname or IP address") from None
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", required["DATABASE"]):
         raise ValueError("CLICKHOUSE_DATABASE must be a simple identifier")
     if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", required["USER"]):
