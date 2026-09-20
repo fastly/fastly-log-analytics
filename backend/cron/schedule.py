@@ -58,47 +58,7 @@ def build_cron_schedule_payload(source: dict) -> dict:
     }
     schedules = []
 
-    # External mode splits jobs across two schedulers: the ledger/FOS family
-    # lives in RedBeat (query Redis for next_run_time) while pod-local jobs
-    # (rollups/compaction/alerts/…) stay on this process's APScheduler — so
-    # BOTH sources contribute rows. Inprocess mode only has APScheduler.
-    import logging
-    import os
-
-    logger = logging.getLogger(__name__)
-    if os.environ.get("SCHEDULER_MODE") == "external":
-        from datetime import UTC, datetime
-
-        from backend.celery_status import _get_redis
-        from backend.utils.date_utils import iso_z
-
-        try:
-            r = _get_redis()
-            entries = r.zrange("redbeat::schedule", 0, -1, withscores=True)
-            for job_name_raw, next_run_ts in entries:  # type: ignore
-                job_name = job_name_raw.decode() if isinstance(job_name_raw, bytes) else job_name_raw
-                if not job_name.startswith("redbeat:"):
-                    continue
-                job_id = job_name[len("redbeat:") :]
-
-                if not job_id.endswith(f"_{service_id}"):
-                    continue
-                if job_id.startswith("initial_sync"):
-                    continue
-
-                task_name = job_id[: -len(f"_{service_id}")]
-                db_task = _TASK_MAP.get(task_name)
-                if db_task is None:
-                    continue
-
-                next_run_dt = datetime.fromtimestamp(next_run_ts, UTC)
-                next_run = iso_z(next_run_dt)
-                schedules.append({"task": db_task, "next_run_time": next_run, **last_runs.get(db_task, {})})
-        except Exception as e:
-            logger.error("Error getting redbeat schedule: %s", e, exc_info=True)
-
-    # Pod-local APScheduler jobs — the ONLY source in inprocess mode, and
-    # the non-redbeat family in external mode.
+    # Pod-local APScheduler jobs — the ONLY source of cron jobs.
     for job in sched._sched.get_jobs():
         job_id = getattr(job, "id", "")
         if not job_id.endswith(f"_{service_id}"):

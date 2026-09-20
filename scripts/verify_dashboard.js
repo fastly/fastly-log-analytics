@@ -76,6 +76,30 @@ if (!url) {
         console.log(`[${url}] Verified environment matches: ${expectedEnv}`);
       }
 
+      // Also verify the RUM page if we are checking dashboard
+      if (url.includes('/dashboard')) {
+        const rumUrl = url.replace('/dashboard', '/rum');
+        console.log(`[${url}] Checking RUM page: ${rumUrl} ...`);
+        const rumResponse = await page.goto(rumUrl, { timeout: 15000 });
+        if (!rumResponse || !rumResponse.ok()) {
+          console.error(`[${rumUrl}] Failed to load RUM page. Status: ${rumResponse ? rumResponse.status() : 'Unknown'}`);
+          await browser.close();
+          process.exit(1);
+        }
+        await page.waitForSelector('main', { timeout: 10000 });
+        await page.waitForTimeout(3000);
+        
+        const rumBodyText = await page.evaluate(() => document.body.innerText);
+        if (rumBodyText.includes("Failed to load") || rumBodyText.includes("No RUM events") || rumBodyText.includes("Internal Server Error")) {
+          console.error(`[${rumUrl}] Verification Failed: RUM page is displaying 'Failed to load' or 'No RUM events'! Ingestion did not populate.`);
+          console.error("Body text sample:");
+          console.error(rumBodyText.slice(0, 1000));
+          await browser.close();
+          process.exit(1);
+        }
+        console.log(`[${rumUrl}] Verified RUM page is active and successfully populated with ingested Web Vitals data!`);
+      }
+
     } catch (e) {
       console.error(`[${url}] Timed out waiting for content. Error: ${e.message}`);
       await browser.close();
