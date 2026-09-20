@@ -56,16 +56,18 @@
    - Converts rows to size-optimized Parquet files in `cache/{bucket}/`.
 5. **View Update:** Calls `update_iceberg_view()` to stitch local Parquet buffer files into the DuckDB `logs` view.
 6. **SQLite Ledger Commit:** Records successfully ingested files into SQLite `ingested_files`.
-7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 60s):
-   - Triggers `update_top_values()` (100k reservoir sample backing autocomplete).
+7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 30s):
+   - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
    - Triggers `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation).
-8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`.
+8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. If any files were quarantined or rows corrupted, `cron_runs.status` must be marked as `warning` (never `success`) so it surfaces in `/api/admin/health-snapshot`.
 
 ### High-Scale Mode:
-1. Issues FOS LIST on prefix.
+1. Issues FOS LIST on prefix (rolling 10-minute window).
 2. Performs batch `INSERT INTO ingest_ledger (service_id, filename, status) VALUES (...) ON CONFLICT DO NOTHING`.
 3. Selects batches using `UPDATE ingest_ledger SET status = 'claimed', worker_id = %s, claimed_at = NOW() WHERE status = 'discovered' ... RETURNING filename`.
-4. Enqueues conversion tasks to Celery queue (`convert_batch.delay(...)`).
+4. Enqueues conversion tasks to Celery queue (`convert_batch_files.delay(...)`).
+5. **Stateless Workers:** Worker processes skip local DuckDB heavy refresh to avoid file-lock contention with readers; autocomplete cache updates run on the serving web-pod.
+6. **Quarantine Handling:** Conversion failures or malformed lines record bad rows to FOS `errors/`, insert records into `quarantined_files` table via `metadata_db.insert_quarantined_file()`, and transition ledger rows to `quarantined` (or `dead_letter` after 3 failed attempts). Any quarantined rows elevate `cron_runs` status to `warning`.
 
 ---
 
@@ -82,13 +84,13 @@
 - **Audit Checklist:**
   - Confirm zero Class A API call proliferation (validate LIST pagination).
   - Verify `ingested_files` query uses primary index on `filename`.
-  - Confirm heavy refresh is strictly clamped to the 60s throttle window.
+  - Confirm heavy refresh is strictly clamped to the 30s throttle window.
 
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
 - **FOS Rate Limiting / 429:** Exponential backoff with retry; logs warning in `cron_runs`.
-- **Corrupted `.gz` File:** Moves file to quarantine, logs parsing error with byte offset, continues remaining batch.
+- **Corrupted `.gz` File / Bad Rows:** Writes bad lines to FOS `errors/`, records in `quarantined_files` via `insert_quarantined_file()`, elevates `cron_runs` status to `warning`, and continues remaining batch.
 - **Stale Buffer View Race:** Handled via `execute_with_stale_view_retry()` clearing view cache and rebuilding.
 
 ---
