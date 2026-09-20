@@ -872,15 +872,13 @@ export function AppLayout({
             set, so it's free on the cold path. */}
         {hideFilterBar && <ActiveFiltersBanner />}
 
-        {/* A-11 (a11y): tabIndex={-1} makes <main> a programmatic focus
-            target so the RouteFocus effect above can move SR reading
-            position here on client-side navigation. -1 keeps it out of
-            the keyboard tab order. outline-none avoids a visible focus
-            ring on the landmark itself (the new page's first focusable
-            element / heading is what users will actually see/hear). */}
+        {/* A-11 (a11y): tabIndex={0} makes <main> a programmatic focus
+            target and keyboard-accessible scrollable region (WCAG 2.1 AA
+            scrollable-region-focusable). outline-none avoids an intrusive
+            focus ring on the landmark itself. */}
         <main
           id="main"
-          tabIndex={-1}
+          tabIndex={0}
           className="flex-1 overflow-auto p-4 md:p-6 outline-none"
         >
           {/* Render children IMMEDIATELY on navigation. The previous

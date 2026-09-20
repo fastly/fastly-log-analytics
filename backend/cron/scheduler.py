@@ -368,6 +368,7 @@ class Scheduler:
         """Start the scheduler and register jobs for all configured services."""
         if dev_mode_no_crons():
             import os
+
             logger.warning(
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
                 "(sync/full_sweep/gap_heal/commit/optimize/expire/ngwaf_sync/metadata_cleanup/"
@@ -390,6 +391,7 @@ class Scheduler:
         self._sync_jobs()
         self._sched.start()
         import os
+
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
 
         # Initial metadata sync for analyst (read_only) services only.
