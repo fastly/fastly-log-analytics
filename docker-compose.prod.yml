@@ -287,6 +287,7 @@ services:
       # HOSTNAME=0.0.0.0).
       - HOSTNAME=127.0.0.1
       - API_PROXY_URL=http://127.0.0.1:8000
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
       # SSR helpers in lib/ssr/*.ts inject this on the loopback upstream
       # fetch when the backend's admin-token gate is active (Phase Q).
       # Same passthrough rationale as the backend block — empty = no-op
