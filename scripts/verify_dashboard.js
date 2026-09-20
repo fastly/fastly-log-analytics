@@ -36,8 +36,8 @@ if (!url) {
       console.log(`[${url}] Rendered Footer: "${footerText}"`);
 
       const bodyText = await page.evaluate(() => document.body.innerText);
-      if (bodyText.includes("Failed to load") || bodyText.includes("saturated at") || bodyText.includes("PoolBusy")) {
-        console.error(`[${url}] Verification Failed: Dashboard is displaying a 'Failed to load' or pool saturation error!`);
+      if (bodyText.includes("Failed to load") || bodyText.includes("saturated at") || bodyText.includes("PoolBusy") || bodyText.includes("No data for this filter")) {
+        console.error(`[${url}] Verification Failed: Dashboard is displaying a 'Failed to load', pool saturation, or empty 'No data for this filter' error! Ingestion failed or did not populate.`);
         console.error(`Body text sample:\n${bodyText.slice(0, 500)}`);
         await browser.close();
         process.exit(1);
@@ -90,8 +90,8 @@ if (!url) {
         await page.waitForTimeout(3000);
         
         const rumBodyText = await page.evaluate(() => document.body.innerText);
-        if (rumBodyText.includes("Failed to load") || rumBodyText.includes("No RUM events") || rumBodyText.includes("Internal Server Error")) {
-          console.error(`[${rumUrl}] Verification Failed: RUM page is displaying 'Failed to load' or 'No RUM events'! Ingestion did not populate.`);
+        if (rumBodyText.includes("Failed to load") || rumBodyText.includes("No data for this time period") || rumBodyText.includes("Waiting for real-time RUM") || rumBodyText.includes("Internal Server Error")) {
+          console.error(`[${rumUrl}] Verification Failed: RUM page is displaying 'Failed to load', 'No data for this time period', or empty RUM state! Ingestion did not populate.`);
           console.error("Body text sample:");
           console.error(rumBodyText.slice(0, 1000));
           await browser.close();

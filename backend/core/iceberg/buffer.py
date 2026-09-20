@@ -701,15 +701,29 @@ def _optimize_table_impl(
         # rewrite below has real files to compact.
         con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
 
-        # DuckLake rewrites small files directly, capped by the catalog's
-        # target_file_size (pinned to LOCAL_COMPACT_MAX_PARTITION_MB at
-        # attach — never collapse to fewer-larger files past the cap).
-        con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
+        # Merge adjacent small files into larger ones (bin-packing)
+        merge_rows = con.execute("CALL ducklake_merge_adjacent_files('lake')").fetchall()
+
+        # DuckLake rewrites data files with deleted rows / expired data
+        rewrite_rows = con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
+
+        files_rewritten = sum(int(r[2]) for r in merge_rows if len(r) >= 4) + sum(
+            int(r[2]) for r in rewrite_rows if len(r) >= 4
+        )
+        files_added = sum(int(r[3]) for r in merge_rows if len(r) >= 4) + sum(
+            int(r[3]) for r in rewrite_rows if len(r) >= 4
+        )
+
         try:
             _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
         except Exception as e:
             logger.warning("%s metadata pointer sync after rewrite failed: %s", _core_mod._ICE, e)
-        return {"files_rewritten": -1, "files_added": -1, "eligible_partitions": 1, "partition_errors": []}
+        return {
+            "files_rewritten": files_rewritten,
+            "files_added": files_added,
+            "eligible_partitions": 1,
+            "partition_errors": [],
+        }
     except Exception as e:
         return {"error": str(e), "files_rewritten": 0}
     finally:
@@ -1070,24 +1084,49 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         try:
             from backend.core.duckdb import _cache_dir
 
-            cache_dir = os.path.join(_cache_dir(source), "data")
-            if os.path.exists(cache_dir):
-                cache_cutoff = datetime.now(UTC) - timedelta(days=cache_retention_days)
-                deleted_files = 0
-                for root, _, files in os.walk(cache_dir):
-                    for file in files:
-                        if not file.endswith(".parquet"):
-                            continue
-                        filepath = os.path.join(root, file)
-                        mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
-                        if mtime < cache_cutoff:
+            cache_root = _cache_dir(source)
+            candidate_dirs = [os.path.join(cache_root, "data"), os.path.join(cache_root, "buffer")]
+            for t_name in _RUM_BEACON_TABLES:
+                candidate_dirs.append(os.path.join(cache_root, f"data_{t_name}"))
+
+            cache_cutoff = datetime.now(UTC) - timedelta(days=cache_retention_days)
+            tmp_cutoff = datetime.now(UTC) - timedelta(hours=2)
+            deleted_files = 0
+            deleted_tmp_files = 0
+
+            for c_dir in candidate_dirs:
+                if os.path.exists(c_dir):
+                    for root, _, files in os.walk(c_dir):
+                        for file in files:
+                            if not file.endswith(".parquet"):
+                                continue
+                            filepath = os.path.join(root, file)
                             try:
-                                os.remove(filepath)
-                                deleted_files += 1
+                                mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
+                                if mtime < cache_cutoff:
+                                    os.remove(filepath)
+                                    deleted_files += 1
                             except Exception:
                                 pass
-                _core_mod._prune_empty_dirs(cache_dir)
-                results["local_cache_files_deleted"] = deleted_files
+                    _core_mod._prune_empty_dirs(c_dir)
+
+            # Clean stale orphaned temp files across cache_root older than 2 hours
+            if os.path.exists(cache_root):
+                for root, _, files in os.walk(cache_root):
+                    for file in files:
+                        if file.endswith((".tmp", ".part", ".bad.jsonl.tmp")):
+                            filepath = os.path.join(root, file)
+                            try:
+                                mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
+                                if mtime < tmp_cutoff:
+                                    os.remove(filepath)
+                                    deleted_tmp_files += 1
+                            except Exception:
+                                pass
+
+            results["local_cache_files_deleted"] = deleted_files
+            if deleted_tmp_files > 0:
+                results["local_temp_files_deleted"] = deleted_tmp_files
         except Exception as e:
             logger.warning("[iceberg] Local cache cleanup skipped: %s", e)
             results["local_cache_error"] = str(e)
@@ -1108,18 +1147,50 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
                         if not file.endswith(".parquet"):
                             continue
                         filepath = os.path.join(root, file)
-                        mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
-                        if mtime < rollup_cutoff:
-                            try:
+                        try:
+                            mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
+                            if mtime < rollup_cutoff:
                                 os.remove(filepath)
                                 deleted_rollups += 1
-                            except Exception:
-                                pass
+                        except Exception:
+                            pass
                 _core_mod._prune_empty_dirs(rollup_dir)
                 results["local_rollup_files_deleted"] = deleted_rollups
         except Exception as e:
             logger.warning("[iceberg] Local rollup cleanup skipped: %s", e)
             results["local_rollup_error"] = str(e)
+
+    # 5. Clean up expired quarantined files in FOS and metadata
+    quarantine_retention_days = int(cron_sync.get("quarantine_retention_days", 30))
+    if quarantine_retention_days > 0:
+        try:
+            from backend.core.metadata import delete_quarantined_rows, get_expired_quarantined_files
+
+            service_id = source.get("service_id") or source.get("name")
+            expired = get_expired_quarantined_files(service_id, retention_days=quarantine_retention_days)
+            if expired:
+                from backend.core.duckdb import _get_fos_client
+                from backend.core.ingest import _delete_objects_robust
+
+                fos_client = _get_fos_client(source)
+                keys_to_delete = []
+                ids_to_delete = []
+                for row in expired:
+                    if row.get("error_key"):
+                        keys_to_delete.append(row["error_key"])
+                    if row.get("meta_key"):
+                        keys_to_delete.append(row["meta_key"])
+                    ids_to_delete.append(row["id"])
+                purged_fos = 0
+                if keys_to_delete and source.get("bucket"):
+                    purged_fos = _delete_objects_robust(fos_client, source["bucket"], keys_to_delete)
+                if ids_to_delete:
+                    delete_quarantined_rows(service_id, ids_to_delete)
+                results["quarantined_files_purged"] = len(expired)
+                results["quarantined_fos_objects_deleted"] = purged_fos
+        except Exception as e:
+            logger.warning("[iceberg] Quarantine cleanup skipped: %s", e)
+            results["quarantine_cleanup_error"] = str(e)
 
     return results
 

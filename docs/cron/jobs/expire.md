@@ -48,7 +48,7 @@
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-The job executes 4 distinct, isolated steps. Each step captures its own errors so one failure does not abort the remaining steps:
+The job checks `should_defer_cron("expire_snapshots", service_id)` and initializes SSE progress (`start_progress`) before running 5 distinct, isolated steps. Each step captures its own errors so one failure does not abort the remaining steps:
 1. **Step 1: Retention Delete (Gated on `data_retention_days > 0`):**
    - If `data_retention_days > 0`: `DELETE FROM lake.logs WHERE timestamp < ?` (cutoff = `NOW() - interval`).
    - If `rum_retention_days > 0`: `DELETE FROM lake.client_vitals WHERE timestamp < ?` and `DELETE FROM lake.client_errors WHERE timestamp < ?`.
@@ -57,13 +57,17 @@ The job executes 4 distinct, isolated steps. Each step captures its own errors s
    - Calls `ducklake_expire_snapshots('lake', older_than => cutoff_date)` using `keep_snapshot_days`.
    - Calls `ducklake_cleanup_old_files('lake', older_than => cutoff_date)` to unlink queued unreferenced files in FOS.
    - *Never call `ducklake_delete_orphaned_files`* (it would destroy local compaction files).
-3. **Step 3: Local Disk Cache Purge:**
-   - Scans `cache/{bucket}/` and `data/parquet/` for files older than `cache_retention_days` and deletes them.
+3. **Step 3: Comprehensive Local Disk Cache & Temp Purge:**
+   - Scans `cache/{bucket}/data`, RUM tables (`data_client_vitals`, `data_client_errors`), and `buffer/` for Parquet files older than `cache_retention_days` and deletes them.
+   - Cleans orphaned temporary files (`*.tmp`, `*.part`, `*.bad.jsonl.tmp`) older than 2 hours across `cache/{bucket}/` left behind by aborted writes or worker crashes.
+   - Prunes empty subdirectories.
 4. **Step 4: Rollup Retention Purge:**
    - Scans `rollups/{service_id}/` for day bundles older than `rollup_retention_months` and deletes them.
-5. **Telemetry & Log Recording:**
-   - Records step timings and deleted counts in `cron_runs` (marks `warning` if an isolated step failed, `success` if clean).
-   - Records FOS Class A delete calls in `usage_log.db`.
+5. **Step 5: Expired Quarantine Purge (FOS & SQLite):**
+   - If `quarantine_retention_days > 0` (default 30 days): queries `get_expired_quarantined_files` and unlinks old `.bad.jsonl` objects from FOS while deleting their SQLite metadata records.
+6. **Telemetry & Log Recording:**
+   - Records step timings and deleted counts in `cron_runs` (marks `warning` if any isolated step failed, `success` if clean).
+   - Records FOS Class A delete calls in `usage_log.db` and finalizes progress tracking via `end_progress`.
 
 ---
 
