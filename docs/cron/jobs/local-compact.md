@@ -15,14 +15,14 @@
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
-- **Default Schedule:** Every 2 minutes (`minutes=2`).
+- **Default Schedule:** Every 1 minute (`minutes=1`).
 - **Configurable Overrides:** Environment variables:
-  - `LOCAL_COMPACT_INTERVAL_MIN` (default: 2)
+  - `LOCAL_COMPACT_INTERVAL_MIN` (default: 1)
   - `LOCAL_COMPACT_DAILY_TIER_DAYS` (default: 1)
   - `LOCAL_COMPACT_WEEKLY_TIER_DAYS` (default: 30)
 - **Jitter & Misfire Policy:**
-  - Jitter: 15 seconds.
-  - `max_instances=1`, `coalesce=True`, `misfire_grace_time=120s`.
+  - Jitter: 10 seconds.
+  - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
 
 ---
 
@@ -30,7 +30,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Scans local `cache/{bucket}/` and `data/parquet/`, merges small files via DuckDB, writes compacted files, atomic rename. | Local file lock per service partition. Explicitly ALLOWED under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Runs strictly on web serving pods if local buffer tier exists; skipped on worker nodes to prevent shared disk contention. | Pod-local file locks only. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Scans `ingest_ledger` for hours committed in the last 15 minutes and executes `recompute_touched_hours()` to maintain fresh serving-pod Top-N rollups. Skipped on worker nodes. | Pod-local lock; read-only access to DuckLake via ephemeral connection. |
 
 ---
 

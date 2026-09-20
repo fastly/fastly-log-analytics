@@ -94,8 +94,8 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | Job Identifier | Default Cadence | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
 |---|---|---|---|---|---|
 | `log_discovery_{id}` | Derived (`log_period // 2`) | APScheduler | RedBeat + Celery | Admin | [log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md) |
-| `commit_{id}` | Every 5 min | APScheduler | RedBeat + Celery | Admin | [commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md) |
-| `local_compact_{id}` | Every 2 min | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md) |
+| `commit_{id}` | Every 5 min (configurable) | APScheduler | RedBeat + Celery | Admin | [commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md) |
+| `local_compact_{id}` | Every 1 min | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md) |
 | `partial_hour_merge_{id}` | Every 30 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/partial-hour-merge.md) |
 | `rollup_heal_{id}` | Hourly at :05 | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-heal.md) |
 | `rollup_compact_{id}` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-compact.md) |

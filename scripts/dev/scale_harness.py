@@ -52,9 +52,15 @@ async def _request(
 ) -> tuple[int, int]:
     started = time.perf_counter()
     try:
-        async with session.get(url, headers=headers) as response:
-            await response.read()
-            return response.status, round((time.perf_counter() - started) * 1000)
+        if "/rum-beacon" in url:
+            # RUM beacons must be POST requests to trigger the edge logging condition
+            async with session.post(url, headers=headers, data="{}") as response:
+                await response.read()
+                return response.status, round((time.perf_counter() - started) * 1000)
+        else:
+            async with session.get(url, headers=headers) as response:
+                await response.read()
+                return response.status, round((time.perf_counter() - started) * 1000)
     except (aiohttp.ClientError, TimeoutError):
         return 0, round((time.perf_counter() - started) * 1000)
 

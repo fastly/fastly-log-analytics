@@ -15,8 +15,10 @@
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
-- **Default Schedule:** Every 5 minutes (`commit_interval_mins = 5`).
-- **Configurable Overrides:** `provisioning.cron_sync.commit_interval_mins` (minimum 1 min).
+- **Default Schedule:** Configurable by the user per service via `provisioning.cron_sync.commit_interval_mins` (default: 5 minutes, minimum: 1 minute).
+- **Service Configuration Binding:**
+  - Standard mode: APScheduler runs every `commit_interval_mins`.
+  - High-Scale mode: RedBeat schedules every `commit_interval_mins`.
 - **Jitter & Misfire Policy:**
   - Jitter: 30 seconds.
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=commit_interval_mins * 60s`.
@@ -27,14 +29,14 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads local Parquet buffer, writes consolidated Parquet to FOS `ducklake/`, commits transaction to DuckLake metadata catalog, unlinks local buffer files. | Exclusive per-service commit lock. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Scans `ingest_ledger` for completed batch conversions, issues `ducklake_merge_adjacent_files` on Postgres DuckLake catalog, marks rows `committed`. | Distributed PostgreSQL transaction isolation. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Executes `CALL ducklake_flush_inlined_data('lake')` (durability flush to FOS Parquet), calls `ducklake_merge_adjacent_files('lake')`, and runs `finalize_committed_raw` with 10-minute deletion grace. | Distributed PostgreSQL transaction isolation. |
 
 ---
 
 ## 4. Role & Permissions Matrix
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
-| **Admin (`read_write`)** | Active | `POST /api/admin/commit/{service_id}` | Full commit status and history in Admin UI. |
+| **Admin (`read_write`)** | Active | `POST /api/admin/commit/{service_id}` | Full commit status and history in Admin UI. Displays prominent banner alert when commits fail. |
 | **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Reads cloud DuckLake table; never commits. |
 | **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side DuckLake state; no cron interaction. |
 
@@ -53,7 +55,11 @@
    - Atomically updates table snapshot metadata.
 6. **Local Buffer Unlink:** Safely unlinks the uploaded local Parquet files.
 7. **View Refresh:** Triggers `update_iceberg_view()` so analytical queries immediately read the new DuckLake snapshot.
-8. **Logging & Telemetry:** Records commit run in SQLite `cron_runs` and records FOS Class A PUT calls in `usage_log.db`.
+8. **Logging, Quarantine & Banner Alerts:**
+   - Records commit run in SQLite `cron_runs`.
+   - If any unreadable buffer files were quarantined, `cron_runs.status` must be set to `warning` (never `success`).
+   - If commit transaction fails, records `error` in `cron_runs` and triggers an Admin UI banner alert ("Commits to FOS failing").
+   - Records FOS Class A PUT calls in `usage_log.db`.
 
 ### High-Scale Mode:
 1. Queries PostgreSQL `ingest_ledger` for claimed batches where conversion is done.
