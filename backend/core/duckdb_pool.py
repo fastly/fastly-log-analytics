@@ -878,6 +878,7 @@ class _PoolBusy(Exception):
 
 
 _pools: dict[str, _Pool] = {}
+_retired_pools: dict[str, _Pool] = {}
 _pools_lock = threading.Lock()
 
 
@@ -1051,6 +1052,7 @@ def begin_drain_pools(service_keys) -> dict[str, _Pool]:
             if pool is not None:
                 pool.begin_drain()
                 retired[k] = pool
+                _retired_pools[k] = pool
                 _pools.pop(k, None)
     return retired
 
@@ -1067,7 +1069,8 @@ def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
         targets = pools_or_keys
     else:
         # Fallback to string keys for backward compatibility
-        targets = _existing_pools(pools_or_keys)
+        with _pools_lock:
+            targets = [p for k in pools_or_keys if (p := (_retired_pools.get(k) or _pools.get(k))) is not None]
 
     deadline = time.monotonic() + timeout
     ok = True
@@ -1080,13 +1083,19 @@ def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
 
 def end_drain_pools(pools_or_keys) -> None:
     """Take every existing pool out of draining mode (no-op for swapped pools)."""
-    if isinstance(pools_or_keys, dict) or (
-        isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys)
-    ):
-        # For swapped/retired pools, we don't need to end drain because they are retired
+    if isinstance(pools_or_keys, dict):
+        for pool in pools_or_keys.values():
+            pool.end_drain()
         return
-    for pool in _existing_pools(pools_or_keys):
-        pool.end_drain()
+    if isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        for pool in pools_or_keys:
+            pool.end_drain()
+        return
+    with _pools_lock:
+        for k in pools_or_keys:
+            pool = _retired_pools.pop(k, None) or _pools.get(k)
+            if pool is not None:
+                pool.end_drain()
 
 
 def reset_pool_for_service(service_key: str) -> int:

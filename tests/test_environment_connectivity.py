@@ -9,6 +9,8 @@ Enforces that every deployment topology in Current_Project_State_and_Current_Goa
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from scripts.check_environment_health import (
@@ -16,6 +18,11 @@ from scripts.check_environment_health import (
     check_backend_health,
     check_rbac,
     check_tenancy,
+)
+
+pytestmark = pytest.mark.skipif(
+    bool(os.getenv("CI") or os.getenv("GITHUB_ACTIONS")),
+    reason="Environment connectivity tests require local/remote port-forwards not present in CI",
 )
 
 
