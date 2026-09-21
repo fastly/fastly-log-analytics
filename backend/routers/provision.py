@@ -1089,6 +1089,14 @@ def provision_ingest(payload: ProvisionConfigRequest):
     # pass here re-imported and re-validated the identical token+service_id.
     write_service_config(state)
 
+    # Reload scheduler immediately to pick up any changed log periods or sync intervals
+    try:
+        from backend.cron.scheduler import get_scheduler
+        get_scheduler().reload()
+        logger.info("[provision_ingest] Successfully reloaded scheduler with new intervals! 🔄")
+    except Exception as e:
+        logger.warning("[provision_ingest] Failed to reload scheduler after ingest: %s", e)
+
     # Re-ingest can carry refreshed FOS creds; drop the credential-bearing
     # caches so the next sync/read picks them up rather than 401ing on a stale
     # in-process key.
