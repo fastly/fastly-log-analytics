@@ -64,7 +64,7 @@ function getUrlWithParam(url, key, value) {
     const MIN_REQ_5M = 150; // Safe minimum for standard traffic seeding
     let bodyText5m = "";
     
-    for (let attempt = 1; attempt <= 12; attempt++) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await page.goto(url5m, { timeout: 15000 });
         if (response && response.ok()) {
@@ -81,8 +81,8 @@ function getUrlWithParam(url, key, value) {
       } catch (err) {
         console.log(`[Dashboard 5m] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[Dashboard 5m] Attempt ${attempt}/12: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 5s for background ingestion...`);
-      await page.waitForTimeout(5000);
+      console.log(`[Dashboard 5m] Attempt ${attempt}/4: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 8s for background ingestion...`);
+      await page.waitForTimeout(8000);
     }
 
     if (count5m < MIN_REQ_5M) {
@@ -188,7 +188,7 @@ function getUrlWithParam(url, key, value) {
     let hasVitalsTitle24h = false;
     let hasVitalsRating24h = false;
     
-    for (let attempt = 1; attempt <= 12; attempt++) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await rumPage.goto(rumUrl24h, { timeout: 15000 });
         if (response && response.ok()) {
@@ -207,8 +207,8 @@ function getUrlWithParam(url, key, value) {
       } catch (err) {
         console.log(`[RUM 24h] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[RUM 24h] Attempt ${attempt}/12: Web Vitals metrics not fully rendered yet. Waiting 5s for cron commit...`);
-      await rumPage.waitForTimeout(5000);
+      console.log(`[RUM 24h] Attempt ${attempt}/4: Web Vitals metrics not fully rendered yet. Waiting 8s for cron commit...`);
+      await rumPage.waitForTimeout(8000);
     }
 
     if (!hasVitalsTitle24h || !hasVitalsRating24h) {
@@ -227,7 +227,7 @@ function getUrlWithParam(url, key, value) {
     const MIN_BEACONS_5M = 50; // Safe threshold allowing for global edge S3 streaming latency
     let rumBodyText5m = "";
     
-    for (let attempt = 1; attempt <= 12; attempt++) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await rumPage.goto(rumUrl5m, { timeout: 15000 });
         if (response && response.ok()) {
@@ -247,8 +247,8 @@ function getUrlWithParam(url, key, value) {
       } catch (err) {
         console.log(`[RUM 5m] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[RUM 5m] Attempt ${attempt}/12: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 5s for background ingestion...`);
-      await rumPage.waitForTimeout(5000);
+      console.log(`[RUM 5m] Attempt ${attempt}/4: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 8s for background ingestion...`);
+      await rumPage.waitForTimeout(8000);
     }
 
     if (beaconCount5m < MIN_BEACONS_5M) {
