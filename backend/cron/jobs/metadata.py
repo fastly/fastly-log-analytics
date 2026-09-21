@@ -531,12 +531,20 @@ def _run_bot_data_refresh() -> str:
 
 
 @global_job("rdns_enrichment", color="34", tag="rdns", label="rDNS enrichment")
-def _run_rdns_enrichment() -> str:
+def _run_rdns_enrichment() -> tuple[str, str]:
     """Resolve pending rDNS lookups and discover new IPs (every 5 min)."""
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.rdns_cache import enrich_batch
 
+    if dev_mode_no_crons():
+        logger.info("⏸️  \x1b[34m[rdns]\x1b[0m dev_mode_no_crons active, skipping rDNS enrichment.")
+        return ("skipped", "skipped (dev_mode_no_crons)")
+
     summary = enrich_batch()
-    return f"resolved={summary['resolved']} errors={summary['errors']} discovered={summary['discovered']}"
+    detail = f"resolved={summary['resolved']} errors={summary['errors']} discovered={summary['discovered']}"
+    if summary["errors"] > 0 and summary["resolved"] == 0:
+        return ("warning", f"{detail} (DNS lookup failures detected)")
+    return ("success", detail)
 
 
 @global_job("share_audit_purge", color="35", tag="share_audit_purge", label="Share audit purge")

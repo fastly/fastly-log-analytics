@@ -506,9 +506,26 @@ def _maybe_reap_stale_rows() -> None:
         logger.error("[rdns_cache] Reap pass failed: %s", e)
 
 
-def enrich_batch(limit: int = 200) -> dict:
+def _get_pending_count() -> int:
+    con = _read_con()
+    if con is None:
+        return 0
+    try:
+        row = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()
+        return row[0] if row else 0
+    finally:
+        con.close()
+
+
+def enrich_batch(limit: int | None = None) -> dict:
     """Resolve pending IPs with FCrDNS validation, then discover new IPs from
     DuckDB sources.
+
+    If limit is None, dynamically scales the batch size based on the pending
+    queue depth:
+    - pending <= 200: batch_limit = max(100, pending) if pending > 0 else 200
+    - 200 < pending <= 2000: batch_limit = 500
+    - pending > 2000: batch_limit = 1000
 
     Returns a summary dict with counts for monitoring/logging.
     """
@@ -518,14 +535,25 @@ def enrich_batch(limit: int = 200) -> dict:
     errors = 0
     discovered = 0
 
-    pending_rows = _select_ips_with_status("pending", limit=limit)
+    if limit is not None:
+        batch_limit = limit
+    else:
+        pending_count = _get_pending_count()
+        if pending_count <= 200:
+            batch_limit = max(100, pending_count) if pending_count > 0 else 200
+        elif pending_count <= 2000:
+            batch_limit = 500
+        else:
+            batch_limit = 1000
+
+    pending_rows = _select_ips_with_status("pending", limit=batch_limit)
     if pending_rows:
         pending_ips = [row[0] for row in pending_rows]
         summary = _run_async_resolve(pending_ips)
         resolved = summary["resolved"]
         errors = summary["errors"]
 
-    stale_rows = _select_stale_ips(limit=max(1, limit // 4))
+    stale_rows = _select_stale_ips(limit=max(1, batch_limit // 4))
     if stale_rows:
         stale_ips = [row[0] for row in stale_rows]
         _run_async_resolve(stale_ips)
@@ -538,7 +566,12 @@ def enrich_batch(limit: int = 200) -> dict:
     _maybe_reap_stale_rows()
 
     _last_enrichment_at = iso_z_now()
-    summary_out = {"resolved": resolved, "errors": errors, "discovered": discovered}
+    summary_out = {
+        "resolved": resolved,
+        "errors": errors,
+        "discovered": discovered,
+        "batch_limit": batch_limit,
+    }
     if resolved > 0 or errors > 0 or discovered > 0:
         logger.info("🌐 \x1b[34m[rdns]\x1b[0m enrich_batch complete: %s", summary_out)
     else:

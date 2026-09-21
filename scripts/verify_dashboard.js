@@ -58,7 +58,7 @@ function getUrlWithParam(url, key, value) {
     console.log(`[Dashboard 5m] Checking ${url5m} with active polling...`);
     
     let count5m = 0;
-    const MIN_REQ_5M = 150; // Reflects a highly safe minimum for standard traffic seeding
+    const MIN_REQ_5M = 150; // Safe minimum for standard traffic seeding
     let bodyText5m = "";
     
     for (let attempt = 1; attempt <= 12; attempt++) {
@@ -90,14 +90,65 @@ function getUrlWithParam(url, key, value) {
     }
     console.log(`[Dashboard 5m] Verified: 5m data contains ${count5m} rows (greater than load-test minimum of ${MIN_REQ_5M} rows).`);
 
-    // Verify Footers and Metadata on 5m page
+    // 1.3. Validate Header Liveness (REQUEST)
+    const reqLatestMatch = bodyText5m.match(/REQUEST[\s\n]*latest:[\s\n]*([^\n]+)/i);
+    if (!reqLatestMatch) {
+      console.error(`[Header] Verification Failed: REQUEST block not found in the global header.`);
+      await browser.close();
+      process.exit(1);
+    }
+    const reqLatestTime = reqLatestMatch[1].trim();
+    console.log(`[Header] REQUEST Latest Time: "${reqLatestTime}"`);
+    if (reqLatestTime.includes("Never") || reqLatestTime.includes("—") || reqLatestTime.includes("-")) {
+      console.error(`[Header] Verification Failed: REQUEST latest time is unpopulated/stale: "${reqLatestTime}"`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[Header] Verified: REQUEST latest header time is fully active and updating!`);
+
+    // 1.4. Validate 30d Data Consistency: Header Total vs. Page Total
+    const url30d = getUrlWithParam(baseUrl, "range", "30d");
+    console.log(`[Dashboard 30d] Checking data consistency on ${url30d} ...`);
+    response = await page.goto(url30d, { timeout: 20000 });
+    if (!response || !response.ok()) {
+      console.error(`[Dashboard 30d] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
+      await browser.close();
+      process.exit(1);
+    }
+    await page.waitForSelector('main', { timeout: 10000 });
+    await page.waitForTimeout(4000);
+
+    const bodyText30d = await page.evaluate(() => document.body.innerText);
+    
+    // Extract Header Request Total
+    const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+    if (!headerReqMatch) {
+      console.error(`[Dashboard 30d] Verification Failed: REQUEST total count not found in global header.`);
+      await browser.close();
+      process.exit(1);
+    }
+    const headerReqTotal = parseInt(headerReqMatch[1].replace(/,/g, ''), 10);
+
+    // Extract Page Request Total (from request metrics card)
+    const pageReqMatch = bodyText30d.match(/total:\s*([\d,]+)/i);
+    const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
+
+    console.log(`[Dashboard 30d Consistency] Header REQUEST Total: ${headerReqTotal} │ Page Metrics Total: ${pageReqTotal}`);
+    if (headerReqTotal !== pageReqTotal) {
+      console.error(`[Dashboard 30d Consistency] Verification Failed: Header count (${headerReqTotal}) does not match page count (${pageReqTotal}) under 30d range!`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[Dashboard 30d Consistency] Verified: Header request count and page metrics are 100% in-sync!`);
+
+    // Verify Footers and Metadata on 30d page
     const footerText = await page.evaluate(() => {
       const footer = document.querySelector('footer');
       return footer ? footer.innerText : '';
     });
     console.log(`[Dashboard] Rendered Footer: "${footerText}"`);
 
-    if (expectedCommit && !footerText.includes(`commit:${expectedCommit}`) && !bodyText5m.includes(`commit:${expectedCommit}`)) {
+    if (expectedCommit && !footerText.includes(`commit:${expectedCommit}`) && !bodyText30d.includes(`commit:${expectedCommit}`)) {
       console.error(`[Dashboard] Verification Failed: Expected commit hash 'commit:${expectedCommit}' not found in page.`);
       await browser.close();
       process.exit(1);
@@ -201,6 +252,57 @@ function getUrlWithParam(url, key, value) {
     }
     console.log(`[RUM 5m] Verified: 5m RUM data contains ${beaconCount5m} beacons (greater than load-test minimum of ${MIN_BEACONS_5M} beacons).`);
     console.log(`[RUM 5m] Verified: Web Vitals metrics are active in the 5m window.`);
+
+    // 2.3. Validate Header Liveness (RUM)
+    const rumLatestMatch = rumBodyText5m.match(/RUM[\s\n]*latest:[\s\n]*([^\n]+)/i);
+    if (!rumLatestMatch) {
+      console.error(`[Header] Verification Failed: RUM block not found in the global header.`);
+      await browser.close();
+      process.exit(1);
+    }
+    const rumLatestTime = rumLatestMatch[1].trim();
+    console.log(`[Header] RUM Latest Time: "${rumLatestTime}"`);
+    if (rumLatestTime.includes("Never") || rumLatestTime.includes("—") || rumLatestTime.includes("-")) {
+      console.error(`[Header] Verification Failed: RUM latest time is unpopulated/stale: "${rumLatestTime}"`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[Header] Verified: RUM latest header time is fully active and updating!`);
+
+    // 2.4. Validate 30d RUM Consistency: Header RUM Total vs. Page RUM Total
+    const rumUrl30d = getUrlWithParam(rumBaseUrl, "range", "30d");
+    console.log(`[RUM 30d] Checking data consistency on ${rumUrl30d} ...`);
+    response = await rumPage.goto(rumUrl30d, { timeout: 20000 });
+    if (!response || !response.ok()) {
+      console.error(`[RUM 30d] Failed to load RUM page. Status: ${response ? response.status() : 'Unknown'}`);
+      await browser.close();
+      process.exit(1);
+    }
+    await rumPage.waitForSelector('main', { timeout: 10000 });
+    await rumPage.waitForTimeout(4000);
+
+    const rumBodyText30d = await rumPage.evaluate(() => document.body.innerText);
+
+    // Extract Header RUM Total
+    const headerRumMatch = rumBodyText30d.match(/RUM[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+    if (!headerRumMatch) {
+      console.error(`[RUM 30d] Verification Failed: RUM total count not found in global header.`);
+      await browser.close();
+      process.exit(1);
+    }
+    const headerRumTotal = parseInt(headerRumMatch[1].replace(/,/g, ''), 10);
+
+    // Extract Page RUM Total
+    const pageRumMatch = rumBodyText30d.match(/TOTAL BEACONS\s*([\d,]+)/i);
+    const pageRumTotal = pageRumMatch ? parseInt(pageRumMatch[1].replace(/,/g, ''), 10) : 0;
+
+    console.log(`[RUM 30d Consistency] Header RUM Total: ${headerRumTotal} │ Page Metrics Total: ${pageRumTotal}`);
+    if (headerRumTotal !== pageRumTotal) {
+      console.error(`[RUM 30d Consistency] Verification Failed: Header count (${headerRumTotal}) does not match page count (${pageRumTotal}) under 30d range!`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% in-sync!`);
 
     await browser.close();
     process.exit(0);

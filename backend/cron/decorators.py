@@ -207,8 +207,12 @@ def global_job(job_id: str, *, color: str, tag: str, label: str):
             start = time.monotonic()
             try:
                 with process_context_scope(f"cron:{job_id}"):
-                    detail = fn()
-                record_job_run(job_id, "success", time.monotonic() - start, detail)
+                    result = fn()
+                if isinstance(result, tuple) and len(result) == 2:
+                    status, detail = result
+                else:
+                    status, detail = "success", str(result or "")
+                record_job_run(job_id, status, time.monotonic() - start, detail)
             except Exception as e:
                 record_job_run(job_id, "error", time.monotonic() - start, str(e))
                 logger.error("[%s] Failed: %s", job_id, e)

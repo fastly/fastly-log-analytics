@@ -228,7 +228,8 @@ We will tackle these one at a time, auto-discovering issues and updating this li
 - [x] Build multi-environment system and pipeline audit monitoring tool (`scripts/dev/audit_environments.py`, `make audit`, `make audit-watch`).
 - [x] Resolve High-Scale RUM discovery visibility and `last_sync_at` synchronization across frontend badges, SSR headers, and backend cron filter aliasing (`rum_sync` / `rum_discovery`).
 - [x] Integrate mandatory 5-minute post-deployment stability watch into deployment orchestration flow.
-- [ ] Investigate and audit all background cron jobs and ingestion pipelines across both architectures to ensure zero warnings or errors.
+- [x] Author and execute strict, multi-stage Playwright E2E positive-data verifications, validating that 24h charts populate, 5m ranges contain recent edge traffic, header ingestion times are live, and 30d header counts exactly match page query metrics.
+- [x] Investigate and audit all background cron jobs and ingestion pipelines across both architectures to ensure zero warnings or errors.
 - [ ] Develop synthetic log generator for 5M RPS load testing.
 - [ ] Execute baseline performance tests on the "standard" architecture (GCE).
 - [ ] Execute baseline performance tests on the "high-scale" architecture.
