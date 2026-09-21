@@ -56,6 +56,33 @@ def generate_rum_record(service_id: str, timestamp_str: str) -> dict:
     cid = f"cid-{random.randint(10000, 99999)}"
 
     # Faro payload structure
+    faro_payload = {
+        "meta": {
+            "browser": {
+                "name": browser,
+                "mobile": device == "Mobile"
+            },
+            "os": {
+                "name": os_name
+            },
+            "page": {
+                "url": f"http://localhost{path}"
+            }
+        },
+        "measurements": [
+            {
+                "type": "web-vitals",
+                "values": {
+                    metric: value
+                },
+                "context": {
+                    "rating": rating
+                }
+            }
+        ]
+    }
+
+    # Serialized record matching Fastly edge output format precisely
     return {
         "service_id": service_id,
         "timestamp": timestamp_str,
@@ -68,31 +95,7 @@ def generate_rum_record(service_id: str, timestamp_str: str) -> dict:
         "device": device,
         "rum_cid": cid,
         "url": f"http://localhost{path}",
-        "faro": {
-            "meta": {
-                "browser": {
-                    "name": browser,
-                    "mobile": device == "Mobile"
-                },
-                "os": {
-                    "name": os_name
-                },
-                "page": {
-                    "url": f"http://localhost{path}"
-                }
-            },
-            "measurements": [
-                {
-                    "type": "web-vitals",
-                    "values": {
-                        metric: value
-                    },
-                    "context": {
-                        "rating": rating
-                    }
-                }
-            ]
-        }
+        "rum_body": json.dumps(faro_payload) # Serialized JSON payload parsed by rum_ingest.py
     }
 
 
@@ -129,7 +132,9 @@ def main():
 
     # Generate records
     print(f"   - Generating {args.rows:,} mock Faro vitals records...")
-    timestamp_str = now.isoformat()
+    
+    # Ensure UTC timezone formatting matches S3 log delivery perfectly
+    timestamp_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     records = [generate_rum_record(args.service_id, timestamp_str) for _ in range(args.rows)]
 
     # Write gzipped log to temp file

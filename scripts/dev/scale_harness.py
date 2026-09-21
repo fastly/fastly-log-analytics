@@ -53,8 +53,51 @@ async def _request(
     started = time.perf_counter()
     try:
         if "/rum-beacon" in url:
-            # RUM beacons must be POST requests to trigger the edge logging condition
-            async with session.post(url, headers=headers, data="{}") as response:
+            # Parse metrics from URL to construct a real Faro payload body
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            
+            metric = qs.get("rum_metric_name", ["LCP"])[0]
+            val_str = qs.get("rum_metric_value", ["1200"])[0]
+            try:
+                value = float(val_str)
+            except ValueError:
+                value = 1200.0
+                
+            cid = qs.get("rum_cid", ["cid-1234"])[0]
+            path = qs.get("rum_pathname", ["/"])[0]
+            
+            # Realistic rating calculation
+            if metric == "LCP":
+                rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
+            elif metric == "CLS":
+                rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
+            elif metric == "INP":
+                rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
+            else:
+                rating = "good" if value <= 800 else "poor"
+                
+            browser = random.choice(["Chrome", "Firefox", "Safari"])
+            os_name = random.choice(["Windows", "macOS", "iOS"])
+            device = "Mobile" if os_name == "iOS" else "Desktop"
+            
+            faro_payload = {
+                "meta": {
+                    "browser": {"name": browser, "mobile": device == "Mobile"},
+                    "os": {"name": os_name},
+                    "page": {"url": f"{parsed.scheme}://{parsed.netloc}{path}"}
+                },
+                "measurements": [
+                    {
+                        "type": "web-vitals",
+                        "values": {metric: value},
+                        "context": {"rating": rating}
+                    }
+                ]
+            }
+            
+            async with session.post(url, headers=headers, data=json.dumps(faro_payload)) as response:
                 await response.read()
                 return response.status, round((time.perf_counter() - started) * 1000)
         else:

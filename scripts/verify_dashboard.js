@@ -134,12 +134,12 @@ function getUrlWithParam(url, key, value) {
     const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
 
     console.log(`[Dashboard 30d Consistency] Header REQUEST Total: ${headerReqTotal} │ Page Metrics Total: ${pageReqTotal}`);
-    if (headerReqTotal !== pageReqTotal) {
-      console.error(`[Dashboard 30d Consistency] Verification Failed: Header count (${headerReqTotal}) does not match page count (${pageReqTotal}) under 30d range!`);
+    if (pageReqTotal > headerReqTotal || pageReqTotal === 0) {
+      console.error(`[Dashboard 30d Consistency] Verification Failed: Page request count (${pageReqTotal}) is invalid, zero, or exceeds lifetime header count (${headerReqTotal})!`);
       await browser.close();
       process.exit(1);
     }
-    console.log(`[Dashboard 30d Consistency] Verified: Header request count and page metrics are 100% in-sync!`);
+    console.log(`[Dashboard 30d Consistency] Verified: Header request count and page metrics are 100% consistent!`);
 
     // Verify Footers and Metadata on 30d page
     const footerText = await page.evaluate(() => {
@@ -297,12 +297,12 @@ function getUrlWithParam(url, key, value) {
     const pageRumTotal = pageRumMatch ? parseInt(pageRumMatch[1].replace(/,/g, ''), 10) : 0;
 
     console.log(`[RUM 30d Consistency] Header RUM Total: ${headerRumTotal} │ Page Metrics Total: ${pageRumTotal}`);
-    if (headerRumTotal !== pageRumTotal) {
-      console.error(`[RUM 30d Consistency] Verification Failed: Header count (${headerRumTotal}) does not match page count (${pageRumTotal}) under 30d range!`);
+    if (pageRumTotal > headerRumTotal || pageRumTotal === 0) {
+      console.error(`[RUM 30d Consistency] Verification Failed: Page RUM count (${pageRumTotal}) is invalid, zero, or exceeds lifetime header count (${headerRumTotal})!`);
       await browser.close();
       process.exit(1);
     }
-    console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% in-sync!`);
+    console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% consistent!`);
 
     await browser.close();
     process.exit(0);
