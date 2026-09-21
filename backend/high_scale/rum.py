@@ -8,7 +8,7 @@ from backend.high_scale.registry import HighScaleService
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
     res = service.client.execute(
-        "SELECT count() as c FROM fastly_log_analytics.rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
+        "SELECT count() as c FROM rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
         {"service_id": service.service_id},
     )
     beacons = res[0].get("c", 0) if res else 0 or 0
@@ -31,7 +31,7 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
                sum(if(metric_rating = 'good', 1, 0)) as good,
                sum(if(metric_rating = 'needs-improvement', 1, 0)) as ni,
                sum(if(metric_rating = 'poor', 1, 0)) as poor
-        FROM fastly_log_analytics.rum_vitals_facts
+        FROM rum_vitals_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
         GROUP BY metric_name
     """
@@ -48,7 +48,6 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     }
 
     total_pageviews = 0
-
     for r in rows:
         m = r["metric_name"].lower()
         if m in vitals:
@@ -65,7 +64,7 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
 
     error_count = 0
     try:
-        err_query = "SELECT count() as c FROM fastly_log_analytics.rum_error_facts WHERE service_id={service_id:String} AND publication_state='visible'"
+        err_query = "SELECT count() as c FROM rum_error_facts WHERE service_id={service_id:String} AND publication_state='visible'"
         if start and end:
             err_query += " AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp <= {end:DateTime64(3)}"
         err_res = service.client.execute(err_query, {"service_id": service.service_id, "start": start, "end": end})
@@ -111,7 +110,7 @@ def rum_live_events(
         request_event_id as req_id,
         country,
         '' as error_message
-    FROM fastly_log_analytics.rum_vitals_facts
+    FROM rum_vitals_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
       AND event_timestamp >= {start_time:DateTime64(3)}
@@ -130,7 +129,7 @@ def rum_live_events(
         request_event_id as req_id,
         country,
         error_message
-    FROM fastly_log_analytics.rum_error_facts
+    FROM rum_error_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
       AND event_timestamp >= {start_time:DateTime64(3)}
