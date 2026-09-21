@@ -237,7 +237,7 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [x] Build automated multi-tier parallel deployment & verification script (`scripts/dev/deploy_test_all.sh`) with automated port healing and Playwright commit-hash verification.
 - [x] Build automated environment health, tenancy isolation, and RBAC verification suite (`scripts/check_environment_health.py`).
 - [x] Build multi-environment system and pipeline audit monitoring tool (`scripts/dev/audit_environments.py`, `make audit`, `make audit-watch`).
-- [x] Resolve High-Scale RUM discovery visibility and `last_sync_at` synchronization across frontend badges, SSR headers, and backend cron filter aliasing (`rum_sync` / `rum_discovery`).
+- [x] Resolve High-Scale RUM discovery visibility and `last_sync_at` synchronization across frontend badges, SSR headers, and backend cron filtering.
 - [x] Integrate mandatory 5-minute post-deployment stability watch into deployment orchestration flow.
 - [x] Author and execute strict, multi-stage Playwright E2E positive-data verifications, validating that 24h charts populate, 5m ranges contain recent edge traffic, header ingestion times are live, and 30d header counts exactly match page query metrics.
 - [x] Investigate and audit all background cron jobs and ingestion pipelines across both architectures to ensure zero warnings or errors.
@@ -251,7 +251,7 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 > **Gotcha (verify before trusting `cron_runs`/telemetry queries):** the DB-persisted `task` string for a job is not always the same token used in its APScheduler job id or this list. Confirmed aliases in `backend/cron/schedule.py`'s `_TASK_MAP`: `sync_metadata` → `metadata_sync`, `expire` → `expire_snapshots`, `alerts_evaluation` → `alerts`, `rollup_heal` → `rollup_hour_heal`, `rollup_compact` → `rollup_compact_daily`. Querying `cron_runs`/`recent_cron_failures` by the job-id token instead of the DB task string will silently return zero rows, not an error.
 
 - [ ] Cron 1: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md))
-- [ ] Cron 2: `commit_{id}` — Parquet Buffer to DuckLake Catalog Commit ([docs/cron/jobs/commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md))
+- [ ] Cron 2: `log_commit_{id}` — Parquet Buffer to DuckLake Catalog Commit ([docs/cron/jobs/commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md))
 - [ ] Cron 3: `local_compact_{id}` — Local Hourly & Daily/Weekly Tier Compaction ([docs/cron/jobs/local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md))
 - [ ] Cron 4: `partial_hour_merge_{id}` — Active Partial-Hour Ingest Merge ([docs/cron/jobs/partial-hour-merge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/partial-hour-merge.md))
 - [ ] Cron 5: `rollup_heal_{id}` — Top-N Rollup Backfill & Self-Healing ([docs/cron/jobs/rollup-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-heal.md))
@@ -265,9 +265,9 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [ ] Cron 13: `insights_prewarmer_{id}` — Background Anomaly Detection Insight Prewarming ([docs/cron/jobs/insights-prewarmer.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/insights-prewarmer.md))
 - [ ] Cron 14: `sync_metadata_{id}` — Analyst Path A State Sync ([docs/cron/jobs/sync-metadata.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/sync-metadata.md))
 - [ ] Cron 15: `ledger_sweep_{id}` — High-Scale Ingest Ledger Crash-Net Sweep ([docs/cron/jobs/ledger-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-sweep.md))
-- [ ] Cron 16: `rum_sync_{id}` — Standard Mode RUM Beacon Ingest & Staging ([docs/cron/jobs/rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md))
+- [ ] Cron 16: `rum_discovery_{id}` — Standard Mode RUM Beacon Ingest & Staging ([docs/cron/jobs/rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md))
 - [ ] Cron 17: `rum_commit_{id}` — Standard Mode RUM Beacon DuckLake Commit ([docs/cron/jobs/rum-commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-commit.md))
-- [ ] Cron 18: `rum_discovery_{id}` — High-Scale RUM Discovery & Ledger Dispatch ([docs/cron/jobs/rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md))
+- [ ] Cron 18: High-Scale RUM Discovery & Ledger Dispatch (same logical job: `rum_discovery_{id}`) ([docs/cron/jobs/rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md))
 - [ ] Cron 19: `ledger_rum_sweep_{id}` — High-Scale RUM Ledger Crash-Net Sweep ([docs/cron/jobs/ledger-rum-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-rum-sweep.md))
 - [ ] Cron 20: `metric_snapshot` — Global System Vitals & Host Metrics Snapshot ([docs/cron/jobs/metric-snapshot.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/metric-snapshot.md))
 - [ ] Cron 21: `rdns_enrichment` — Client IP Reverse DNS Background Enrichment ([docs/cron/jobs/rdns-enrichment.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rdns-enrichment.md))

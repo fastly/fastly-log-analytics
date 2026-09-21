@@ -19,11 +19,11 @@ Every scheduled background job in this system must adhere to these non-negotiabl
    - Jobs that perform FOS S3 operations must record Class A / Class B counts in `usage_log.db`.
    - Jobs that modify operational SQLite databases must use `ThreadLocalPool` with connection wait times (`app.thread_wait_ms`) instrumented.
 4. **Strict Concurrency & Pod Safety:**
-   - Long-running cloud write jobs (`optimize`, `expire`, `commit`) must acquire exclusive per-service distributed or file-based locks.
+   - Long-running cloud write jobs (`optimize`, `expire`, `log_commit`) must acquire exclusive per-service distributed or file-based locks.
    - In distributed deployments (`DEPLOYMENT_MODE=high_throughput`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
 5. **Local-Only Safety Gate (`FLA_DEV_NO_CRONS=1`):**
    - Development environments and AI test sessions must be capable of running safely without racing production FOS buckets or generating external write costs.
-   - When `FLA_DEV_NO_CRONS=1` is set, all cloud-writing jobs (`log_discovery`, `commit`, `optimize`, `expire`, `full_sync`, `gap_heal`) are completely bypassed. Only local-safe jobs (`local_compact`, `rollup_compact`, `rollup_heal`, `partial_hour_merge`, `duckdb_recycle`, `metric_snapshot`) are permitted to run.
+   - When `FLA_DEV_NO_CRONS=1` is set, all cloud-writing jobs (`log_discovery`, `log_commit`, `optimize`, `expire`, `full_sync`, `gap_heal`) are completely bypassed. Only local-safe jobs (`local_compact`, `rollup_compact`, `rollup_heal`, `partial_hour_merge`, `duckdb_recycle`, `metric_snapshot`) are permitted to run.
 6. **Graceful Degradation & Autonomous Recovery:**
    - Background tasks must be idempotent. Re-running a job on the same data must never produce duplicate rows or corrupt catalog state.
    - Distributed pipelines must include automated crash-net sweeps (`ledger_sweep`, `ledger_rum_sweep`) to recover orphaned worker claims.
@@ -82,7 +82,7 @@ Background jobs respect tenant isolation and dual-role permission models:
 | Role | Permitted Jobs | Prohibited Jobs | Architectural Rationale |
 |---|---|---|---|
 | **Admin (`read_write`)** | **All 26 Jobs:** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, backups, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
-| **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_sync_{id}`, `rum_commit_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
+| **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `log_commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_discovery_{id}`, `rum_commit_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
 | **Analyst Path B (Remote Live Share)** | **Zero Cron Execution:** Read-only analyst sessions connect over HTTPS to the admin's running process. | All cron execution APIs blocked with HTTP 403. | Analysts share the running host server; all background maintenance is handled by the host admin process. |
 
 ---
@@ -94,7 +94,7 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | Job Identifier | Default Cadence | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
 |---|---|---|---|---|---|
 | `log_discovery_{id}` | Derived (`log_period // 2`) | APScheduler | RedBeat + Celery | Admin | [log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md) |
-| `commit_{id}` | Every 5 min (configurable) | APScheduler | RedBeat + Celery | Admin | [commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md) |
+| `log_commit_{id}` | Every 5 min (configurable) | APScheduler | RedBeat + Celery | Admin | [commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md) |
 | `local_compact_{id}` | Every 1 min | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md) |
 | `partial_hour_merge_{id}` | Every 30 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/partial-hour-merge.md) |
 | `rollup_heal_{id}` | Hourly at :05 | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-heal.md) |
@@ -109,7 +109,7 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/sync-metadata.md) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-sweep.md) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
-| `rum_sync_{id}` | Every 60 sec | APScheduler | Disabled | Admin | [rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md) |
+| `rum_discovery_{id}` | Every 60 sec | APScheduler | Disabled | Admin | [rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md) |
 | `rum_commit_{id}` | Every 5 min | APScheduler | Disabled | Admin | [rum-commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-commit.md) |
 | `rum_discovery_{id}` | Every 60 sec | Disabled | RedBeat + Celery | Admin | [rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md) |
 | `ledger_rum_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-rum-sweep.md) |
@@ -171,7 +171,7 @@ When verifying background jobs during automated test suites or dedicated AI test
 - [ ] **2. Manual API Triggering:**
   - Execute manual POST triggers for each job and verify HTTP 200 response:
     - `/api/admin/sync/{service_id}` (`log_discovery`)
-    - `/api/admin/commit/{service_id}` (`commit`)
+    - `/api/admin/commit/{service_id}` (`log_commit`)
     - `/api/admin/compact/{service_id}` (`local_compact`)
     - `/api/admin/optimize/{service_id}` (`optimize`)
     - `/api/admin/expire-snapshots/{service_id}` (`expire`)

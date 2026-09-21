@@ -27,7 +27,7 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Synchronous mode uses `rum_sync_{service_id}` instead. Cleanly returns if invoked. | N/A |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Synchronous mode uses `rum_discovery_{service_id}` instead. Cleanly returns if invoked. | N/A |
 | **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Discovers FOS `raw/rum/` keys, writes to PostgreSQL `ingest_ledger`, dispatches Celery conversion jobs. | PostgreSQL row-level locks on `ingest_ledger`. |
 
 ---

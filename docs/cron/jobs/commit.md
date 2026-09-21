@@ -1,12 +1,12 @@
 > [!TODO]
 > **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `commit_{service_id}` background job.
+> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `log_commit_{service_id}` background job.
 > An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
 
-# Background Job Specification: `commit_{service_id}`
+# Background Job Specification: `log_commit_{service_id}`
 
 ## 1. Overview & Objectives
-- **Job Identifier:** `commit_{service_id}`
+- **Job Identifier:** `log_commit_{service_id}`
 - **Category:** Durable Lakehouse Storage Commit
 - **Purpose:** Flushes transient Parquet buffer files from local disk (`cache/{bucket}/`) into the durable DuckLake table (`ducklake/` in FOS or Postgres catalog).
 - **Why It Runs:** Prevents unbounded local disk growth and ensures data durability. Once committed to DuckLake, rows are preserved permanently in cloud object storage and discoverable by all analytical readers.
