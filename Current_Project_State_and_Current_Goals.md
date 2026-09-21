@@ -276,6 +276,32 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [ ] Cron 24: `share_audit_purge` — Remote Share Audit Trail Retention Purge ([docs/cron/jobs/share-audit-purge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/share-audit-purge.md))
 - [ ] Cron 25: `duckdb_recycle` — DuckDB Native Memory Pool Recycling & Heap Trim ([docs/cron/jobs/duckdb-recycle.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/duckdb-recycle.md))
 
+#### Current Work Item: Phase 2, Cron 1 — `log_discovery_{service_id}`
+
+The current session is in requirements clarification and documentation only; implementation
+and end-to-end verification are intentionally deferred to a new session. The agreed
+quarantine behavior is:
+
+- Request logs and RUM remain separate ingestion cron families, with shared transport,
+  telemetry, and cost-attribution primitives.
+- Valid rows continue ingesting when individual lines are malformed. Each malformed line
+  is retained as exact original bytes, with source object, line ordinal, byte offset when
+  known, parser error, and size metadata.
+- A corrupt gzip container is retained as the complete original gzip evidence because no
+  line-level decode is trustworthy.
+- Evidence is local-only under `data/services/{service_id}/quarantine/`. The FOS source
+  object is deleted only after local capture and metadata indexing succeed; otherwise it
+  remains retryable. Quarantine is diagnostic evidence, not a re-ingest queue.
+- Retention is seven days by default. The configurable cap is 1,000 **bad lines**; the
+  oldest entries are evicted immediately and bounded when the cap is exceeded. Total
+  bytes are measured for visibility and warnings but do not independently evict.
+- High-Scale serving/web ownership performs quarantine maintenance; Celery workers do not
+  run a duplicate cleanup path. Read-only Analyst Path A instances do not write or
+  maintain quarantine evidence.
+- Quarantine access is admin/read-write only. The admin UI groups evidence by source
+  object, expands to individual bad-line details, provides decoded previews when safe,
+  and offers exact-byte download plus selected-line and purge-all controls.
+
 ### Phase 3: Analytics & Admin Pages Audit (One Single Session per Page)
 - [ ] Page 1: Dashboard (`/dashboard`) ([docs/pages/dashboard.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md))
 - [ ] Page 2: Control Room (`/control-room`) ([docs/pages/control-room.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/control-room.md))

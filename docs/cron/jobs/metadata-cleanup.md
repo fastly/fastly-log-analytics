@@ -36,8 +36,8 @@
 ## 4. Role & Permissions Matrix
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
-| **Admin (`read_write`)** | Active | `POST /api/admin/metadata/cleanup/{service_id}` | Pruning statistics in Admin UI. Purges expired quarantine files in FOS. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Prunes local analyst metadata databases. FOS object deletion skipped. |
+| **Admin (`read_write`)** | Active | `POST /api/admin/metadata/cleanup/{service_id}` | Pruning statistics in Admin UI. Purges expired local quarantine evidence. |
+| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Prunes local analyst metadata databases. Quarantine writes and maintenance skipped. |
 | **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side maintenance only; no direct interaction. |
 
 ---
@@ -60,9 +60,9 @@
    - Deletes `slow_queries` older than `slow_queries_days`.
 7. **SQLite VACUUM:**
    - If any rows were deleted, issues `VACUUM` on SQLite database files to reclaim freed pages and compact physical storage.
-8. **Global System Metrics & Quarantine Purge:**
+8. **Global System Metrics & Local Quarantine Purge:**
    - Purges global `metric_snapshots` older than 30 days.
-   - If admin (`access_level != "read_only"`), purges expired quarantined files (> 14 days) from FOS and deletes metadata records.
+   - The owning serving/web process purges local quarantine evidence older than seven days and performs bounded oldest-first eviction when the 1,000-bad-line cap is exceeded. Evidence bytes are measured for warnings but do not independently trigger eviction. Celery workers and read-only Analyst Path A instances do not run this maintenance.
 9. **Telemetry, Progress & Duration Finalization:**
    - Emits done event to `cron_progress`.
    - Records deleted row tallies and execution status in `cron_runs`.
@@ -72,7 +72,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & Resource Capture:**
-  - **FOS Calls:** Zero FOS calls except when purging expired quarantine objects (> 14 days) on admin services.
+  - **FOS Calls:** Zero FOS calls for quarantine maintenance; evidence is local-only.
   - **SQLite Operations:** Every `DELETE FROM` statement executes in 5,000-row chunks via `ThreadLocalPool` with instrumented timings.
   - **Lock Wait Time:** Connection acquisition wait (`app.thread_wait_ms`) remains < 20ms.
 - **Timing & Resource Budgets:**
@@ -88,7 +88,14 @@
 ## 7. Failure Modes & Recovery Runbooks
 - **SQLite Database Locked (`sqlite3.OperationalError`):** Handled gracefully; politeness gate prevents contention with active dashboard users.
 - **Corrupt SQLite File:** If corruption is detected, logs error and triggers automated `.dump` restore.
-- **Read-Only Service (Analyst):** FOS quarantine deletion skipped; only local SQLite tables pruned.
+- **Read-Only Service (Analyst):** Quarantine writes and maintenance are skipped; only the instance's owned operational metadata is pruned.
+
+### Local quarantine evidence
+- One bad raw line is one capacity item. A source object with multiple malformed lines
+  therefore contributes multiple items to the 1,000-item cap.
+- Evidence is stored under `data/services/{service_id}/quarantine/`, with metadata in the
+  service metadata database. The admin view groups those line items by source object and
+  expands them for inspection.
 
 ---
 

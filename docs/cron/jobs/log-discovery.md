@@ -67,7 +67,7 @@
 3. Selects batches using `UPDATE ingest_ledger SET status = 'claimed', worker_id = %s, claimed_at = NOW() WHERE status = 'discovered' ... RETURNING filename`.
 4. Enqueues conversion tasks to Celery queue (`convert_batch_files.delay(...)`).
 5. **Stateless Workers:** Worker processes skip local DuckDB heavy refresh to avoid file-lock contention with readers; autocomplete cache updates run on the serving web-pod.
-6. **Quarantine Handling:** Conversion failures or malformed lines record bad rows to FOS `errors/`, insert records into `quarantined_files` table via `metadata_db.insert_quarantined_file()`, and transition ledger rows to `quarantined` (or `dead_letter` after 3 failed attempts). Any quarantined rows elevate `cron_runs` status to `warning`.
+6. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as exact original bytes under `data/services/{service_id}/quarantine/`, indexed with its source object, line ordinal, byte offset when known, parser error, and byte size, then the FOS source is deleted only after local capture succeeds. A corrupt gzip container is retained as the complete original gzip evidence. Capture failures leave the FOS object retryable. Quarantine is diagnostic evidence, not a re-ingest queue. Any quarantined rows elevate `cron_runs` status to `warning`.
 
 ---
 
@@ -90,7 +90,18 @@
 
 ## 7. Failure Modes & Recovery Runbooks
 - **FOS Rate Limiting / 429:** Exponential backoff with retry; logs warning in `cron_runs`.
-- **Corrupted `.gz` File / Bad Rows:** Writes bad lines to FOS `errors/`, records in `quarantined_files` via `insert_quarantined_file()`, elevates `cron_runs` status to `warning`, and continues remaining batch.
+- **Corrupted `.gz` File / Bad Rows:** Captures exact local evidence, records it in `quarantined_files`, deletes the FOS source only after successful capture, elevates `cron_runs` status to `warning`, and continues the remaining batch. A failed local capture leaves the source available for retry.
+
+### Quarantine retention and admin surface
+- Default retention is seven days.
+- The configurable capacity is 1,000 bad lines, not 1,000 source objects. Oldest entries are evicted immediately in bounded batches when the cap is exceeded.
+- Total evidence bytes are measured and surfaced for operational warnings but do not independently trigger eviction.
+- High-Scale serving/web ownership runs retention and capacity maintenance; Celery workers do not duplicate it.
+- Evidence is admin/read-write only. Analyst Path A and Analyst Path B cannot inspect,
+  download, or purge it.
+- The admin UI groups entries by source object and expands to individual malformed-line
+  details. It provides a decoded preview when safe, exact-byte download on demand, and
+  selected-line or purge-all controls.
 - **Stale Buffer View Race:** Handled via `execute_with_stale_view_retry()` clearing view cache and rebuilding.
 
 ---
