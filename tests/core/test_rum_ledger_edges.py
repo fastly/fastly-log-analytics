@@ -574,7 +574,10 @@ def test_sweep_rum_ledger_fails_closed_when_the_broker_check_raises():
                 ):
                     summary = sweep_rum_ledger_once(SERVICE_ID)
 
-    assert summary == {"reclaimed": 1, "redispatched": 0, "discovered": 0}
+    assert summary["reclaimed"] == 1
+    assert summary["redispatched"] == 0
+    assert summary["discovered"] == 0
+    assert summary["broker_ok"] is False
     mock_rum_delay.assert_not_called()
     mock_batch_delay.assert_not_called()
     assert _ledger_row(con, reclaim_key)["status"] == "discovered"
@@ -633,6 +636,8 @@ def test_sweep_rum_ledger_leaves_terminal_rows_alone(status):
                 ):
                     summary = sweep_rum_ledger_once(SERVICE_ID)
 
-    assert summary == {"reclaimed": 0, "redispatched": 0, "discovered": 0}
+    assert summary["reclaimed"] == 0
+    assert summary["redispatched"] == 0
+    assert summary["discovered"] == 0
     mock_rum_delay.assert_not_called()
     assert _ledger_row(con, key)["status"] == status
