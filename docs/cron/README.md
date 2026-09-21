@@ -101,7 +101,7 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | `rollup_compact_{id}` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-compact.md) |
 | `optimize_{id}` | Daily 04:00 UTC | APScheduler | RedBeat / Worker | Admin | [optimize.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/optimize.md) |
 | `expire_{id}` | Hourly | APScheduler | Worker / Pod | Admin | [expire.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/expire.md) |
-| `full_sync_{id}` | Daily 03:30 UTC | APScheduler | RedBeat + Celery | Admin | [full-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/full-sync.md) |
+| `full_sync_{id}` | Every 6h (:30 UTC) | APScheduler | RedBeat + Celery | Admin | [full-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/full-sync.md) |
 | `gap_heal_{id}` | Every 30 min | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/gap-heal.md) |
 | `metadata_cleanup_{id}` | Daily 03:15 UTC | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/metadata-cleanup.md) |
 | `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/alerts-evaluation.md) |

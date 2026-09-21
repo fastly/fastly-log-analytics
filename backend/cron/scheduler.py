@@ -997,17 +997,26 @@ class Scheduler:
             # See note above (analyst branch) on the no-alerts gate.
             self._register_alerts_evaluation_job(service_id, log_period, seen_ids)
 
-            # ── Daily full-LIST sweep (catches late-arriving files) ───────────
+            # ── Full-LIST sweep (catches late-arriving files, every 6h) ───────
             full_sweep_cfg = prov.get("cron_full_sweep", {})
             if full_sweep_cfg.get("enabled", True):
                 full_job_id = f"full_sync_{service_id}"
                 seen_ids.add(full_job_id)
-                if full_job_id not in self._job_ids:
+                cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
+                cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
+                if full_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(full_job_id)
+                        if job:
+                            job.reschedule("cron", hour=cron_hours, minute=cron_minute)
+                    except Exception:
+                        pass
+                else:
                     self._add_job(
                         _run_full_sweep,
                         "cron",
-                        hour=3,
-                        minute=30,  # 03:30 UTC — runs before optimize (04:00)
+                        hour=cron_hours,
+                        minute=cron_minute,  # 03:30, 09:30, 15:30, 21:30 UTC
                         args=[service_id],
                         id=full_job_id,
                         max_instances=1,
@@ -1015,7 +1024,12 @@ class Scheduler:
                         misfire_grace_time=3600,
                     )
                     self._job_ids[full_job_id] = full_job_id
-                    logger.info("🔍 [scheduler] Registered full-sweep job %s (daily 03:30 UTC).", full_job_id)
+                    logger.info(
+                        "🔍 [scheduler] Registered full-sweep job %s (hours: %s at :%02d UTC).",
+                        full_job_id,
+                        cron_hours,
+                        cron_minute,
+                    )
 
             # ── Gap-heal evaluator (auto full_sweep on sustained loss) ────────
             # Polls compute_log_accounting every 30 min; when sustained loss
@@ -1032,11 +1046,19 @@ class Scheduler:
             if heal_cfg.get("enabled", True) and has_logging_svc:
                 heal_job_id = f"gap_heal_{service_id}"
                 seen_ids.add(heal_job_id)
-                if heal_job_id not in self._job_ids:
+                interval_mins = int(heal_cfg.get("interval_minutes", 30))
+                if heal_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(heal_job_id)
+                        if job:
+                            job.reschedule("interval", minutes=interval_mins)
+                    except Exception:
+                        pass
+                else:
                     self._add_job(
                         _run_gap_heal,
                         "interval",
-                        minutes=int(heal_cfg.get("interval_minutes", 30)),
+                        minutes=interval_mins,
                         args=[service_id],
                         id=heal_job_id,
                         max_instances=1,
@@ -1047,7 +1069,7 @@ class Scheduler:
                     logger.info(
                         "🩹 [scheduler] Registered gap-heal job %s (every %d min).",
                         heal_job_id,
-                        int(heal_cfg.get("interval_minutes", 30)),
+                        interval_mins,
                     )
 
             # ── Daily optimize job (Iceberg small-file compaction) ────────────

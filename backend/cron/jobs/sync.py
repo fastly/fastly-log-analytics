@@ -741,6 +741,7 @@ def _run_full_sweep(
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import ingest
+    from backend.utils.active_requests import should_defer_cron
 
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
@@ -749,11 +750,55 @@ def _run_full_sweep(
     if src is None or src.get("access_level") == "read_only":
         return
 
+    if should_defer_cron("full_sync", service_id):
+        return
+
     try:
         run_id = start_cron_run(src, "full_sync")
     except RuntimeError as e:
         logger.info("⏭️  \x1b[95m[full_sync]\x1b[0m %s: skipping — %s", service_id, e)
         return
+
+    full_sweep_cfg = cfg.get("provisioning", {}).get("cron_full_sweep", {})
+    configured_max_files = full_sweep_cfg.get("max_files")
+    configured_max_seconds = full_sweep_cfg.get("max_seconds")
+
+    effective_max_files = max_files
+    effective_max_seconds = max_seconds
+
+    # Dynamic queue-depth / backlog adaptation when running with default budget:
+    if max_files == _FULL_SWEEP_DEFAULT_MAX_FILES:
+        if configured_max_files is not None:
+            effective_max_files = int(configured_max_files)
+        elif svcconfig.is_high_throughput_mode(src):
+            try:
+                from backend.celery_status import celery_queue_depths
+
+                queues, broker_ok = celery_queue_depths()
+                total_queue = sum(queues.values()) if broker_ok else 0
+                if total_queue > 5_000:
+                    effective_max_files = min(effective_max_files, 5_000)
+                elif total_queue < 500:
+                    effective_max_files = max(effective_max_files, 50_000)
+            except Exception:
+                pass
+        else:
+            try:
+                from backend.core import iceberg as db_iceberg
+
+                stats = db_iceberg.buffer_backlog_stats(src)
+                buf_files = int(stats.get("file_count", 0) or 0)
+                if buf_files > 2_000:
+                    effective_max_files = min(effective_max_files, 5_000)
+                    effective_max_seconds = min(effective_max_seconds, 300)
+                elif buf_files < 200:
+                    effective_max_files = max(effective_max_files, 50_000)
+                    effective_max_seconds = max(effective_max_seconds, 1200)
+            except Exception:
+                pass
+
+    if max_seconds == _FULL_SWEEP_DEFAULT_MAX_SECONDS and configured_max_seconds is not None:
+        effective_max_seconds = int(configured_max_seconds)
 
     if svcconfig.is_high_throughput_mode(src):
         # Celery data plane: the catch-net is a full-prefix LIST diffed into
@@ -761,6 +806,7 @@ def _run_full_sweep(
         # file-based ingest here would open the per-service .duckdb from a
         # worker — the cross-process single-writer lock hazard.
         from backend.core.ingest import discover_prefix
+        from backend.cron.jobs._common import finalize_cron_duration
 
         sweep_started = time.time()
         try:
@@ -789,6 +835,8 @@ def _run_full_sweep(
                 summary="Full-prefix ledger sweep failed",
             )
             logger.exception("[full_sync] %s: ledger sweep failed", service_id)
+        finally:
+            finalize_cron_duration(src, run_id, sweep_started)
         return
 
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
@@ -799,8 +847,8 @@ def _run_full_sweep(
     logger.info(
         "▶️  \x1b[95m[full_sync]\x1b[0m %s: Full-LIST sweep started (max_files=%d, max_seconds=%d).",
         _display,
-        max_files,
-        max_seconds,
+        effective_max_files,
+        effective_max_seconds,
     )
 
     start_time_exec = time.time()
@@ -813,8 +861,8 @@ def _run_full_sweep(
         for event in ingest(
             source=src,
             delete_after=delete_after,
-            max_files=max_files,
-            max_seconds=max_seconds,
+            max_files=effective_max_files,
+            max_seconds=effective_max_seconds,
             incremental_only=False,
         ):
             _log_and_add_progress(run_id, service_id, job_name="full_sync", event=event)
@@ -843,6 +891,7 @@ def _run_full_sweep(
 
         new_files = done_event.get("new_files", 0)
         rows = done_event.get("rows_inserted", 0)
+        corrupt_rows_cnt = done_event.get("corrupt_rows", 0)
         # full_sync is the whole-bucket backstop for the stranded-delete reconcile,
         # so it can reclaim strands of any age; record + surface that count too.
         reclaimed = done_event.get("deleted_files", 0)
@@ -851,17 +900,20 @@ def _run_full_sweep(
             if new_files == 0
             else f"Backfilled {new_files} late-arriving file(s), {rows} row(s)"
         )
+        if corrupt_rows_cnt > 0:
+            summary += f"; ⚠ {corrupt_rows_cnt} corrupt row(s) quarantined"
         if reclaimed:
             summary += f"; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
+        status = "warning" if corrupt_rows_cnt > 0 else "success"
         log_cron_run(
             src,
             "full_sync",
             time.time() - start_time_exec,
-            "success",
+            status,
             files_downloaded=new_files,
             files_deleted_fos=reclaimed,
             rows_ingested=rows,
-            corrupt_rows=done_event.get("corrupt_rows", 0),
+            corrupt_rows=corrupt_rows_cnt,
             summary=summary,
             run_id=run_id,
             log_output=_extract_log_text(run_id),
@@ -884,6 +936,9 @@ def _run_full_sweep(
         logger.exception("[full_sync] %s: unexpected error", service_id)
     finally:
         end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
+
+        finalize_cron_duration(src, run_id, start_time_exec)
 
     logger.info("⏹️  \x1b[95m[full_sync]\x1b[0m %s: Daily full-LIST sweep finished.", _display)
 
@@ -1008,9 +1063,13 @@ def _run_gap_heal(service_id: str) -> None:
         return
 
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.utils.active_requests import should_defer_cron
 
     src = get_source_for_service(service_id)
     if src is None or src.get("access_level") == "read_only":
+        return
+
+    if should_defer_cron("gap_heal", service_id):
         return
 
     try:
@@ -1071,7 +1130,7 @@ def _run_gap_heal(service_id: str) -> None:
                     src,
                     "gap_heal",
                     time.time() - start_time_exec,
-                    "success",
+                    "warning",
                     summary=msg,
                     run_id=run_id,
                     log_output=_extract_log_text(run_id),
@@ -1092,7 +1151,7 @@ def _run_gap_heal(service_id: str) -> None:
             src,
             "gap_heal",
             time.time() - start_time_exec,
-            "success",
+            "warning",
             summary=msg,
             run_id=run_id,
             log_output=_extract_log_text(run_id),
@@ -1122,6 +1181,9 @@ def _run_gap_heal(service_id: str) -> None:
         logger.exception("[gap_heal] %s: unexpected error", service_id)
     finally:
         end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
+
+        finalize_cron_duration(src, run_id, start_time_exec)
 
 
 @cron_task("ledger_sweep", job_name="ledger_sweep")

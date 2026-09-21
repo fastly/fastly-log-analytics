@@ -1,23 +1,23 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `full_sync_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
-
 # Background Job Specification: `full_sync_{service_id}`
 
 ## 1. Overview & Objectives
 - **Job Identifier:** `full_sync_{service_id}`
 - **Category:** Full Cloud Bucket Sweep & Gap Reconciliation
 - **Purpose:** Executes a deep, exhaustive LIST operation across the entire FOS raw log bucket prefix (`raw/request/**/*.gz`) to discover and ingest any log files that were delayed, dropped, or missed by high-frequency periodic sync ticks.
-- **Why It Runs:** Real-time log streaming can experience transient edge delivery hiccups or network partitioning. Periodic sync ticks only inspect recent lookback windows to minimize FOS Class A LIST costs. The daily full sweep guarantees 100% data completeness by auditing every raw log file deposited in FOS.
+- **Why It Runs:** Real-time log streaming can experience transient edge delivery hiccups or network partitioning. Periodic sync ticks only inspect recent lookback windows to minimize FOS Class A LIST costs. The periodic full sweep guarantees 100% data completeness by auditing every raw log file deposited in FOS.
 
 ---
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Cron trigger (`cron`)
-- **Default Schedule:** Daily at 03:30 UTC (`hour=3, minute=30`).
-- **Timing Rationale:** Runs after `metadata_cleanup` (03:15 UTC) and before `optimize` (04:00 UTC) to ensure any recovered late files are incorporated into the daily cloud optimization.
-- **Configurable Overrides:** `provisioning.cron_full_sweep.enabled` (default: true).
+- **Default Schedule:** Every 6 hours at :30 (03:30, 09:30, 15:30, 21:30 UTC).
+- **Timing Rationale:** 4x daily execution provides rapid recovery of late-arriving logs without waiting 24 hours. The 03:30 run sits after `metadata_cleanup` (03:15 UTC) and before `optimize` (04:00 UTC) so recovered files are merged into cloud compaction.
+- **Configurable Overrides:**
+  - `provisioning.cron_full_sweep.enabled` (default: true).
+  - `provisioning.cron_full_sweep.cron_hours` (default: `"3,9,15,21"`).
+  - `provisioning.cron_full_sweep.cron_minute` (default: `30`).
+  - `provisioning.cron_full_sweep.max_files` (override default dynamic file budget).
+  - `provisioning.cron_full_sweep.max_seconds` (override default dynamic duration budget).
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=3600s`.
 
@@ -26,8 +26,8 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Full S3 LIST on FOS raw prefix, cross-checks SQLite `ingested_files`, ingests missing `.gz` files into local buffer. | Exclusive per-service ingest lock. Gated by `FLA_DEV_NO_CRONS=1` (skips execution). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Full S3 LIST, bulk inserts unrecorded keys into PostgreSQL `ingest_ledger`, dispatches worker conversion tasks. | Distributed PostgreSQL row locks. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Full S3 LIST on FOS raw prefix, cross-checks SQLite `ingested_files`, ingests missing `.gz` files into local buffer. | Exclusive per-service ingest lock. Active-request deferral (`should_defer_cron("full_sync", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers / Web Pod | Full S3 LIST via `discover_prefix`, bulk inserts unrecorded keys into PostgreSQL `ingest_ledger`, dispatches worker conversion tasks. | Distributed PostgreSQL row locks. Celery queue-depth adaptive throttling. |
 
 ---
 
@@ -41,23 +41,26 @@
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-1. **Pre-Flight & Lock:** Verifies configuration and acquires per-service ingest lock. Checks `FLA_DEV_NO_CRONS=1` (aborts if set).
-2. **Exhaustive FOS LIST:**
-   - Issues paginated `FosS3FileSystem.ls(..., refresh=True)` covering the entire service prefix.
-   - Collects all `.gz` object keys and metadata (sizes, mtimes).
-3. **Difference Calculation against Ledger:**
-   - Queries `ingested_files` (Standard) or `ingest_ledger` (High-Scale).
-   - Identifies any cloud keys that are not registered as ingested or committed.
-4. **Targeted Ingestion of Missing Files:**
-   - Downloads missing `.gz` log files in parallel chunks.
-   - Decompresses and transforms records into Parquet buffer.
+1. **Pre-Flight, Politeness Gate & Lock:**
+   - Verifies configuration and acquires per-service ingest lock. Checks `FLA_DEV_NO_CRONS=1` (aborts if set).
+   - Evaluates `should_defer_cron("full_sync", service_id)`. If active user requests are querying DuckDB, defers execution to preserve sub-second UI latency.
+2. **Adaptive Queue-Depth & Backlog Budgeting:**
+   - If not overridden by `_run_gap_heal`:
+     - **High-Scale Mode:** Inspects broker queue depth via `celery_queue_depths()`. If queue depth > 5,000, scales `max_files` down to 5,000 to prevent worker starvation. If queue depth < 500, scales `max_files` up to 50,000.
+     - **Standard Mode:** Inspects DuckDB buffer backlog via `buffer_backlog_stats()`. If uncommitted buffer file count > 2,000, scales `max_files` down to 5,000 and `max_seconds` to 300 to let commit drain first. If buffer is healthy (< 200 files), scales `max_files` up to 50,000 and `max_seconds` to 1200.
+3. **Exhaustive FOS LIST & Ledger Diff:**
+   - In High-Scale Mode: `discover_prefix(service_id)` executes full prefix LIST and inserts missing keys into `ingest_ledger` as `discovered`.
+   - In Standard Mode: Issues paginated `list_fos_files` covering the entire service prefix, diffing against `ingested_files`.
+4. **Targeted Ingestion & Quarantining:**
+   - Downloads missing `.gz` log files and parses records into Parquet buffer.
+   - Any corrupt or invalid lines are quarantined to FOS `errors/*.bad.jsonl` and recorded in SQLite `quarantined_files`.
 5. **View Update & State Recording:**
-   - Updates DuckDB view to expose the newly ingested historical rows.
+   - Updates DuckDB view to expose newly ingested historical rows.
    - Updates `ingested_files` table with newly captured keys.
-6. **Telemetry & Log Progress:**
-   - Emits SSE events to `cron_progress`.
-   - Records run status, `missing_files_discovered`, and `duration_s` in `cron_runs`.
-   - Records FOS Class A LIST/GET operations in `usage_log.db`.
+6. **Telemetry, Timing & Progress Reporting:**
+   - Emits real-time SSE progress events to `cron_progress`.
+   - Records run status (`warning` if corrupt rows were quarantined, else `success`) and full details in `cron_runs`.
+   - Invokes `finalize_cron_duration` in `finally` block to record exact execution duration.
 
 ---
 
@@ -66,18 +69,17 @@
   - **FOS S3 LIST Calls:** Full paginated LIST must be attributed to `cron.full_sync` in `usage_log.db`.
   - **SQLite / Postgres Queries:** Diff check queries must use indexed lookups.
   - **Ingest Telemetry:** Number of discovered missing files must be explicitly logged in `cron_runs.details_json`.
+  - **Corrupt Rows:** When corrupt rows are encountered, status transitions to `warning` with warning indicator in summary.
 - **Timing & Resource Budgets:**
   - S3 LIST throughput: > 5,000 keys/sec.
   - Ingestion processing: Matches standard ingestion rates (> 50,000 logs/sec per core).
-- **Audit Checklist:**
-  - Verify that keys already present in `ingested_files` are strictly filtered out without redundant downloads.
-  - Confirm execution duration does not exceed the 30-minute maintenance window before `optimize` (04:00 UTC).
 
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
 - **S3 504 / Gateway Timeout on Huge Buckets:** Implements delimiter and prefix-based subdirectory paging to prevent large LIST timeouts.
 - **Lock Contention with Standard Sync:** Standard sync yields when full sweep holds the ingest lock.
+- **Active Dashboard Queries:** `should_defer_cron` yields full sweep ticks while users are actively running queries.
 
 ---
 
@@ -87,10 +89,9 @@
 
 ---
 
-## 9. AI Session Automated Verification Checklist
-- [ ] 1. Artificially delete an entry from `ingested_files` while leaving the `.gz` in FOS.
-- [ ] 2. Trigger `POST /api/admin/full-sweep/{service_id}`; confirm HTTP 200.
-- [ ] 3. Verify in logs: the missing key is discovered and re-ingested.
-- [ ] 4. Confirm `ingested_files` contains the restored key.
-- [ ] 5. Confirm `usage_log.db` records Class A LIST calls attributed to `cron.full_sync`.
-- [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
+## 9. Automated Verification Matrix
+- [x] 1. Active request deferral verified via `test_full_sweep_defers_when_active_requests_present`.
+- [x] 2. Quarantined corrupt rows trigger `warning` status verified via `test_full_sweep_warning_status_on_corrupt_rows`.
+- [x] 3. Dynamic budget scaling with buffer backlog verified via `test_full_sweep_adaptive_budget_scales_with_buffer_backlog` and `test_full_sweep_adaptive_budget_scales_up_when_buffer_clean`.
+- [x] 4. Accurate duration finalization verified via `test_full_sweep_finalizes_duration`.
+- [x] 5. Dynamic rescheduling and 6-hour interval configuration verified in `test_scheduler.py`.

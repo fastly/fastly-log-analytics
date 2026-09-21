@@ -828,6 +828,114 @@ def test_full_sweep_error_event_logs_with_processed_counts(
     assert "Full-sweep failed" in kwargs.get("summary", "")
 
 
+def test_full_sweep_defers_when_active_requests_present(monkeypatch, stub_load_config):
+    """When active requests are in flight, should_defer_cron returns True
+    and _run_full_sweep returns early without starting a cron run."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    start_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    start_cron.assert_not_called()
+
+
+def test_full_sweep_warning_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress):
+    """When corrupt rows are quarantined during a full sweep, the cron run status
+    must transition to 'warning' and the summary must flag the quarantine."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=101))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 1, "rows_inserted": 50, "corrupt_rows": 3}]),
+    )
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    log_cron.assert_called_once()
+    args, kwargs = log_cron.call_args
+    assert args[3] == "warning", "Corrupt rows must report warning status"
+    assert "quarantined" in kwargs.get("summary", "").lower()
+    assert kwargs.get("corrupt_rows") == 3
+
+
+def test_full_sweep_adaptive_budget_scales_with_buffer_backlog(monkeypatch, stub_load_config, stub_progress):
+    """When buffer backlog is high (>2000 files), dynamic budget scales max_files down to 5000."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=102))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.iceberg.buffer_backlog_stats",
+        MagicMock(return_value={"file_count": 3500, "total_bytes": 100_000_000}),
+    )
+
+    ingest_mock = MagicMock(return_value=iter([{"type": "done", "new_files": 0, "rows_inserted": 0}]))
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    assert ingest_mock.call_count == 1
+    _, kwargs = ingest_mock.call_args
+    assert kwargs["max_files"] == 5_000, "High buffer backlog must scale max_files down to 5000"
+    assert kwargs["max_seconds"] == 300
+
+
+def test_full_sweep_adaptive_budget_scales_up_when_buffer_clean(monkeypatch, stub_load_config, stub_progress):
+    """When buffer is healthy (<200 files), dynamic budget scales max_files up to 50,000."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=103))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.iceberg.buffer_backlog_stats",
+        MagicMock(return_value={"file_count": 50, "total_bytes": 1_000_000}),
+    )
+
+    ingest_mock = MagicMock(return_value=iter([{"type": "done", "new_files": 0, "rows_inserted": 0}]))
+    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    assert ingest_mock.call_count == 1
+    _, kwargs = ingest_mock.call_args
+    assert kwargs["max_files"] == 50_000, "Clean buffer must scale max_files up to 50,000"
+    assert kwargs["max_seconds"] == 1200
+
+
+def test_full_sweep_finalizes_duration(monkeypatch, stub_load_config, stub_progress):
+    """finalize_cron_duration must be called in finally block."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=104))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
+    )
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    finalize.assert_called_once()
+    assert finalize.call_args.args[1] == 104
+
+
 # ── Cron → ingest → metadata_db cascade (real ingest, moto S3) ────────────
 
 

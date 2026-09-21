@@ -2251,7 +2251,7 @@ def test_run_gap_heal_triggers_full_sweep_on_sustained_loss():
     assert kw["max_seconds"] == 900
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
-    assert args[3] == "success"
+    assert args[3] == "warning"
     assert "triggering full_sweep" in kwargs["summary"]
 
 
@@ -2293,8 +2293,45 @@ def test_run_gap_heal_respects_throttle_window():
     assert full_sweep_calls == [], "throttle must prevent re-trigger"
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
-    assert args[3] == "success"
+    assert args[3] == "warning"
     assert "throttled" in kwargs["summary"]
+
+
+def test_run_gap_heal_defers_when_active_requests_present():
+    """When active queries are running, gap_heal politely defers without starting a cron run."""
+    from backend.cron.jobs.sync import _run_gap_heal
+
+    start_calls = []
+    with (
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", side_effect=lambda *a, **k: start_calls.append(a)),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(start_calls) == 0
+
+
+def test_run_gap_heal_finalizes_duration():
+    """gap_heal must finalize its duration in finally: block."""
+    from backend.cron.jobs.sync import _run_gap_heal
+
+    update_duration_calls = []
+    with (
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_gap_heal_src()),
+        patch("backend.core.duckdb.start_cron_run", return_value=77),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.duckdb.update_cron_duration", side_effect=lambda *a, **k: update_duration_calls.append(a)),
+        patch(
+            "backend.routers.admin.compute_log_accounting",
+            return_value={"sustained_loss": None, "buckets": [], "totals": None},
+        ),
+    ):
+        _run_gap_heal("svc-gap")
+
+    assert len(update_duration_calls) == 1
+    assert update_duration_calls[0][1] == 77
 
 
 def test_gap_heal_severity_bands():
