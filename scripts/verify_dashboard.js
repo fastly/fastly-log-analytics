@@ -182,6 +182,7 @@ function registerErrorListeners(page, browser, contextName) {
       process.exit(1);
     }
     await page.waitForSelector('main', { timeout: 30000 });
+    
     // Robust waiting: Wait for the header badge containing the REQUEST totals to fully render
     try {
       await page.waitForFunction(() => {
@@ -189,6 +190,24 @@ function registerErrorListeners(page, browser, contextName) {
       }, { timeout: 30000 });
     } catch (e) {
       console.log(`[Dashboard 30d] Warning: timed out waiting for header totals to render, proceeding...`);
+    }
+
+    // Wait for aggregates/bundle queries to complete and loading overlays to disappear
+    try {
+      await page.waitForFunction(() => {
+        const text = document.body.innerText;
+        return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
+      }, { timeout: 45000 });
+    } catch (e) {
+      console.log(`[Dashboard 30d] Warning: timed out waiting for "Crunching logs" loading overlays to clear, proceeding...`);
+    }
+
+    // Wait for at least one Plotly chart to become visible
+    try {
+      await page.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+      console.log(`[Dashboard 30d] Verified: Plotly charts are fully rendered and visible! 🟢`);
+    } catch (e) {
+      console.log(`⚠️ [Dashboard 30d] Warning: timed out waiting for Plotly charts to become visible.`);
     }
 
     const bodyText30d = await page.evaluate(() => document.body.innerText);
@@ -233,7 +252,7 @@ function registerErrorListeners(page, browser, contextName) {
 
     // Verify that at least one Plotly chart is rendered and visible on the page
     const isChartVisible = await page.evaluate(() => {
-      const el = document.querySelector('.js-plotly-plot');
+      const el = document.querySelector('.js-plotly-plot, .plotly');
       if (!el) return false;
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -391,7 +410,24 @@ function registerErrorListeners(page, browser, contextName) {
       process.exit(1);
     }
     await rumPage.waitForSelector('main', { timeout: 10000 });
-    await rumPage.waitForTimeout(4000);
+    
+    // Wait for RUM aggregates/bundle queries to complete and loading overlays to disappear
+    try {
+      await rumPage.waitForFunction(() => {
+        const text = document.body.innerText;
+        return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
+      }, { timeout: 45000 });
+    } catch (e) {
+      console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
+    }
+
+    // Wait for at least one Plotly chart to become visible on the RUM page
+    try {
+      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+      console.log(`[RUM 30d] Verified: RUM Plotly charts are fully rendered and visible! 🟢`);
+    } catch (e) {
+      console.log(`⚠️ [RUM 30d] Warning: timed out waiting for RUM Plotly charts to become visible.`);
+    }
 
     const rumBodyText30d = await rumPage.evaluate(() => document.body.innerText);
 
@@ -406,21 +442,17 @@ function registerErrorListeners(page, browser, contextName) {
       await browser.close();
       process.exit(1);
     }
-    if (pageRumTotal === 0) {
-      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM metrics card has 0 total beacons!`);
-      await browser.close();
-      process.exit(1);
-    }
 
     // Verify that at least one Plotly chart is rendered and visible on standard RUM page
     const isRumChartVisible = await rumPage.evaluate(() => {
-      const el = document.querySelector('.js-plotly-plot');
+      const el = document.querySelector('.js-plotly-plot, .plotly');
       if (!el) return false;
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     });
     if (!isRumChartVisible) {
-      console.error(`❌ [Playwright RUM Chart Verification] Verification Failed: No visible Plotly charts found on the RUM page!`);
+      await rumPage.screenshot({ path: '../rum-screenshot.png', fullPage: true });
+      console.error(`❌ [Playwright RUM Chart Verification] Verification Failed: No visible Plotly charts found on the RUM page! Screenshot saved to rum-screenshot.png`);
       await browser.close();
       process.exit(1);
     }
@@ -438,6 +470,12 @@ function registerErrorListeners(page, browser, contextName) {
     // Extract Page RUM Total
     const pageRumMatch = rumBodyText30d.match(/TOTAL BEACONS\s*([\d,]+)/i);
     const pageRumTotal = pageRumMatch ? parseInt(pageRumMatch[1].replace(/,/g, ''), 10) : 0;
+
+    if (pageRumTotal === 0) {
+      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM metrics card has 0 total beacons!`);
+      await browser.close();
+      process.exit(1);
+    }
 
     console.log(`[RUM 30d Consistency] Header Raw Metrics Total: ${headerRumTotal} │ Page Distinct Beacons Total: ${pageRumTotal}`);
     const isRemote = expectedEnv === "gce" || expectedEnv === "elevation";
