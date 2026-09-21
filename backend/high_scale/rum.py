@@ -31,17 +31,19 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     start = datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else None
     end = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else None
 
-    query = """
+    query_base = """
         SELECT metric_name,
                quantile(0.75)(metric_value) as p75,
                count() as total,
                sum(if(metric_rating = 'good', 1, 0)) as good,
-               sum(if(metric_rating = 'needs-improvement', 1, 0)) as ni,
+               sum(if(metric_rating = 'needs-improvement' OR metric_rating = 'needs_improvement', 1, 0)) as ni,
                sum(if(metric_rating = 'poor', 1, 0)) as poor
         FROM rum_vitals_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
-        GROUP BY metric_name
     """
+    if start and end:
+        query_base += " AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp <= {end:DateTime64(3)}"
+    query = query_base + " GROUP BY metric_name"
     try:
         rows = service.client.execute(query, {"service_id": service.service_id, "start": start, "end": end})
     except Exception:

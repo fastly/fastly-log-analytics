@@ -728,6 +728,22 @@ async def rum_analytics(
             # Check eligibility:
             # 1. No filters allowed for rollups (same as standard rollups)
             # 2. RUM aggregates tables must exist and have data
+
+            target_hours = None
+            try:
+                st = parse_iso_utc(start_time)
+                et = parse_iso_utc(end_time)
+                if st and et:
+                    st_hour = st.replace(minute=0, second=0, microsecond=0)
+                    et_hour = et.replace(minute=0, second=0, microsecond=0)
+                    target_hours = []
+                    curr = st_hour
+                    while curr <= et_hour:
+                        target_hours.append(curr)
+                        curr += datetime.timedelta(hours=1)
+            except Exception:
+                pass
+
             if not parsed_filters:
                 from backend.core.rollups.rum import table_exists
 
@@ -749,8 +765,10 @@ async def rum_analytics(
                                         service_id,
                                     )
                                     from backend.core.duckdb import get_connection
+
                                     with get_connection(rum_source, read_only=False) as write_con:
                                         from backend.core.rollups.rum import recompute_rum_aggregates
+
                                         recompute_rum_aggregates(write_con, service_id)
                                     use_rollup = True
                                 except Exception as init_err:
@@ -783,7 +801,7 @@ async def rum_analytics(
                         ) as cur_raw_any:
                             if not cur_raw_any.fetchone()[0]:
                                 return {"no_data": True}
-                            
+
                             # On-demand RUM aggregates recomputation!
                             try:
                                 logger.info(
@@ -791,11 +809,13 @@ async def rum_analytics(
                                     service_id,
                                 )
                                 from backend.core.duckdb import get_connection
+
                                 # Open a temporary read-write connection to the RUM source
                                 with get_connection(rum_source, read_only=False) as write_con:
                                     from backend.core.rollups.rum import recompute_rum_aggregates
-                                    recompute_rum_aggregates(write_con, service_id)
-                                
+
+                                    recompute_rum_aggregates(write_con, service_id, hours=target_hours)
+
                                 # If successful, we can re-verify if we now have rollup data!
                                 with track_query(
                                     con,
@@ -1075,8 +1095,7 @@ async def rum_analytics(
                     SELECT
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name NOT LIKE 'event_%' THEN distinct_id END) AS pageviews,
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name LIKE 'event_%' THEN distinct_id END) AS interactions,
-                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count,
-                        COUNT(DISTINCT distinct_id) AS total_beacons
+                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count
                     FROM (
                         SELECT 'vitals' AS src, metric_name, {distinct_id} AS distinct_id
                         FROM t_client_vitals
@@ -1088,11 +1107,11 @@ async def rum_analytics(
                     [],
                     "rum_consolidated_counts",
                 ) as cur_counts:
-                    pageviews, interactions, errors_count, total_beacons = cur_counts.fetchone()
+                    pageviews, interactions, errors_count = cur_counts.fetchone()
                     pageviews = pageviews or 0
                     interactions = interactions or 0
                     errors_count = errors_count or 0
-                    total_beacons = total_beacons or 0
+                    total_beacons = pageviews + interactions + errors_count
 
                 # A. Check if any data exists at all (Deferred check ONLY if no matches in selected bounds)
                 if total_beacons == 0:

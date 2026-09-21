@@ -544,15 +544,46 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 with _ConnectionHolder(rum_source, read_only=True) as rum_con:
 
                     def _query_rum_bootstrap(con):
+                        from backend.core.rollups.rum import table_exists
+
+                        if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
+                            try:
+                                v_cnt_res = con.execute(
+                                    "SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE dimension = 'total' AND value = 'pageviews'"
+                                ).fetchone()
+                                v_cnt = v_cnt_res[0] if v_cnt_res and v_cnt_res[0] is not None else 0
+
+                                e_cnt_res = con.execute("SELECT SUM(error_count) FROM rum_error_aggregates").fetchone()
+                                e_cnt = e_cnt_res[0] if e_cnt_res and e_cnt_res[0] is not None else 0
+
+                                cnt = v_cnt + e_cnt
+
+                                ts_v_res = con.execute("SELECT MAX(bucket_start) FROM rum_vitals_aggregates").fetchone()
+                                ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
+
+                                ts_e_res = con.execute("SELECT MAX(bucket_start) FROM rum_error_aggregates").fetchone()
+                                ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
+
+                                ts_list = []
+                                if ts_v:
+                                    ts_list.append(ts_v)
+                                if ts_e:
+                                    ts_list.append(ts_e)
+                                l_ts = max(ts_list) if ts_list else None
+                                return cnt, l_ts
+                            except Exception:
+                                pass
+
                         distinct_id = (
                             "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
                         )
-                        cnt = (
-                            con.execute(
-                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
-                            ).fetchone()[0]
-                            or 0
+                        v_cnt = (
+                            con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM client_vitals").fetchone()[0] or 0
                         )
+                        e_cnt = (
+                            con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM client_errors").fetchone()[0] or 0
+                        )
+                        cnt = v_cnt + e_cnt
 
                         ts_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
                         ts_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()

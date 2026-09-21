@@ -122,12 +122,36 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
             # Update/recompute precomputed RUM aggregates
             try:
+                from datetime import UTC, datetime, timedelta
+
                 from backend.core.duckdb import get_connection, rum_source_for
                 from backend.core.rollups.rum import recompute_rum_aggregates
 
                 rum_src = rum_source_for(src)
                 with get_connection(rum_src, read_only=False) as rum_con:
-                    recompute_rum_aggregates(rum_con, service_id)
+                    # Find hours that had data in the last 48 hours to do a fast incremental recompute
+                    recent_hours = []
+                    since = datetime.now(UTC) - timedelta(hours=48)
+                    try:
+                        res_v = rum_con.execute(
+                            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp >= ?",
+                            [since],
+                        ).fetchall()
+                        recent_hours.extend([r[0] for r in res_v if r[0]])
+                    except Exception:
+                        pass
+
+                    try:
+                        res_e = rum_con.execute(
+                            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp >= ?",
+                            [since],
+                        ).fetchall()
+                        recent_hours.extend([r[0] for r in res_e if r[0]])
+                    except Exception:
+                        pass
+
+                    target_hours = list(set(recent_hours)) if recent_hours else None
+                    recompute_rum_aggregates(rum_con, service_id, hours=target_hours)
             except Exception as agg_err:
                 logger.warning("[rum_commit] %s: RUM aggregates update failed: %s", service_id, agg_err, exc_info=True)
 

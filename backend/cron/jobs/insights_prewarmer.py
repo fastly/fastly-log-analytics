@@ -166,13 +166,11 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
 
-        # OOM fix: Prewarmer is a solitary background task and shouldn't be
-        # clamped to the 512MB DUCKDB_POOL_CONN_MEMORY_LIMIT meant for concurrent queries.
+        # OOM fix: Prewarmer is a solitary background task and shouldn't exceed container memory limits.
+        # Enforcing a safe ceiling (like 256MB on small-VM/GCE setups) forces DuckDB to spill
+        # intermediate states to disk, preventing container crashes and OOM-killer events.
         try:
-            from backend.core.duckdb import DUCKDB_MEMORY_LIMIT
-
-            if DUCKDB_MEMORY_LIMIT:
-                con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}';")
+            con.execute("SET memory_limit = '256MB';")
         except Exception:
             pass
 

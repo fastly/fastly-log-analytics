@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ def table_exists(con, table_name: str) -> bool:
         return False
 
 
-def recompute_rum_aggregates(con, service_id: str) -> None:
+def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
     """Ensure RUM aggregate tables exist, find active hours, and update them idempotently."""
     logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")
     con.execute("""
@@ -52,35 +53,57 @@ def recompute_rum_aggregates(con, service_id: str) -> None:
         return
 
     # 2. Identify the hours that have raw data
-    hours = set()
-    if has_vitals:
-        try:
-            res = con.execute(
-                "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp IS NOT NULL"
-            ).fetchall()
-            for r in res:
-                if r[0]:
-                    hours.add(r[0])
-        except Exception as e:
-            logger.warning("[rum_rollups] Failed to query active hours from client_vitals: %s", e)
+    hours_set = set()
+    if hours is not None:
+        for h in hours:
+            if isinstance(h, str):
+                try:
+                    parsed_dt = datetime.fromisoformat(h.replace("Z", "+00:00")).replace(
+                        minute=0, second=0, microsecond=0, tzinfo=None
+                    )
+                    hours_set.add(parsed_dt)
+                except ValueError:
+                    pass
+            elif isinstance(h, datetime):
+                # Ensure we work with naive datetimes or normalize timezone
+                naive_dt = h.replace(tzinfo=None).replace(minute=0, second=0, microsecond=0)
+                hours_set.add(naive_dt)
+    else:
+        if has_vitals:
+            try:
+                res = con.execute(
+                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp IS NOT NULL"
+                ).fetchall()
+                for r in res:
+                    if r[0]:
+                        # Normalize timezone to match the other path
+                        dt_val = r[0]
+                        if hasattr(dt_val, "replace"):
+                            dt_val = dt_val.replace(tzinfo=None)
+                        hours_set.add(dt_val)
+            except Exception as e:
+                logger.warning("[rum_rollups] Failed to query active hours from client_vitals: %s", e)
 
-    if has_errors:
-        try:
-            res = con.execute(
-                "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp IS NOT NULL"
-            ).fetchall()
-            for r in res:
-                if r[0]:
-                    hours.add(r[0])
-        except Exception as e:
-            logger.warning("[rum_rollups] Failed to query active hours from client_errors: %s", e)
+        if has_errors:
+            try:
+                res = con.execute(
+                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp IS NOT NULL"
+                ).fetchall()
+                for r in res:
+                    if r[0]:
+                        dt_val = r[0]
+                        if hasattr(dt_val, "replace"):
+                            dt_val = dt_val.replace(tzinfo=None)
+                        hours_set.add(dt_val)
+            except Exception as e:
+                logger.warning("[rum_rollups] Failed to query active hours from client_errors: %s", e)
 
-    if not hours:
+    if not hours_set:
         logger.info("[rum_rollups] %s: No active RUM data hours found. Skipping.", service_id)
         return
 
     # 3. Format hours as SQL TIMESTAMPTZ list
-    hours_list = sorted(list(hours))
+    hours_list = sorted(list(hours_set))
     hours_str = ", ".join(f"TIMESTAMPTZ '{h.isoformat()}'" for h in hours_list)
 
     logger.info(
@@ -137,8 +160,8 @@ def recompute_rum_aggregates(con, service_id: str) -> None:
                 COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement') AS ni_count,
                 COUNT(*) FILTER (WHERE metric_rating = 'poor') AS poor_count,
                 CAST(MEDIAN(metric_value) AS DOUBLE) AS p50_value,
-                CAST(APPROX_QUANTILE(metric_value, 0.75) AS DOUBLE) AS p75_value,
-                CAST(APPROX_QUANTILE(metric_value, 0.99) AS DOUBLE) AS p99_value
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
+                CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p99_value
             FROM client_vitals
             WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
             GROUP BY bucket_start, metric_name
@@ -259,7 +282,7 @@ def recompute_rum_aggregates(con, service_id: str) -> None:
                 0 AS ni_count,
                 0 AS poor_count,
                 0.0 AS p50_value,
-                CAST(APPROX_QUANTILE(metric_value, 0.75) AS DOUBLE) AS p75_value,
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
                 0.0 AS p99_value
             FROM client_vitals
             WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
@@ -281,7 +304,7 @@ def recompute_rum_aggregates(con, service_id: str) -> None:
                 0 AS ni_count,
                 0 AS poor_count,
                 0.0 AS p50_value,
-                CAST(APPROX_QUANTILE(metric_value, 0.75) AS DOUBLE) AS p75_value,
+                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
                 0.0 AS p99_value
             FROM client_vitals
             WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})

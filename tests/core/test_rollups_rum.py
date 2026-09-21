@@ -178,7 +178,7 @@ def test_recompute_rum_aggregates_idempotency_and_correctness():
     assert lcp_row[2] == 2  # event_count
     assert lcp_row[3] == 1  # good_count
     assert lcp_row[4] == 1  # poor_count
-    assert lcp_row[5] == 4.5  # p75 of [2.5, 4.5] is 4.5 under DuckDB approx_quantile
+    assert lcp_row[5] == 4.0  # p75 of [2.5, 4.5] is exact 4.0 under PERCENTILE_CONT
 
     # Check errors aggregates
     e_rows = con.execute(
