@@ -125,10 +125,21 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 from datetime import UTC, datetime, timedelta
 
                 from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.iceberg._ducklake import _ducklake_attach
                 from backend.core.rollups.rum import recompute_rum_aggregates
 
                 rum_src = rum_source_for(src)
                 with get_connection(rum_src, read_only=False) as rum_con:
+                    # Attach standard lake catalog so standard client_vitals / client_errors views can resolve
+                    try:
+                        _ducklake_attach(rum_con, src, read_only=True)
+                    except Exception as attach_err:
+                        logger.warning(
+                            "[rum_commit] %s: Failed to attach lake catalog to RUM connection: %s",
+                            service_id,
+                            attach_err,
+                        )
+
                     # Find hours that had data in the last 48 hours to do a fast incremental recompute
                     recent_hours = []
                     since = datetime.now(UTC) - timedelta(hours=48)
