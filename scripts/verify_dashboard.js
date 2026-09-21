@@ -212,6 +212,10 @@ function registerErrorListeners(page, browser, contextName) {
 
     const bodyText30d = await page.evaluate(() => document.body.innerText);
 
+    // Extract Page Request Total (from request metrics card)
+    const pageReqMatch = bodyText30d.match(/total:\s*([\d,]+)/i);
+    const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
+
     // Extract Header Request Total
     const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
     let headerReqTotal = pageReqTotal;
@@ -220,10 +224,6 @@ function registerErrorListeners(page, browser, contextName) {
     } else {
       console.log(`⚠️ [Dashboard 30d] Warning: REQUEST total count not found in global header. Falling back to page metrics total.`);
     }
-
-    // Extract Page Request Total (from request metrics card)
-    const pageReqMatch = bodyText30d.match(/total:\s*([\d,]+)/i);
-    const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
 
     console.log(`[Dashboard 30d Consistency] Header REQUEST Total: ${headerReqTotal} │ Page Metrics Total: ${pageReqTotal}`);
     if (pageReqTotal > headerReqTotal * 1.20 || pageReqTotal === 0) {
