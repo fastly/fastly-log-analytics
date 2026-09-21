@@ -51,9 +51,15 @@ async def _request(
     headers: dict[str, str],
 ) -> tuple[int, int]:
     started = time.perf_counter()
+    import uuid
     try:
+        # Clone headers and generate a completely unique Request ID per log line
+        headers = headers.copy()
+        req_id = f"req-{uuid.uuid4().hex[:16]}"
+        headers["Fastly-Request-ID"] = req_id
+        
         if "/rum-beacon" in url:
-            # Parse metrics from URL to construct a real Faro payload body
+            # Parse metrics from URL to construct a real, randomized Faro payload body
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(url)
             qs = parse_qs(parsed.query)
@@ -68,16 +74,6 @@ async def _request(
             cid = qs.get("rum_cid", ["cid-1234"])[0]
             path = qs.get("rum_pathname", ["/"])[0]
             
-            # Realistic rating calculation
-            if metric == "LCP":
-                rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
-            elif metric == "CLS":
-                rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
-            elif metric == "INP":
-                rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
-            else:
-                rating = "good" if value <= 800 else "poor"
-                
             browser = random.choice(["Chrome", "Firefox", "Safari"])
             os_name = random.choice(["Windows", "macOS", "iOS"])
             device = "Mobile" if os_name == "iOS" else "Desktop"
@@ -87,15 +83,60 @@ async def _request(
                     "browser": {"name": browser, "mobile": device == "Mobile"},
                     "os": {"name": os_name},
                     "page": {"url": f"{parsed.scheme}://{parsed.netloc}{path}"}
-                },
-                "measurements": [
+                }
+            }
+            
+            # Randomize the beacon type to simulate a realistic production stream
+            beacon_type = random.choices(["vitals", "interaction", "exception"], weights=[75, 15, 10])[0]
+            
+            if beacon_type == "vitals":
+                # Realistic rating calculation
+                if metric == "LCP":
+                    rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
+                elif metric == "CLS":
+                    rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
+                elif metric == "INP":
+                    rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
+                else:
+                    rating = "good" if value <= 800 else "poor"
+                    
+                faro_payload["measurements"] = [
                     {
                         "type": "web-vitals",
                         "values": {metric: value},
                         "context": {"rating": rating}
                     }
                 ]
-            }
+            elif beacon_type == "interaction":
+                event_name = random.choice(["click_search_button", "form_submit", "tab_switch_performance"])
+                faro_payload["events"] = [
+                    {
+                        "name": event_name,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "attributes": {"element_id": f"btn_{random.randint(100, 999)}"}
+                    }
+                ]
+            else: # exception
+                err_msg = random.choice([
+                    "TypeError: Cannot read properties of undefined (reading 'split')",
+                    "ReferenceError: analytics_tracker is not defined",
+                    "DOMException: Failed to execute 'appendChild' on 'Node'"
+                ])
+                faro_payload["exceptions"] = [
+                    {
+                        "type": "error",
+                        "value": err_msg,
+                        "stacktrace": {
+                            "frames": [
+                                {
+                                    "filename": "static/chunks/main.js",
+                                    "lineno": random.randint(10, 500),
+                                    "colno": random.randint(1, 120)
+                                }
+                            ]
+                        }
+                    }
+                ]
             
             async with session.post(url, headers=headers, data=json.dumps(faro_payload)) as response:
                 await response.read()

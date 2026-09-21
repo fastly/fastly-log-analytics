@@ -14,7 +14,8 @@ import random
 import sys
 import tempfile
 import time
-from datetime import datetime, UTC
+import uuid
+from datetime import datetime, UTC, timedelta
 
 # Insert backend directory to import libraries
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -23,26 +24,9 @@ from backend.core.duckdb import get_source_for_service
 from backend.core.ingest import _get_fos_client
 
 
-def generate_rum_record(service_id: str, timestamp_str: str) -> dict:
-    metric = random.choice(["LCP", "CLS", "INP", "FID", "TTFB", "FCP"])
+def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
+    beacon_type = random.choices(["vitals", "interaction", "exception"], weights=[75, 15, 10])[0]
     
-    # Generate realistic values and ratings
-    if metric == "LCP":
-        value = random.choice([800, 1200, 2200, 3100, 4200])
-        rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
-    elif metric == "CLS":
-        value = round(random.uniform(0.01, 0.35), 3)
-        rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
-    elif metric == "INP":
-        value = random.choice([50, 120, 180, 240, 320])
-        rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
-    elif metric == "TTFB":
-        value = random.choice([150, 250, 650, 950])
-        rating = "good" if value <= 800 else "poor"
-    else: # FID or FCP
-        value = random.choice([10, 25, 80, 150])
-        rating = "good" if value <= 100 else "poor"
-
     browser = random.choice(["Chrome", "Firefox", "Safari", "Edge", "Mobile Safari"])
     os_name = random.choice(["Windows", "macOS", "iOS", "Android", "Linux"])
     device = "Mobile" if "Mobile" in browser or os_name in ("iOS", "Android") else "Desktop"
@@ -54,35 +38,78 @@ def generate_rum_record(service_id: str, timestamp_str: str) -> dict:
 
     path = random.choice(["/", "/dashboard", "/origin", "/security", "/performance", "/rum"])
     cid = f"cid-{random.randint(10000, 99999)}"
+    req_id = f"req-{uuid.uuid4().hex[:16]}"
 
-    # Faro payload structure
     faro_payload = {
         "meta": {
-            "browser": {
-                "name": browser,
-                "mobile": device == "Mobile"
-            },
-            "os": {
-                "name": os_name
-            },
-            "page": {
-                "url": f"http://localhost{path}"
-            }
-        },
-        "measurements": [
+            "browser": {"name": browser, "mobile": device == "Mobile"},
+            "os": {"name": os_name},
+            "page": {"url": f"http://localhost{path}"}
+        }
+    }
+
+    if beacon_type == "vitals":
+        metric = random.choice(["LCP", "CLS", "INP", "FID", "TTFB", "FCP"])
+        if metric == "LCP":
+            value = random.choice([800, 1200, 2200, 3100, 4200])
+            rating = "good" if value <= 2500 else ("needs_improvement" if value <= 4000 else "poor")
+        elif metric == "CLS":
+            value = round(random.uniform(0.01, 0.35), 3)
+            rating = "good" if value <= 0.1 else ("needs_improvement" if value <= 0.25 else "poor")
+        elif metric == "INP":
+            value = random.choice([50, 120, 180, 240, 320])
+            rating = "good" if value <= 200 else ("needs_improvement" if value <= 500 else "poor")
+        elif metric == "TTFB":
+            value = random.choice([150, 250, 650, 950])
+            rating = "good" if value <= 800 else "poor"
+        else:
+            value = random.choice([10, 25, 80, 150])
+            rating = "good" if value <= 100 else "poor"
+
+        faro_payload["measurements"] = [
             {
                 "type": "web-vitals",
-                "values": {
-                    metric: value
-                },
-                "context": {
-                    "rating": rating
+                "values": {metric: value},
+                "context": {"rating": rating}
+            }
+        ]
+
+    elif beacon_type == "interaction":
+        event_name = random.choice(["click_search_button", "form_submit", "tab_switch_performance", "modal_close_settings"])
+        faro_payload["events"] = [
+            {
+                "name": event_name,
+                "timestamp": record_dt.isoformat(),
+                "attributes": {"element_id": f"btn_{random.randint(100, 999)}"}
+            }
+        ]
+
+    else: # exception / JS Error
+        err_msg = random.choice([
+            "TypeError: Cannot read properties of null (reading 'style')",
+            "ReferenceError: x_analytics is not defined",
+            "Error: Failed to fetch npm registry assets",
+            "DOMException: Playwright auto-navigation aborted"
+        ])
+        faro_payload["exceptions"] = [
+            {
+                "type": "error",
+                "value": err_msg,
+                "stacktrace": {
+                    "frames": [
+                        {
+                            "filename": f"static/chunks/main-{uuid.uuid4().hex[:8]}.js",
+                            "lineno": random.randint(10, 500),
+                            "colno": random.randint(1, 120)
+                        }
+                    ]
                 }
             }
         ]
-    }
 
-    # Serialized record matching Fastly edge output format precisely
+    # Timestamp formatting with dynamic, microsecond-accurate UTC format
+    timestamp_str = record_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
     return {
         "service_id": service_id,
         "timestamp": timestamp_str,
@@ -94,8 +121,10 @@ def generate_rum_record(service_id: str, timestamp_str: str) -> dict:
         "os": os_name,
         "device": device,
         "rum_cid": cid,
+        "req_id": req_id,  # UNIQUE REQUEST ID per raw log line!
+        "request_event_id": req_id, # Aligns ClickHouse high-scale schema
         "url": f"http://localhost{path}",
-        "rum_body": json.dumps(faro_payload) # Serialized JSON payload parsed by rum_ingest.py
+        "rum_body": json.dumps(faro_payload)
     }
 
 
@@ -121,7 +150,7 @@ def main():
     # Initialize FOS client
     s3 = _get_fos_client(src)
     
-    # Resolve the correct time-based folder layout for raw/rum prefix
+    # Resolve correct time-based folder layout for raw/rum prefix
     now = datetime.now(UTC)
     prefix = now.strftime("raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
     filename = f"{now.strftime('%Y-%m-%dT%H:%M:%S.000')}-mock-rum-seeding-{random.randint(1000, 9999)}.log.gz"
@@ -130,12 +159,13 @@ def main():
     print(f"   - Bucket: {bucket}")
     print(f"   - Target Key: {key}")
 
-    # Generate records
-    print(f"   - Generating {args.rows:,} mock Faro vitals records...")
-    
-    # Ensure UTC timezone formatting matches S3 log delivery perfectly
-    timestamp_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    records = [generate_rum_record(args.service_id, timestamp_str) for _ in range(args.rows)]
+    # Generate records with varied sequential timestamps
+    print(f"   - Generating {args.rows:,} mock Faro vitals, events, and exceptions...")
+    records = []
+    for i in range(args.rows):
+        # Subtract tiny sequential microsecond steps so every single record has a unique timestamp
+        record_dt = now - timedelta(milliseconds=i * 50)
+        records.append(generate_rum_record(args.service_id, record_dt))
 
     # Write gzipped log to temp file
     with tempfile.NamedTemporaryFile(suffix=".log.gz", delete=False) as tmp:

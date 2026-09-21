@@ -304,17 +304,21 @@ function getUrlWithParam(url, key, value) {
     const pageRumTotal = pageRumMatch ? parseInt(pageRumMatch[1].replace(/,/g, ''), 10) : 0;
 
     console.log(`[RUM 30d Consistency] Header Raw Metrics Total: ${headerRumTotal} │ Page Distinct Beacons Total: ${pageRumTotal}`);
-    if (pageRumTotal > headerRumTotal || pageRumTotal === 0) {
-      console.error(`[RUM 30d Consistency] Verification Failed: Page RUM count (${pageRumTotal}) is invalid, zero, or exceeds lifetime header count (${headerRumTotal})!`);
-      await browser.close();
-      process.exit(1);
-    }
-    
-    if (expectedArch === "standard") {
-      const ratio = (headerRumTotal / pageRumTotal).toFixed(2);
-      console.log(`[RUM 30d Consistency] Verified: Distinct browser pageviews (${pageRumTotal}) is a natural subset of raw ingested vitals metrics (${headerRumTotal}) with a healthy ${ratio}:1 metrics-per-beacon ratio. 🟢`);
+    const isRemote = expectedEnv === "gce" || expectedEnv === "elevation";
+    if (isRemote) {
+      if (pageRumTotal > headerRumTotal || pageRumTotal === 0) {
+        console.error(`[RUM 30d Consistency] Verification Failed: Page RUM count (${pageRumTotal}) is invalid, zero, or exceeds lifetime header count (${headerRumTotal})!`);
+        await browser.close();
+        process.exit(1);
+      }
+      console.log(`[RUM 30d Consistency] Verified: Distinct browser pageviews (${pageRumTotal}) is consistent with raw metrics (${headerRumTotal}) on remote host! 🟢`);
     } else {
-      console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% consistent! 🟢`);
+      if (headerRumTotal !== pageRumTotal) {
+        console.error(`[RUM 30d Consistency] Verification Failed: Header RUM count (${headerRumTotal}) does not match page metrics count (${pageRumTotal})! Ingestion collapsed or duplicated rows.`);
+        await browser.close();
+        process.exit(1);
+      }
+      console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% in-sync! 🟢`);
     }
 
     await rumPage.close();
