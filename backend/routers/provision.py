@@ -1092,6 +1092,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
     # Reload scheduler immediately to pick up any changed log periods or sync intervals
     try:
         from backend.cron.scheduler import get_scheduler
+
         get_scheduler().reload()
         logger.info("[provision_ingest] Successfully reloaded scheduler with new intervals! 🔄")
     except Exception as e:
