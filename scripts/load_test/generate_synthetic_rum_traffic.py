@@ -13,9 +13,8 @@ import os
 import random
 import sys
 import tempfile
-import time
 import uuid
-from datetime import datetime, UTC, timedelta
+from datetime import UTC, datetime, timedelta
 
 # Insert backend directory to import libraries
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -26,11 +25,11 @@ from backend.core.ingest import _get_fos_client
 
 def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
     beacon_type = random.choices(["vitals", "interaction", "exception"], weights=[75, 15, 10])[0]
-    
+
     browser = random.choice(["Chrome", "Firefox", "Safari", "Edge", "Mobile Safari"])
     os_name = random.choice(["Windows", "macOS", "iOS", "Android", "Linux"])
     device = "Mobile" if "Mobile" in browser or os_name in ("iOS", "Android") else "Desktop"
-    
+
     city = random.choice(["Denver", "New York", "San Francisco", "London", "Tokyo", "Paris"])
     region = random.choice(["CO", "NY", "CA", "ENG", "TKY", "IDF"])
     country = random.choice(["US", "US", "US", "GB", "JP", "FR"])
@@ -44,7 +43,7 @@ def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
         "meta": {
             "browser": {"name": browser, "mobile": device == "Mobile"},
             "os": {"name": os_name},
-            "page": {"url": f"http://localhost{path}"}
+            "page": {"url": f"http://localhost{path}"},
         }
     }
 
@@ -67,30 +66,30 @@ def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
             rating = "good" if value <= 100 else "poor"
 
         faro_payload["measurements"] = [
-            {
-                "type": "web-vitals",
-                "values": {metric: value},
-                "context": {"rating": rating}
-            }
+            {"type": "web-vitals", "values": {metric: value}, "context": {"rating": rating}}
         ]
 
     elif beacon_type == "interaction":
-        event_name = random.choice(["click_search_button", "form_submit", "tab_switch_performance", "modal_close_settings"])
+        event_name = random.choice(
+            ["click_search_button", "form_submit", "tab_switch_performance", "modal_close_settings"]
+        )
         faro_payload["events"] = [
             {
                 "name": event_name,
                 "timestamp": record_dt.isoformat(),
-                "attributes": {"element_id": f"btn_{random.randint(100, 999)}"}
+                "attributes": {"element_id": f"btn_{random.randint(100, 999)}"},
             }
         ]
 
-    else: # exception / JS Error
-        err_msg = random.choice([
-            "TypeError: Cannot read properties of null (reading 'style')",
-            "ReferenceError: x_analytics is not defined",
-            "Error: Failed to fetch npm registry assets",
-            "DOMException: Playwright auto-navigation aborted"
-        ])
+    else:  # exception / JS Error
+        err_msg = random.choice(
+            [
+                "TypeError: Cannot read properties of null (reading 'style')",
+                "ReferenceError: x_analytics is not defined",
+                "Error: Failed to fetch npm registry assets",
+                "DOMException: Playwright auto-navigation aborted",
+            ]
+        )
         faro_payload["exceptions"] = [
             {
                 "type": "error",
@@ -100,10 +99,10 @@ def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
                         {
                             "filename": f"static/chunks/main-{uuid.uuid4().hex[:8]}.js",
                             "lineno": random.randint(10, 500),
-                            "colno": random.randint(1, 120)
+                            "colno": random.randint(1, 120),
                         }
                     ]
-                }
+                },
             }
         ]
 
@@ -122,9 +121,9 @@ def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
         "device": device,
         "rum_cid": cid,
         "req_id": req_id,  # UNIQUE REQUEST ID per raw log line!
-        "request_event_id": req_id, # Aligns ClickHouse high-scale schema
+        "request_event_id": req_id,  # Aligns ClickHouse high-scale schema
         "url": f"http://localhost{path}",
-        "rum_body": json.dumps(faro_payload)
+        "rum_body": json.dumps(faro_payload),
     }
 
 
@@ -135,7 +134,7 @@ def main():
     args = parser.parse_args()
 
     print(f"🚀 SEEDING SYNTHETIC RUM TRAFFIC FOR SERVICE: {args.service_id}")
-    
+
     # Load FOS credentials
     src = get_source_for_service(args.service_id)
     if not src:
@@ -149,7 +148,7 @@ def main():
 
     # Initialize FOS client
     s3 = _get_fos_client(src)
-    
+
     # Resolve correct time-based folder layout for raw/rum prefix
     now = datetime.now(UTC)
     prefix = now.strftime("raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
@@ -170,7 +169,7 @@ def main():
     # Write gzipped log to temp file
     with tempfile.NamedTemporaryFile(suffix=".log.gz", delete=False) as tmp:
         temp_path = tmp.name
-        
+
     try:
         with gzip.open(temp_path, "wt", encoding="utf-8") as f:
             for r in records:

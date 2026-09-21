@@ -486,8 +486,12 @@ export const handlers = [
     HttpResponse.json({ sources: [], rdns: { total: 0, pending: 0 } }),
   ),
   http.post(`${API_BASE}/api/admin/bot-sources/:source_id/refresh`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/bot-sources/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
+  http.post(`${API_BASE}/api/admin/bots/refresh`, ok({ ok: true, sources: [], updated_count: 0, failed_count: 0 })),
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/backfill`, ok({ enqueued: 0 })),
   http.post(`${API_BASE}/api/admin/bot-sources/rdns/enrich`, ok({ enriched: 0 })),
+  http.post(`${API_BASE}/api/admin/rdns/enrich`, ok({ ok: true, summary: {} })),
+  http.get(`${API_BASE}/api/admin/rdns/stats`, ok({ ok: true, stats: {} })),
   http.get(`${API_BASE}/api/admin/system-jobs`, () => HttpResponse.json({ jobs: [] })),
   http.get(`${API_BASE}/api/admin/usage-logging`, () =>
     // GlobalSettings reads .enabled AND .retention_days.
@@ -523,6 +527,10 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/celery/status`, () =>
     HttpResponse.json({ workers: [], schedule: [], queues: [] }),
   ),
+  http.post(`${API_BASE}/api/admin/duckdb/recycle`, ok({ ok: true, status: 'skipped' })),
+  http.get(`${API_BASE}/api/admin/duckdb/status`, ok({ ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
+  http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, ok({ ok: true, service_id: 'svc-default', stats: {} })),
+  http.get(`${API_BASE}/api/admin/ngwaf/status`, ok({ ok: true })),
 
   // ── AppLayout always-on calls (every page render hits these) ─────
   // sync-status: header lag indicator (useSyncStatus) — every admin
@@ -662,6 +670,7 @@ export const handlers = [
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/pii`, ok({ ok: true })),
   http.patch(`${API_BASE}/api/admin/share/invites/:invite_id/sharing`, ok({ ok: true })),
   http.post(`${API_BASE}/api/admin/share/sessions/:session_id/boot`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/admin/share/purge`, ok({ ok: true })),
 
   // ── Quarantine ───────────────────────────────────────────────────
   http.get(`${API_BASE}/api/admin/quarantine`, () =>

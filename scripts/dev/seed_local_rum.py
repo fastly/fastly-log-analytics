@@ -10,12 +10,11 @@ import os
 import random
 import sys
 import uuid
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 # Add project root to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from backend import config as svcconfig
 from backend.core.duckdb import get_source_for_service, is_configured
 
 
@@ -73,6 +72,7 @@ def seed_service_rum(service_id: str, num_files: int = 3, rows_per_file: int = 1
     # Dynamically load the S3/FOS storage client configured for this service
     try:
         from backend.core.s3_client import get_s3_client
+
         s3 = get_s3_client(src)
     except Exception as e:
         print(f"❌ Failed to initialize S3 client: {e}. Skipping.")
@@ -113,7 +113,9 @@ def seed_service_rum(service_id: str, num_files: int = 3, rows_per_file: int = 1
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Seed Local Standard/High-Scale services with mock RUM log files in FOS.")
+    parser = argparse.ArgumentParser(
+        description="Seed Local Standard/High-Scale services with mock RUM log files in FOS."
+    )
     parser.add_argument("--files", type=int, default=3, help="Number of files to generate per service")
     parser.add_argument("--rows", type=int, default=20, help="Number of RUM rows per file")
     args = parser.parse_args()
