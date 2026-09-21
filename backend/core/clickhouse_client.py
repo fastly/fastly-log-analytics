@@ -389,6 +389,8 @@ class ClickHouseClient:
                 "wait_end_of_query": "1",
                 "default_format": "JSON",
                 "output_format_json_quote_64bit_integers": "0",
+                "max_memory_usage": "2147483648",
+                "max_threads": "4",
             }
             if operation == "insert":
                 query.update({"query": sql or "", "async_insert": "0", "date_time_input_format": "best_effort"})

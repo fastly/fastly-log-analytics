@@ -92,8 +92,25 @@ def _record_schema(identity: str) -> None:
         )
 
 
+def maintain_clickhouse_system_tables(client: ClickHouseClient) -> None:
+    """Ensure internal system tables do not accumulate unbounded parts and trigger merge OOMs."""
+    log = logging.getLogger(__name__)
+    for profiler_tbl in ("trace_log", "processors_profile_log"):
+        try:
+            client.execute(f"TRUNCATE TABLE IF EXISTS system.{profiler_tbl}")
+        except Exception as e:
+            log.debug("Failed to truncate system.%s: %s", profiler_tbl, e)
+
+    for tbl in ("metric_log", "asynchronous_metric_log", "text_log", "query_log", "part_log", "error_log", "trace_log"):
+        try:
+            client.execute(f"ALTER TABLE system.{tbl} MODIFY TTL event_date + INTERVAL 1 DAY")
+        except Exception as e:
+            log.debug("Failed to alter TTL on system.%s: %s", tbl, e)
+
+
 def create_clickhouse_schema(client: ClickHouseClient) -> None:
     require_postgres()
+    maintain_clickhouse_system_tables(client)
     client.execute(CLICKHOUSE_FACT_DDL)
     _record_schema(target_identity(client))
 

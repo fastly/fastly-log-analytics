@@ -338,6 +338,10 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
     con.execute("DELETE FROM telemetry_queries WHERE timestamp < ?", (cutoff,))
     con.execute("DELETE FROM telemetry_sections WHERE timestamp < ?", (cutoff,))
     con.commit()
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
 
 
 def clear_usage_log(service_id: str) -> None:
@@ -345,6 +349,10 @@ def clear_usage_log(service_id: str) -> None:
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
     con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
     con.commit()
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
 
 
 def _usage_class_predicate(usage_type: str) -> tuple[str, list]:

@@ -67,6 +67,7 @@ class HighScaleWorkerLoop:
         self._sleeper = sleeper
         self._deletion_sweeper = deletion_sweeper
         self._deletion_sweep_limit = deletion_sweep_limit
+        self._last_system_cleanup = 0.0
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
         results: list[WorkerPageResult] = []
@@ -83,6 +84,7 @@ class HighScaleWorkerLoop:
                 else:
                     results.append(WorkerPageResult(service_id, domain, page))
         self._run_deletion_sweeps()
+        self._run_system_cleanups()
         return tuple(results)
 
     def _run_deletion_sweeps(self) -> None:
@@ -93,6 +95,29 @@ class HighScaleWorkerLoop:
                 self._deletion_sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
             except Exception:
                 logger.exception("high-scale deletion sweep failed", extra={"service_id": service_id})
+
+    def _run_system_cleanups(self) -> None:
+        now = time.time()
+        if now - self._last_system_cleanup < 300:
+            return
+        self._last_system_cleanup = now
+        for service_id in self._service_ids:
+            try:
+                from backend.utils.usage_logger import run_usage_log_cleanup
+
+                run_usage_log_cleanup(service_id)
+            except Exception:
+                logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
+
+        try:
+            from backend.core.clickhouse_client import get_clickhouse_client
+            from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
+
+            client = get_clickhouse_client()
+            if client is not None:
+                maintain_clickhouse_system_tables(client)
+        except Exception:
+            logger.debug("periodic clickhouse system tables maintenance failed")
 
     def run(self, *, max_iterations: int | None = None) -> None:
         if max_iterations is not None and max_iterations < 0:
@@ -239,6 +264,7 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         self._sleeper = time.sleep
         self._deletion_sweepers = deletion_sweepers
         self._deletion_sweep_limit = deletion_sweep_limit
+        self._last_system_cleanup = 0.0
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
         results: list[WorkerPageResult] = []
@@ -255,6 +281,7 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
                 else:
                     results.append(WorkerPageResult(service_id, domain, page))
         self._run_deletion_sweeps()
+        self._run_system_cleanups()
         return tuple(results)
 
     def _run_deletion_sweeps(self) -> None:
@@ -265,6 +292,29 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
                 sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
             except Exception:
                 logger.exception("high-scale deletion sweep failed", extra={"service_id": service_id})
+
+    def _run_system_cleanups(self) -> None:
+        now = time.time()
+        if now - self._last_system_cleanup < 300:
+            return
+        self._last_system_cleanup = now
+        for service_id, _ in self._coordinators:
+            try:
+                from backend.utils.usage_logger import run_usage_log_cleanup
+
+                run_usage_log_cleanup(service_id)
+            except Exception:
+                logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
+
+        try:
+            from backend.core.clickhouse_client import get_clickhouse_client
+            from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
+
+            client = get_clickhouse_client()
+            if client is not None:
+                maintain_clickhouse_system_tables(client)
+        except Exception:
+            logger.debug("periodic clickhouse system tables maintenance failed")
 
 
 def _csv_env(name: str) -> tuple[str, ...]:

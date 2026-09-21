@@ -1,0 +1,28 @@
+<clickhouse>
+    <!-- Disable memory profiler trace log to prevent hundreds of millions of allocation traces -->
+    <trace_log remove="1"/>
+    <!-- Disable query pipeline profiler -->
+    <processors_profile_log remove="1"/>
+
+    <!-- Retain system logs for only 1 day to prevent unbounded disk and memory growth -->
+    <metric_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 1 DAY DELETE</engine>
+        <flush_interval_milliseconds>15000</flush_interval_milliseconds>
+    </metric_log>
+    <asynchronous_metric_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 1 DAY DELETE</engine>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
+    </asynchronous_metric_log>
+    <text_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 1 DAY DELETE</engine>
+        <flush_interval_milliseconds>15000</flush_interval_milliseconds>
+    </text_log>
+    <query_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 1 DAY DELETE</engine>
+        <flush_interval_milliseconds>15000</flush_interval_milliseconds>
+    </query_log>
+    <part_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 1 DAY DELETE</engine>
+        <flush_interval_milliseconds>15000</flush_interval_milliseconds>
+    </part_log>
+</clickhouse>

@@ -232,6 +232,33 @@ def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: floa
         return 0, {"error": str(e)}
 
 
+def http_post_json(
+    url: str, payload: dict | list | None = None, headers: dict[str, str] | None = None, timeout: float = 5.0
+) -> tuple[int, Any]:
+    req_headers = {
+        "User-Agent": "FLA-AuditTool/1.0",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Connection": "close",
+    }
+    if headers:
+        req_headers.update(headers)
+    body = json.dumps(payload if payload is not None else {}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return resp.status, data
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode("utf-8"))
+            return e.code, err_body
+        except Exception:
+            return e.code, {"error": str(e)}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
 def parse_timestamp_age(ts_str: str | None) -> float | None:
     if not ts_str:
         return None
@@ -474,6 +501,19 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             if res.clickhouse_health not in ("ok", "disabled", None):
                 res.warnings.append(f"ClickHouse state: {res.clickhouse_health}")
 
+    # 6. Active Dashboard Analytical Query Probe
+    dash_url = f"{env.backend_url}/api/dashboard/bundle?service_id={env.service_id}&range=24h"
+    d_status, d_data = http_post_json(dash_url, payload={}, headers=req_headers, timeout=timeout)
+    if d_status != 200:
+        res.errors.append(f"Dashboard query failed: HTTP {d_status} (data: {d_data})")
+    elif isinstance(d_data, dict):
+        if d_data.get("unhandled_error"):
+            res.errors.append(f"Dashboard query unhandled error: {d_data.get('unhandled_error')}")
+        elif "error" in d_data:
+            res.errors.append(f"Dashboard query error: {d_data.get('error')}")
+        elif "aggregates" not in d_data:
+            res.warnings.append("Dashboard bundle response missing aggregates")
+
     return res
 
 
@@ -605,6 +645,9 @@ def run_audit(
                 )
     else:
         envs_to_check = list(ENVIRONMENTS.values())
+
+    if os.getenv("IGNORE_LOCAL_STD") == "1":
+        envs_to_check = [e for e in envs_to_check if e.name != "local-standard"]
 
     # Configure tokens
     remote_token = admin_token or auto_resolve_remote_admin_token()

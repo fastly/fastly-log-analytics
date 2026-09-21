@@ -11,6 +11,7 @@ services:
       - app-network
     volumes:
       - clickhouse-prototype-data:/var/lib/clickhouse
+      - ./clickhouse/config.d/system_logs.xml:/etc/clickhouse-server/config.d/system_logs.xml:ro
     mem_limit: 6g
     cpus: 2
     ulimits:

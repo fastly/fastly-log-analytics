@@ -672,22 +672,12 @@ def optimize_table(
 def _optimize_table_impl(
     source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
 ) -> dict:
-    from backend.core.duckdb import get_connection
+    from backend.core.duckdb import get_memory_connection
     from backend.core.iceberg._ducklake import _ducklake_attach
 
     con = None
     try:
-        con = get_connection(source, read_only=True)
-        # Pool connections hold a READ-ONLY lake attach — re-attach
-        # read-write for the rewrite (same dance as _commit_buffer_impl).
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        try:
-            con.execute("DETACH lake")
-        except Exception as e:
-            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
+        con = get_memory_connection(source)
         if not _ducklake_attach(con, source, read_only=False):
             return {"error": "Failed to attach DuckLake", "files_rewritten": 0}
 
@@ -729,11 +719,9 @@ def _optimize_table_impl(
     finally:
         if con:
             try:
-                con.execute("DETACH lake")
+                con.close()
             except Exception:
                 pass
-            _ducklake_attach(con, source, read_only=True)
-            con.close()
 
 
 def run_cloud_maintenance(source: dict) -> dict:
@@ -980,20 +968,12 @@ def _run_ducklake_maintenance(
     Each step is isolated: one failing records its own ``*_error`` key (which
     the cron wrapper turns into a ``warning`` run) and the other still runs.
     """
-    from backend.core.duckdb import get_connection
+    from backend.core.duckdb import get_memory_connection
     from backend.core.iceberg._ducklake import _ducklake_attach
 
     con = None
     try:
-        con = get_connection(source, read_only=True)
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        try:
-            con.execute("DETACH lake")
-        except Exception as e:
-            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
+        con = get_memory_connection(source)
         if not _ducklake_attach(con, source, read_only=False):
             raise RuntimeError("Failed to attach DuckLake")
     except Exception as e:
@@ -1019,19 +999,11 @@ def _run_ducklake_maintenance(
             logger.warning("[ducklake] Snapshot expiry skipped: %s", e)
             out["snapshot_expiry_error"] = str(e)
     finally:
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        try:
-            con.execute("DETACH lake")
-        except Exception as e:
-            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
-        _ducklake_attach(con, source, read_only=True)
-        try:
-            con.close()
-        except Exception:
-            pass
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
     return out
 
 
