@@ -88,10 +88,13 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
         except Exception:
             pass
 
+    vitals_and_interactions_total = sum(r["total"] for r in rows)
+    beacon_count = vitals_and_interactions_total + error_count
+
     return {
         "is_mock": False,
         "no_data": False,
-        "beacon_count": health["beacons"],
+        "beacon_count": beacon_count,
         "pageview_count": total_pageviews,
         "interaction_count": 0,
         "error_count": error_count,
