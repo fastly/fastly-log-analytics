@@ -186,7 +186,7 @@ function registerErrorListeners(page, browser, contextName) {
     // Robust waiting: Wait for the header badge containing the REQUEST totals to fully render
     try {
       await page.waitForFunction(() => {
-        return document.body.innerText.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+        return document.body.innerText.match(/REQUEST[\s\n]*latest:[\s\n]*[\s\S]*?total:\s*([\d,]+)/i);
       }, { timeout: 30000 });
     } catch (e) {
       console.log(`[Dashboard 30d] Warning: timed out waiting for header totals to render, proceeding...`);
@@ -217,7 +217,7 @@ function registerErrorListeners(page, browser, contextName) {
     const pageReqTotal = pageReqMatch ? parseInt(pageReqMatch[1].replace(/,/g, ''), 10) : 0;
 
     // Extract Header Request Total
-    const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+    const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[\s\S]*?total:\s*([\d,]+)/i);
     let headerReqTotal = pageReqTotal;
     if (headerReqMatch) {
       headerReqTotal = parseInt(headerReqMatch[1].replace(/,/g, ''), 10);
@@ -478,7 +478,7 @@ function registerErrorListeners(page, browser, contextName) {
     console.log(`[RUM Panel Verification] Verified: All RUM panels finished loading, metrics are positive, and Plotly charts are visible! 🟢`);
 
     // Extract Header RUM Total
-    const headerRumMatch = rumBodyText30d.match(/RUM[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+    const headerRumMatch = rumBodyText30d.match(/RUM[\s\n]*latest:[\s\n]*[\s\S]*?total:\s*([\d,]+)/i);
     if (!headerRumMatch) {
       console.error(`[RUM 30d] Verification Failed: RUM total count not found in global header.`);
       await browser.close();
