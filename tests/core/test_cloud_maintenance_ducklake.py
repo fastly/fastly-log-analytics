@@ -538,9 +538,52 @@ def test_optimize_table_flushes_inlined_rows_to_parquet(tmp_path, monkeypatch):
 
     result = buffer_mod._optimize_table_impl(src)
 
-    assert "error" not in result, result
+    assert (
+        result == {"files_rewritten": 0, "files_added": 0, "eligible_partitions": 1, "partition_errors": []}
+        or "error" not in result
+    )
     assert glob.glob(os.path.join(data_root, "**", "*.parquet"), recursive=True), (
         "inlined rows must be promoted to real parquet — otherwise the catalog DB holds "
         "the only copy of every ingested row"
     )
     assert _read(src) == [f"r{i}" for i in range(5)], "the flush must be lossless"
+
+
+def test_ducklake_write_connection_file_mode(tmp_path):
+    """Under file mode, _ducklake_write_connection attaches read-write,
+    executes statements, and restores read-only mode upon exit."""
+    src = _make_source(tmp_path, f"wrconn{uuid.uuid4().hex[:8]}")
+    _seed(src, "logs", _logs_cols(), [(NOW, "seed_row")])
+
+    table = f'lake."{ducklake_table_name(src)}"'
+    with buffer_mod._ducklake_write_connection(src) as con:
+        con.execute(f"INSERT INTO {table} (timestamp, ip) VALUES ('2026-09-21 00:00:00', '1.1.1.1')")
+
+    # After exiting, a normal connection should be able to connect and read
+    con_check = get_connection(src, read_only=True)
+    rows = con_check.execute(f"SELECT ip FROM {table}").fetchall()
+    con_check.close()
+    assert {r[0] for r in rows} == {"seed_row", "1.1.1.1"}
+
+
+def test_ducklake_write_connection_postgres_mode(tmp_path, monkeypatch):
+    """When DUCKLAKE_CATALOG points to Postgres, get_memory_connection is used."""
+    import backend.core.iceberg._ducklake as _ducklake_mod
+
+    src = _make_source(tmp_path, f"pgconn{uuid.uuid4().hex[:8]}")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgres://user:pass@localhost:5432/db")
+
+    called_mem = []
+
+    def fake_get_memory_connection(s):
+        called_mem.append(s)
+        import duckdb
+
+        return duckdb.connect(":memory:")
+
+    monkeypatch.setattr("backend.core.duckdb.get_memory_connection", fake_get_memory_connection)
+    monkeypatch.setattr(_ducklake_mod, "_ducklake_attach", lambda con, s, read_only=False: True)
+
+    with buffer_mod._ducklake_write_connection(src) as con:
+        assert con is not None
+        assert len(called_mem) == 1

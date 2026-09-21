@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -507,9 +508,62 @@ def commit_buffer(source: dict, progress_callback=None, table_name: str = "logs"
         lock.release()
 
 
+@contextmanager
+def _ducklake_write_connection(source: dict):
+    """Context manager yielding a DuckDB connection with DuckLake attached read-write.
+
+    Topology-aware:
+    - In Postgres / durable serving mode (`config.DUCKLAKE_CATALOG` starting with postgres),
+      an ephemeral in-memory connection is used (`get_memory_connection`), avoiding file locks.
+    - In local-file mode (`DEPLOYMENT_MODE=standard`), DuckDB restricts on-disk `.ducklake` files
+      to the primary database handle, requiring a connection via `get_connection(source, read_only=True)`.
+      The connection is detached, re-attached as read-write for execution, and restored to read-only
+      in `finally` before closing.
+    """
+    from backend import config
+    from backend.core.duckdb import get_connection, get_memory_connection
+    from backend.core.iceberg._ducklake import _ducklake_attach
+
+    catalog_dsn = config.DUCKLAKE_CATALOG or ""
+    uses_postgres = catalog_dsn.startswith(("postgres://", "postgresql://", "postgres:"))
+    con = None
+    try:
+        if uses_postgres:
+            con = get_memory_connection(source)
+            if not _ducklake_attach(con, source, read_only=False):
+                raise RuntimeError("Failed to attach DuckLake in read-write mode")
+        else:
+            con = get_connection(source, read_only=True)
+            try:
+                con.execute("DETACH lake")
+            except Exception:
+                pass
+            if not _ducklake_attach(con, source, read_only=False):
+                raise RuntimeError("Failed to attach DuckLake in read-write mode")
+        yield con
+    finally:
+        if con is not None:
+            if not uses_postgres:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
+                try:
+                    con.execute("DETACH lake")
+                except Exception as e:
+                    logger.warning("[ducklake] Failed to DETACH lake: %s", e)
+                try:
+                    _ducklake_attach(con, source, read_only=True)
+                except Exception as e:
+                    logger.warning("[ducklake] Failed to restore read-only lake: %s", e)
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
 def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
-    from backend.core.duckdb import get_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import ducklake_table_name
     from backend.utils.sql_validator import escape_sql_literal
 
     # Sweep tombstones whose grace window elapsed — the sweep cadence is
@@ -519,18 +573,6 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     files = buffer_files(source, table_name=table_name)
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
-    con = get_connection(source, read_only=True)
-
-    # Detach and re-attach as read-write
-    try:
-        con.execute("DETACH lake")
-    except Exception:
-        pass
-
-    if not _ducklake_attach(con, source, read_only=False):
-        logger.error("%s Failed to attach DuckLake in read-write mode", _core_mod._ICE)
-        con.close()
-        return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
     lake_table = ducklake_table_name(source, table_name)
     lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
@@ -539,62 +581,57 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     committed_paths: list[str] = []
     quarantined_files = 0
     try:
+        with _ducklake_write_connection(source) as con:
 
-        def _commit_paths(paths: list[str]) -> int:
-            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
-            con.execute(
-                f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-            )
-            table_cols: set[str] = set()
-            try:
-                table_cols = {r[0] for r in con.execute(f"DESCRIBE {lake_ident}").fetchall()}
-                parquet_cols_res = con.execute(
-                    f"DESCRIBE SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-                ).fetchall()
-                parquet_cols = {r[0] for r in parquet_cols_res}
-                for p_col, p_type, *_ in parquet_cols_res:
-                    if p_col not in table_cols:
-                        col_ident = '"{}"'.format(p_col.replace('"', '""'))
-                        con.execute(f"ALTER TABLE {lake_ident} ADD COLUMN {col_ident} {p_type}")
-                        table_cols.add(p_col)
-            except Exception as e:
-                logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
-                parquet_cols = set()
-
-            delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
-            con.execute("BEGIN TRANSACTION")
-            try:
-                if delete_by_source:
-                    con.execute(
-                        f"DELETE FROM {lake_ident} WHERE _source_file IN "
-                        f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
-                    )
-                res = con.execute(
-                    f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
-                ).fetchone()
-                con.execute("COMMIT")
-                return res[0] if res else 0
-            except Exception:
-                try:
-                    con.execute("ROLLBACK")
-                except Exception as rb_err:
-                    logger.warning("%s ROLLBACK failed after commit error: %s", _core_mod._ICE, rb_err)
-                raise
-
-        for i in range(0, len(files), _BUFFER_COMMIT_CHUNK_SIZE):
-            chunk = files[i : i + _BUFFER_COMMIT_CHUNK_SIZE]
-            try:
-                added = _commit_paths(chunk)
-                rows_committed += added
-                committed_paths.extend(chunk)
-            except Exception as chunk_err:
-                logger.warning(
-                    "%s Chunk commit failed, falling back to one-by-one for %d files: %s",
-                    _core_mod._ICE,
-                    len(chunk),
-                    chunk_err,
+            def _commit_paths(paths: list[str]) -> int:
+                paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
+                con.execute(
+                    f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
                 )
-                for f in chunk:
+                table_cols: set[str] = set()
+                try:
+                    table_cols = {r[0] for r in con.execute(f"DESCRIBE {lake_ident}").fetchall()}
+                    parquet_cols_res = con.execute(
+                        f"DESCRIBE SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
+                    ).fetchall()
+                    parquet_cols = {r[0] for r in parquet_cols_res}
+                    for p_col, p_type, *_ in parquet_cols_res:
+                        if p_col not in table_cols:
+                            col_ident = '"{}"'.format(p_col.replace('"', '""'))
+                            con.execute(f"ALTER TABLE {lake_ident} ADD COLUMN {col_ident} {p_type}")
+                            table_cols.add(p_col)
+                except Exception as e:
+                    logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
+                    parquet_cols = set()
+
+                delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    if delete_by_source:
+                        con.execute(
+                            f"DELETE FROM {lake_ident} WHERE _source_file IN "
+                            f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
+                        )
+                    con.execute(
+                        f"INSERT INTO {lake_ident} SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
+                    )
+                    con.execute("COMMIT")
+                    return len(paths)
+                except Exception as e:
+                    con.execute("ROLLBACK")
+                    raise e
+
+            try:
+                _commit_paths(files)
+                rows_committed = sum(pq.read_metadata(p).num_rows for p in files)
+                committed_paths = list(files)
+            except Exception as batch_err:
+                logger.warning(
+                    "%s Full-batch commit failed (%s) — falling back to per-file commits with quarantine",
+                    _core_mod._ICE,
+                    batch_err,
+                )
+                for f in files:
                     try:
                         added = _commit_paths([f])
                         rows_committed += added
@@ -608,18 +645,9 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
                         ):
                             if _quarantine_buffer_file(source, f, inner_err, table_name):
                                 quarantined_files += 1
-    finally:
-        # Always restore to read-only for the pool
-        try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        try:
-            con.execute("DETACH lake")
-        except Exception as e:
-            logger.warning("[ducklake] Failed to DETACH lake: %s", e)
-        _ducklake_attach(con, source, read_only=True)
-        con.close()
+    except Exception as attach_err:
+        logger.error("%s Failed to attach DuckLake in read-write mode: %s", _core_mod._ICE, attach_err)
+        return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
 
     # Tombstone (NOT unlink) the committed buffer parquets: views bound
     # BEFORE this commit still reference these paths, and a hard unlink
@@ -672,56 +700,43 @@ def optimize_table(
 def _optimize_table_impl(
     source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
 ) -> dict:
-    from backend.core.duckdb import get_memory_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach
-
-    con = None
     try:
-        con = get_memory_connection(source)
-        if not _ducklake_attach(con, source, read_only=False):
-            return {"error": "Failed to attach DuckLake", "files_rewritten": 0}
+        with _ducklake_write_connection(source) as con:
+            # DURABILITY, not an optimization: DuckLake "inlines" small commits
+            # straight into the metadata catalog instead of writing parquet, and
+            # NEITHER ducklake_rewrite_data_files NOR ducklake_merge_adjacent_files
+            # promotes inlined rows — both only touch already-materialized files.
+            # A table whose every commit was inlined therefore stays at
+            # file_count = 0 forever, leaving the ONLY copy of the data inside the
+            # catalog DB (the raw .gz is deleted after ingest). flush first so the
+            # rewrite below has real files to compact.
+            con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
 
-        # DURABILITY, not an optimization: DuckLake "inlines" small commits
-        # straight into the metadata catalog instead of writing parquet, and
-        # NEITHER ducklake_rewrite_data_files NOR ducklake_merge_adjacent_files
-        # promotes inlined rows — both only touch already-materialized files.
-        # A table whose every commit was inlined therefore stays at
-        # file_count = 0 forever, leaving the ONLY copy of the data inside the
-        # catalog DB (the raw .gz is deleted after ingest). flush first so the
-        # rewrite below has real files to compact.
-        con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
+            # Merge adjacent small files into larger ones (bin-packing)
+            merge_rows = con.execute("CALL ducklake_merge_adjacent_files('lake')").fetchall()
 
-        # Merge adjacent small files into larger ones (bin-packing)
-        merge_rows = con.execute("CALL ducklake_merge_adjacent_files('lake')").fetchall()
+            # DuckLake rewrites data files with deleted rows / expired data
+            rewrite_rows = con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
 
-        # DuckLake rewrites data files with deleted rows / expired data
-        rewrite_rows = con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
+            files_rewritten = sum(int(r[2]) for r in merge_rows if len(r) >= 4) + sum(
+                int(r[2]) for r in rewrite_rows if len(r) >= 4
+            )
+            files_added = sum(int(r[3]) for r in merge_rows if len(r) >= 4) + sum(
+                int(r[3]) for r in rewrite_rows if len(r) >= 4
+            )
 
-        files_rewritten = sum(int(r[2]) for r in merge_rows if len(r) >= 4) + sum(
-            int(r[2]) for r in rewrite_rows if len(r) >= 4
-        )
-        files_added = sum(int(r[3]) for r in merge_rows if len(r) >= 4) + sum(
-            int(r[3]) for r in rewrite_rows if len(r) >= 4
-        )
-
-        try:
-            _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
-        except Exception as e:
-            logger.warning("%s metadata pointer sync after rewrite failed: %s", _core_mod._ICE, e)
-        return {
-            "files_rewritten": files_rewritten,
-            "files_added": files_added,
-            "eligible_partitions": 1,
-            "partition_errors": [],
-        }
+            try:
+                _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
+            except Exception as e:
+                logger.warning("%s metadata pointer sync after rewrite failed: %s", _core_mod._ICE, e)
+            return {
+                "files_rewritten": files_rewritten,
+                "files_added": files_added,
+                "eligible_partitions": 1,
+                "partition_errors": [],
+            }
     except Exception as e:
         return {"error": str(e), "files_rewritten": 0}
-    finally:
-        if con:
-            try:
-                con.close()
-            except Exception:
-                pass
 
 
 def run_cloud_maintenance(source: dict) -> dict:
@@ -963,47 +978,27 @@ def _run_ducklake_maintenance(
 ) -> dict:
     """Run steps 1 and 2 against DuckLake on one read-write ``lake`` attach.
 
-    Pool connections hold a READ-ONLY lake attach, so this performs the same
-    DETACH / read-write re-attach / restore dance as ``_optimize_table_impl``.
+    Uses _ducklake_write_connection to respect postgres vs local-file catalog topology.
     Each step is isolated: one failing records its own ``*_error`` key (which
     the cron wrapper turns into a ``warning`` run) and the other still runs.
     """
-    from backend.core.duckdb import get_memory_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach
-
-    con = None
-    try:
-        con = get_memory_connection(source)
-        if not _ducklake_attach(con, source, read_only=False):
-            raise RuntimeError("Failed to attach DuckLake")
-    except Exception as e:
-        logger.warning("[ducklake] %s: maintenance could not open the lake: %s", source.get("name"), e)
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                pass
-        return {"data_deletion_error": str(e), "snapshot_expiry_error": str(e)}
-
     out: dict[str, Any] = {}
     try:
-        if data_retention_days > 0 or rum_retention_days > 0:
+        with _ducklake_write_connection(source) as con:
+            if data_retention_days > 0 or rum_retention_days > 0:
+                try:
+                    out.update(_ducklake_retention_delete(con, source, data_retention_days, rum_retention_days))
+                except Exception as e:
+                    logger.warning("[ducklake] Data deletion skipped: %s", e)
+                    out["data_deletion_error"] = str(e)
             try:
-                out.update(_ducklake_retention_delete(con, source, data_retention_days, rum_retention_days))
+                out.update(_ducklake_expire_snapshots(con, source, keep_snapshot_days))
             except Exception as e:
-                logger.warning("[ducklake] Data deletion skipped: %s", e)
-                out["data_deletion_error"] = str(e)
-        try:
-            out.update(_ducklake_expire_snapshots(con, source, keep_snapshot_days))
-        except Exception as e:
-            logger.warning("[ducklake] Snapshot expiry skipped: %s", e)
-            out["snapshot_expiry_error"] = str(e)
-    finally:
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                pass
+                logger.warning("[ducklake] Snapshot expiry skipped: %s", e)
+                out["snapshot_expiry_error"] = str(e)
+    except Exception as e:
+        logger.warning("[ducklake] %s: maintenance could not open the lake: %s", source.get("name"), e)
+        return {"data_deletion_error": str(e), "snapshot_expiry_error": str(e)}
     return out
 
 

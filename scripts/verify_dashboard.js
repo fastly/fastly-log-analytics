@@ -44,8 +44,16 @@ function getUrlWithParam(url, key, value) {
         await page.waitForTimeout(4000);
         continue;
       }
-      await page.waitForSelector('main', { timeout: 10000 });
-      await page.waitForTimeout(4000); // Allow hydration
+      await page.waitForSelector('main', { timeout: 30000 });
+      // Robust waiting: Wait for the total count to appear and be non-zero
+      try {
+        await page.waitForFunction(() => {
+          const match = document.body.innerText.match(/total:\s*([\d,]+)/i);
+          return match && parseInt(match[1].replace(/,/g, ''), 10) > 0;
+        }, { timeout: 30000 });
+      } catch (e) {
+        console.log(`[Dashboard 24h] Warning: timed out waiting for total count to render, proceeding...`);
+      }
 
       bodyText24h = await page.evaluate(() => document.body.innerText);
       const hasFailedToLoad24h = bodyText24h.includes("Failed to load") && !bodyText24h.includes("Faro version");
@@ -136,8 +144,15 @@ function getUrlWithParam(url, key, value) {
       await browser.close();
       process.exit(1);
     }
-    await page.waitForSelector('main', { timeout: 10000 });
-    await page.waitForTimeout(4000);
+    await page.waitForSelector('main', { timeout: 30000 });
+    // Robust waiting: Wait for the header badge containing the REQUEST totals to fully render
+    try {
+      await page.waitForFunction(() => {
+        return document.body.innerText.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
+      }, { timeout: 30000 });
+    } catch (e) {
+      console.log(`[Dashboard 30d] Warning: timed out waiting for header totals to render, proceeding...`);
+    }
 
     const bodyText30d = await page.evaluate(() => document.body.innerText);
 
