@@ -53,13 +53,20 @@
    - In Standard Mode: Issues paginated `list_fos_files` covering the entire service prefix, diffing against `ingested_files`.
 4. **Targeted Ingestion & Quarantining:**
    - Downloads missing `.gz` log files and parses records into Parquet buffer.
-   - Any corrupt or invalid lines are quarantined to FOS `errors/*.bad.jsonl` and recorded in SQLite `quarantined_files`.
+   - Any corrupt or invalid lines use the same local-only, per-service quarantine contract as
+     `log_discovery`: one exact-byte item per failed line or corrupt gzip, shared 1,000-item
+     cap, immediate oldest-item eviction, and no age expiry. The source FOS object is always
+     deleted after processing, including when evidence capture fails.
 5. **View Update & State Recording:**
    - Updates DuckDB view to expose newly ingested historical rows.
    - Updates `ingested_files` table with newly captured keys.
 6. **Telemetry, Timing & Progress Reporting:**
    - Emits real-time SSE progress events to `cron_progress`.
-   - Records run status (`warning` if corrupt rows were quarantined, else `success`) and full details in `cron_runs`.
+   - Records run status `error` when any log line, quarantine capture, or FOS deletion fails;
+     otherwise `success`, with the shared zero-filled record-level and object-level outcome
+     counters and full details in `cron_runs`.
+   - A source object whose records ingest successfully but whose FOS deletion fails after
+     bounded retries counts as `objects_failed`, not `objects_partial`.
    - Invokes `finalize_cron_duration` in `finally` block to record exact execution duration.
 
 ---
@@ -69,7 +76,8 @@
   - **FOS S3 LIST Calls:** Full paginated LIST must be attributed to `cron.full_sync` in `usage_log.db`.
   - **SQLite / Postgres Queries:** Diff check queries must use indexed lookups.
   - **Ingest Telemetry:** Number of discovered missing files must be explicitly logged in `cron_runs.details_json`.
-  - **Corrupt Rows:** When corrupt rows are encountered, status transitions to `warning` with warning indicator in summary.
+  - **Corrupt Rows:** Valid rows continue, each failed line is stored separately when possible,
+    and the run transitions to `error` with per-category counters.
 - **Timing & Resource Budgets:**
   - S3 LIST throughput: > 5,000 keys/sec.
   - Ingestion processing: Matches standard ingestion rates (> 50,000 logs/sec per core).

@@ -57,7 +57,9 @@
 7. **View Refresh:** Triggers `update_iceberg_view()` so analytical queries immediately read the new DuckLake snapshot.
 8. **Logging, Quarantine & Banner Alerts:**
    - Records commit run in SQLite `cron_runs`.
-   - If any unreadable buffer files were quarantined, `cron_runs.status` must be set to `warning` (never `success`).
+   - If any unreadable buffer files are quarantined or a commit-side cleanup fails,
+     `cron_runs.status` must be set to `error` (never `success`); the original raw-source
+     ingestion outcome remains represented by the discovery/worker run counters.
    - If commit transaction fails, records `error` in `cron_runs` and triggers an Admin UI banner alert ("Commits to FOS failing").
    - Records FOS Class A PUT calls in `usage_log.db`.
 

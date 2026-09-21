@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `ledger_sweep_{service_id}`
 - **Category:** Distributed State Machine Crash Recovery & Dead-Letter Management
-- **Purpose:** Acts as the automated crash-net for High-Scale (`DEPLOYMENT_MODE=high_throughput`) distributed ingestion. It scans PostgreSQL `ingest_ledger` to reclaim stuck worker claims, re-dispatches stranded tasks with queue-depth guards, moves permanently failing items to `dead_letter` / `quarantined`, and diffs FOS to catch up on any unrecorded keys.
+- **Purpose:** Acts as the automated crash-net for High-Scale (`DEPLOYMENT_MODE=high_throughput`) distributed ingestion. It scans PostgreSQL `ingest_ledger` to reclaim stuck worker claims, re-dispatches stranded tasks with queue-depth guards, records permanently failing objects as `dead_letter`/`quarantined`, and diffs FOS to catch up on unrecorded keys. Per-line evidence follows the shared local quarantine contract and is captured by the worker at conversion time.
 - **Why It Runs:** Distributed Celery workers can crash, lose network connectivity, or be killed by Kubernetes OOMKilled events mid-conversion. Without an autonomous ledger sweeper, claimed log batches would remain permanently stuck in `claimed` status, creating silent data holes in the lakehouse.
 
 ---
@@ -57,7 +57,9 @@
    - Calls `discover_prefix(service_id, start_time=st)` for lookback window (default: 4 hours) to catch any objects missed by real-time discovery.
 6. **Dead-Letter & Health Check:**
    - Queries count of rows in `quarantined` or `dead_letter` status in `ingest_ledger`.
-   - If broker probe failed or `dead_letter > 0`: sets cron run status to `"warning"`.
+   - If broker probe failed or `dead_letter > 0`: sets cron run status to `"warning"`; the
+     worker conversion run itself is `"error"` when any log line, quarantine capture, or FOS
+     deletion fails.
 7. **Telemetry & Log Recording:**
    - Logs `run_status` (`"success"` or `"warning"`) in `cron_runs` with summary string.
    - In guaranteed `finally:` block: calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, started)`.
@@ -76,7 +78,8 @@
 - **Audit Checklist:**
   - Verify PostgreSQL index on `(service_id, status, claimed_at)` is utilized.
   - Verify that queue-depth guards prevent duplicate message storms during worker outages.
-  - Verify warning status appears in UI when dead-letter items exist.
+  - Verify warning status appears in UI when dead-letter items exist and that worker
+    conversion exposes the separate quarantine outcome counters.
 
 ---
 

@@ -63,8 +63,12 @@ The job checks `should_defer_cron("expire_snapshots", service_id)` and initializ
    - Prunes empty subdirectories.
 4. **Step 4: Rollup Retention Purge:**
    - Scans `rollups/{service_id}/` for day bundles older than `rollup_retention_months` and deletes them.
-5. **Step 5: Expired Quarantine Purge (FOS & SQLite):**
-   - If `quarantine_retention_days > 0` (default 30 days): queries `get_expired_quarantined_files` and unlinks old `.bad.jsonl` objects from FOS while deleting their SQLite metadata records.
+5. **Step 5: Quarantine Consistency (Local Metadata Only):**
+   - Quarantine evidence is local-only, has no age-based expiry, and is capped at 1,000
+     items per service during ingestion writes. This job does not perform normal quarantine
+     eviction or FOS quarantine deletion. Any bounded orphan-reconciliation responsibility
+     belongs to `metadata_cleanup_{service_id}`, which removes stale metadata references
+     for missing evidence and preserves/reports unexpected local evidence files.
 6. **Telemetry & Log Recording:**
    - Records step timings and deleted counts in `cron_runs` (marks `warning` if any isolated step failed, `success` if clean).
    - Records FOS Class A delete calls in `usage_log.db` and finalizes progress tracking via `end_progress`.

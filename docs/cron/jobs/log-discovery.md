@@ -59,7 +59,9 @@
 7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 30s):
    - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
    - Triggers `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation).
-8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records separate counts for valid lines, malformed lines, corrupt gzip files, quarantine-capture failures, FOS deletion failures, and cap-eviction failures.
+8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records a stable, zero-filled counter schema shared with RUM ingestion: `valid_records`, `malformed_records`, `corrupt_containers`, `quarantine_capture_failures`, `source_delete_failures`, and `cap_evictions`. It also records source-object counters for `objects_processed`, `objects_successful`, `objects_partial`, and `objects_failed`.
+   - If records ingest successfully but FOS deletion fails after bounded retries, the
+     object is counted as `objects_failed` and `source_delete_failures` is incremented.
 
 ### High-Scale Mode:
 1. Issues FOS LIST on prefix (rolling 10-minute window).
