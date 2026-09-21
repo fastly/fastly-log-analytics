@@ -1,20 +1,43 @@
 import * as os from 'os'
 
-export function ServerFooter() {
+async function fetchGceMetadata(path: string): Promise<string | null> {
+  try {
+    // 169.254.169.254 / metadata.google.internal is standard Google Cloud Metadata Server IP
+    const res = await fetch(`http://169.254.169.254/computeMetadata/v1/${path}`, {
+      headers: { 'Metadata-Flavor': 'Google' },
+      next: { revalidate: 3600 }, // Cache for 1 hour
+      signal: AbortSignal.timeout(500), // Fail-open after 500ms if not on GCE
+    })
+    if (res.ok) {
+      return (await res.text()).trim()
+    }
+  } catch {}
+  return null
+}
+
+export async function ServerFooter() {
   let envName = 'local'
-  if (process.env.ENV_NAME) {
-    envName = process.env.ENV_NAME
+  let machineName = process.env.POD_NAME || os.hostname()
+
+  // Dynamic Google Compute Engine Metadata Detection
+  const gceHostname = await fetchGceMetadata('instance/name')
+  const gceProject = await fetchGceMetadata('project/project-id')
+
+  if (gceHostname) {
+    envName = 'gce'
+    if (gceProject) {
+      envName = `gce (${gceProject})`
+    }
+    machineName = gceHostname
   } else if (process.env.ELEVATION_CLUSTER_NAME) {
     envName = `elevation (${process.env.ELEVATION_CLUSTER_NAME})`
-  } else if (process.env.KUBERNETES_PORT) {
+  } else if (process.env.KUBERNETES_SERVICE_HOST) {
     envName = 'k8s'
-  } else if (process.env.GCE_INSTANCE || os.hostname().includes('gce') || os.hostname().includes('instance')) {
-    envName = 'gce'
+  } else if (process.env.ENV_NAME) {
+    envName = process.env.ENV_NAME
   } else if (process.env.NODE_ENV === 'production') {
     envName = 'production'
   }
-
-  const machineName = process.env.POD_NAME || os.hostname()
 
   const isHighScale =
     ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase()) ||

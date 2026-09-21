@@ -32,10 +32,9 @@ services:
       - "80:80"
     volumes:
       - ./configs:/app/configs
-      - ./data:/app/data
       - ./cache:/app/cache
+      - ./scripts:/app/scripts
     environment:
-      - FLA_DEV_NO_CRONS=true
       - PYTHONUNBUFFERED=1
       - DUCKDB_MEMORY_LIMIT=4GB
       - DUCKDB_RECYCLE_INTERVAL_MIN=5

@@ -214,6 +214,37 @@ function registerErrorListeners(page, browser, contextName) {
     }
     console.log(`[Dashboard 30d Consistency] Verified: Header request count and page metrics are 100% consistent!`);
 
+    // Strict Panel Loading Verification: Assert that panels have successfully finished loading and contain real data
+    if (bodyText30d.includes("Crunching logs") || bodyText30d.includes("Loading") || bodyText30d.includes("Initializing")) {
+      console.error(`❌ [Playwright Panel Verification] Verification Failed: Dashboard panels are stuck on "Crunching logs..." or "Loading..." loading state!`);
+      await browser.close();
+      process.exit(1);
+    }
+    if (bodyText30d.includes("No data available") || bodyText30d.includes("No data in this time range yet")) {
+      console.error(`❌ [Playwright Panel Verification] Verification Failed: Dashboard panels successfully loaded but have no data ("No data available")!`);
+      await browser.close();
+      process.exit(1);
+    }
+    if (pageReqTotal === 0) {
+      console.error(`❌ [Playwright Panel Verification] Verification Failed: Dashboard metrics card has 0 total requests!`);
+      await browser.close();
+      process.exit(1);
+    }
+
+    // Verify that at least one Plotly chart is rendered and visible on the page
+    const isChartVisible = await page.evaluate(() => {
+      const el = document.querySelector('.js-plotly-plot');
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    if (!isChartVisible) {
+      console.error(`❌ [Playwright Chart Verification] Verification Failed: No visible Plotly charts found on the dashboard page!`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[Dashboard Panel Verification] Verified: All dashboard panels finished loading, metrics are positive, and Plotly charts are visible! 🟢`);
+
     // Verify Footers and Metadata on 30d page
     const footerText = await page.evaluate(() => {
       const footer = document.querySelector('footer');
@@ -363,6 +394,37 @@ function registerErrorListeners(page, browser, contextName) {
     await rumPage.waitForTimeout(4000);
 
     const rumBodyText30d = await rumPage.evaluate(() => document.body.innerText);
+
+    // Strict RUM Panel Loading Verification: Assert that panels have successfully finished loading and contain real data
+    if (rumBodyText30d.includes("Crunching logs") || rumBodyText30d.includes("Loading") || rumBodyText30d.includes("Initializing")) {
+      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels are stuck on "Crunching logs..." or "Loading..." loading state!`);
+      await browser.close();
+      process.exit(1);
+    }
+    if (rumBodyText30d.includes("No data available") || rumBodyText30d.includes("No data in this time range yet") || rumBodyText30d.includes("Waiting for real-time")) {
+      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels successfully loaded but have no data ("No data available")!`);
+      await browser.close();
+      process.exit(1);
+    }
+    if (pageRumTotal === 0) {
+      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM metrics card has 0 total beacons!`);
+      await browser.close();
+      process.exit(1);
+    }
+
+    // Verify that at least one Plotly chart is rendered and visible on standard RUM page
+    const isRumChartVisible = await rumPage.evaluate(() => {
+      const el = document.querySelector('.js-plotly-plot');
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    if (!isRumChartVisible) {
+      console.error(`❌ [Playwright RUM Chart Verification] Verification Failed: No visible Plotly charts found on the RUM page!`);
+      await browser.close();
+      process.exit(1);
+    }
+    console.log(`[RUM Panel Verification] Verified: All RUM panels finished loading, metrics are positive, and Plotly charts are visible! 🟢`);
 
     // Extract Header RUM Total
     const headerRumMatch = rumBodyText30d.match(/RUM[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
