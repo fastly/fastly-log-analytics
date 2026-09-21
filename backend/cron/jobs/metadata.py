@@ -121,6 +121,12 @@ def _run_metadata_sync(
 
     is_manual = run_id is not None
 
+    if not is_manual:
+        from backend.utils.active_requests import should_defer_cron
+
+        if should_defer_cron("metadata_sync", service_id):
+            return
+
     if run_id is None:
         try:
             run_id = start_cron_run(src, "metadata_sync")
@@ -290,11 +296,13 @@ def _run_metadata_sync(
             con.close()
 
         # 4. Import shared history and views/alerts from Admin
+        import_error: str | None = None
         try:
             from backend.state_sync import import_admin_state
 
             import_admin_state(service_id)
         except Exception as e:
+            import_error = str(e)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "warning", "message": e})
 
         # 5. Refresh cached status (row count, etc)
@@ -313,12 +321,17 @@ def _run_metadata_sync(
         if files_cached > 0:
             verb = "downloaded" if src.get("access_level") == "read_only" else "synced"
             summary += f" and {verb} {files_cached} new Iceberg data file(s)"
+        if import_error:
+            summary += f" (admin state import warning: {import_error})"
+            run_status = "warning"
+        else:
+            run_status = "success"
 
         log_cron_run(
             src,
             "metadata_sync",
             duration,
-            "success",
+            run_status,
             files_downloaded=files_cached,
             rows_ingested=rows_cached,
             summary=summary,

@@ -1414,6 +1414,86 @@ def test_run_metadata_sync_clears_time_range_on_manual_sync_all():
     assert cleared is not None
 
 
+def test_run_metadata_sync_defers_when_active_requests_present():
+    """Scheduled metadata_sync must defer when active dashboard requests are executing."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.core.duckdb.start_cron_run") as mock_start_run,
+    ):
+        _run_metadata_sync("svc-1", run_id=None)
+
+    mock_start_run.assert_not_called()
+
+
+def test_run_metadata_sync_does_not_defer_when_manual():
+    """Manual metadata_sync (run_id provided) must NOT defer even if dashboard requests are active."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True) as mock_defer,
+        patch("backend.core.iceberg.init_iceberg_table"),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=False),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_metadata_sync("svc-1", run_id=42)
+
+    # should_defer_cron should not be checked for manual run
+    mock_defer.assert_not_called()
+
+
+def test_run_metadata_sync_status_warning_when_import_admin_state_fails():
+    """When import_admin_state raises, metadata_sync logs warning status with the error detail."""
+    from backend.cron.jobs.metadata import _run_metadata_sync
+
+    fake_cfg = {"service_id": "svc-1"}
+    fake_src = {"name": "svc-1", "service_id": "svc-1"}
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.iceberg.init_iceberg_table"),
+        patch("backend.core.iceberg.ducklake_table_exists", return_value=True),
+        patch("backend.core.iceberg.sync_data", return_value={"files_downloaded": 0, "rows_downloaded": 0}),
+        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
+        patch("backend.core.iceberg.update_iceberg_view"),
+        patch("backend.core.duckdb.refresh_config_status"),
+        patch("backend.state_sync.import_admin_state", side_effect=RuntimeError("S3 connection error")),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs._common.finalize_cron_duration"),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+    ):
+        _run_metadata_sync("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "admin state import warning" in kwargs.get("summary", "")
+
+
+
 # ── _run_commit (Iceberg snapshot commit) ────────────────────────────────
 #
 # Each cron entry-point is wrapped in heavy try/finally guards so the
@@ -2820,6 +2900,158 @@ def test_sync_jobs_skips_alerts_evaluation_when_disabled():
         s._sync_jobs()
 
     assert "alerts_evaluation_svc-alert-disabled" not in s._job_ids
+
+
+def test_sync_jobs_registers_insights_prewarmer_for_analyst():
+    """Analyst Path A services (access_level: read_only) must have insights_prewarmer registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-analyst-ip",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "access_level": "read_only",
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-analyst-ip")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-analyst-ip" in s._job_ids
+
+
+def test_sync_jobs_reschedules_insights_prewarmer_when_interval_changed():
+    """When cron_insights_prewarmer.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-ip-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_insights_prewarmer": {"interval_seconds": 120},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["insights_prewarmer_svc-ip-resched"] = "insights_prewarmer_svc-ip-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=120, jitter=15)
+
+
+def test_sync_jobs_skips_insights_prewarmer_when_disabled():
+    """When cron_insights_prewarmer.enabled is False, insights_prewarmer job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-ip-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_insights_prewarmer": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-ip-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_metadata_sync_when_interval_changed():
+    """When cron_metadata_sync.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-meta-resched",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_sync": {"interval_seconds": 45},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["sync_metadata_svc-meta-resched"] = "sync_metadata_svc-meta-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-meta-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=45)
+
+
+def test_sync_jobs_skips_metadata_sync_when_disabled():
+    """When cron_metadata_sync.enabled is False, sync_metadata job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-meta-disabled",
+        "log_period": 60,
+        "access_level": "read_only",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_sync": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-meta-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "sync_metadata_svc-meta-disabled" not in s._job_ids
+
+
 
 
 

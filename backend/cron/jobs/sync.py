@@ -1208,20 +1208,52 @@ def _run_ledger_sweep(service_id: str) -> None:
         logger.info("[ledger_sweep] %s: skipping — %s", service_id, str(e))
         return
 
+    from backend.cron.jobs._common import finalize_cron_duration
+    from backend.cron.jobs.metadata import _log_and_add_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="ledger_sweep")
+    _log_and_add_progress(
+        run_id,
+        service_id,
+        job_name="ledger_sweep",
+        event={"type": "status", "message": f"Starting ledger sweep for {service_id}..."},
+    )
+
     started = time.time()
     try:
         summary = sweep_ledger_once(service_id)
+        run_status = "success"
+        warnings = []
+        if not summary.get("broker_ok", True):
+            warnings.append("Celery broker/queue depth probe failed")
+        if summary.get("dead_letter", 0) > 0:
+            warnings.append(f"{summary['dead_letter']} dead-letter/quarantined row(s)")
+        if warnings:
+            run_status = "warning"
+
+        summary_msg = (
+            f"reclaimed={summary['reclaimed']} redispatched={summary['redispatched']} "
+            f"discovered={summary['discovered']}"
+        )
+        if warnings:
+            summary_msg += f" ({'; '.join(warnings)})"
+
         log_cron_run(
             src,
             "ledger_sweep",
             time.time() - started,
-            "success",
+            run_status,
             run_id=run_id,
             files_downloaded=summary.get("discovered", 0),
-            summary=(
-                f"reclaimed={summary['reclaimed']} redispatched={summary['redispatched']} "
-                f"discovered={summary['discovered']}"
-            ),
+            summary=summary_msg,
+        )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="ledger_sweep",
+            event={"type": "done", "message": summary_msg},
         )
     except Exception as e:
         log_cron_run(
@@ -1233,7 +1265,16 @@ def _run_ledger_sweep(service_id: str) -> None:
             error_message=str(e),
             summary="Ledger sweep failed",
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="ledger_sweep",
+            event={"type": "error", "message": str(e)},
+        )
         logger.exception("[ledger_sweep] %s: sweep failed", service_id)
+    finally:
+        end_progress(run_id)
+        finalize_cron_duration(src, run_id, started)
 
 
 # R-1: drain the gap-heal trigger timestamp dict between tests so an

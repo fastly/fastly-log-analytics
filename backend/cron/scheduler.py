@@ -538,6 +538,45 @@ class Scheduler:
                 seconds,
             )
 
+    def _register_insights_prewarmer_job(self, service_id: str, seen_ids: set[str], prov: dict) -> None:
+        """Register (or reschedule) the per-service insights cache prewarmer.
+        Runs for both admin and analyst services so users land on a prewarmed cache.
+        """
+        from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
+
+        cron_ip = prov.get("cron_insights_prewarmer", {})
+        if not cron_ip.get("enabled", True):
+            return
+
+        interval_seconds = int(cron_ip.get("interval_seconds", 240))
+        ip_job_id = f"insights_prewarmer_{service_id}"
+        seen_ids.add(ip_job_id)
+        if ip_job_id in self._job_ids:
+            try:
+                job = self._sched.get_job(ip_job_id)
+                if job:
+                    job.reschedule("interval", seconds=interval_seconds, jitter=15)
+            except Exception:
+                pass
+        else:
+            self._add_job(
+                _run_insights_prewarmer,
+                "interval",
+                seconds=interval_seconds,
+                jitter=15,
+                args=[service_id],
+                id=ip_job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=360,
+            )
+            self._job_ids[ip_job_id] = ip_job_id
+            logger.info(
+                "🔥 [scheduler] Registered insights_prewarmer job %s (every %ds).",
+                ip_job_id,
+                interval_seconds,
+            )
+
     def _register_recycle_job(self, seen_ids: set[str] | None = None) -> None:
         """Register the process-global DuckDB instance recycle job.
 
@@ -762,32 +801,35 @@ class Scheduler:
             # it on-demand immediately after a successful 'commit' to stay in sync.
             sync_metadata_id = f"sync_metadata_{service_id}"
             if is_readonly:
-                seen_ids.add(sync_metadata_id)
+                meta_cfg = prov.get("cron_metadata_sync", {})
+                if meta_cfg.get("enabled", True):
+                    meta_interval = int(meta_cfg.get("interval_seconds") or interval_seconds)
+                    seen_ids.add(sync_metadata_id)
 
-                if sync_metadata_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(sync_metadata_id)
-                        if job:
-                            job.reschedule("interval", seconds=interval_seconds)
-                    except Exception:
-                        pass
-                else:
-                    # Start immediately so the dashboard isn't slow/empty
-                    self._add_job(
-                        _run_metadata_sync,
-                        "interval",
-                        seconds=interval_seconds,
-                        id=sync_metadata_id,
-                        replace_existing=True,
-                        start_date=None,
-                        args=[service_id],
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[sync_metadata_id] = sync_metadata_id
-                    logger.info(
-                        "[scheduler] Registered metadata sync job %s (every %ds).", sync_metadata_id, interval_seconds
-                    )
+                    if sync_metadata_id in self._job_ids:
+                        try:
+                            job = self._sched.get_job(sync_metadata_id)
+                            if job:
+                                job.reschedule("interval", seconds=meta_interval)
+                        except Exception:
+                            pass
+                    else:
+                        # Start immediately so the dashboard isn't slow/empty
+                        self._add_job(
+                            _run_metadata_sync,
+                            "interval",
+                            seconds=meta_interval,
+                            id=sync_metadata_id,
+                            replace_existing=True,
+                            start_date=None,
+                            args=[service_id],
+                            coalesce=True,
+                            misfire_grace_time=60,
+                        )
+                        self._job_ids[sync_metadata_id] = sync_metadata_id
+                        logger.info(
+                            "[scheduler] Registered metadata sync job %s (every %ds).", sync_metadata_id, meta_interval
+                        )
 
                 # ── Alerts evaluation job for analysts ────────────────────────
                 # Analysts evaluate alerts against their locally-cached data,
@@ -799,6 +841,9 @@ class Scheduler:
                 alerts_enabled = alerts_cfg.get("enabled", True)
                 alerts_seconds = int(alerts_cfg.get("interval_seconds") or interval_seconds)
                 self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
+
+                # ── Insights prewarmer job for analysts ───────────────────────
+                self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
                 # Analysts don't ingest or commit — skip the rest.
                 continue
@@ -876,21 +921,35 @@ class Scheduler:
             if svcconfig.is_high_throughput_mode(src):
                 from backend.cron.jobs.sync import _run_ledger_sweep
 
-                sweep_job_id = f"ledger_sweep_{service_id}"
-                seen_ids.add(sweep_job_id)
-                if sweep_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_ledger_sweep,
-                        "interval",
-                        minutes=15,
-                        args=[service_id],
-                        id=sweep_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=300,
-                    )
-                    self._job_ids[sweep_job_id] = sweep_job_id
-                    logger.info("🧹 [scheduler] Registered ledger_sweep job %s (every 15m).", sweep_job_id)
+                sweep_cfg = prov.get("cron_ledger_sweep", {})
+                if sweep_cfg.get("enabled", True):
+                    sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
+                    sweep_job_id = f"ledger_sweep_{service_id}"
+                    seen_ids.add(sweep_job_id)
+                    if sweep_job_id in self._job_ids:
+                        try:
+                            job = self._sched.get_job(sweep_job_id)
+                            if job:
+                                job.reschedule("interval", minutes=sweep_interval_mins)
+                        except Exception:
+                            pass
+                    else:
+                        self._add_job(
+                            _run_ledger_sweep,
+                            "interval",
+                            minutes=sweep_interval_mins,
+                            args=[service_id],
+                            id=sweep_job_id,
+                            max_instances=1,
+                            coalesce=True,
+                            misfire_grace_time=300,
+                        )
+                        self._job_ids[sweep_job_id] = sweep_job_id
+                        logger.info(
+                            "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
+                            sweep_job_id,
+                            sweep_interval_mins,
+                        )
 
             # ── RUM ingest jobs (ingest RUM beacons from FOS) ──────────────────
             # Only register if RUM is enabled for this service. Celery mode
@@ -1159,29 +1218,7 @@ class Scheduler:
                 logger.info("⚡ [scheduler] Registered partial_hour_merge job %s (every 30s, local-only).", ph_job_id)
 
             # ── Insights cache prewarmer (perf #76) ───────────────────────────
-            # 240 s cadence — just under the 300 s INSIGHTS_CACHE_TTL so the
-            # default (window=1h, baseline=168h) selection never expires
-            # between prewarmer ticks. Runs for both admin and analyst
-            # services since the insights tab is visible to both.
-            ip_job_id = f"insights_prewarmer_{service_id}"
-            seen_ids.add(ip_job_id)
-            if ip_job_id not in self._job_ids:
-                self._add_job(
-                    _run_insights_prewarmer,
-                    "interval",
-                    seconds=240,
-                    jitter=15,
-                    args=[service_id],
-                    id=ip_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=360,
-                )
-                self._job_ids[ip_job_id] = ip_job_id
-                logger.info(
-                    "🔥 [scheduler] Registered insights_prewarmer job %s (every 240s).",
-                    ip_job_id,
-                )
+            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
             # ── Daily rollup compaction (per-day parquet from per-hour) ────
             # 02:00 UTC — runs before optimize (04:00) so per-day rollups

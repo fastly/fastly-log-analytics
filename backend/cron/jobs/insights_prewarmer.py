@@ -37,10 +37,9 @@ its 300 s mark, leaving a ~(TTL - interval) window each cycle where a user
 pays cold. Forcing the recompute at 240 s < 300 s TTL keeps the entry
 continuously warm with margin.
 
-Active-request gate (#84) intentionally NOT applied here — the
-prewarmer's whole point is to win during quiet moments; it doesn't
-contend with user traffic the way sync/optimize do (no FOS calls,
-just read-only DuckDB queries against the local Iceberg view).
+Active-request gate (#84) applied — if active dashboard queries are
+running, prewarming defers to avoid competing for DuckDB threads and CPU
+with user queries.
 """
 
 from __future__ import annotations
@@ -123,7 +122,9 @@ def _run_insights_prewarmer(service_id: str) -> None:
     analyst) lands on a cache hit instead of the cold path."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.jobs.metadata import _log_and_add_progress
     from backend.repositories.insights import get_insights
+    from backend.utils.active_requests import should_defer_cron
     from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
     from backend.utils.remote_access import resolve_analyst_insights_clamp
     from backend.utils.tunnel import get_tunnel_manager
@@ -132,11 +133,19 @@ def _run_insights_prewarmer(service_id: str) -> None:
     if src is None:
         return
 
+    if should_defer_cron("insights_prewarmer", service_id):
+        return
+
     try:
         run_id = start_cron_run(src, "insights_prewarmer")
     except RuntimeError as e:
         logger.info("⏭️  [insights-prewarmer] %s: skipping — %s", service_id, str(e))
         return
+
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="insights_prewarmer")
 
     _display = _display_label(src, service_id)
 
@@ -224,6 +233,12 @@ def _run_insights_prewarmer(service_id: str) -> None:
             summary=summary,
             run_id=run_id,
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="insights_prewarmer",
+            event={"type": "done", "message": summary},
+        )
         logger.info(
             "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
             _display,
@@ -250,3 +265,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
                 con.close()
             except Exception:
                 pass
+        end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
+
+        finalize_cron_duration(src, run_id, started)
