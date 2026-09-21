@@ -52,27 +52,23 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
 
   test('3. Single round-trip /api/dashboard/bundle contract', async ({ page }) => {
     let bundleCalls = 0
-    let bundleResponseData: any = null
 
-    page.on('response', async (res) => {
+    page.on('response', (res) => {
       if (res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST') {
         bundleCalls++
-        try {
-          bundleResponseData = await res.json()
-        } catch {
-          // ignore non-json
-        }
       }
     })
+
+    const bundleResponsePromise = page.waitForResponse(
+      (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
+      { timeout: 30_000 }
+    )
 
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Wait for bundle response to settle instead of networkidle (networkidle hangs on SSE streams)
-    await page.waitForResponse(
-      (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
-      { timeout: 30_000 }
-    ).catch(() => null)
+    const bundleRes = await bundleResponsePromise
+    const bundleResponseData = await bundleRes.json()
 
     // Exactly 1 composite bundle request on cold load
     expect(bundleCalls).toBe(1)
@@ -137,23 +133,20 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
   })
 
   test('8. Compare mode triggers secondary aggregates query', async ({ page }) => {
-    let compareFired = false
-    page.on('request', (req) => {
-      if (req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST') {
-        compareFired = true
-      }
-    })
-
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
     // Compare switch in FilterBar
-    const compareSwitch = page.locator('label[for="compare-mode"]').or(page.getByRole('switch')).first()
+    const compareSwitch = page.locator('#compare-mode, label[for="compare-mode"]').first()
 
     if (await compareSwitch.isVisible({ timeout: 5000 }).catch(() => false)) {
+      const compareRequestPromise = page.waitForRequest(
+        (req) => req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST',
+        { timeout: 15_000 }
+      )
       await compareSwitch.click({ force: true })
-      await page.waitForTimeout(1000)
-      expect(compareFired).toBe(true)
+      const req = await compareRequestPromise
+      expect(req).toBeTruthy()
     }
   })
 
@@ -237,25 +230,24 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
       'x-debug-responses': '1',
     })
 
-    page.on('response', async (res) => {
-      if (res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST') {
-        try {
-          const json = await res.json()
-          if (json._debug_queries || json._debug_sqlite) {
-            bundleDebugData = json
-          }
-        } catch {
-          // ignore non-json
-        }
-      }
-    })
-
-    await page.goto('/dashboard')
-    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
-    await page.waitForResponse(
+    const bundleResponsePromise = page.waitForResponse(
       (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
       { timeout: 30_000 }
     ).catch(() => null)
+
+    await page.goto('/dashboard')
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+    const bundleRes = await bundleResponsePromise
+    if (bundleRes) {
+      try {
+        const json = await bundleRes.json()
+        if (json._debug_queries || json._debug_sqlite) {
+          bundleDebugData = json
+        }
+      } catch {
+        // ignore non-json
+      }
+    }
 
     // Audit captured queries if debug instrumentation returned
     if (bundleDebugData) {
