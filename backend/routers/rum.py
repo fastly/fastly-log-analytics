@@ -733,6 +733,32 @@ async def rum_analytics(
 
                 if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
                     use_rollup = True
+                else:
+                    # Tables don't exist yet! Let's see if raw data exists and trigger creation + recompute
+                    if table_exists(con, "client_vitals") or table_exists(con, "client_errors"):
+                        with track_query(
+                            con,
+                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END",
+                            [],
+                            "rum_any_data_initial",
+                        ) as cur_raw_any_init:
+                            if cur_raw_any_init.fetchone()[0]:
+                                try:
+                                    logger.info(
+                                        "[rum_rollups] %s: RUM aggregates tables do not exist. Triggering initial on-demand creation and recomputation...",
+                                        service_id,
+                                    )
+                                    from backend.core.duckdb import get_connection
+                                    with get_connection(rum_source, read_only=False) as write_con:
+                                        from backend.core.rollups.rum import recompute_rum_aggregates
+                                        recompute_rum_aggregates(write_con, service_id)
+                                    use_rollup = True
+                                except Exception as init_err:
+                                    logger.warning(
+                                        "[rum_rollups] %s: Initial on-demand RUM aggregates recomputation failed: %s",
+                                        service_id,
+                                        init_err,
+                                    )
 
             if use_rollup:
                 # Run optimized rollup-based query
@@ -757,12 +783,45 @@ async def rum_analytics(
                         ) as cur_raw_any:
                             if not cur_raw_any.fetchone()[0]:
                                 return {"no_data": True}
-                            # If raw data exists, we fall back to raw query (maybe the rollup is not backfilled yet)
-                            logger.info(
-                                "[rum_rollups] %s: No rollup data in range but raw exists. Falling back to raw query.",
-                                service_id,
-                            )
-                            use_rollup = False
+                            
+                            # On-demand RUM aggregates recomputation!
+                            try:
+                                logger.info(
+                                    "[rum_rollups] %s: No rollup data in range but raw exists. Triggering on-demand RUM aggregates recomputation...",
+                                    service_id,
+                                )
+                                from backend.core.duckdb import get_connection
+                                # Open a temporary read-write connection to the RUM source
+                                with get_connection(rum_source, read_only=False) as write_con:
+                                    from backend.core.rollups.rum import recompute_rum_aggregates
+                                    recompute_rum_aggregates(write_con, service_id)
+                                
+                                # If successful, we can re-verify if we now have rollup data!
+                                with track_query(
+                                    con,
+                                    "SELECT COUNT(*) FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)",
+                                    [service_id, start_time, end_time],
+                                    "rum_rollup_any_data_retry",
+                                ) as cur_any_retry:
+                                    if cur_any_retry.fetchone()[0] > 0:
+                                        logger.info(
+                                            "[rum_rollups] %s: On-demand RUM aggregates successfully populated. Querying from rollups!",
+                                            service_id,
+                                        )
+                                        use_rollup = True
+                                    else:
+                                        logger.warning(
+                                            "[rum_rollups] %s: On-demand RUM aggregates populated but range is still empty. Falling back to raw query.",
+                                            service_id,
+                                        )
+                                        use_rollup = False
+                            except Exception as on_demand_err:
+                                logger.warning(
+                                    "[rum_rollups] %s: On-demand RUM aggregates recomputation failed: %s. Falling back to raw query.",
+                                    service_id,
+                                    on_demand_err,
+                                )
+                                use_rollup = False
 
             if use_rollup:
                 # 1. Pageviews, interactions, errors, total beacons

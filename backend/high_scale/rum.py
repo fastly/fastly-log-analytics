@@ -7,11 +7,18 @@ from backend.high_scale.registry import HighScaleService
 
 
 def rum_beacon_health(service: HighScaleService) -> dict[str, Any]:
-    res = service.client.execute(
-        "SELECT count() as c FROM rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
-        {"service_id": service.service_id},
-    )
-    beacons = res[0].get("c", 0) if res else 0 or 0
+    try:
+        res = service.client.execute(
+            "SELECT sum(event_count) as c FROM rum_vitals_aggregates WHERE service_id = {service_id:String} AND dimension = 'metric_name' AND publication_state='visible'",
+            {"service_id": service.service_id},
+        )
+        beacons = res[0].get("c", 0) if res and res[0].get("c") is not None else 0
+    except Exception:
+        res = service.client.execute(
+            "SELECT count() as c FROM rum_vitals_facts WHERE service_id = {service_id:String} AND publication_state='visible'",
+            {"service_id": service.service_id},
+        )
+        beacons = res[0].get("c", 0) if res else 0
     return {"has_data": beacons > 0, "beacons": beacons}
 
 
@@ -64,13 +71,20 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
 
     error_count = 0
     try:
-        err_query = "SELECT count() as c FROM rum_error_facts WHERE service_id={service_id:String} AND publication_state='visible'"
+        err_query = "SELECT sum(error_count) as c FROM rum_error_aggregates WHERE service_id={service_id:String} AND dimension='error_message' AND publication_state='visible'"
         if start and end:
-            err_query += " AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp <= {end:DateTime64(3)}"
+            err_query += " AND bucket_start >= {start:DateTime} AND bucket_start <= {end:DateTime}"
         err_res = service.client.execute(err_query, {"service_id": service.service_id, "start": start, "end": end})
-        error_count = err_res[0].get("c", 0) if err_res else 0
+        error_count = err_res[0].get("c", 0) if err_res and err_res[0].get("c") is not None else 0
     except Exception:
-        pass
+        try:
+            err_query = "SELECT count() as c FROM rum_error_facts WHERE service_id={service_id:String} AND publication_state='visible'"
+            if start and end:
+                err_query += " AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp <= {end:DateTime64(3)}"
+            err_res = service.client.execute(err_query, {"service_id": service.service_id, "start": start, "end": end})
+            error_count = err_res[0].get("c", 0) if err_res else 0
+        except Exception:
+            pass
 
     return {
         "is_mock": False,
