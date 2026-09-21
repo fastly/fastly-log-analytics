@@ -31,9 +31,10 @@ services:
     ports:
       - "80:80"
     volumes:
-      - ./configs:/app/configs
-      - ./cache:/app/cache
+      - ./configs/ZU15BvY2LX7WcEp43T9VwU.json:/app/configs/ZU15BvY2LX7WcEp43T9VwU.json
+      - backend-cache:/app/cache
       - ./scripts:/app/scripts
+      - backend-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
       - DUCKDB_MEMORY_LIMIT=4GB
@@ -104,3 +105,7 @@ networks:
     ipam:
       config:
         - subnet: 172.29.0.0/16
+
+volumes:
+  backend-data:
+  backend-cache:

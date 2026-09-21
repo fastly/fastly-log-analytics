@@ -393,6 +393,8 @@ class ClickHouseClient:
                 "max_threads": "4",
                 "memory_overcommit_ratio_denominator": "0",
                 "memory_overcommit_ratio_denominator_for_user": "0",
+                "max_bytes_before_external_group_by": "268435456",
+                "max_bytes_before_external_sort": "268435456",
             }
             if operation == "insert":
                 query.update({"query": sql or "", "async_insert": "0", "date_time_input_format": "best_effort"})

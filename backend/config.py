@@ -296,7 +296,19 @@ def _atomic_write_json(path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except OSError as e:
+            # Fallback to direct truncate-and-write if the bind-mount filesystem is busy/locked
+            if getattr(e, "errno", None) in {16, 13} or "busy" in str(e).lower() or "permission" in str(e).lower():
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            else:
+                raise
     except Exception:
         try:
             os.unlink(tmp_path)
