@@ -44,6 +44,7 @@ from . import (  # noqa: F401
     compaction,
     debug_settings,
     downloads,
+    duckdb,
     events,
     health,
     iceberg,

@@ -802,6 +802,15 @@ def set_recycle_barrier(db_path: str, on: bool) -> None:
             _recycle_barrier_cond.notify_all()
 
 
+def is_recycle_barrier_active(db_path: str | None = None) -> bool | set[str]:
+    """Check if the recycle barrier is currently active for a specific db_path or return active paths."""
+    with _recycle_barrier_cond:
+        if db_path is not None:
+            return db_path in _recycle_barrier_active
+        return set(_recycle_barrier_active)
+
+
+
 def _register_live_connection(con, db_path: str) -> None:
     """Track a freshly-opened raw connection in the per-db_path liveness set."""
     with _live_conns_lock:

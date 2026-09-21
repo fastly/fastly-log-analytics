@@ -1132,6 +1132,33 @@ def shutdown_all() -> None:
                 pass
 
 
+def get_pool_status() -> dict[str, Any]:
+    """Return status and connection metrics across all active and retired pools."""
+    with _pools_lock:
+        pools_info = {}
+        for k, pool in _pools.items():
+            pools_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "max_size": pool.max_size,
+                "created_total": pool._created_total,
+                "reused_total": pool._reused_total,
+                "draining": pool._draining,
+            }
+        retired_info = {}
+        for k, pool in _retired_pools.items():
+            retired_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "draining": pool._draining,
+            }
+    return {
+        "pools": pools_info,
+        "retired_pools": retired_info,
+    }
+
+
+
 # R-1: drain the per-connection metadata dict between tests so a recycled
 # Python id() doesn't carry an earlier test's pool-slot state forward.
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
