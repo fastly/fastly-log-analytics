@@ -121,6 +121,12 @@ def generate_rum_record(service_id: str, record_dt: datetime) -> dict:
         "device": device,
         "rum_cid": cid,
         "req_id": req_id,  # UNIQUE REQUEST ID per raw log line!
+        # Standard-mode ingest (backend/core/rum_ingest.py) reads
+        # `fastly_req_id` specifically — the same field the real edge VCL
+        # stamps (backend/core/fastly/rum_provisioning.py). Without it every
+        # synthetic record's request-id join to the CDN request log silently
+        # resolves to "".
+        "fastly_req_id": req_id,
         "request_event_id": req_id,  # Aligns ClickHouse high-scale schema
         "url": f"http://localhost{path}",
         "rum_body": json.dumps(faro_payload),

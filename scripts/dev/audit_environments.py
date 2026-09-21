@@ -309,7 +309,9 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     if env.admin_token:
         req_headers["X-Admin-Token"] = env.admin_token
 
-    # 1. Ping /api/health
+    # 1. Ping /api/health first — every other probe depends on the backend
+    # being alive, and there is no reason to fire five more requests at one
+    # that's already down.
     t0 = time.perf_counter()
     status, health_data = http_get_json(f"{env.backend_url}/api/health", headers=req_headers, timeout=timeout)
     res.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -323,8 +325,59 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     res.reachable = True
     res.version = health_data.get("version")
 
-    # 2. Query /api/bootstrap (unauthenticated baseline)
-    b_status, b_data = http_get_json(f"{env.backend_url}/api/bootstrap", headers=req_headers, timeout=timeout)
+    # 2-6. The remaining probes don't depend on one another — fire them
+    # concurrently instead of paying for 4-5 sequential round trips per
+    # environment. Keeps a single audit_target() call fast enough that
+    # --watch's --interval isn't routinely blown by its own probing.
+    probes: dict[str, tuple[Any, tuple, dict]] = {
+        "bootstrap": (
+            http_get_json,
+            (f"{env.backend_url}/api/bootstrap",),
+            {"headers": req_headers, "timeout": timeout},
+        ),
+        "health_snapshot": (
+            http_get_json,
+            (f"{env.backend_url}/api/admin/health-snapshot?probe_fos=1",),
+            {"headers": req_headers, "timeout": timeout},
+        ),
+        "cron_runs": (
+            http_get_json,
+            (f"{env.backend_url}/api/cron-runs?service_id={env.service_id}&task=log_discovery&per_page=3",),
+            {"headers": req_headers, "timeout": timeout},
+        ),
+        # NOTE: the scan window MUST be passed as the `range_token` body
+        # field, not a `range=` query param — /api/dashboard/bundle has no
+        # such query param, and an empty body (both start_time/end_time
+        # None) hits build_where_clause's no-bounds branch, which adds NO
+        # time predicate at all: an unbounded full-table scan with zero
+        # partition pruning, on every audit tick. `range_token: "24h"` is
+        # the real wire contract (see backend/utils/time_window.py) and is
+        # what actually bounds this probe to the 24h window it claims to
+        # exercise.
+        "dashboard_bundle": (
+            http_post_json,
+            (f"{env.backend_url}/api/dashboard/bundle?service_id={env.service_id}",),
+            {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": timeout},
+        ),
+    }
+    if env.is_high_scale:
+        probes["clickhouse_status"] = (
+            http_get_json,
+            (f"{env.backend_url}/api/admin/clickhouse/status?service_id={env.service_id}",),
+            {"headers": req_headers, "timeout": timeout},
+        )
+
+    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
+        futures = {name: pool.submit(fn, *args, **kwargs) for name, (fn, args, kwargs) in probes.items()}
+        outcomes = {name: fut.result() for name, fut in futures.items()}
+
+    b_status, b_data = outcomes["bootstrap"]
+    hs_status, hs_data = outcomes["health_snapshot"]
+    cron_status, cron_data = outcomes["cron_runs"]
+    d_status, d_data = outcomes["dashboard_bundle"]
+    ch_status, ch_data = outcomes.get("clickhouse_status", (0, {}))
+
+    # Bootstrap parsing (unauthenticated baseline)
     if b_status == 200 and isinstance(b_data, dict):
         status_sec = b_data.get("sync_status") or b_data.get("status") or {}
         req_sec = status_sec.get("request") or (b_data.get("header_badge") or {}).get("request") or {}
@@ -344,12 +397,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.iceberg_bytes = status_sec.get("iceberg_bytes", 0)
         res.iceberg_files = status_sec.get("iceberg_files", 0)
 
-    # 3. Query /api/admin/health-snapshot?probe_fos=1
-    hs_status, hs_data = http_get_json(
-        f"{env.backend_url}/api/admin/health-snapshot?probe_fos=1",
-        headers=req_headers,
-        timeout=timeout,
-    )
     if hs_status == 200 and isinstance(hs_data, dict):
         # CPU
         load = hs_data.get("load") or {}
@@ -461,12 +508,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     elif hs_status == 401:
         res.errors.append("Authentication required for /api/admin/health-snapshot (pass --admin-token)")
 
-    # 4. Ingest State determination
-    cron_status, cron_data = http_get_json(
-        f"{env.backend_url}/api/cron-runs?service_id={env.service_id}&task=log_discovery&per_page=3",
-        headers=req_headers,
-        timeout=timeout,
-    )
+    # Ingest state determination (uses the bootstrap + cron-runs results fetched above)
     last_disc_summary = ""
     if cron_status == 200 and isinstance(cron_data, dict):
         entries = cron_data.get("entries") or []
@@ -486,13 +528,8 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     else:
         res.ingest_state = "NO LOGS"
 
-    # 5. ClickHouse status (if high scale)
+    # ClickHouse status (if high scale; fetched above)
     if env.is_high_scale:
-        ch_status, ch_data = http_get_json(
-            f"{env.backend_url}/api/admin/clickhouse/status?service_id={env.service_id}",
-            headers=req_headers,
-            timeout=timeout,
-        )
         if ch_status == 200 and isinstance(ch_data, dict):
             res.clickhouse_health = ch_data.get("health")
             pub_counts = ch_data.get("publication_counts") or {}
@@ -501,9 +538,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             if res.clickhouse_health not in ("ok", "disabled", None):
                 res.warnings.append(f"ClickHouse state: {res.clickhouse_health}")
 
-    # 6. Active Dashboard Analytical Query Probe
-    dash_url = f"{env.backend_url}/api/dashboard/bundle?service_id={env.service_id}&range=24h"
-    d_status, d_data = http_post_json(dash_url, payload={}, headers=req_headers, timeout=timeout)
+    # Active Dashboard Analytical Query Probe (fetched above, bounded to a 24h range_token)
     if d_status != 200:
         res.errors.append(f"Dashboard query failed: HTTP {d_status} (data: {d_data})")
     elif isinstance(d_data, dict):
