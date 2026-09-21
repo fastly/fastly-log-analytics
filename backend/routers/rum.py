@@ -1193,8 +1193,6 @@ async def rum_live_events(
 
     # 2. Establish fallback ranges
     if not start_time and not end_time:
-        import datetime
-
         from backend.utils.date_utils import iso_z
 
         end_dt = datetime.datetime.now(datetime.UTC)

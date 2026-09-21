@@ -557,12 +557,16 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     """Evaluate all enabled alerts for a specific service."""
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
     from backend.repositories import alerts as alert_repo
+    from backend.utils.active_requests import should_defer_cron
 
     start = time.monotonic()
 
     src = get_source_for_service(service_id)
     if not src:
         logger.warning("Could not find source for service_id %s", service_id)
+        return
+
+    if should_defer_cron("alerts", service_id):
         return
 
     task_name = "alerts"
@@ -592,6 +596,13 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         logger.debug("[scheduler] Could not start alerts evaluation for %s: %s", service_id, e)
         return
 
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task=task_name)
+
+    webhook_failures: list[str] = []
+
     try:
         display_name = _display_label(src, service_id)
 
@@ -606,6 +617,12 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                 if fired:
                     triggered_items.append((alert, webhook_url, payload, max_ts))
                     logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
+                    _log_and_add_progress(
+                        run_id,
+                        service_id,
+                        job_name=task_name,
+                        event={"type": "status", "message": f"Alert triggered: {alert['name']}"},
+                    )
             except Exception as e:
                 logger.error(
                     "%s Failed to evaluate alert %s for %s: %s",
@@ -637,6 +654,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                     try:
                         _post_alert_webhook(webhook_url, payload)
                     except Exception as e:
+                        err_str = f"webhook for {alert['name']}: {e}"
+                        webhook_failures.append(err_str)
                         logger.error(
                             "%s Failed to send webhook for alert %s: %s",
                             JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
@@ -682,6 +701,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                         elif chan_type == "webhook":
                             _post_alert_webhook(chan_url, payload or {"alert": alert})
                     except Exception as e:
+                        err_str = f"channel {channel.get('type')} for {alert['name']}: {e}"
+                        webhook_failures.append(err_str)
                         logger.error(
                             "%s Failed to send notifications to channel %s for alert %s: %s",
                             JOB_COLORS["alerts"] + "[alerts]" + RESET_COLOR,
@@ -692,20 +713,29 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 
         n_eval = len(enabled_alerts)
         n_trig = len(triggered_items)
+        status = "warning" if (n_trig > 0 or webhook_failures) else "success"
         summary = (
             f"Evaluated {n_eval} {'alert' if n_eval == 1 else 'alerts'}. "
             f"{n_trig} {'alert' if n_trig == 1 else 'alerts'} triggered."
         )
+        if webhook_failures:
+            summary += f" ({len(webhook_failures)} notification failure{'s' if len(webhook_failures) > 1 else ''}: {', '.join(webhook_failures)})"
 
         log_cron_run(
             src,
             task_name,
             time.monotonic() - start,
-            "success",
+            status,
             summary=summary,
             files_downloaded=n_eval,
             rows_ingested=n_trig,
             run_id=run_id,
+        )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name=task_name,
+            event={"type": "done", "message": summary},
         )
 
     except Exception as e:
@@ -731,6 +761,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             run_id=run_id,
         )
     finally:
+        end_progress(run_id)
         from backend.cron.jobs._common import finalize_cron_duration
 
         finalize_cron_duration(src, run_id, start, clock=time.monotonic)

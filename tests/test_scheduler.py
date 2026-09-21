@@ -1009,6 +1009,134 @@ def test_run_service_alerts_evaluation_swallows_webhook_post_failure():
     assert any("working" in u for u in webhook_attempts)
 
 
+def test_run_service_alerts_evaluation_defers_when_active_requests_present():
+    """When active requests are present on the dashboard, alerts evaluation should defer."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.repositories.alerts.get_alerts") as mock_get_alerts,
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    mock_get_alerts.assert_not_called()
+
+
+def test_run_service_alerts_evaluation_status_warning_when_alert_triggers():
+    """When an alert triggers, cron run status should be logged as 'warning'."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "5xx error spike", "enabled": True}]
+    fake_con = MagicMock()
+    log_calls = []
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, None, None, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "1 alert triggered" in kwargs.get("summary", "")
+
+
+def test_run_service_alerts_evaluation_status_warning_when_webhook_fails():
+    """When a webhook fails to send, status is logged as 'warning' with failure details."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "latency alert", "enabled": True}]
+    fake_con = MagicMock()
+    log_calls = []
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch(
+            "backend.core.duckdb.log_cron_run",
+            side_effect=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+        ),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, "https://slack.example/hook", {"text": "boom"}, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("httpx.post", side_effect=RuntimeError("connection timed out")),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert "notification failure" in kwargs.get("summary", "")
+
+
+def test_run_service_alerts_evaluation_emits_progress_events():
+    """Progress events should be emitted to cron_progress when alerts trigger and when evaluation finishes."""
+    from backend.cron.jobs.metadata import _run_service_alerts_evaluation
+
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    alerts = [{"id": "a1", "name": "bandwidth spike", "enabled": True}]
+    fake_con = MagicMock()
+    progress_mock = MagicMock()
+
+    with (
+        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch(
+            "backend.repositories.alerts.evaluate_alert",
+            return_value=(True, None, None, "2026-01-01T00:00:00Z"),
+        ),
+        patch("backend.repositories.alerts.update_last_triggered"),
+        patch("backend.state_sync.export_admin_state"),
+        patch("backend.cron_progress.start_progress") as mock_start_prog,
+        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress", progress_mock),
+    ):
+        _run_service_alerts_evaluation("svc-1")
+
+    mock_start_prog.assert_called_once_with(42, service_id="svc-1", task="alerts")
+    mock_end_prog.assert_called_once_with(42)
+    # Status event for triggered alert + Done event
+    assert progress_mock.call_count == 2
+    assert "Alert triggered" in progress_mock.call_args_list[0][1]["event"]["message"]
+    assert "done" == progress_mock.call_args_list[1][1]["event"]["type"]
+
+
+
 # ── _run_metadata_sync (analyst metadata refresh) ────────────────────────
 
 
@@ -2570,6 +2698,130 @@ def test_sync_jobs_reschedules_gap_heal_when_interval_changed():
         s._sync_jobs()
 
     mock_job.reschedule.assert_called_once_with("interval", minutes=15)
+
+
+def test_sync_jobs_reschedules_metadata_cleanup_when_hour_changed():
+    """When cron_metadata_cleanup.cron_hour changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-mc-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_cleanup": {"cron_hour": 4, "cron_minute": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["metadata_cleanup_svc-mc-resched"] = "metadata_cleanup_svc-mc-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-mc-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("cron", hour=4, minute=30)
+
+
+def test_sync_jobs_skips_metadata_cleanup_when_disabled():
+    """When cron_metadata_cleanup.enabled is False, job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-mc-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_metadata_cleanup": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-mc-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    assert "metadata_cleanup_svc-mc-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_alerts_evaluation_when_interval_changed():
+    """When cron_alerts.interval_seconds changes, existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-alert-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_alerts": {"interval_seconds": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["alerts_evaluation_svc-alert-resched"] = "alerts_evaluation_svc-alert-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-alert-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", seconds=30)
+
+
+def test_sync_jobs_skips_alerts_evaluation_when_disabled():
+    """When cron_alerts.enabled is False, alerts_evaluation job should not be registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-alert-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_alerts": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-alert-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    assert "alerts_evaluation_svc-alert-disabled" not in s._job_ids
+
+
 
 
 def test_check_disk_space_passes_when_plenty_free(tmp_path):

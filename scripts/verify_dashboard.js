@@ -102,7 +102,6 @@ if (!url) {
         await page.waitForTimeout(4000);
         
         const rumBodyText = await page.evaluate(() => document.body.innerText);
-        const isLocalStandard = expectedArch === "standard" && expectedEnv === "local";
 
         // Assert that the RUM Page components are rendered
         if (!rumBodyText.includes("TOTAL BEACONS") || !rumBodyText.includes("PAGEVIEWS")) {
@@ -111,23 +110,18 @@ if (!url) {
           process.exit(1);
         }
 
-        // For real services (excluding the local mocked standard service), verify that active metrics actually populated
-        if (!isLocalStandard) {
-          // Confirm Largest Contentful Paint chart and Good/Poor/Needs Imp rating exist, proving data is present
-          const hasVitalsTitle = rumBodyText.includes("Largest Contentful Paint") || rumBodyText.includes("LCP");
-          const hasVitalsRating = rumBodyText.includes("GOOD") || rumBodyText.includes("POOR") || rumBodyText.includes("NEEDS IMP.");
-          
-          if (!hasVitalsTitle || !hasVitalsRating) {
-            console.error(`[${rumUrl}] Verification Failed: Web Vitals metrics are missing or empty on the RUM page!`);
-            console.error("Body text sample:");
-            console.error(rumBodyText.slice(0, 1000));
-            await browser.close();
-            process.exit(1);
-          }
-          console.log(`[${rumUrl}] Verified RUM metrics successfully populated on page (Vitals & Ratings active).`);
-        } else {
-          console.log(`[${rumUrl}] Verified RUM page is active (mock service idle state verified).`);
+        // Confirm Largest Contentful Paint chart and Good/Poor/Needs Imp rating exist, proving data is present
+        const hasVitalsTitle = rumBodyText.includes("Largest Contentful Paint") || rumBodyText.includes("LCP");
+        const hasVitalsRating = rumBodyText.includes("GOOD") || rumBodyText.includes("POOR") || rumBodyText.includes("NEEDS IMP.");
+        
+        if (!hasVitalsTitle || !hasVitalsRating) {
+          console.error(`[${rumUrl}] Verification Failed: Web Vitals metrics are missing or empty on the RUM page! Ingestion failed or did not populate.`);
+          console.error("Body text sample:");
+          console.error(rumBodyText.slice(0, 1000));
+          await browser.close();
+          process.exit(1);
         }
+        console.log(`[${rumUrl}] Verified RUM metrics successfully populated on page (Vitals & Ratings active).`);
       }
 
     } catch (e) {

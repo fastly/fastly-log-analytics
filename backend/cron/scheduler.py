@@ -496,13 +496,17 @@ class Scheduler:
 
     # ── Job management ────────────────────────────────────────────────────────
 
-    def _register_alerts_evaluation_job(self, service_id: str, seconds: int, seen_ids: set[str]) -> None:
+    def _register_alerts_evaluation_job(
+        self, service_id: str, seconds: int, seen_ids: set[str], enabled: bool = True
+    ) -> None:
         """Register (or reschedule) the per-service alerts-evaluation cron
         job. Gated on having at least one alert configured — otherwise the
         cron just fires a "skipped" log every tick. Shared between the
         analyst (read-only) and admin paths in :func:`_sync_jobs`; the only
         per-path difference is the tick interval, so we take it as ``seconds``.
         """
+        if not enabled:
+            return
         from backend.cron.jobs.metadata import _run_service_alerts_evaluation
 
         if not _service_has_alerts(service_id):
@@ -791,7 +795,10 @@ class Scheduler:
                 # When the user adds an alert, the alerts router calls
                 # scheduler.reload() to register the job; deleting the last
                 # alert lets the cleanup loop unregister it on the next sync.
-                self._register_alerts_evaluation_job(service_id, interval_seconds, seen_ids)
+                alerts_cfg = prov.get("cron_alerts", {})
+                alerts_enabled = alerts_cfg.get("enabled", True)
+                alerts_seconds = int(alerts_cfg.get("interval_seconds") or interval_seconds)
+                self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
 
                 # Analysts don't ingest or commit — skip the rest.
                 continue
@@ -995,7 +1002,10 @@ class Scheduler:
 
             # ── Alerts evaluation job (Per Service) ───────────────────────────
             # See note above (analyst branch) on the no-alerts gate.
-            self._register_alerts_evaluation_job(service_id, log_period, seen_ids)
+            alerts_cfg = prov.get("cron_alerts", {})
+            alerts_enabled = alerts_cfg.get("enabled", True)
+            alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
+            self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
 
             # ── Full-LIST sweep (catches late-arriving files, every 6h) ───────
             full_sweep_cfg = prov.get("cron_full_sweep", {})
