@@ -531,3 +531,37 @@ def oauth_providers():
     client_id/client_secret.
     """
     return OAuthProvidersResponse(providers=[p.admin_dict() for p in oauth_registry.get_all_providers()])
+
+
+# ── Retention Purge ──────────────────────────────────────────────────────────
+
+
+@router.post("/purge")
+def trigger_share_purge(
+    audit_retention_days: int | None = Query(
+        default=None,
+        ge=1,
+        description="Audit retention window in days (defaults to share_audit_retention_days setting or 90)",
+    ),
+    max_idle_session_days: int = Query(
+        default=30,
+        ge=1,
+        description="Max days an analyst session can remain idle before being pruned",
+    ),
+):
+    """Trigger manual retention cleanup of audit logs, expired invites, tokens, and stale sessions."""
+    from backend.core import share_db
+
+    if audit_retention_days is None:
+        raw = share_db.get_setting(share_db.SHARE_AUDIT_RETENTION_DAYS_KEY, "90")
+        try:
+            audit_retention_days = max(1, int(raw or "90"))
+        except (TypeError, ValueError):
+            audit_retention_days = 90
+
+    stats = share_db.purge_all_share_records(
+        audit_retention_days=audit_retention_days,
+        max_idle_session_days=max_idle_session_days,
+    )
+    return {"ok": True, **stats}
+

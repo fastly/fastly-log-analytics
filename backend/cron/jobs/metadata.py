@@ -599,10 +599,10 @@ def _run_rdns_enrichment() -> tuple[str, str]:
 
 @global_job("share_audit_purge", color="35", tag="share_audit_purge", label="Share audit purge")
 def _run_share_audit_purge() -> str:
-    """Drop remote-share audit rows older than the retention window (daily 03:45 UTC).
+    """Drop remote-share audit rows older than retention, expired invites, tokens, and stale sessions (daily 03:45 UTC).
 
     Retention is read from the `share_audit_retention_days` setting, defaulting
-    to 90 days. The companion endpoint is `share_db.purge_old_audit_logs`.
+    to 90 days. The companion endpoint is `POST /api/admin/share/purge`.
     """
     from backend.core import share_db
 
@@ -612,12 +612,21 @@ def _run_share_audit_purge() -> str:
     except (TypeError, ValueError):
         retention = 90
     deleted = share_db.purge_old_audit_logs(retention_days=retention)
+    stale_res = share_db.purge_stale_share_records(max_idle_session_days=30)
     logger.info(
-        "✅ \x1b[35m[share_audit_purge]\x1b[0m Deleted %d row(s) older than %d days.",
+        "✅ \x1b[35m[share_audit_purge]\x1b[0m Deleted %d audit row(s), %d expired invite(s), %d stale session(s), %d claim token(s).",
         deleted,
-        retention,
+        stale_res.get("deleted_expired_invites", 0),
+        stale_res.get("deleted_stale_sessions", 0),
+        stale_res.get("deleted_claim_tokens", 0),
     )
-    return f"deleted={deleted} retention_days={retention}"
+    return (
+        f"deleted={deleted} retention_days={retention} "
+        f"expired_invites={stale_res.get('deleted_expired_invites', 0)} "
+        f"stale_sessions={stale_res.get('deleted_stale_sessions', 0)} "
+        f"claim_tokens={stale_res.get('deleted_claim_tokens', 0)}"
+    )
+
 
 
 # ── _run_service_alerts_evaluation ───────────────────────────────────────────
