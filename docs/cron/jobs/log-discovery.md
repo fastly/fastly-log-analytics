@@ -59,7 +59,7 @@
 7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 30s):
    - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
    - Triggers `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation).
-8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. If any files were quarantined or rows corrupted, `cron_runs.status` must be marked as `warning` (never `success`) so it surfaces in `/api/admin/health-snapshot`.
+8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records separate counts for valid lines, malformed lines, corrupt gzip files, quarantine-capture failures, FOS deletion failures, and cap-eviction failures.
 
 ### High-Scale Mode:
 1. Issues FOS LIST on prefix (rolling 10-minute window).
@@ -67,7 +67,7 @@
 3. Selects batches using `UPDATE ingest_ledger SET status = 'claimed', worker_id = %s, claimed_at = NOW() WHERE status = 'discovered' ... RETURNING filename`.
 4. Enqueues conversion tasks to Celery queue (`convert_batch_files.delay(...)`).
 5. **Stateless Workers:** Worker processes skip local DuckDB heavy refresh to avoid file-lock contention with readers; autocomplete cache updates run on the serving web-pod.
-6. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as exact original bytes under `data/services/{service_id}/quarantine/`, indexed with its source object, line ordinal, byte offset when known, parser error, and byte size, then the FOS source is deleted only after local capture succeeds. A corrupt gzip container is retained as the complete original gzip evidence. Capture failures leave the FOS object retryable. Quarantine is diagnostic evidence, not a re-ingest queue. Any quarantined rows elevate `cron_runs` status to `warning`.
+6. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as a separate exact-byte item under `data/services/{service_id}/quarantine/`; corrupt gzip containers are captured as one complete gzip item. Metadata records request/RUM source type, original FOS key, line ordinal, byte offset/length when known, normalized error category, bounded error text, and SHA-256. The source FOS object is always deleted after processing, even if capture fails; capture failures are recorded and the run is marked `error`. Quarantine is diagnostic evidence, not a re-ingest queue. High-Scale workers write to shared quarantine storage with bounded retries for transient storage failures, while the serving pod owns the admin surface and cap enforcement.
 
 ---
 
@@ -89,19 +89,21 @@
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
-- **FOS Rate Limiting / 429:** Exponential backoff with retry; logs warning in `cron_runs`.
-- **Corrupted `.gz` File / Bad Rows:** Captures exact local evidence, records it in `quarantined_files`, deletes the FOS source only after successful capture, elevates `cron_runs` status to `warning`, and continues the remaining batch. A failed local capture leaves the source available for retry.
+- **FOS Rate Limiting / 429:** Bounded exponential backoff with retry; exhausted failures mark the run `error`, record the source key and error, and continue other files where safe.
+- **Corrupted `.gz` File / Bad Rows:** Captures exact local evidence when possible, records the error when capture fails, deletes the FOS source regardless, marks the run `error`, and continues the remaining batch. Every line receives a durable success/failure outcome.
+- **FOS Deletion Failure:** Bounded retry is attempted. If deletion still fails, the run is marked `error`, the source key and deletion error are recorded, and other files continue.
 
 ### Quarantine retention and admin surface
-- Default retention is seven days.
-- The configurable capacity is 1,000 bad lines, not 1,000 source objects. Oldest entries are evicted immediately in bounded batches when the cap is exceeded.
-- Total evidence bytes are measured and surfaced for operational warnings but do not independently trigger eviction.
-- High-Scale serving/web ownership runs retention and capacity maintenance; Celery workers do not duplicate it.
-- Evidence is admin/read-write only. Analyst Path A and Analyst Path B cannot inspect,
-  download, or purge it.
-- The admin UI groups entries by source object and expands to individual malformed-line
-  details. It provides a decoded preview when safe, exact-byte download on demand, and
-  selected-line or purge-all controls.
+- The cap is 1,000 items per service, shared by malformed lines and corrupt gzip items.
+- There is no age-based expiry and no configurable override. New writes enforce the cap
+  immediately by evicting oldest individual items; failures are recorded while other
+  eligible evictions continue.
+- Evidence is admin/read-write only. Both Analyst Path A and Analyst Path B are denied by
+  backend authorization, regardless of UI visibility.
+- The UI treats each line as an individual item, paginates results, supports source-type
+  and error-category filters, shows readable previews by default, and provides authenticated
+  exact-byte streaming downloads with size limits. Individual purge and service-scoped
+  purge-all are supported. No separate quarantine cron is required.
 - **Stale Buffer View Race:** Handled via `execute_with_stale_view_retry()` clearing view cache and rebuilding.
 
 ---
@@ -121,3 +123,5 @@
 - [ ] 5. Confirm heavy refresh phases (`update_top_values`, `reconcile_fastly_stats`) run no more than once per 60s.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
 - [ ] 7. In High-Scale mode, verify rows transition properly in `ingest_ledger` (`discovered → claimed`).
+- [ ] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
+  immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.

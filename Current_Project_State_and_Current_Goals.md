@@ -287,20 +287,35 @@ quarantine behavior is:
 - Valid rows continue ingesting when individual lines are malformed. Each malformed line
   is retained as exact original bytes, with source object, line ordinal, byte offset when
   known, parser error, and size metadata.
-- A corrupt gzip container is retained as the complete original gzip evidence because no
-  line-level decode is trustworthy.
-- Evidence is local-only under `data/services/{service_id}/quarantine/`. The FOS source
-  object is deleted only after local capture and metadata indexing succeed; otherwise it
-  remains retryable. Quarantine is diagnostic evidence, not a re-ingest queue.
-- Retention is seven days by default. The configurable cap is 1,000 **bad lines**; the
-  oldest entries are evicted immediately and bounded when the cap is exceeded. Total
-  bytes are measured for visibility and warnings but do not independently evict.
-- High-Scale serving/web ownership performs quarantine maintenance; Celery workers do not
-  run a duplicate cleanup path. Read-only Analyst Path A instances do not write or
-  maintain quarantine evidence.
-- Quarantine access is admin/read-write only. The admin UI groups evidence by source
-  object, expands to individual bad-line details, provides decoded previews when safe,
-  and offers exact-byte download plus selected-line and purge-all controls.
+- A corrupt gzip container is retained as one complete original gzip evidence item because
+  no line-level decode is trustworthy.
+- Evidence is local-only under `data/services/{service_id}/quarantine/`, outside static
+  web roots. Each malformed line or corrupt gzip is one item with its own collision-safe
+  evidence file. Metadata includes source type (request/RUM), source FOS key, line ordinal,
+  byte offset/length when known, normalized error category, bounded error text, and
+  SHA-256 for integrity verification. Source key plus line ordinal/byte range remains the
+  primary identity.
+- The FOS source object is always deleted after processing, including when local evidence
+  capture fails. Capture is best effort: the system records as much error information as
+  possible, marks the run `error`, and continues safely. Every source line must receive a
+  durable success or failure outcome; no source is silently acknowledged.
+- Quarantine is diagnostic evidence, not a re-ingest queue. There is one 1,000-item cap
+  per service shared by malformed-line and corrupt-gzip items, with no age-based expiry
+  and no configurable override. When new items exceed the cap, oldest individual items
+  are evicted immediately; eviction failures are recorded and do not block other eligible
+  evictions.
+- High-Scale workers capture directly into shared quarantine storage/database with bounded
+  retries for transient storage failures. The serving pod owns the admin surface and cap
+  enforcement; workers do not run duplicate maintenance. Read-only Analyst Path A
+  instances do not write or maintain quarantine evidence.
+- Quarantine access is backend-enforced admin/read-write only for both analyst paths. The
+  admin UI treats each line as an individual item, supports pagination, source-type and
+  error-category filters, readable previews by default, authenticated exact-byte streaming
+  downloads with size limits, individual purge, and service-scoped purge-all.
+- Existing legacy FOS-backed quarantine records are out of scope; only newly quarantined
+  items use this design. Existing metadata maintenance may run a bounded orphan-repair
+  sweep, removing stale metadata references while preserving and reporting unexpected
+  evidence files.
 
 ### Phase 3: Analytics & Admin Pages Audit (One Single Session per Page)
 - [ ] Page 1: Dashboard (`/dashboard`) ([docs/pages/dashboard.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md))

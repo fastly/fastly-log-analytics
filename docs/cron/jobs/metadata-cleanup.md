@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `metadata_cleanup_{service_id}`
 - **Category:** Operational Database Retention & Pruning
-- **Purpose:** Trims historical operational records from per-service databases (`metadata.db`, `usage_log.db`, or PostgreSQL `METADATA_DSN`), including `usage_log`, `ingested_files`, `cron_runs`, `slow_queries`, expired quarantine files, and global `metric_snapshots` according to configured retention windows.
+- **Purpose:** Trims historical operational records from per-service databases (`metadata.db`, `usage_log.db`, or PostgreSQL `METADATA_DSN`), including `usage_log`, `ingested_files`, `cron_runs`, `slow_queries`, and global `metric_snapshots` according to configured retention windows. Quarantine-cap enforcement occurs during writes in log discovery; no separate quarantine cron is required.
 - **Why It Runs:** Continuous streaming writes hundreds of operational records per hour. Unbounded growth in SQLite databases causes WAL bloat, slower indexed lookups, and unneeded disk consumption. Scheduled pruning keeps SQLite databases small, fast, and cached in OS memory.
 
 ---
@@ -36,7 +36,7 @@
 ## 4. Role & Permissions Matrix
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
-| **Admin (`read_write`)** | Active | `POST /api/admin/metadata/cleanup/{service_id}` | Pruning statistics in Admin UI. Purges expired local quarantine evidence. |
+| **Admin (`read_write`)** | Active | `POST /api/admin/metadata/cleanup/{service_id}` | Pruning statistics in Admin UI. May report bounded quarantine orphan reconciliation. |
 | **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Prunes local analyst metadata databases. Quarantine writes and maintenance skipped. |
 | **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side maintenance only; no direct interaction. |
 
@@ -60,9 +60,10 @@
    - Deletes `slow_queries` older than `slow_queries_days`.
 7. **SQLite VACUUM:**
    - If any rows were deleted, issues `VACUUM` on SQLite database files to reclaim freed pages and compact physical storage.
-8. **Global System Metrics & Local Quarantine Purge:**
+8. **Global System Metrics & Quarantine Consistency Check:**
    - Purges global `metric_snapshots` older than 30 days.
-   - The owning serving/web process purges local quarantine evidence older than seven days and performs bounded oldest-first eviction when the 1,000-bad-line cap is exceeded. Evidence bytes are measured for warnings but do not independently trigger eviction. Celery workers and read-only Analyst Path A instances do not run this maintenance.
+   - Does not perform normal quarantine-cap eviction; log discovery enforces the 1,000-item-per-service cap immediately on writes.
+   - May perform a bounded orphan-reconciliation sweep: remove stale metadata references for missing evidence, preserve and report unexpected evidence files, and report remaining work. Celery workers and read-only Analyst Path A instances do not run this maintenance.
 9. **Telemetry, Progress & Duration Finalization:**
    - Emits done event to `cron_progress`.
    - Records deleted row tallies and execution status in `cron_runs`.
@@ -72,7 +73,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & Resource Capture:**
-  - **FOS Calls:** Zero FOS calls for quarantine maintenance; evidence is local-only.
+  - **FOS Calls:** Zero FOS calls for quarantine maintenance; evidence is local-only and outside static web roots.
   - **SQLite Operations:** Every `DELETE FROM` statement executes in 5,000-row chunks via `ThreadLocalPool` with instrumented timings.
   - **Lock Wait Time:** Connection acquisition wait (`app.thread_wait_ms`) remains < 20ms.
 - **Timing & Resource Budgets:**
@@ -91,11 +92,13 @@
 - **Read-Only Service (Analyst):** Quarantine writes and maintenance are skipped; only the instance's owned operational metadata is pruned.
 
 ### Local quarantine evidence
-- One bad raw line is one capacity item. A source object with multiple malformed lines
-  therefore contributes multiple items to the 1,000-item cap.
-- Evidence is stored under `data/services/{service_id}/quarantine/`, with metadata in the
-  service metadata database. The admin view groups those line items by source object and
-  expands them for inspection.
+- Each malformed line and corrupt gzip container is one item in a shared 1,000-item cap
+  for that service. There is no age-based expiry.
+- Evidence is stored under `data/services/{service_id}/quarantine/`, outside static web
+  roots, with metadata in the service metadata database. Each item has its own evidence
+  file; source key and line metadata remain in the database.
+- Normal cap eviction happens synchronously during quarantine writes. This cron may only
+  run the bounded orphan-reconciliation safety sweep described above.
 
 ---
 
