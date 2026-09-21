@@ -120,6 +120,17 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
             _mark_ledger_published(service_id, rum=True)
 
+            # Update/recompute precomputed RUM aggregates
+            try:
+                from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.rollups.rum import recompute_rum_aggregates
+
+                rum_src = rum_source_for(src)
+                with get_connection(rum_src, read_only=False) as rum_con:
+                    recompute_rum_aggregates(rum_con, service_id)
+            except Exception as agg_err:
+                logger.warning("[rum_commit] %s: RUM aggregates update failed: %s", service_id, agg_err, exc_info=True)
+
         # Also launch local compaction for BOTH tables with error logging
         try:
             import threading as _t

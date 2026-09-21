@@ -177,6 +177,25 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     n_pd_day = compact_perf_dims_closed_days_to_daily(sid, source)
     n_nb_day = compact_ngwaf_bots_closed_days_to_daily(sid, source)
     n_ov_day = compact_overview_closed_days_to_daily(sid, source)
+
+    # RUM aggregates backfill
+    n_rum = 0
+    try:
+        from backend.core.duckdb import get_connection, rum_source_for
+        from backend.core.rollups.rum import recompute_rum_aggregates, table_exists
+
+        rum_src = rum_source_for(source)
+        with get_connection(rum_src, read_only=False) as rum_con:
+            recompute_rum_aggregates(rum_con, sid)
+            if table_exists(rum_con, "rum_vitals_aggregates"):
+                res_count = rum_con.execute(
+                    "SELECT COUNT(DISTINCT bucket_start) FROM rum_vitals_aggregates WHERE service_id = ?", [sid]
+                ).fetchone()
+                if res_count is not None:
+                    n_rum = res_count[0] or 0
+    except Exception as rum_backfill_err:
+        logging.getLogger(__name__).warning("RUM aggregates backfill failed: %s", rum_backfill_err, exc_info=True)
+
     return {
         "slow_urls": n_su,
         "origin_summary": n_os,
@@ -206,6 +225,7 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "overview": n_ov,
         "overview_days": n_ov_day,
         "network_summary": n_netsumm,
+        "rum": n_rum,
     }
 
 

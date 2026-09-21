@@ -549,6 +549,7 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     wellknown_bots: int | None = None
     overview: int | None = None
     overview_days: int | None = None
+    rum: int | None = None
 
 
 class LocalCompactNowResponse(_AdminMaintRead):
