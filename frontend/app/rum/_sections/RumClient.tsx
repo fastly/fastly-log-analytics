@@ -419,7 +419,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Total Beacons</p>
-            <p className="text-2xl font-extrabold text-blue-500">{analytics.beacon_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-blue-500">{(analytics.beacon_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-blue-500/10 rounded-lg">
             <Activity className="h-5 w-5 text-blue-500" />
@@ -429,7 +429,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Pageviews</p>
-            <p className="text-2xl font-extrabold text-emerald-500">{analytics.pageview_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-emerald-500">{(analytics.pageview_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-emerald-500/10 rounded-lg">
             <Eye className="h-5 w-5 text-emerald-500" />
@@ -439,7 +439,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Interactions</p>
-            <p className="text-2xl font-extrabold text-amber-500">{analytics.interaction_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-amber-500">{(analytics.interaction_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-amber-500/10 rounded-lg">
             <Cpu className="h-5 w-5 text-amber-500" />
@@ -449,7 +449,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">JavaScript Errors</p>
-            <p className="text-2xl font-extrabold text-rose-500">{analytics.error_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-rose-500">{(analytics.error_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-rose-500/10 rounded-lg">
             <ShieldAlert className="h-5 w-5 text-rose-500" />
@@ -488,7 +488,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${clsColors.text}`}>
-              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(3) : '—'}
+              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—'}
             </p>
             <p className={`text-xs ${clsColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.cls.distribution)}
@@ -506,7 +506,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${inpColors.text}`}>
-              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75}ms` : '—'}
+              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—'}
             </p>
             <p className={`text-xs ${inpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.inp.distribution)}

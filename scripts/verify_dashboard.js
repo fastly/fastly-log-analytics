@@ -182,7 +182,7 @@ function registerErrorListeners(page, browser, contextName) {
       process.exit(1);
     }
     await page.waitForSelector('main', { timeout: 30000 });
-    
+
     // Robust waiting: Wait for the header badge containing the REQUEST totals to fully render
     try {
       await page.waitForFunction(() => {
@@ -410,7 +410,7 @@ function registerErrorListeners(page, browser, contextName) {
       process.exit(1);
     }
     await rumPage.waitForSelector('main', { timeout: 10000 });
-    
+
     // Wait for RUM aggregates/bundle queries to complete and loading overlays to disappear
     try {
       await rumPage.waitForFunction(() => {
