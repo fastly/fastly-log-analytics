@@ -133,8 +133,16 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
                 # uploaded as "not intact", and re-upload it a second time
                 # this same tick.
                 cfg = svcconfig.load_config(service_id) or cfg
-            except Exception:
-                logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
+            except Exception as e:
+                msg = str(e)
+                if "403" in msg or "401" in msg or "unauthorized" in msg.lower():
+                    logger.warning(
+                        "Faro default-version adoption failed for %s (S3/FOS write credentials unauthorized: %s)",
+                        service_id,
+                        e,
+                    )
+                else:
+                    logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
                 return False
 
             # The bundle now exists in FOS, but the deployed VCL for this
@@ -179,8 +187,16 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
                 )
                 _faro_purge_surrogate_key(service_id, token)
                 report(f"Faro bundle v{pinned_version} restored to FOS")
-            except Exception:
-                logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
+            except Exception as e:
+                msg = str(e)
+                if "403" in msg or "401" in msg or "unauthorized" in msg.lower():
+                    logger.warning(
+                        "Faro bundle restore failed for %s (S3/FOS write credentials unauthorized: %s)",
+                        service_id,
+                        e,
+                    )
+                else:
+                    logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
                 return False
 
         # 2. Throttled upstream drift check. Reload cfg first in case the

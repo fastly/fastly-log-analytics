@@ -269,13 +269,28 @@ def load_config(service_id: str | None) -> dict | None:
     except FileNotFoundError:
         return None
 
-    cached = _config_cache.get(service_id)
-    if cached is not None and cached[0] == mtime_ns:
-        return copy.deepcopy(cached[1])
+    with _config_cache_lock:
+        cached = _config_cache.get(service_id)
+        if cached is not None and cached[0] == mtime_ns:
+            return copy.deepcopy(cached[1])
 
-    with open(path, "rb") as f:
-        raw = f.read()
-    parsed = json.loads(raw)
+    # Robust VirtioFS mid-write desynchronization retry loop
+    import time
+    parsed = None
+    last_exc = None
+    for attempt in range(5):
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            parsed = json.loads(raw)
+            break
+        except (json.JSONDecodeError, PermissionError, OSError) as e:
+            last_exc = e
+            time.sleep(0.05)
+
+    if parsed is None:
+        raise last_exc
+
     with _config_cache_lock:
         _config_cache[service_id] = (mtime_ns, parsed)
     return copy.deepcopy(parsed)

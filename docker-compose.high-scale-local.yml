@@ -57,7 +57,7 @@ services:
       - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
       - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - HIGH_SCALE_CLICKHOUSE_URL=http://clickhouse:8123
-      - HIGH_SCALE_FOS_BUCKET=prototype-bucket
+      - HIGH_SCALE_FOS_BUCKET=fos-zez4mcajosfdtg7tpkdkv2-logs
       - HIGH_SCALE_ARCHIVE_MANIFEST_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - HIGH_SCALE_WORKER_QUEUE_URL=redis://valkey:6379/0
       - CLICKHOUSE_ENABLED=true
@@ -87,6 +87,11 @@ services:
   clickhouse-schema-init:
     volumes: !override
       - ./configs-hs:/app/configs:ro
+
+  clickhouse:
+    environment:
+      - AWS_ACCESS_KEY_ID=${HOT_S3_KEY:-IXNk1iHlFpFPDINmxkJeDd}
+      - AWS_SECRET_ACCESS_KEY=${HOT_S3_SECRET:-53PNbRlptdwELDTavfMId1in1FpWZwi3sIUMLfznTWl4bWdGuRL8UelHscv9WHyXY}
 
 volumes:
   hs-data:

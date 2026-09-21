@@ -1181,7 +1181,7 @@ def get_connection(
         except Exception as e:
             err_msg = str(e)
             if "cannot switch temporary directory" in err_msg.lower():
-                logger.warning(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
+                logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
             else:
                 logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
 
@@ -1192,7 +1192,7 @@ def get_connection(
     except Exception as e:
         err_msg = str(e)
         if "cannot switch temporary directory" in err_msg.lower() or "cannot change" in err_msg.lower():
-            logger.warning(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
+            logger.debug(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
         else:
             logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
 
