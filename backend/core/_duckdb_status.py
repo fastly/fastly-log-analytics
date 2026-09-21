@@ -549,7 +549,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                         if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
                             try:
                                 v_cnt_res = con.execute(
-                                    "SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE dimension = 'total' AND value = 'pageviews'"
+                                    "SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE dimension = 'total' AND value IN ('pageviews', 'interactions')"
                                 ).fetchone()
                                 v_cnt = v_cnt_res[0] if v_cnt_res and v_cnt_res[0] is not None else 0
 
