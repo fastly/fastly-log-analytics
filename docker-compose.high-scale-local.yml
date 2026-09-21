@@ -90,8 +90,8 @@ services:
 
   clickhouse:
     environment:
-      - AWS_ACCESS_KEY_ID=${HOT_S3_KEY:-IXNk1iHlFpFPDINmxkJeDd}
-      - AWS_SECRET_ACCESS_KEY=${HOT_S3_SECRET:-53PNbRlptdwELDTavfMId1in1FpWZwi3sIUMLfznTWl4bWdGuRL8UelHscv9WHyXY}
+      - AWS_ACCESS_KEY_ID=${HOT_S3_KEY}
+      - AWS_SECRET_ACCESS_KEY=${HOT_S3_SECRET}
 
 volumes:
   hs-data:
