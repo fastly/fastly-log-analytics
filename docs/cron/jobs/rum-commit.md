@@ -11,6 +11,7 @@
 - **Category:** Durable RUM Lakehouse Commit
 - **Purpose:** Flushes transient RUM Parquet buffer files from local disk (`cache/{bucket}/rum/`) into the durable DuckLake tables `client_vitals` and `client_errors` in cloud storage.
 - **Why It Runs:** Just like standard access logs, RUM telemetry must be durably stored in DuckLake to prevent local disk exhaustion and ensure multi-node / multi-analyst query discovery.
+- **High-Scale boundary:** This is deliberately a Standard-mode-only cron. High-Scale RUM conversion workers publish facts through the ingest-ledger/publication pipeline during conversion; `ledger_rum_sweep_{service_id}` recovers stalled or dead-lettered work. Adding a second High-Scale `rum_commit` tick would duplicate ownership and could race ledger publication.
 
 ---
 
@@ -28,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads local RUM Parquet buffer, writes to FOS `ducklake/rum/`, commits to DuckLake catalog tables `client_vitals` and `client_errors`. | Exclusive per-service RUM commit lock. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Disabled | Handled automatically by high-scale batch publication pipelines. | N/A |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Disabled | Handled by `rum_discovery_{service_id}` → Celery conversion/publication; recovery is owned by `ledger_rum_sweep_{service_id}`. | PostgreSQL ledger state and worker publication ownership. |
 
 ---
 
@@ -85,6 +86,7 @@
 
 ## 7. Failure Modes & Recovery Runbooks
 - **Partial Table Failure:** If `client_errors` fails while `client_vitals` succeeds, status is `"warning"`, ledger is kept un-published so raw data is preserved, and next tick retries.
+- **High-Scale misconception:** No High-Scale `rum_commit` run should be expected in `cron_runs`; inspect the RUM ingest ledger, worker publication state, and `ledger_rum_sweep_{service_id}` instead.
 - **Catalog Commit Conflict:** Automatically retries with exponential backoff.
 - **Upload Network Failure:** Local RUM buffer files are preserved; next interval tick retries upload cleanly.
 - **Disk Full:** Aborts prior to catalog modification, emitting status `"error"` with disk alert message.
