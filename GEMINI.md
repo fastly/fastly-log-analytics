@@ -6,7 +6,10 @@ These instructions govern all coding, debugging, provisioning, deployment, and v
 
 ### 1. Unified Automated Deployment & Testing (No Manual Deploys)
 - **NEVER** deploy, sync, or provision Fastly services or local container configurations manually.
-- **ALWAYS** execute standard unified, automated parallel deployment and verification script to perform all rollouts, edge-traffic seeding, and Playwright verification contiguously:
+- **NEVER** expect `deploy_test_all.sh` to auto-commit or push changes. It does not blindly commit or push pending code.
+- **ALWAYS** make an intentional commit for your specific change and push it to upstream origin (`git add <files> && git commit -m "..." && git push origin HEAD`) BEFORE invoking `deploy_test_all.sh`.
+- Other work-in-progress files in the working directory that should not be committed do NOT block deployment; `deploy_test_all.sh` leaves uncommitted WIP changes untouched and deploys the pushed HEAD commit.
+- **ALWAYS** execute the standard unified, automated parallel deployment and verification script contiguously AFTER pushing your commit:
   ```bash
   export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh
   ```

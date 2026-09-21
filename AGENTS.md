@@ -669,7 +669,7 @@ uv run python scripts/check_environment_health.py
 For rapid, parallelized deployment of local and remote environments, use the local-only `deploy_test_all.sh` script in the `scripts/dev/` folder of the project (which is gitignored to secure environment credentials).
 
 This script performs the following steps in parallel:
-1. **Commits and Pushes:** Auto-commits any uncommitted work with a deploy chore message and pushes the active branch to origin.
+1. **Pre-flight Pushed-Commit Verification:** Verifies that your active HEAD commit has already been intentionally committed and pushed to upstream origin (`git push origin HEAD`). It does NOT blindly commit or push pending code; any other work-in-progress files in your working directory are left untouched.
 2. **Prompts for Image Tags:** Prompts you for the latest frontend/backend Jenkins image tags so it can deploy to Elevation.
 3. **Deploys Parallel Groups:**
    - **Local Standard:** Rebuilds and launches local standard containerized services (`docker compose up -d --build`).
@@ -1076,7 +1076,7 @@ Before beginning implementation, testing, or refactoring on any page, background
 
 ### Canonical Multi-Tier Deployment Mandate (Never Deploy or Test by Hand)
 
-1. **Always use `scripts/dev/deploy_test_all.sh`**: NEVER deploy, restart, refresh port-forwards, or test environments manually by hand (e.g. running ad-hoc `docker compose up`, `kubectl set image`, or manual background port-forwards). The project provides `scripts/dev/deploy_test_all.sh` as the single canonical, robust, and repeatable deployment script.
+1. **Always use `scripts/dev/deploy_test_all.sh` after committing and pushing**: NEVER deploy, restart, refresh port-forwards, or test environments manually by hand (e.g. running ad-hoc `docker compose up`, `kubectl set image`, or manual background port-forwards). The project provides `scripts/dev/deploy_test_all.sh` as the single canonical, robust, and repeatable deployment script. You MUST craft an intentional commit for your change and push it to upstream origin (`git push origin HEAD`) BEFORE invoking `deploy_test_all.sh`. The script will NEVER auto-commit or auto-push, and will leave any other uncommitted work-in-progress files in the working directory untouched.
 2. **Four-Tier Parallelism & Drift Prevention**: The script concurrently builds, updates, establishes tunnels/port-forwards, and verifiably tests across all 4 environments:
    - **Local Standard** (Docker Compose, `http://localhost:3000` / `http://127.0.0.1/dashboard`)
    - **Local High-Scale** (Multipod + ClickHouse + Valkey + Postgres, `http://localhost:8081`)
