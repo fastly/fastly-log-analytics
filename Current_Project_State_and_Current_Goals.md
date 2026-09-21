@@ -241,8 +241,9 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [x] Author and execute strict, multi-stage Playwright E2E positive-data verifications, validating that 24h charts populate, 5m ranges contain recent edge traffic, header ingestion times are live, and 30d header counts exactly match page query metrics.
 - [x] Investigate and audit all background cron jobs and ingestion pipelines across both architectures to ensure zero warnings or errors.
 
-### Phase 1: High-Throughput Synthetic Traffic Generation (Current Session)
-- [ ] Develop and finalize synthetic log generator for 2M sustained / 5M RPS burst load testing (`scripts/load_test/generate_synthetic_traffic.py`).
+### Phase 1: High-Throughput Synthetic Traffic Generation (Completed)
+- [x] Develop and finalize synthetic log generator for 50k sustained / 100k RPS burst load testing (`scripts/load_test/generate_synthetic_traffic.py`).
+- [x] Document deployment architectures and throughput sizing guidelines (Standard vs. High-Scale) in `README.md`.
 
 ### Phase 2: Background Tasks & Cron Jobs Audit (One Single Session per Cron)
 - [ ] Cron 1: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md))

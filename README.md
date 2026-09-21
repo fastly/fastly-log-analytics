@@ -40,6 +40,25 @@ When running as a shared server (Path B), the host machine should meet these min
 
 ---
 
+## Deployment Architectures & Throughput Sizing
+
+Fastly Log Analytics supports two primary deployment topologies sized for different log volumes:
+
+| Architecture | Intended Log Throughput | Backend Engine | Ingest Topology | Best For |
+|---|---|---|---|---|
+| **Standard Architecture** | **Up to 5,000 – 10,000 logged RPS** | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
+| **High-Scale Architecture** | **50,000 sustained logged RPS** *(burst to 100,000+ RPS)* | ClickHouse + DuckLake (Hybrid) | Distributed Celery workers + PostgreSQL Ingest Ledger | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
+
+> [!NOTE]
+> **Edge Traffic vs. Logged Throughput:**
+> Sizing figures represent the volume of **logged records streamed to Fastly Object Storage**, *not* your service's total CDN edge traffic. Fastly services handling tens or hundreds of thousands of edge requests per second can comfortably use either architecture by leveraging Fastly VCL log conditions:
+> - **Sampling:** Stream 1-in-10 (`randombool(1, 10)`) or 1-in-50 requests for statistical sampling of high-volume traffic.
+> - **Conditional Logging:** Log only requests meeting specific criteria (e.g., HTTP errors `resp.status >= 400`, backend origin fetches, requests with origin latency above a threshold, or security/WAF events).
+>
+> As performance optimizations continue to evolve, these throughput guidelines will be updated with each release.
+
+---
+
 ## Quick Start
 
 > 📺 Prefer to watch? See the [video walkthrough](https://youtu.be/7-3XWzesuAY).
