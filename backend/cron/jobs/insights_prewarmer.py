@@ -167,10 +167,11 @@ def _run_insights_prewarmer(service_id: str) -> None:
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
 
         # OOM fix: Prewarmer is a solitary background task and shouldn't exceed container memory limits.
-        # Enforcing a safe ceiling (like 256MB on small-VM/GCE setups) forces DuckDB to spill
-        # intermediate states to disk, preventing container crashes and OOM-killer events.
+        # Enforcing a safe ceiling (like 384MB) and limiting execution threads to 2 prevents parallel
+        # thread-memory bloat, keeping standard execution extremely fast without OOM-killer crashes.
         try:
-            con.execute("SET memory_limit = '256MB';")
+            con.execute("SET memory_limit = '384MB';")
+            con.execute("SET threads = 2;")
         except Exception:
             pass
 
