@@ -749,6 +749,40 @@ async def rum_analytics(
 
                 if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
                     use_rollup = True
+                    try:
+                        raw_max = None
+                        if table_exists(con, "client_vitals"):
+                            ts_raw_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()[0]
+                            if ts_raw_v:
+                                # handle timezone if needed
+                                raw_max = ts_raw_v.replace(tzinfo=None) if hasattr(ts_raw_v, "replace") else ts_raw_v
+                        if table_exists(con, "client_errors"):
+                            ts_raw_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()[0]
+                            if ts_raw_e:
+                                ts_raw_e_naive = (
+                                    ts_raw_e.replace(tzinfo=None) if hasattr(ts_raw_e, "replace") else ts_raw_e
+                                )
+                                if not raw_max or ts_raw_e_naive > raw_max:
+                                    raw_max = ts_raw_e_naive
+
+                        agg_max = None
+                        ts_agg_v = con.execute("SELECT MAX(bucket_start) FROM rum_vitals_aggregates").fetchone()[0]
+                        if ts_agg_v:
+                            agg_max = ts_agg_v.replace(tzinfo=None) if hasattr(ts_agg_v, "replace") else ts_agg_v
+                        ts_agg_e = con.execute("SELECT MAX(bucket_start) FROM rum_error_aggregates").fetchone()[0]
+                        if ts_agg_e:
+                            ts_agg_e_naive = ts_agg_e.replace(tzinfo=None) if hasattr(ts_agg_e, "replace") else ts_agg_e
+                            if not agg_max or ts_agg_e_naive > agg_max:
+                                agg_max = ts_agg_e_naive
+
+                        if raw_max and (not agg_max or raw_max > agg_max):
+                            logger.info(
+                                "[rum_rollups] %s: RUM aggregates are stale compared to raw views. Forcing on-demand recomputation.",
+                                service_id,
+                            )
+                            use_rollup = False
+                    except Exception as stale_check_err:
+                        logger.warning("[rum_rollups] Failed to check liveness of RUM aggregates: %s", stale_check_err)
                 else:
                     # Tables don't exist yet! Let's see if raw data exists and trigger creation + recompute
                     if table_exists(con, "client_vitals") or table_exists(con, "client_errors"):
