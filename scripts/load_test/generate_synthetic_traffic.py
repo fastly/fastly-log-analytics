@@ -536,7 +536,7 @@ def run_target_fos(
     dry_run: bool,
 ) -> int:
     """Generates gzipped NDJSON and uploads directly to FOS object storage."""
-    from backend.provision.log_paths import analytics_log_path
+    from backend.provision.log_paths import minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
     if not bucket:
@@ -547,6 +547,8 @@ def run_target_fos(
     from botocore.config import Config
 
     endpoint = src.get("s3_endpoint") or src.get("fos_endpoint")
+    if endpoint and not endpoint.startswith("http://") and not endpoint.startswith("https://"):
+        endpoint = f"https://{endpoint}"
     key_id = src.get("s3_access_key") or src.get("fos_access_key_id")
     secret_key = src.get("s3_secret_key") or src.get("fos_secret_access_key")
 
@@ -594,8 +596,10 @@ def run_target_fos(
         gz_bytes = gz_buf.getvalue()
 
         now_utc = datetime.now(UTC)
-        prefix = src.get("s3_prefix", "").strip("/")
-        s3_key = analytics_log_path(prefix, now_utc, shard_id=file_idx)
+        prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
+        min_prefix = minute_list_prefix(now_utc)
+        base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
+        s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
 
         if dry_run:
             print(f"  [dry-run] Would upload {len(gz_bytes):,} gzipped bytes to s3://{bucket}/{s3_key}")

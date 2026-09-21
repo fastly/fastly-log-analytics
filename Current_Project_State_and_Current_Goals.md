@@ -165,19 +165,28 @@ A few immediate architecture decisions/gaps to address:
 
 ## Expanded Testing Plan & Harness
 
-To properly validate both "standard" and "high-scale" architectures, we need a robust testing harness driven by explicit per-page functional specifications in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/):
+To properly validate both "standard" and "high-scale" architectures, we follow a strict **one item per AI coding session** workflow:
 
-1.  **Multi-AI Testing Session Protocol (Page-by-Page Focus)**:
-    - **Session Scope:** Each independent AI session will focus on exactly one page (or cohesive sub-domain), using the corresponding spec file in `docs/pages/<page>.md` as its contract.
-    - **Verification Matrix:** The session tests the page across all 4 environments (Local Standard, Local High-Scale, GCE VM Standard, Elevation K8s High-Scale) and applicable roles (Admin direct vs Analyst Path B remote share).
-    - **Automated Validation:** Follow the 10-step verification checklist at the bottom of the page's spec document using Playwright, curl, and network HAR analysis.
-    - **Telemetry & Query Attribution:** Inspect the Live Query Monitor (`/admin/queries`) and server logs to verify all queries fired during the page load have proper query runner attribution, use precomputed rollups where expected (e.g. 7d/30d), and do not execute duplicate or unindexed queries.
-    - **Performance Budget Enforcement:** Verify p95 load times meet the targets defined in the page spec (< 300ms warm bundle, < 800ms TTI, CLS = 0).
-    - **Issue Remediation & Bug Tracking:** Any auto-discovered bugs, race conditions, or layout shifts are fixed, verified, and documented directly in the page spec and PR commit.
+1.  **Strict Sequential Protocol (Crons First, Then Pages — One Item per AI Session)**:
+    - **Single-Item Scope:** Each independent AI session must focus on **exactly ONE cron job or ONE page at a time**. Never combine multiple crons or pages into a single session.
+    - **Order of Execution:**
+      1. **Crons First:** Complete the background cron jobs one by one in order. Every page is a downstream consumer of data produced, compacted, and committed by the background tasks. Ensuring each cron is properly scheduled, invoked, locked, logged, and optimized prevents chasing phantom bugs on page loads.
+      2. **Pages Second:** Once all background jobs are verified, validate each page and sub-page one by one in order.
+    - **Cron Job Session Standard:** For each cron job session:
+      - Confirm proper registration and schedule across all applicable environments (Standard APScheduler, High-Scale RedBeat/Celery, and Web Pod APScheduler).
+      - Confirm invocation, mutual exclusion locking, error handling, and backpressure recovery.
+      - Confirm 100% telemetry & query auditing: DuckDB `telemetry_queries`, ClickHouse `query_registry`, Postgres `ingest_ledger`, SQLite `ThreadLocalPool` wait times (`app.thread_wait_ms`), and FOS `usage_log.db` Class A/B accounting.
+      - Confirm code efficiency and perform a library review: ensure custom code isn't reinventing wheels where a world-class, battle-tested library could reduce code size, improve reliability, and boost performance.
+    - **Page Session Standard:** For each page session:
+      - Use the corresponding specification file in `docs/pages/<page>.md` as the authoritative contract.
+      - Test across applicable roles (Admin direct vs Analyst Path B remote share) and architectures (Standard vs High-Scale).
+      - Execute the 10-step verification checklist at the bottom of the page spec using Playwright, curl, and network HAR analysis.
+      - Inspect the Live Query Monitor (`/admin/queries`) and server logs to verify all queries have proper query runner attribution, use precomputed rollups where expected (e.g. 7d/30d), and avoid duplicate or unindexed scans.
+      - Enforce performance budgets (< 300ms warm bundle, < 800ms TTI, CLS = 0.00).
 
 2.  **Automated End-to-End (E2E) & Performance Harness**:
     - Build a best-in-class Playwright testing harness following industry best practices.
-    - Automatically load each of the 27 top-level and sub-level pages (and their sub-tabs/modals) for all roles.
+    - Automatically load each of the 28 top-level and sub-level pages (and their sub-tabs/modals) for all roles.
     - Capture network HAR files, API call durations, and page interactive timings (LCP, INP, fully loaded) during runs to calculate p95 metrics over repeated iterations.
     - Implement a synthetic log generator script capable of pushing sustained 2M RPS (with 5M bursts) to push limits.
 
@@ -213,8 +222,9 @@ To properly validate both "standard" and "high-scale" architectures, we need a r
 
 ## To-Dos
 
-We will tackle these one at a time, auto-discovering issues and updating this list dynamically.
+We will tackle these one at a time, strictly dedicating **only ONE cron job or ONE page per AI coding session**, auto-discovering issues and updating this list dynamically.
 
+### Completed Milestones
 - [x] Stabilize "standard" architecture (GCE) — fixed DuckDB connection pool saturation and stuck cron ingestion.
 - [x] Tear down `ZEZ4mcAjoSFDTg7tpkDKV2` (and ancillary services) to test the full provisioning flow for "high-scale" architecture (Elevation cluster). Redeployed from scratch with all log fields including `cmcd` enabled.
 - [x] Establish page specification architecture in [`docs/pages/`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/) and create master index [`docs/pages/README.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/README.md).
@@ -230,10 +240,70 @@ We will tackle these one at a time, auto-discovering issues and updating this li
 - [x] Integrate mandatory 5-minute post-deployment stability watch into deployment orchestration flow.
 - [x] Author and execute strict, multi-stage Playwright E2E positive-data verifications, validating that 24h charts populate, 5m ranges contain recent edge traffic, header ingestion times are live, and 30d header counts exactly match page query metrics.
 - [x] Investigate and audit all background cron jobs and ingestion pipelines across both architectures to ensure zero warnings or errors.
-- [ ] Develop synthetic log generator for 5M RPS load testing.
-- [ ] Execute baseline performance tests on the "standard" architecture (GCE).
-- [ ] Execute baseline performance tests on the "high-scale" architecture.
-- [ ] Validate all 27 pages, sub-pages, filters, and modals under both architectures via dedicated AI test sessions.
+
+### Phase 1: High-Throughput Synthetic Traffic Generation (Current Session)
+- [ ] Develop and finalize synthetic log generator for 2M sustained / 5M RPS burst load testing (`scripts/load_test/generate_synthetic_traffic.py`).
+
+### Phase 2: Background Tasks & Cron Jobs Audit (One Single Session per Cron)
+- [ ] Cron 1: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md))
+- [ ] Cron 2: `commit_{id}` — Parquet Buffer to DuckLake Catalog Commit ([docs/cron/jobs/commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md))
+- [ ] Cron 3: `local_compact_{id}` — Local Hourly & Daily/Weekly Tier Compaction ([docs/cron/jobs/local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md))
+- [ ] Cron 4: `partial_hour_merge_{id}` — Active Partial-Hour Ingest Merge ([docs/cron/jobs/partial-hour-merge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/partial-hour-merge.md))
+- [ ] Cron 5: `rollup_heal_{id}` — Top-N Rollup Backfill & Self-Healing ([docs/cron/jobs/rollup-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-heal.md))
+- [ ] Cron 6: `rollup_compact_{id}` — Daily Top-N Rollup Consolidation ([docs/cron/jobs/rollup-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rollup-compact.md))
+- [ ] Cron 7: `optimize_{id}` — DuckLake Durability Flush & File Rewrite ([docs/cron/jobs/optimize.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/optimize.md))
+- [ ] Cron 8: `expire_{id}` — Snapshot Expiry, Retention Pruning & Cache Purge ([docs/cron/jobs/expire.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/expire.md))
+- [ ] Cron 9: `full_sync_{id}` — Periodic 6-Hour Ingestion Reconciliation Full Sweep ([docs/cron/jobs/full-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/full-sync.md))
+- [ ] Cron 10: `gap_heal_{id}` — Ingest Gap Discovery & Fast-Forward Sweep ([docs/cron/jobs/gap-heal.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/gap-heal.md))
+- [ ] Cron 11: `metadata_cleanup_{id}` — Operational SQLite/Postgres Retention & Vacuum ([docs/cron/jobs/metadata-cleanup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/metadata-cleanup.md))
+- [ ] Cron 12: `alerts_evaluation_{id}` — Real-Time Alert Threshold Rule Evaluation ([docs/cron/jobs/alerts-evaluation.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/alerts-evaluation.md))
+- [ ] Cron 13: `insights_prewarmer_{id}` — Background Anomaly Detection Insight Prewarming ([docs/cron/jobs/insights-prewarmer.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/insights-prewarmer.md))
+- [ ] Cron 14: `sync_metadata_{id}` — Analyst Path A State Sync ([docs/cron/jobs/sync-metadata.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/sync-metadata.md))
+- [ ] Cron 15: `ledger_sweep_{id}` — High-Scale Ingest Ledger Crash-Net Sweep ([docs/cron/jobs/ledger-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-sweep.md))
+- [ ] Cron 16: `rum_sync_{id}` — Standard Mode RUM Beacon Ingest & Staging ([docs/cron/jobs/rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md))
+- [ ] Cron 17: `rum_commit_{id}` — Standard Mode RUM Beacon DuckLake Commit ([docs/cron/jobs/rum-commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-commit.md))
+- [ ] Cron 18: `rum_discovery_{id}` — High-Scale RUM Discovery & Ledger Dispatch ([docs/cron/jobs/rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md))
+- [ ] Cron 19: `ledger_rum_sweep_{id}` — High-Scale RUM Ledger Crash-Net Sweep ([docs/cron/jobs/ledger-rum-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-rum-sweep.md))
+- [ ] Cron 20: `metric_snapshot` — Global System Vitals & Host Metrics Snapshot ([docs/cron/jobs/metric-snapshot.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/metric-snapshot.md))
+- [ ] Cron 21: `rdns_enrichment` — Client IP Reverse DNS Background Enrichment ([docs/cron/jobs/rdns-enrichment.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rdns-enrichment.md))
+- [ ] Cron 22: `bot_data_refresh` — NGWAF & Verified Bot Seed Refresh ([docs/cron/jobs/bot-data-refresh.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/bot-data-refresh.md))
+- [ ] Cron 23: `ngwaf_sync_{id}` — NGWAF Security Workspace Feed Ingestion ([docs/cron/jobs/ngwaf-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ngwaf-sync.md))
+- [ ] Cron 24: `share_audit_purge` — Remote Share Audit Trail Retention Purge ([docs/cron/jobs/share-audit-purge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/share-audit-purge.md))
+- [ ] Cron 25: `duckdb_recycle` — DuckDB Native Memory Pool Recycling & Heap Trim ([docs/cron/jobs/duckdb-recycle.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/duckdb-recycle.md))
+
+### Phase 3: Analytics & Admin Pages Audit (One Single Session per Page)
+- [ ] Page 1: Dashboard (`/dashboard`) ([docs/pages/dashboard.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/dashboard.md))
+- [ ] Page 2: Control Room (`/control-room`) ([docs/pages/control-room.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/control-room.md))
+- [ ] Page 3: Service Summary / Value (`/fastly-value`) ([docs/pages/fastly-value.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/fastly-value.md))
+- [ ] Page 4: Performance (`/performance`) ([docs/pages/performance.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/performance.md))
+- [ ] Page 5: Origin Health (`/origin`) ([docs/pages/origin.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/origin.md))
+- [ ] Page 6: Security (`/security`) ([docs/pages/security.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/security.md))
+- [ ] Page 7: Insights (`/insights`) ([docs/pages/insights.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/insights.md))
+- [ ] Page 8: Network Path (`/network`) ([docs/pages/network.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/network.md))
+- [ ] Page 9: Streaming (`/streaming`) ([docs/pages/streaming.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/streaming.md))
+- [ ] Page 10: RUM (`/rum`) ([docs/pages/rum.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/rum.md))
+- [ ] Page 11: Sessions (`/sessions`) ([docs/pages/sessions.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/sessions.md))
+- [ ] Page 12: Sessions Stream (`/sessions/stream`) ([docs/pages/sessions-stream.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/sessions-stream.md))
+- [ ] Page 13: Usage & Cost (`/usage`) ([docs/pages/usage-and-cost.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/usage-and-cost.md))
+- [ ] Page 14: SQL Query Editor (`/query`) ([docs/pages/query.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/query.md))
+- [ ] Page 15: Alerts (`/alerts`) ([docs/pages/alerts.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/alerts.md))
+- [ ] Page 16: Raw Logs Viewer (`/logs`) ([docs/pages/logs.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/logs.md))
+- [ ] Page 17: Assets & Shield (`/assets-shield`) ([docs/pages/assets-shield.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/assets-shield.md))
+- [ ] Page 18: High-Scale Request Facts (`/high-scale/request-facts`) ([docs/pages/high-scale-request-facts.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/high-scale-request-facts.md))
+- [ ] Page 19: Analyst Share Login (`/share-login`) ([docs/pages/share-login.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/share-login.md))
+- [ ] Page 20: Admin Overview (`/admin`) ([docs/pages/admin/overview.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/overview.md))
+- [ ] Page 21: Live Query Monitor (`/admin/queries`) ([docs/pages/admin/queries.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/queries.md))
+- [ ] Page 22: Task Queue (`/admin/queue`) ([docs/pages/admin/queue.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/queue.md))
+- [ ] Page 23: RUM Beacon Settings (`/admin/rum`) ([docs/pages/admin/rum.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/rum.md))
+- [ ] Page 24: Session Scoring Admin (`/admin/session-scoring`) ([docs/pages/admin/session-scoring.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/session-scoring.md))
+- [ ] Page 25: Live Share Management (`/admin/share`) ([docs/pages/admin/share.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/share.md))
+- [ ] Page 26: System Metric Trends (`/admin/trends`) ([docs/pages/admin/trends.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/trends.md))
+- [ ] Page 27: FOS Usage Ledger (`/admin/usage-log`) ([docs/pages/admin/usage-log.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/usage-log.md))
+- [ ] Page 28: ClickHouse Cluster Admin (`/admin/clickhouse`) ([docs/pages/admin/clickhouse.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/clickhouse.md))
+
+### Phase 4: Full System Load & Stress Testing
+- [ ] Execute baseline performance tests on "standard" architecture (GCE) under target load.
+- [ ] Execute baseline performance tests on "high-scale" architecture (Elevation) under 2M sustained / 5M burst load.
 - [ ] Validate end-to-end system robustness under sustained heavy load.
 
 ## First Steps
