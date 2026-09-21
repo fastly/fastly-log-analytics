@@ -37,6 +37,26 @@ def refresh_bot_source_endpoint(source_id: str):
     return {"ok": True, "source": meta}
 
 
+@router.post("/admin/bot-sources/refresh")
+@router.post("/admin/bots/refresh")
+def refresh_all_bot_sources_endpoint():
+    """Fetch and re-cache all enabled bot sources."""
+    from backend.utils.bot_sources import refresh_all_sources
+
+    try:
+        results = refresh_all_sources()
+        failed = [r for r in results if r.get("failed")]
+        succeeded = [r for r in results if not r.get("failed")]
+        return {
+            "ok": len(failed) == 0,
+            "sources": results,
+            "updated_count": len(succeeded),
+            "failed_count": len(failed),
+        }
+    except Exception as e:
+        raise_internal(logger, e, code="bot_sources_refresh_failed", status=502)
+
+
 @router.post("/admin/rdns/enrich")
 def trigger_rdns_enrich_endpoint(
     limit: int | None = Query(None, description="Optional override for batch limit"),

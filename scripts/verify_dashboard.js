@@ -19,7 +19,10 @@ function getUrlWithParam(url, key, value) {
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+
+    // Create a completely isolated incognito browser context for Stage 1 to prevent domain/port caching conflicts
+    const dashboardContext = await browser.newContext();
+    const page = await dashboardContext.newPage();
 
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGE 1: DASHBOARD PAGE VERIFICATION
@@ -164,14 +167,18 @@ function getUrlWithParam(url, key, value) {
       process.exit(1);
     }
 
-    // Close the dashboard page before navigating to RUM to cleanly prevent client-side NextJS chunk-mismatch reloads!
+    // Close the dashboard context and page before navigating to RUM to cleanly prevent client-side NextJS chunk-mismatch reloads!
     await page.close();
+    await dashboardContext.close();
 
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGE 2: RUM PAGE VERIFICATION
     // ────────────────────────────────────────────────────────────────────────
     const rumBaseUrl = baseUrl.replace('/dashboard', '/rum');
-    const rumPage = await browser.newPage();
+    
+    // Create a completely clean, isolated incognito browser context for Stage 2 to prevent any cookie or storage conflicts
+    const rumContext = await browser.newContext();
+    const rumPage = await rumContext.newPage();
     
     // 2.1. Verify 24h Overall RUM Data is present with active polling
     const rumUrl24h = getUrlWithParam(rumBaseUrl, "range", "24h");
@@ -304,6 +311,8 @@ function getUrlWithParam(url, key, value) {
     }
     console.log(`[RUM 30d Consistency] Verified: Header RUM count and page metrics are 100% consistent!`);
 
+    await rumPage.close();
+    await rumContext.close();
     await browser.close();
     process.exit(0);
   } catch (e) {

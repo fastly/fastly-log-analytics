@@ -50,6 +50,7 @@ from . import (  # noqa: F401
     ingest,
     log_accounting,
     metric_history,
+    ngwaf,
     pop_locations,
     quarantine,
     sync_status,

@@ -155,3 +155,31 @@ def cleanup_old_bots(retention_days: int) -> int:
             return cur.rowcount
     finally:
         con.close()
+
+
+def get_cache_stats() -> dict:
+    """Return summary statistics of cached NGWAF bot records."""
+    ensure_schema()
+    con = _get_conn()
+    try:
+        cur = con.execute("SELECT count(*) FROM ngwaf_bots")
+        total_bots = cur.fetchone()[0]
+
+        workspaces: dict[str, str | None] = {}
+        cur = con.execute("SELECT workspace_id, last_timestamp_synced FROM ngwaf_sync_state")
+        for wid, ts in cur.fetchall():
+            workspaces[wid] = ts
+
+        # Top bot names
+        cur = con.execute(
+            "SELECT bot_name, count(*) FROM ngwaf_bots WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count(*) DESC LIMIT 10"
+        )
+        top_bots = {name: count for name, count in cur.fetchall()}
+
+        return {
+            "total_cached_bots": total_bots,
+            "workspaces": workspaces,
+            "top_bots": top_bots,
+        }
+    finally:
+        con.close()

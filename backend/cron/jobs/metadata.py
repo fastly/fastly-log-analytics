@@ -384,8 +384,13 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     """
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.ngwaf import fetch_verified_bots_paged
     from backend.utils.ngwaf_bot_cache import cleanup_old_bots, ensure_schema, upsert_bots
+
+    if dev_mode_no_crons():
+        logger.info("⏸️  \x1b[36m[ngwaf_sync]\x1b[0m %s: dev_mode_no_crons active, skipping NGWAF sync.", service_id)
+        return
 
     # Make sure the cache file + tables exist before anything else touches it.
     # Otherwise the planner query in oldest_unenriched_timestamp throws on the
@@ -499,19 +504,49 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             run_id=run_id,
         )
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
+
+        # Adaptive scheduling under load:
+        # If budget was reached or high bot volume (> 500 records), tighten interval to 2 minutes
+        # to rapidly catch up. When backlog subsides, restore baseline configured interval (default 5m).
+        try:
+            from backend.cron.scheduler import get_scheduler
+
+            sched = get_scheduler()
+            job = sched.get_job(f"ngwaf_sync_{service_id}")
+            if job:
+                base_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
+                if budget_exceeded or total_records >= 500:
+                    expedited_mins = max(1, min(2, base_mins))
+                    job.reschedule("interval", minutes=expedited_mins)
+                    logger.info(
+                        "👾 [ngwaf_sync] %s: High NGWAF volume (%d records) — expedited next run to %dm.",
+                        svc_display,
+                        total_records,
+                        expedited_mins,
+                    )
+                else:
+                    job.reschedule("interval", minutes=base_mins)
+        except Exception:
+            pass
     except Exception as e:
+        err_msg = str(e)
+        is_auth_error = any(code in err_msg for code in ("401", "403", "Unauthorized", "Forbidden", "invalid_api_key"))
+        if is_auth_error:
+            summary = "NGWAF sync failed: authentication error (check Fastly API key / workspace permissions)"
+        else:
+            summary = f"NGWAF sync failed: {err_msg}"
         log_cron_run(
             src,
             "ngwaf_sync",
             time.time() - start_time,
             "error",
             files_downloaded=total_records if "total_records" in locals() else 0,
-            error_message=str(e),
-            summary="NGWAF sync failed",
+            error_message=err_msg,
+            summary=summary,
             run_id=run_id,
         )
-        _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "error", "message": str(e)})
-        logger.exception("[ngwaf_sync] %s: sync failed: %s", svc_display, e)
+        _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "error", "message": summary})
+        logger.exception("[ngwaf_sync] %s: sync failed: %s", svc_display, err_msg)
 
     logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
 
@@ -520,14 +555,29 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
 
 
 @global_job("bot_data_refresh", color="36", tag="bots", label="Bot data refresh")
-def _run_bot_data_refresh() -> str:
+def _run_bot_data_refresh() -> tuple[str, str]:
     """Fetch and cache all enabled bot sources (nightly 02:00 UTC)."""
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.bot_sources import refresh_all_sources
 
+    if dev_mode_no_crons():
+        logger.info("⏸️  \x1b[36m[bots]\x1b[0m dev_mode_no_crons active, skipping bot data refresh.")
+        return ("skipped", "skipped (dev_mode_no_crons)")
+
     results = refresh_all_sources()
-    total = sum(r.get("entry_count", 0) for r in results)
-    logger.info("✅ \x1b[36m[bots]\x1b[0m Refreshed %d source(s), %d total entries", len(results), total)
-    return f"Updated {len(results)} source(s), {total} total entries"
+    failed = [r for r in results if r.get("failed")]
+    succeeded = [r for r in results if not r.get("failed")]
+    total = sum(r.get("entry_count", 0) for r in succeeded)
+    logger.info("✅ \x1b[36m[bots]\x1b[0m Refreshed %d source(s), %d total entries", len(succeeded), total)
+    detail = f"Updated {len(succeeded)} source(s), {total} total entries"
+
+    if failed and not succeeded:
+        failed_ids = ", ".join(r.get("id", "unknown") for r in failed)
+        return ("error", f"{detail} (All {len(failed)} bot sources failed: {failed_ids})")
+    if failed:
+        failed_ids = ", ".join(r.get("id", "unknown") for r in failed)
+        return ("warning", f"{detail} ({len(failed)} source(s) failed: {failed_ids})")
+    return ("success", detail)
 
 
 @global_job("rdns_enrichment", color="34", tag="rdns", label="rDNS enrichment")
