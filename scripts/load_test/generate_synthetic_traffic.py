@@ -32,11 +32,16 @@ Usage:
   # FOS upload + direct ClickHouse seeding:
   uv run python scripts/load_test/generate_synthetic_traffic.py \\
       --target fos --with-clickhouse --scenario diurnal --rows 50000
+
+  # High-throughput rate pacing (50k sustained, 100k burst to FOS):
+  uv run python scripts/load_test/generate_synthetic_traffic.py \\
+      --target fos --rows 200000 --rate-rps 50000 --burst-rps 100000 --upload-workers 8
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gzip
 import io
 import json
@@ -445,6 +450,10 @@ def run_target_local(
     commit: bool,
     clean: bool,
     dry_run: bool,
+    rate_rps: int = 0,
+    burst_rps: int = 0,
+    burst_duration: int = 30,
+    burst_interval: int = 120,
 ) -> int:
     """Writes Parquet directly to local buffer and optionally commits to DuckLake."""
     buf_dir = _buffer_dir(src)
@@ -468,10 +477,17 @@ def run_target_local(
     file_idx = 0
     total_rows = 0
 
+    pacing_desc = (
+        f"{rate_rps:,} rps (burst: {burst_rps:,} rps for {burst_duration}s every {burst_interval}s)"
+        if rate_rps > 0
+        else "Unthrottled (maximum throughput)"
+    )
+
     print(
         f"Generating {rows:,} rows [{scenario}] for service '{src.get('service_id')}'\n"
         f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}\n"
-        f"  Target: Local buffer ({buf_dir})"
+        f"  Target: Local buffer ({buf_dir})\n"
+        f"  Pacing: {pacing_desc}"
     )
 
     if dry_run:
@@ -486,12 +502,27 @@ def run_target_local(
 
         rows_in_this_file = 0
         while rows_in_this_file < rows_this_file:
+            b_t0 = time.monotonic()
+            elapsed_total = b_t0 - t0
+            if burst_rps > 0 and (elapsed_total % burst_interval) < burst_duration:
+                target_rps = burst_rps
+            elif rate_rps > 0:
+                target_rps = rate_rps
+            else:
+                target_rps = 0
+
             n = min(batch_size, rows_this_file - rows_in_this_file)
             cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
             tbl = _cols_to_arrow_table(cols, schema)
             tbl = tbl.sort_by([("timestamp", "ascending"), ("ip", "ascending")])
             writer.write_table(tbl)
             rows_in_this_file += n
+
+            if target_rps > 0:
+                target_batch_sec = n / target_rps
+                b_dur = time.monotonic() - b_t0
+                if target_batch_sec > b_dur:
+                    time.sleep(target_batch_sec - b_dur)
 
         writer.close()
         rows_remaining -= rows_this_file
@@ -534,8 +565,13 @@ def run_target_fos(
     batch_size: int,
     seed: int,
     dry_run: bool,
+    rate_rps: int = 0,
+    burst_rps: int = 0,
+    burst_duration: int = 30,
+    burst_interval: int = 120,
+    upload_workers: int = 8,
 ) -> int:
-    """Generates gzipped NDJSON and uploads directly to FOS object storage."""
+    """Generates gzipped NDJSON and uploads directly to FOS object storage with rate pacing & background uploads."""
     from backend.provision.log_paths import minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
@@ -557,66 +593,136 @@ def run_target_fos(
         endpoint_url=endpoint,
         aws_access_key_id=key_id,
         aws_secret_access_key=secret_key,
-        config=Config(signature_version="s3v4", max_pool_connections=25),
+        config=Config(signature_version="s3v4", max_pool_connections=max(25, upload_workers * 2)),
     )
 
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
     rng = np.random.default_rng(seed)
 
+    pacing_desc = (
+        f"{rate_rps:,} rps (burst: {burst_rps:,} rps for {burst_duration}s every {burst_interval}s)"
+        if rate_rps > 0
+        else "Unthrottled (maximum throughput)"
+    )
+
     print(
         f"Generating and uploading {rows:,} raw log records [{scenario}] to FOS\n"
         f"  Bucket: {bucket}\n"
         f"  Service: {src.get('service_id')}\n"
-        f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}"
+        f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}\n"
+        f"  Upload Workers: {upload_workers}\n"
+        f"  Pacing: {pacing_desc}"
     )
 
     rows_remaining = rows
     file_idx = 0
     t0 = time.monotonic()
+    total_bytes_uploaded = 0
+    total_rows_emitted = 0
 
-    while rows_remaining > 0:
-        n = min(batch_size, rows_remaining)
-        cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
+    upload_pool = ThreadPoolExecutor(max_workers=upload_workers) if not dry_run else None
+    pending_uploads = set()
 
-        # Convert columnar dict to NDJSON rows
-        lines = []
-        for i in range(n):
-            record = {k: cols[k][i] for k in cols if k != "_source_file"}
-            # Format timestamp as ISO 8601
-            record["timestamp"] = datetime.fromtimestamp(record["timestamp"] / 1_000_000, tz=UTC).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-            lines.append(json.dumps(record, default=str))
+    def _upload_task(bucket_name: str, key_name: str, payload: bytes) -> int:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=key_name,
+            Body=payload,
+            ContentType="application/gzip",
+        )
+        return len(payload)
 
-        ndjson_bytes = "\n".join(lines).encode("utf-8")
-        gz_buf = io.BytesIO()
-        with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=6) as gz:
-            gz.write(ndjson_bytes)
-        gz_bytes = gz_buf.getvalue()
+    try:
+        while rows_remaining > 0:
+            b_t0 = time.monotonic()
+            elapsed_total = b_t0 - t0
 
-        now_utc = datetime.now(UTC)
-        prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
-        min_prefix = minute_list_prefix(now_utc)
-        base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
-        s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
+            if burst_rps > 0 and (elapsed_total % burst_interval) < burst_duration:
+                target_rps = burst_rps
+                in_burst = True
+            elif rate_rps > 0:
+                target_rps = rate_rps
+                in_burst = False
+            else:
+                target_rps = 0
+                in_burst = False
 
-        if dry_run:
-            print(f"  [dry-run] Would upload {len(gz_bytes):,} gzipped bytes to s3://{bucket}/{s3_key}")
-        else:
-            s3_client.put_object(
-                Bucket=bucket,
-                Key=s3_key,
-                Body=gz_bytes,
-                ContentType="application/gzip",
-            )
-            print(f"  uploaded s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes, {n:,} rows)")
+            n = min(batch_size, rows_remaining)
+            cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
 
-        rows_remaining -= n
-        file_idx += 1
+            # Fast NDJSON formatting with pre-converted lists
+            cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in cols}
+            lines = []
+            keys = [k for k in cols_py if k != "_source_file"]
+            ts_list = cols_py["timestamp"]
+            for i in range(n):
+                record = {k: cols_py[k][i] for k in keys}
+                record["timestamp"] = datetime.fromtimestamp(ts_list[i] / 1_000_000, tz=UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                lines.append(json.dumps(record, default=str))
+
+            ndjson_bytes = "\n".join(lines).encode("utf-8")
+            gz_buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=1) as gz:
+                gz.write(ndjson_bytes)
+            gz_bytes = gz_buf.getvalue()
+
+            now_utc = datetime.now(UTC)
+            prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
+            min_prefix = minute_list_prefix(now_utc)
+            base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
+            s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
+
+            mode_str = f"BURST {burst_rps:,} rps" if in_burst else (f"NORMAL {rate_rps:,} rps" if rate_rps > 0 else "MAX")
+
+            if dry_run:
+                total_bytes_uploaded += len(gz_bytes)
+                print(
+                    f"  [dry-run] [{mode_str}] File {file_idx:04d}: {n:,} rows -> "
+                    f"s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes)"
+                )
+            else:
+                assert upload_pool is not None
+                if len(pending_uploads) >= upload_workers * 2:
+                    done, pending_uploads = wait(pending_uploads, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        total_bytes_uploaded += fut.result()
+
+                fut = upload_pool.submit(_upload_task, bucket, s3_key, gz_bytes)
+                pending_uploads.add(fut)
+                print(
+                    f"  queued [{mode_str}] s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes, {n:,} rows)",
+                    flush=True,
+                )
+
+            total_rows_emitted += n
+            rows_remaining -= n
+            file_idx += 1
+
+            if target_rps > 0:
+                target_batch_sec = n / target_rps
+                b_dur = time.monotonic() - b_t0
+                if target_batch_sec > b_dur:
+                    time.sleep(target_batch_sec - b_dur)
+
+        if upload_pool and pending_uploads:
+            print(f"Waiting for {len(pending_uploads)} pending S3 uploads to complete...")
+            done, _ = wait(pending_uploads)
+            for fut in done:
+                total_bytes_uploaded += fut.result()
+
+    finally:
+        if upload_pool:
+            upload_pool.shutdown(wait=True)
 
     elapsed = time.monotonic() - t0
-    print(f"\nSUCCESS: Finished FOS upload in {elapsed:.2f}s.")
+    rate = total_rows_emitted / max(elapsed, 0.001)
+    print(
+        f"\nSUCCESS: Finished FOS upload of {total_rows_emitted:,} rows ({total_bytes_uploaded / (1024 * 1024):.2f} MB compressed) "
+        f"in {elapsed:.2f}s ({rate:,.0f} rows/s)."
+    )
     return 0
 
 
@@ -634,6 +740,10 @@ def run_target_clickhouse(
     clickhouse_database: str | None = None,
     clickhouse_user: str | None = None,
     clickhouse_password: str | None = None,
+    rate_rps: int = 0,
+    burst_rps: int = 0,
+    burst_duration: int = 30,
+    burst_interval: int = 120,
 ) -> int:
     """Generates synthetic log records and inserts them directly into ClickHouse."""
     from uuid import uuid4
@@ -690,28 +800,52 @@ def run_target_clickhouse(
     end_ms = int(end_dt.timestamp() * 1000)
     rng = np.random.default_rng(seed)
 
+    pacing_desc = (
+        f"{rate_rps:,} rps (burst: {burst_rps:,} rps for {burst_duration}s every {burst_interval}s)"
+        if rate_rps > 0
+        else "Unthrottled (maximum throughput)"
+    )
+
     print(
         f"Generating and inserting {rows:,} log records [{scenario}] into ClickHouse\n"
         f"  Service: {service_id}\n"
-        f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}"
+        f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}\n"
+        f"  Pacing: {pacing_desc}"
     )
 
     rows_remaining = rows
     batch_idx = 0
     t0 = time.monotonic()
     adapter = ClickHouseBatchAdapter(client) if client else None
+    total_rows_emitted = 0
 
     while rows_remaining > 0:
+        b_t0 = time.monotonic()
+        elapsed_total = b_t0 - t0
+
+        if burst_rps > 0 and (elapsed_total % burst_interval) < burst_duration:
+            target_rps = burst_rps
+            in_burst = True
+        elif rate_rps > 0:
+            target_rps = rate_rps
+            in_burst = False
+        else:
+            target_rps = 0
+            in_burst = False
+
         n = min(batch_size, rows_remaining)
         cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
+        cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in cols}
 
         batch_rows = []
+        batch_uid = uuid4().hex[:8]
+        ts_list = cols_py["timestamp"]
         for i in range(n):
-            row_dict = {k: cols[k][i] for k in cols if k != "_source_file"}
-            ts_us = row_dict["timestamp"]
+            row_dict = {k: cols_py[k][i] for k in cols_py if k != "_source_file"}
+            ts_us = ts_list[i]
             row_dt = datetime.fromtimestamp(ts_us / 1_000_000, tz=UTC)
-            row_dict["timestamp"] = row_dt
-            row_dict["event_id"] = f"syn_{batch_idx}_{i}_{uuid4().hex[:8]}"
+            row_dict["timestamp"] = row_dt.isoformat()
+            row_dict["event_id"] = f"syn_{batch_idx}_{i}_{batch_uid}"
             row_dict["source_object_key"] = f"synthetic://{service_id}/{batch_idx}"
             row_dict["source_object_version"] = "1"
             row_dict["line_ordinal"] = i
@@ -719,7 +853,7 @@ def run_target_clickhouse(
             row_dict["client_ip"] = str(row_dict.get("ip", ""))
             batch_rows.append(row_dict)
 
-        batch_id = f"batch_{service_id}_{batch_idx}_{uuid4().hex[:8]}"
+        batch_id = f"batch_{service_id}_{batch_idx}_{batch_uid}"
         batch = HighScaleBatch(
             batch_id=batch_id,
             service_id=service_id,
@@ -728,21 +862,31 @@ def run_target_clickhouse(
             rows=tuple(batch_rows),
         )
 
+        mode_str = f"BURST {burst_rps:,} rps" if in_burst else (f"NORMAL {rate_rps:,} rps" if rate_rps > 0 else "MAX")
+
         if dry_run:
-            print(f"  [dry-run] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)")
+            print(f"  [dry-run] [{mode_str}] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)")
         else:
             assert adapter is not None
             receipt = adapter.insert(batch)
             print(
-                f"  inserted ClickHouse batch {receipt.batch_id}: "
+                f"  inserted [{mode_str}] ClickHouse batch {receipt.batch_id}: "
                 f"{receipt.rows_inserted:,} rows ({receipt.digest[:16]}...)"
             )
 
+        total_rows_emitted += n
         rows_remaining -= n
         batch_idx += 1
 
+        if target_rps > 0:
+            target_batch_sec = n / target_rps
+            b_dur = time.monotonic() - b_t0
+            if target_batch_sec > b_dur:
+                time.sleep(target_batch_sec - b_dur)
+
     elapsed = time.monotonic() - t0
-    print(f"\nSUCCESS: Finished ClickHouse insertion in {elapsed:.2f}s ({rows / elapsed:,.0f} rows/s).")
+    rate = total_rows_emitted / max(elapsed, 0.001)
+    print(f"\nSUCCESS: Finished ClickHouse insertion of {total_rows_emitted:,} rows in {elapsed:.2f}s ({rate:,.0f} rows/s).")
     return 0
 
 
@@ -853,6 +997,36 @@ def main() -> int:
         help="Skip committing buffer to DuckLake table.",
     )
     parser.add_argument(
+        "--rate-rps",
+        type=int,
+        default=0,
+        help="Sustained rate pacing in requests per second (e.g. 50000). 0 disables rate pacing (max throughput).",
+    )
+    parser.add_argument(
+        "--burst-rps",
+        type=int,
+        default=0,
+        help="Burst rate pacing in requests per second (e.g. 100000). 0 disables burst modulation.",
+    )
+    parser.add_argument(
+        "--burst-duration",
+        type=int,
+        default=30,
+        help="Duration of each burst in seconds (default: 30s).",
+    )
+    parser.add_argument(
+        "--burst-interval",
+        type=int,
+        default=120,
+        help="Interval between bursts in seconds (default: 120s).",
+    )
+    parser.add_argument(
+        "--upload-workers",
+        type=int,
+        default=8,
+        help="Concurrent S3 upload worker threads for --target fos (default: 8).",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="Purge existing buffer files before generating.",
@@ -903,6 +1077,10 @@ def main() -> int:
             commit=args.commit,
             clean=args.clean,
             dry_run=args.dry_run,
+            rate_rps=args.rate_rps,
+            burst_rps=args.burst_rps,
+            burst_duration=args.burst_duration,
+            burst_interval=args.burst_interval,
         )
     elif args.target == "fos":
         res = run_target_fos(
@@ -914,6 +1092,11 @@ def main() -> int:
             batch_size=args.batch_size,
             seed=args.seed,
             dry_run=args.dry_run,
+            rate_rps=args.rate_rps,
+            burst_rps=args.burst_rps,
+            burst_duration=args.burst_duration,
+            burst_interval=args.burst_interval,
+            upload_workers=args.upload_workers,
         )
     elif args.target == "clickhouse":
         res = run_target_clickhouse(
@@ -930,6 +1113,10 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database,
             clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password,
+            rate_rps=args.rate_rps,
+            burst_rps=args.burst_rps,
+            burst_duration=args.burst_duration,
+            burst_interval=args.burst_interval,
         )
 
     if res == 0 and args.with_clickhouse and args.target != "clickhouse":
@@ -947,6 +1134,10 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database,
             clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password,
+            rate_rps=args.rate_rps,
+            burst_rps=args.burst_rps,
+            burst_duration=args.burst_duration,
+            burst_interval=args.burst_interval,
         )
 
     return res
