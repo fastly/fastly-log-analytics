@@ -5,17 +5,17 @@ const expectedArch = process.argv[4];
 const expectedEnv = process.argv[5];
 
 if (!url) {
-  console.error("Please provide a URL to check.");
+  console.error("Please provide a target URL.");
   process.exit(1);
 }
 
 (async () => {
-  console.log(`Checking ${url} ...`);
   try {
+    console.log(`Checking ${url} ...`);
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    const response = await page.goto(url, { timeout: 20000 });
 
-    const response = await page.goto(url, { timeout: 15000 });
     if (!response || !response.ok()) {
       console.error(`[${url}] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
       await browser.close();
@@ -24,7 +24,7 @@ if (!url) {
 
     try {
       await page.waitForSelector('main', { timeout: 10000 });
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(4000); // Allow NextJS client-side hydration to fully complete
       const title = await page.title();
       console.log(`[${url}] Success! Title: '${title}'`);
 
@@ -35,19 +35,28 @@ if (!url) {
 
       console.log(`[${url}] Rendered Footer: "${footerText}"`);
 
+      // ── 1. Positive Validation: Dashboard Page ──
       const bodyText = await page.evaluate(() => document.body.innerText);
-      const hasFailedToLoad = bodyText.includes("Failed to load") && !bodyText.includes("Faro version");
-      if (hasFailedToLoad || bodyText.includes("saturated at") || bodyText.includes("PoolBusy") || bodyText.includes("No data for this filter")) {
-        console.error(`[${url}] Verification Failed: Dashboard is displaying a 'Failed to load', pool saturation, or empty 'No data for this filter' error! Ingestion failed or did not populate.`);
-        console.error(`Body text sample:\n${bodyText.slice(0, 500)}`);
+      
+      // Assert that standard request metrics are present and non-zero
+      if (!bodyText.includes("total:") && !bodyText.includes("REQUEST")) {
+        console.error(`[${url}] Verification Failed: Request metrics section not found in page body.`);
         await browser.close();
         process.exit(1);
       }
+      
+      const totalMatch = bodyText.match(/total:\s*(\d+)/i);
+      if (!totalMatch || parseInt(totalMatch[1], 10) === 0) {
+        console.error(`[${url}] Verification Failed: Request row count is missing or zero! Ingestion did not populate.`);
+        console.error(`Body text sample:\n${bodyText.slice(0, 1000)}`);
+        await browser.close();
+        process.exit(1);
+      }
+      console.log(`[${url}] Verified Dashboard request row count is populated: ${totalMatch[1]} total rows.`);
 
+      // Validate Commit Hash
       if (expectedCommit) {
         if (!footerText.includes(`commit:${expectedCommit}`)) {
-          // Fallback to body text in case footer selector missed
-          const bodyText = await page.evaluate(() => document.body.innerText);
           if (!bodyText.includes(`commit:${expectedCommit}`)) {
             console.error(`[${url}] Verification Failed: Expected commit hash 'commit:${expectedCommit}' not found in page.`);
             await browser.close();
@@ -59,6 +68,7 @@ if (!url) {
         }
       }
 
+      // Validate Architecture
       if (expectedArch) {
         if (!footerText.toLowerCase().includes(expectedArch.toLowerCase())) {
           console.error(`[${url}] Verification Failed: Expected architecture '${expectedArch}' not found in footer.`);
@@ -68,6 +78,7 @@ if (!url) {
         console.log(`[${url}] Verified architecture matches: ${expectedArch}`);
       }
 
+      // Validate Environment
       if (expectedEnv) {
         if (!footerText.toLowerCase().includes(expectedEnv.toLowerCase())) {
           console.error(`[${url}] Verification Failed: Expected environment '${expectedEnv}' not found in footer.`);
@@ -77,7 +88,7 @@ if (!url) {
         console.log(`[${url}] Verified environment matches: ${expectedEnv}`);
       }
 
-      // Also verify the RUM page if we are checking dashboard
+      // ── 2. Positive Validation: RUM Page ──
       if (url.includes('/dashboard')) {
         const rumUrl = url.replace('/dashboard', '/rum');
         console.log(`[${url}] Checking RUM page: ${rumUrl} ...`);
@@ -88,21 +99,35 @@ if (!url) {
           process.exit(1);
         }
         await page.waitForSelector('main', { timeout: 10000 });
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(4000);
         
         const rumBodyText = await page.evaluate(() => document.body.innerText);
-        const rumFailedToLoad = rumBodyText.includes("Failed to load") && !rumBodyText.includes("Faro version");
         const isLocalStandard = expectedArch === "standard" && expectedEnv === "local";
-        const hasEmptyState = !isLocalStandard && (rumBodyText.includes("No data for this time period") || rumBodyText.includes("Waiting for real-time RUM"));
-        
-        if (rumFailedToLoad || hasEmptyState || rumBodyText.includes("Internal Server Error")) {
-          console.error(`[${rumUrl}] Verification Failed: RUM page is displaying 'Failed to load', empty RUM state, or an Internal Server Error! Ingestion did not populate.`);
-          console.error("Body text sample:");
-          console.error(rumBodyText.slice(0, 1000));
+
+        // Assert that the RUM Page components are rendered
+        if (!rumBodyText.includes("TOTAL BEACONS") || !rumBodyText.includes("PAGEVIEWS")) {
+          console.error(`[${rumUrl}] Verification Failed: RUM page metrics card headers (TOTAL BEACONS/PAGEVIEWS) not found.`);
           await browser.close();
           process.exit(1);
         }
-        console.log(`[${rumUrl}] Verified RUM page is active and successfully populated with ingested Web Vitals data!`);
+
+        // For real services (excluding the local mocked standard service), verify that active metrics actually populated
+        if (!isLocalStandard) {
+          // Confirm Largest Contentful Paint chart and Good/Poor/Needs Imp rating exist, proving data is present
+          const hasVitalsTitle = rumBodyText.includes("Largest Contentful Paint") || rumBodyText.includes("LCP");
+          const hasVitalsRating = rumBodyText.includes("GOOD") || rumBodyText.includes("POOR") || rumBodyText.includes("NEEDS IMP.");
+          
+          if (!hasVitalsTitle || !hasVitalsRating) {
+            console.error(`[${rumUrl}] Verification Failed: Web Vitals metrics are missing or empty on the RUM page!`);
+            console.error("Body text sample:");
+            console.error(rumBodyText.slice(0, 1000));
+            await browser.close();
+            process.exit(1);
+          }
+          console.log(`[${rumUrl}] Verified RUM metrics successfully populated on page (Vitals & Ratings active).`);
+        } else {
+          console.log(`[${rumUrl}] Verified RUM page is active (mock service idle state verified).`);
+        }
       }
 
     } catch (e) {
