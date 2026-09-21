@@ -544,9 +544,15 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 with _ConnectionHolder(rum_source, read_only=True) as rum_con:
 
                     def _query_rum_bootstrap(con):
-                        cnt_v = con.execute("SELECT count(*) FROM client_vitals").fetchone()
-                        cnt_e = con.execute("SELECT count(*) FROM client_errors").fetchone()
-                        cnt = (cnt_v[0] if cnt_v else 0) + (cnt_e[0] if cnt_e else 0)
+                        distinct_id = (
+                            "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+                        )
+                        cnt = (
+                            con.execute(
+                                f"SELECT COUNT(DISTINCT {distinct_id}) FROM (SELECT req_id, cid, timestamp FROM client_vitals UNION ALL SELECT req_id, cid, timestamp FROM client_errors)"
+                            ).fetchone()[0]
+                            or 0
+                        )
 
                         ts_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
                         ts_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()

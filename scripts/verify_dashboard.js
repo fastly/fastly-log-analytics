@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const { execSync } = require('child_process');
 const baseUrl = process.argv[2];
 const expectedCommit = process.argv[3];
 const expectedArch = process.argv[4];
@@ -9,10 +10,45 @@ if (!baseUrl) {
   process.exit(1);
 }
 
+// Dynamically resolve actual active commit hash from local git if not supplied or unknown
+let actualExpectedCommit = expectedCommit;
+if (!actualExpectedCommit || actualExpectedCommit === 'unknown') {
+  try {
+    actualExpectedCommit = execSync('git rev-parse --short=12 HEAD').toString().trim();
+  } catch (e) {
+    actualExpectedCommit = 'unknown';
+  }
+}
+
 // Helper to append query parameters cleanly
 function getUrlWithParam(url, key, value) {
   const joiner = url.includes('?') ? '&' : '?';
   return `${url}${joiner}${key}=${encodeURIComponent(value)}`;
+}
+
+// Helper to fail the script if any console error or failed network response occurs
+function registerErrorListeners(page, browser, contextName) {
+  page.on('console', msg => {
+    if (msg.type() === 'error') {
+      const text = msg.text();
+      console.error(`[Playwright Console Error] [${contextName}] ${text}`);
+      // Only fail on critical application or API request errors, filtering out benign browser preload/favicon warnings
+      if (!text.includes('preload') && !text.includes('woff2') && !text.includes('favicon') && !text.includes('React DevTools')) {
+        console.error(`❌ [Playwright] Failing E2E verification due to console error: "${text}"`);
+        browser.close().then(() => process.exit(1));
+      }
+    }
+  });
+
+  page.on('response', response => {
+    const status = response.status();
+    const url = response.url();
+    // Fail immediately on any API response that returns 4xx or 5xx status codes
+    if (status >= 400 && (url.includes('/api/') || url.includes('/_next/data/'))) {
+      console.error(`❌ [Playwright Network Error] [${contextName}] Failed API call: ${url} returned status ${status}`);
+      browser.close().then(() => process.exit(1));
+    }
+  });
 }
 
 (async () => {
@@ -23,6 +59,7 @@ function getUrlWithParam(url, key, value) {
     // Create a completely isolated incognito browser context for Stage 1 to prevent domain/port caching conflicts
     const dashboardContext = await browser.newContext();
     const page = await dashboardContext.newPage();
+    registerErrorListeners(page, browser, 'Dashboard');
 
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGE 1: DASHBOARD PAGE VERIFICATION
@@ -184,11 +221,14 @@ function getUrlWithParam(url, key, value) {
     });
     console.log(`[Dashboard] Rendered Footer: "${footerText}"`);
 
-    if (expectedCommit && !footerText.includes(`commit:${expectedCommit}`) && !bodyText30d.includes(`commit:${expectedCommit}`)) {
-      console.error(`[Dashboard] Verification Failed: Expected commit hash 'commit:${expectedCommit}' not found in page.`);
+    if (!footerText.includes(`commit:${actualExpectedCommit}`)) {
+      console.error(`❌ [Playwright Commit Verification] Verification Failed: The deployed container is running the wrong commit, is un-built, or has stale build artifacts!`);
+      console.error(`Expected active commit hash: 'commit:${actualExpectedCommit}'`);
+      console.error(`Rendered footer text on page: "${footerText}"`);
       await browser.close();
       process.exit(1);
     }
+    console.log(`[Dashboard Commit Verification] Verified: Running correct active commit 'commit:${actualExpectedCommit}'! 🟢`);
     if (expectedArch && !footerText.toLowerCase().includes(expectedArch.toLowerCase())) {
       console.error(`[Dashboard] Verification Failed: Expected architecture '${expectedArch}' not found in footer.`);
       await browser.close();
@@ -212,6 +252,7 @@ function getUrlWithParam(url, key, value) {
     // Create a completely clean, isolated incognito browser context for Stage 2 to prevent any cookie or storage conflicts
     const rumContext = await browser.newContext();
     const rumPage = await rumContext.newPage();
+    registerErrorListeners(rumPage, browser, 'RUM');
 
     // 2.1. Verify 24h Overall RUM Data is present with active polling
     const rumUrl24h = getUrlWithParam(rumBaseUrl, "range", "24h");
