@@ -574,7 +574,8 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         sched_color = RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN
         comp_color = YELLOW if r.compaction_partitions_above_10 > 0 else GREEN
 
-        storage_parts = [f"Scheduler Tick: {sched_color}{r.scheduler_tick_age_s:.0f}s ago{RESET}"]
+        sched_str = f"{r.scheduler_tick_age_s:.0f}s ago" if r.scheduler_tick_age_s is not None else "—"
+        storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
         if r.duckdb_size_bytes > 0:
             storage_parts.append(f"DuckDB: {format_bytes(r.duckdb_size_bytes)}")
         if r.iceberg_files > 0 or r.iceberg_bytes > 0:
