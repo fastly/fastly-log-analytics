@@ -12,12 +12,22 @@
 //
 // containers[] shape (imageName/dockerFile/cache/pushImage) matches the
 // confirmed-working SigSci-RandomHack and SigSci-Demo-Site Jenkinsfiles.
-// Neither of those needed a cross-directory build context, so there's no
-// confirmed `context` key here -- frontend/Dockerfile COPYs backend/ and
-// scripts/, so it needs the repo root as build context. If fastlyDockerBuild
-// doesn't already default to repo-root context, this will fail on the
-// frontend build; check shared-pipeline-lib's actual step signature before
-// trusting this to build correctly.
+// No `dockerContextPath` override needed: it defaults to env.WORKSPACE
+// (repo root) per the fastlyDockerBuild reference, which is what both
+// Dockerfiles require (backend/Dockerfile COPYs scripts/, compute/, and
+// backend/ from outside its own dir; frontend/Dockerfile's COPY paths are
+// `frontend/...`, implying repo-root context too).
+//
+// Both Dockerfiles also use BuildKit's `RUN --mount=type=cache` (uv's wheel
+// cache, npm's tarball cache, Next's webpack/SWC cache) — a different
+// caching mechanism from the Kaniko whole-layer remote cache `cache: true`
+// enables here. Unverified whether Kaniko actually persists these mounts
+// across builds; if not, a cache MISS on this layer (e.g. uv.lock/
+// package-lock.json changes) reinstalls everything cold instead of reusing
+// unchanged packages. Doesn't affect the cache-HIT case (Kaniko's own
+// layer cache still serves the whole RUN layer when inputs are unchanged).
+// Check a recent build's console output for `--mount` warnings/no-ops
+// before assuming this is giving the speedup the Dockerfile comments claim.
 def backendImage = 'fastly/se-demo/fastly-log-analytics-backend'
 def frontendImage = 'fastly/se-demo/fastly-log-analytics-frontend'
 
@@ -45,22 +55,25 @@ fastlyPipeline(script: this) {
           imageName: backendImage,
           dockerFile: 'backend/Dockerfile',
           cache: cache,
+          reproducibleDigest: true,
           tagImage: commitTag,
           pushImage: true,
+          timeout: 45,
         ],
         [
           imageName: frontendImage,
           dockerFile: 'frontend/Dockerfile',
           cache: cache,
+          reproducibleDigest: true,
           tagImage: commitTag,
           pushImage: true,
+          timeout: 45,
         ],
       ]
       fastlyDockerBuild(
         script: this,
         containers: containers,
         parallelBuild: true,
-        checkout: true,
         submodules: false,
       )
       fastlyTagContainer(script: this,
