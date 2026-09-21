@@ -153,3 +153,21 @@ References:
 - [Amazon Data Firehose delivery semantics](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html)
 - [Apache Kafka Connect configuration and exactly-once source support](https://kafka.apache.org/41/generated/connect_config.html)
 - [Amazon S3 Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
+
+## 11. Downstream Page Contract Check
+
+The page specifications were checked before implementation because Cron 1 supplies the
+freshness, status, progress, and role boundaries consumed by the UI:
+
+| Page specification | Cron 1 dependency | Implementation constraint |
+|---|---|---|
+| [`/dashboard`](../../pages/dashboard.md) | `latest_log_at`, adaptive empty/young-service windows, and stale-view recovery | A successful discovery must not publish a false freshness timestamp; partial or empty runs must preserve the existing extent semantics. |
+| [`/admin`](../../pages/admin/overview.md) | `sync-status`, `cron_runs`, `cron_progress`, queued-file counts, and manual Sync Now | Keep the documented counter schema and progress lifecycle stable so the admin status cards and SSE progress stream remain truthful. |
+| [`/admin/queue`](../../pages/admin/queue.md) | High-Scale `ingest_ledger` states and recovery visibility | Discovery owns `discovered`/dispatch state; workers and ledger sweeps own later transitions. Diagnostic quarantine must not be presented as an automatic retry queue without an explicit, separate admin action. |
+| [`/rum`](../../pages/rum.md), [`/admin/rum`](../../pages/admin/rum.md) | Shared request/RUM ingestion outcomes and Standard/High-Scale topology | The request contract is the template for analogous RUM behavior, but the page specifications still contain legacy `rum_sync` naming that must be corrected during the dedicated RUM page/doc session. |
+| [`/admin/usage-log`](../../pages/admin/usage-log.md) | FOS LIST/GET attribution and cost counters | Every discovery storage call must retain the `cron.log_discovery` process context and emit the stable usage categories used by the cost page. |
+
+The review also found two page-documentation follow-ups that are intentionally not being
+implemented in this Cron 1 session: replace stale `rum_sync` references in the RUM page
+specifications, and reconcile `/admin/queue`'s “retry quarantined file” wording with the
+agreed rule that quarantine is diagnostic evidence rather than a re-ingest queue.
