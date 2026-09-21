@@ -4692,7 +4692,7 @@ class QueryRunner:
             if backing_col in cols:
                 tmp = self._create_active_hour_temp_direct([backing_col], cols, live_start, live_end)
                 if tmp == "__empty__":
-                    return {}
+                    return {"top": [], "total": 0}
                 if tmp is None:
                     return None
                 try:
