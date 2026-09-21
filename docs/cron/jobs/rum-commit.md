@@ -61,7 +61,9 @@
    - Launches daemon threads for `compact_local_partitions` on `client_vitals` and `client_errors` with defensive try/except logging.
 7. **Telemetry, Status & Finalization:**
    - If both tables fail: records status `"error"`.
-   - If one table succeeds and one fails: records status `"warning"` with partial accounting (e.g. `Partial RUM commit: 2 vitals (50 rows) and 0 errors; errors failed: ...`).
+   - If one table succeeds and one fails: records the commit-stage partial result while
+     preserving the shared ingestion outcome already recorded by discovery. Commit-stage
+     counters remain limited to files/rows/tables committed and failed.
    - If both succeed: records status `"success"` with total rows and files committed.
    - Guaranteed `finally:` resets Boto3 caller hint, ends progress, and calls `finalize_cron_run_if_running`.
 

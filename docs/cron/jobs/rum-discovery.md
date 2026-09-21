@@ -51,7 +51,10 @@
    - Calls `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="rum_discovery")`.
 3. **Faro Bundle Integrity & Upstream Drift Reconcile:**
    - Calls `_reconcile_faro_bundle(service_id, run_id)`.
-   - If Faro reconciliation fails or reports an issue, tracks `faro_ok = False` so the run is marked `"warning"` while allowing discovery to proceed.
+   - If Faro reconciliation fails or reports an issue, tracks `faro_ok = False` and
+     continues discovery. Faro is the only RUM-specific warning condition; ingestion,
+     quarantine, counters, retries, and FOS deletion follow the same contract as request
+     discovery.
 4. **Broker Check:**
    - Confirms `CELERY_BROKER_URL` is set; records status `"error"` if missing.
 5. **FOS LIST Call & Ledger Dispatch:**
@@ -60,7 +63,9 @@
      - Inserts unseen keys into PostgreSQL `ingest_ledger` with `status='discovered'`.
      - Dispatches batches to Celery via `convert_batch_rum_files.delay`.
 6. **Telemetry & Finalization:**
-   - If Faro bundle reconciliation failed: records status `"warning"` with details in `summary` and `error_message`.
+   - Records the same shared zero-filled outcome counters and status rules as request
+     discovery. A Faro-only failure adds warning details to `summary` and `error_message`;
+     any data-plane failure records `"error"`.
    - If successful: records status `"success"` with `files_downloaded=discovered`.
    - Guaranteed `finally:` ends progress and calls `finalize_cron_run_if_running`.
 

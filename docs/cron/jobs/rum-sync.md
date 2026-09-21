@@ -47,7 +47,8 @@
 2. **Progress Lifecycle Start:** Calls `start_cron_run(service_id, "rum_sync")` returning `run_id`, then calls `start_progress(run_id, service_id=service_id, task="rum_sync")`.
 3. **Faro Bundle Integrity & Reconcile:**
    - Calls `_reconcile_faro_bundle(service_id, run_id)` to ensure pinned Faro SDK bundle is present in FOS and live VCL routes to it.
-   - If bundle adoption, restore, or drift resync fails, logs warning and marks run as degraded.
+   - If bundle adoption, restore, or drift resync fails, logs a RUM-specific warning;
+     this does not change the shared ingestion/quarantine contract.
 4. **FOS LIST Call:** Executes `FosS3FileSystem.ls(f"{bucket}/{prefix}/raw/rum/")`.
 5. **Filter Processed Files:** Compares discovered files against SQLite `ingested_rum_files`.
 6. **Download & Parse Beacons in Chunks:**
@@ -55,19 +56,18 @@
    - Decompresses and extracts JSON beacon payloads:
      - Web Vitals: `lcp`, `inp`, `cls`, `ttfb`, `fcp`, `device_type`, `connection_type`, `effective_type`.
      - Errors: `message`, `source_file`, `lineno`, `colno`, `stack_trace`.
-   - On individual file download or parse errors, increments `error_count`, applies the
-     shared local quarantine contract for malformed RUM lines, and continues the batch.
+   - Uses the same ingestion contract as request logs: valid beacons continue to their
+     normal buffers, each malformed beacon becomes an individual local exact-byte
+     quarantine item, corrupt gzip becomes one item, and processing continues.
 7. **Local Parquet Write:** Writes transformed records to `cache/{bucket}/rum/vitals_*.parquet` and `errors_*.parquet`.
 8. **SQLite Tracking Update:** Inserts ingested filenames into SQLite `ingested_rum_files`.
 9. **Telemetry, Status & Log Recording:**
-   - Evaluates run health: if `error_count > 0`, records status `"error"`; a Faro reconcile
-     degradation without ingestion failures remains `"warning"`; otherwise `"success"`.
-   - Records the shared, zero-filled outcome counters `valid_records`, `malformed_records`,
-     `corrupt_containers`, `quarantine_capture_failures`, `source_delete_failures`, and
-     `cap_evictions`, plus `objects_processed`, `objects_successful`, `objects_partial`,
-     and `objects_failed`.
-   - If valid beacons are ingested but FOS deletion fails after bounded retries, the object
-     is counted as `objects_failed` and `source_delete_failures` is incremented.
+   - Uses the shared status rule: any failed record, quarantine capture, or FOS deletion
+     marks the ingestion run `"error"`; a Faro-only issue is an additional `"warning"`.
+   - Records the same zero-filled counters as request ingestion:
+     `valid_records`, `malformed_records`, `corrupt_containers`,
+     `quarantine_capture_failures`, `source_delete_failures`, `cap_evictions`,
+     `objects_processed`, `objects_successful`, `objects_partial`, and `objects_failed`.
    - Updates `cron_runs` with `duration_s`, `files_downloaded`, `rows_ingested`, and detailed summary.
    - Guaranteed `finally:` block executes `end_progress(run_id)` and `cleanup_progress_and_reap()`.
    - Logs FOS Class A LIST/GET calls in `usage_log.db`.
@@ -89,9 +89,9 @@
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
-- **Corrupt Beacon Payload:** Malformed JSON beacons are captured as individual local
-  quarantine items when possible; valid beacons within the same batch are preserved and the
-  run is marked `"error"`.
+- **Corrupt Beacon Payload:** Uses the same malformed-record handling as request logs:
+  individual local quarantine items when possible, valid beacons preserved, and the run
+  marked `"error"` for any failed record or evidence/deletion operation.
 - **FOS S3 Rate Limit (429):** Backs off exponentially; retries on subsequent interval tick.
 - **Faro Reconcile Failure:** Logged as non-fatal warning, preserving beacon ingest while alerting operator via `"warning"` status.
 
