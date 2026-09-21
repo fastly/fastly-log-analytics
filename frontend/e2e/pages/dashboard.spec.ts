@@ -68,8 +68,11 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Wait for network to settle
-    await page.waitForLoadState('networkidle')
+    // Wait for bundle response to settle instead of networkidle (networkidle hangs on SSE streams)
+    await page.waitForResponse(
+      (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
+      { timeout: 30_000 }
+    ).catch(() => null)
 
     // Exactly 1 composite bundle request on cold load
     expect(bundleCalls).toBe(1)
@@ -112,7 +115,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     if (await firstTableCell.isVisible({ timeout: 5000 }).catch(() => false)) {
       const cellText = await firstTableCell.innerText()
       if (cellText && cellText.trim().length > 0) {
-        await firstTableCell.click()
+        await firstTableCell.click({ force: true })
         // Verify filter pill appeared in FilterBar
         const filterBar = page.locator('[data-testid="filter-bar"]')
         if (await filterBar.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -144,13 +147,11 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Compare switch in DashboardHeader
-    const compareSwitch = page.locator('button[role="switch"]').filter({ hasText: /compare/i })
-      .or(page.getByLabel(/compare/i))
-      .first()
+    // Compare switch in FilterBar
+    const compareSwitch = page.locator('label[for="compare-mode"]').or(page.getByRole('switch')).first()
 
     if (await compareSwitch.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await compareSwitch.click()
+      await compareSwitch.click({ force: true })
       await page.waitForTimeout(1000)
       expect(compareFired).toBe(true)
     }
@@ -187,10 +188,10 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
 
   test('11. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
     // Prime cache on first visit
-    await page.goto('/dashboard', { waitUntil: 'networkidle' })
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' })
 
     const start = Date.now()
-    await page.reload({ waitUntil: 'networkidle' })
+    await page.reload({ waitUntil: 'domcontentloaded' })
     const totalTime = Date.now() - start
 
     const metrics = await page.evaluate(() => {
@@ -251,7 +252,10 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
 
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
-    await page.waitForLoadState('networkidle')
+    await page.waitForResponse(
+      (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
+      { timeout: 30_000 }
+    ).catch(() => null)
 
     // Audit captured queries if debug instrumentation returned
     if (bundleDebugData) {

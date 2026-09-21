@@ -67,17 +67,20 @@ function getCookieValue(headers: { name: string; value: string }[], cookieName: 
   for (const h of headers) {
     if (h.name.toLowerCase() === 'set-cookie') {
       const match = h.value.match(new RegExp(`^${cookieName}=([^;]+)`))
-      if (match) return match[1]
+      if (match) {
+        const val = match[1].replace(/^"|"$/g, '').trim()
+        if (val && !h.value.includes('Max-Age=0')) return val
+      }
     }
   }
   return null
 }
 
 async function loginAsAnalyst(request: APIRequestContext, context: BrowserContext, serviceId: string): Promise<string> {
-  const email = 'e2e-analyst@example.com'
+  const email = `e2e-analyst-${Date.now()}@example.com`
 
   // 1. Seed an OAuth invite
-  const created = await request.post('/api/admin/share/invites', {
+  const created = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}/api/admin/share/invites`, {
     headers: { 'Content-Type': 'application/json' },
     data: JSON.stringify({
       name: 'E2E Perf Analyst',
@@ -93,26 +96,42 @@ async function loginAsAnalyst(request: APIRequestContext, context: BrowserContex
   }
 
   // 2. /authorize
-  const auth = await request.get('/api/share/oauth/authorize?provider=google', { maxRedirects: 0 })
+  const auth = await request.get(`http://127.0.0.1:${E2E_BACKEND_PORT}/api/share/oauth/authorize?provider=google`, { maxRedirects: 0 })
   const flowState = getCookieValue(auth.headersArray(), 'oauth_flow_state')
   const idpUrl = auth.headers()['location']
+  if (!flowState || !idpUrl) {
+    throw new Error('Failed to start OAuth flow')
+  }
 
   // 3. Mock IdP
-  const idp = await request.get(idpUrl, { maxRedirects: 0 })
+  const idp = await request.get(idpUrl, {
+    maxRedirects: 0,
+    headers: { cookie: `mock_idp_email=${email}` },
+  })
   const callbackUrl = idp.headers()['location']
+  if (!callbackUrl) {
+    throw new Error('Failed to get callback URL from IdP')
+  }
 
   // 4. Callback
   const cb = await request.get(callbackUrl, {
     maxRedirects: 0,
     headers: { cookie: `oauth_flow_state=${flowState}` },
   })
+
+  // If TOS was already accepted or callback granted session directly:
+  const directSessionId = getCookieValue(cb.headersArray(), 'analyst_session_id')
+  if (directSessionId) {
+    return directSessionId
+  }
+
   const pendingSessionId = getCookieValue(cb.headersArray(), 'analyst_pending_session_id')
   if (!pendingSessionId) {
     throw new Error('Failed to get analyst_pending_session_id cookie')
   }
 
-  // 5. Acknowledge TOS
-  const ack = await request.post('/api/share/acknowledge', {
+  // 5. Acknowledge TOS directly against backend
+  const ack = await request.post(`http://127.0.0.1:${E2E_BACKEND_PORT}/api/share/acknowledge`, {
     data: { version: 'v1' },
     headers: {
       cookie: `analyst_pending_session_id=${pendingSessionId}`,
@@ -120,30 +139,8 @@ async function loginAsAnalyst(request: APIRequestContext, context: BrowserContex
   })
   const sessionId = getCookieValue(ack.headersArray(), 'analyst_session_id')
   if (!sessionId) {
-    throw new Error('Failed to get analyst_session_id cookie after TOS acknowledgement')
+    throw new Error(`Failed to get analyst_session_id cookie after TOS acknowledgement: status=${ack.status()} body=${await ack.text()}`)
   }
-
-  // 6. Set cookie on the browser context
-  await context.addCookies([
-    {
-      name: 'analyst_session_id',
-      value: sessionId,
-      domain: 'localhost',
-      path: '/',
-      httpOnly: true,
-      secure: false,
-      sameSite: 'Strict'
-    },
-    {
-      name: 'analyst_session_id',
-      value: sessionId,
-      domain: '127.0.0.1',
-      path: '/',
-      httpOnly: true,
-      secure: false,
-      sameSite: 'Strict'
-    }
-  ])
 
   return sessionId
 }
@@ -158,9 +155,11 @@ test.describe('E2E Performance & Posture Harness', () => {
       analystSessionId = await loginAsAnalyst(request, context, SERVICE_ID)
       console.log(`[PERF] Seeded Analyst Session: ${analystSessionId}`)
     } catch (e) {
-      console.warn(`[WARN] Analyst login setup bypassed/failed: ${e}`)
+      console.warn(`[WARN] Analyst login setup failed: ${e}`)
+      throw e
+    } finally {
+      await context.close()
     }
-    await context.close()
   })
 
   test.afterAll(() => {

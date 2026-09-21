@@ -41,7 +41,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gzip
 import io
 import json
@@ -49,6 +48,7 @@ import math
 import os
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -675,7 +675,9 @@ def run_target_fos(
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
             s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
 
-            mode_str = f"BURST {burst_rps:,} rps" if in_burst else (f"NORMAL {rate_rps:,} rps" if rate_rps > 0 else "MAX")
+            mode_str = (
+                f"BURST {burst_rps:,} rps" if in_burst else (f"NORMAL {rate_rps:,} rps" if rate_rps > 0 else "MAX")
+            )
 
             if dry_run:
                 total_bytes_uploaded += len(gz_bytes)
@@ -865,7 +867,9 @@ def run_target_clickhouse(
         mode_str = f"BURST {burst_rps:,} rps" if in_burst else (f"NORMAL {rate_rps:,} rps" if rate_rps > 0 else "MAX")
 
         if dry_run:
-            print(f"  [dry-run] [{mode_str}] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)")
+            print(
+                f"  [dry-run] [{mode_str}] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)"
+            )
         else:
             assert adapter is not None
             receipt = adapter.insert(batch)
@@ -886,7 +890,9 @@ def run_target_clickhouse(
 
     elapsed = time.monotonic() - t0
     rate = total_rows_emitted / max(elapsed, 0.001)
-    print(f"\nSUCCESS: Finished ClickHouse insertion of {total_rows_emitted:,} rows in {elapsed:.2f}s ({rate:,.0f} rows/s).")
+    print(
+        f"\nSUCCESS: Finished ClickHouse insertion of {total_rows_emitted:,} rows in {elapsed:.2f}s ({rate:,.0f} rows/s)."
+    )
     return 0
 
 
