@@ -766,9 +766,13 @@ def _run_metadata_cleanup(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
+    from backend.utils.active_requests import should_defer_cron
 
     src = get_source_for_service(service_id)
     if src is None:
+        return
+
+    if should_defer_cron("metadata_cleanup", service_id):
         return
 
     cfg = svcconfig.load_config(service_id) or {}
@@ -777,12 +781,104 @@ def _run_metadata_cleanup(service_id: str) -> None:
     _display = _display_label(src, service_id)
     color = JOB_COLORS.get("metadata_cleanup", "")
     label = f"{color}[metadata_cleanup]{RESET_COLOR}"
-    logger.info("🏎️  %s %s: Starting metadata cleanup.", label, _display)
 
     start_ts = time.time()
-    run_id = start_cron_run(src, "metadata_cleanup")
     try:
-        result = cleanup_metadata(service_id, retention)
+        run_id = start_cron_run(src, "metadata_cleanup")
+    except RuntimeError as e:
+        logger.info("⏭️  %s %s: skipping — %s", label, _display, e)
+        return
+
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="metadata_cleanup")
+    logger.info("🏎️  %s %s: Starting metadata cleanup.", label, _display)
+
+    def _on_event(event: dict) -> None:
+        _log_and_add_progress(run_id, service_id, job_name="metadata_cleanup", event=event)
+
+    try:
+        result = cleanup_metadata(service_id, retention, on_event=_on_event)
+        total_deleted = sum(result["deleted"].values())
+        summary_parts = [f"{t}={n}" for t, n in result["deleted"].items() if n]
+        summary = (
+            (
+                f"Trimmed {total_deleted:,} rows ({', '.join(summary_parts)}). "
+                f"VACUUM={'yes' if result['vacuumed'] else 'skipped (no deletions)'}."
+            )
+            if total_deleted
+            else "No rows older than retention windows."
+        )
+
+        if total_deleted:
+            logger.info(
+                "🧹 %s %s: deleted %d rows (%s) vacuumed=%s in %.2fs",
+                label,
+                _display,
+                total_deleted,
+                ", ".join(summary_parts),
+                result["vacuumed"],
+                result["duration_s"],
+            )
+        else:
+            logger.info("🏁  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
+
+        # Also trim the global system_metrics.db retention window. Idempotent
+        # across per-service runs (the second call this day deletes 0 rows
+        # because the first one already cleared them), and the DELETE rides
+        # the (metric, ts) index so the cost is microseconds even when there's
+        # nothing to do. 30-day window matches the in-app Trends tab range
+        # (1h / 24h / 7d) plus a buffer.
+        try:
+            from backend.core import metric_snapshots
+
+            metric_snapshots.purge_old(retention_days=30)
+        except Exception as e:
+            logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
+
+        try:
+            from backend.core.metadata.quarantine import delete_quarantined_rows, get_expired_quarantined_files
+
+            expired = get_expired_quarantined_files(service_id, retention_days=14)
+            if expired:
+                from backend.core.duckdb import _get_fos_client
+                from backend.core.ingest import _delete_objects_robust
+
+                if src.get("access_level") != "read_only":
+                    fos_client = _get_fos_client(src)
+                    keys_to_delete = []
+                    ids_to_delete = []
+                    for row in expired:
+                        keys_to_delete.append(row["error_key"])
+                        keys_to_delete.append(row["meta_key"])
+                        ids_to_delete.append(row["id"])
+                    if keys_to_delete:
+                        _delete_objects_robust(fos_client, src["bucket"], keys_to_delete)
+                    if ids_to_delete:
+                        delete_quarantined_rows(service_id, ids_to_delete)
+                    logger.info("[metadata_cleanup] %s: purged %d expired quarantined files", service_id, len(expired))
+        except Exception as e:
+            logger.debug("[metadata_cleanup] quarantine purge failed: %s", e)
+
+        log_cron_run(
+            src,
+            "metadata_cleanup",
+            time.time() - start_ts,
+            "success",
+            summary=summary,
+            # Repurpose the rows_ingested column for the count of rows trimmed —
+            # the schema is shared across all cron tasks, and "rows_ingested" is
+            # the closest semantic fit (each task interprets it by context).
+            rows_ingested=total_deleted,
+            run_id=run_id,
+        )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="metadata_cleanup",
+            event={"type": "done", "message": summary},
+        )
     except Exception as e:
         logger.exception("%s %s: cleanup failed: %s", label, _display, e)
         log_cron_run(
@@ -794,77 +890,8 @@ def _run_metadata_cleanup(service_id: str) -> None:
             summary=f"cleanup failed: {e}",
             run_id=run_id,
         )
-        return
+    finally:
+        end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
 
-    total_deleted = sum(result["deleted"].values())
-    summary_parts = [f"{t}={n}" for t, n in result["deleted"].items() if n]
-    summary = (
-        (
-            f"Trimmed {total_deleted:,} rows ({', '.join(summary_parts)}). "
-            f"VACUUM={'yes' if result['vacuumed'] else 'skipped (no deletions)'}."
-        )
-        if total_deleted
-        else "No rows older than retention windows."
-    )
-
-    if total_deleted:
-        logger.info(
-            "🧹 %s %s: deleted %d rows (%s) vacuumed=%s in %.2fs",
-            label,
-            _display,
-            total_deleted,
-            ", ".join(summary_parts),
-            result["vacuumed"],
-            result["duration_s"],
-        )
-    else:
-        logger.info("🏁  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
-
-    # Also trim the global system_metrics.db retention window. Idempotent
-    # across per-service runs (the second call this day deletes 0 rows
-    # because the first one already cleared them), and the DELETE rides
-    # the (metric, ts) index so the cost is microseconds even when there's
-    # nothing to do. 30-day window matches the in-app Trends tab range
-    # (1h / 24h / 7d) plus a buffer.
-    try:
-        from backend.core import metric_snapshots
-
-        metric_snapshots.purge_old(retention_days=30)
-    except Exception as e:
-        logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
-
-    try:
-        from backend.core.metadata.quarantine import delete_quarantined_rows, get_expired_quarantined_files
-
-        expired = get_expired_quarantined_files(service_id, retention_days=14)
-        if expired:
-            from backend.core.duckdb import _get_fos_client
-            from backend.core.ingest import _delete_objects_robust
-
-            fos_client = _get_fos_client(src)
-            keys_to_delete = []
-            ids_to_delete = []
-            for row in expired:
-                keys_to_delete.append(row["error_key"])
-                keys_to_delete.append(row["meta_key"])
-                ids_to_delete.append(row["id"])
-            if keys_to_delete:
-                _delete_objects_robust(fos_client, src["bucket"], keys_to_delete)
-            if ids_to_delete:
-                delete_quarantined_rows(service_id, ids_to_delete)
-            logger.info("[metadata_cleanup] %s: purged %d expired quarantined files", service_id, len(expired))
-    except Exception as e:
-        logger.debug("[metadata_cleanup] quarantine purge failed: %s", e)
-
-    log_cron_run(
-        src,
-        "metadata_cleanup",
-        time.time() - start_ts,
-        "success",
-        summary=summary,
-        # Repurpose the rows_ingested column for the count of rows trimmed —
-        # the schema is shared across all cron tasks, and "rows_ingested" is
-        # the closest semantic fit (each task interprets it by context).
-        rows_ingested=total_deleted,
-        run_id=run_id,
-    )
+        finalize_cron_duration(src, run_id, start_ts)

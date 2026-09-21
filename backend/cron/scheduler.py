@@ -1316,25 +1316,38 @@ class Scheduler:
             # + cron_runs per cfg["metadata_retention"]; defaults to 1d for
             # the first two and 7d for cron_runs. See
             # backend.core.metadata_db.cleanup_metadata.
-            cleanup_job_id = f"metadata_cleanup_{service_id}"
-            seen_ids.add(cleanup_job_id)
-            if cleanup_job_id not in self._job_ids:
-                self._add_job(
-                    _run_metadata_cleanup,
-                    "cron",
-                    hour=3,
-                    minute=15,
-                    args=[service_id],
-                    id=cleanup_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=3600,
-                )
-                self._job_ids[cleanup_job_id] = cleanup_job_id
-                logger.info(
-                    "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily 03:15 UTC).",
-                    cleanup_job_id,
-                )
+            cleanup_cfg = prov.get("cron_metadata_cleanup", {})
+            if cleanup_cfg.get("enabled", True):
+                cleanup_job_id = f"metadata_cleanup_{service_id}"
+                seen_ids.add(cleanup_job_id)
+                cron_hour = int(cleanup_cfg.get("cron_hour", 3))
+                cron_minute = int(cleanup_cfg.get("cron_minute", 15))
+                if cleanup_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(cleanup_job_id)
+                        if job:
+                            job.reschedule("cron", hour=cron_hour, minute=cron_minute)
+                    except Exception:
+                        pass
+                else:
+                    self._add_job(
+                        _run_metadata_cleanup,
+                        "cron",
+                        hour=cron_hour,
+                        minute=cron_minute,
+                        args=[service_id],
+                        id=cleanup_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=3600,
+                    )
+                    self._job_ids[cleanup_job_id] = cleanup_job_id
+                    logger.info(
+                        "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily %02d:%02d UTC).",
+                        cleanup_job_id,
+                        cron_hour,
+                        cron_minute,
+                    )
 
         # ── Bot data refresh job ──────────────────────────────────────────────
         bot_refresh_id = "bot_data_refresh"

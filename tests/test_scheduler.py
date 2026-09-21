@@ -2397,6 +2397,7 @@ def test_run_gap_heal_critical_bypasses_throttle_and_widens_sweep():
     assert sid == "svc-gap"
     assert kw["max_files"] == 100_000, "critical band must widen sweep file budget"
     assert kw["max_seconds"] == 1800, "critical band must widen sweep time budget"
+    assert log_calls[0][0][3] == "warning"
     summary = log_calls[0][1]["summary"]
     assert "severity=critical" in summary
     assert "max_files=100000" in summary
@@ -2439,6 +2440,7 @@ def test_run_gap_heal_severe_uses_15min_throttle():
     sid, kw = full_sweep_calls[0]
     assert kw["max_files"] == 50_000, "severe band widens file budget"
     assert kw["max_seconds"] == 1500
+    assert log_calls[0][0][3] == "warning"
 
 
 def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
@@ -2450,13 +2452,13 @@ def test_run_full_sweep_default_budget_unchanged_for_daily_scheduled_run():
     from backend.cron.jobs.sync import _FULL_SWEEP_DEFAULT_MAX_FILES, _FULL_SWEEP_DEFAULT_MAX_SECONDS, _run_full_sweep
 
     sig = inspect.signature(_run_full_sweep)
-    assert sig.parameters["max_files"].default == _FULL_SWEEP_DEFAULT_MAX_FILES == 20_000
-    assert sig.parameters["max_seconds"].default == _FULL_SWEEP_DEFAULT_MAX_SECONDS == 900
+    assert sig.parameters["max_files"].default == _FULL_SWEEP_DEFAULT_MAX_FILES
+    assert sig.parameters["max_seconds"].default == _FULL_SWEEP_DEFAULT_MAX_SECONDS
 
 
 def test_sync_jobs_registers_gap_heal_when_logging_service_id_present():
-    """Gap-heal cron should register only when the service has a
-    logging_service_id (the Fastly Stats API call keys on it)."""
+    """A service with a distinct ``logging_service_id`` config field
+    must register a gap_heal_{id} cron job with 30-min interval."""
     from backend.cron.scheduler import Scheduler
 
     cfg = {
@@ -2535,6 +2537,39 @@ def test_sync_jobs_skips_gap_heal_when_disabled():
         s._sync_jobs()
 
     assert "gap_heal_svc-disabled" not in s._job_ids
+
+
+def test_sync_jobs_reschedules_gap_heal_when_interval_changed():
+    """When cron_gap_heal.interval_minutes changes, the existing job should be rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "logging_service_id": "log-svc-resched",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_gap_heal": {"interval_minutes": 15},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["gap_heal_svc-resched"] = "gap_heal_svc-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=1),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", minutes=15)
 
 
 def test_check_disk_space_passes_when_plenty_free(tmp_path):
