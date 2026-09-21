@@ -11,6 +11,7 @@
 - **Category:** Distributed State Machine Crash Recovery & RUM Dead-Letter Sweep
 - **Purpose:** Acts as the automated crash-net for distributed RUM beacon ingestion in `DEPLOYMENT_MODE=high_throughput`. It scans PostgreSQL `ingest_ledger` for orphaned `rum` claims, resets timed-out items, re-dispatches worker tasks to Celery `q.ingest` with queue-depth safety, and tracks quarantined/dead-letter items.
 - **Why It Runs:** RUM beacon conversion can fail due to malformed client telemetry, browser extensions corrupting JSON payloads, or Celery worker evictions. This sweeper guarantees that transient worker failures do not drop RUM beacons and that poison-pill beacons are quarantined without blocking the distributed pipeline.
+- **Ownership boundary:** `rum_discovery_{service_id}` owns discovery and initial dispatch; RUM conversion workers own record validation, quarantine capture, durable publication, and source acknowledgement. This sweep only repairs ledger state and redispatches eligible work; it never re-parses payloads or performs a second commit.
 
 ---
 
@@ -57,6 +58,7 @@
 4. **Warning & Status Evaluation:**
    - If broker probe failed or if dead-letter/quarantined RUM rows > 0: records status `"warning"` with warning details in `summary` and `error_message`.
    - If clean: records status `"success"` with reclaimed, redispatched, and discovered metrics.
+   - A warning here reports recovery pressure or accumulated poison work. It does not downgrade a conversion worker's data-plane `"error"` outcome when record processing, quarantine capture, or source deletion fails.
 5. **Finalization:**
    - Guaranteed `finally:` ends progress and calls `finalize_cron_run_if_running`.
 
