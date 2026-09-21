@@ -42843,6 +42843,17 @@
               }
             ],
             "title": "Overview Days"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum"
           }
         },
         "additionalProperties": true,

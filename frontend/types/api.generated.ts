@@ -6030,6 +6030,8 @@ export interface components {
             overview?: number | null;
             /** Overview Days */
             overview_days?: number | null;
+            /** Rum */
+            rum?: number | null;
         } & {
             [key: string]: unknown;
         };
