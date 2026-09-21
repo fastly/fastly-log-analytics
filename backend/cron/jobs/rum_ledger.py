@@ -76,6 +76,8 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         return
     if src.get("access_level") == "read_only":
         return
+    if not svcconfig.is_high_throughput_mode(src):
+        return
 
     try:
         if run_id is None:
@@ -84,10 +86,20 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         logger.info("[rum_discovery] %s: skipping — %s", service_id, str(e))
         return
 
+    from backend.core.duckdb import finalize_cron_run_if_running
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="rum_discovery")
+
+    faro_ok = True
+    faro_err = None
     try:
-        _reconcile_faro_bundle(service_id, run_id)
-    except Exception:
-        logger.warning("[rum_discovery] %s: Faro bundle reconcile failed (non-fatal)", service_id, exc_info=True)
+        faro_ok = _reconcile_faro_bundle(service_id, run_id)
+    except Exception as fe:
+        faro_ok = False
+        faro_err = str(fe)
+        logger.warning("[rum_discovery] %s: Faro bundle reconcile failed (non-fatal): %s", service_id, fe, exc_info=True)
 
     if not svcconfig.CELERY_BROKER_URL:
         log_cron_run(
@@ -99,6 +111,9 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
             error_message="DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL",
             summary="Celery RUM ingest misconfigured: no broker URL",
         )
+        end_progress(run_id)
+        if run_id is not None:
+            finalize_cron_run_if_running(src, "rum_discovery", run_id)
         return
 
     from backend.core.ingest import discover_rum_prefix
@@ -111,18 +126,35 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         for i in range(5):
             prefix = rum_minute_list_prefix(now - timedelta(minutes=i))
             discovered += discover_rum_prefix(service_id, prefix_subpath=prefix)
-        log_cron_run(
-            src,
-            "rum_discovery",
-            time.time() - started,
-            "success",
-            run_id=run_id,
-            files_downloaded=discovered,
-            summary=(
+
+        duration = time.time() - started
+        if not faro_ok:
+            status = "warning"
+            warn_msg = f"Faro bundle reconcile issue ({faro_err or 'drift/restore warning'})"
+            summary = (
+                f"Discovered {discovered} new RUM file(s); dispatched to ingest workers ({warn_msg})"
+                if discovered
+                else f"No new RUM files ({warn_msg})"
+            )
+            error_message = faro_err or "Faro bundle reconcile failed"
+        else:
+            status = "success"
+            summary = (
                 f"Discovered {discovered} new RUM file(s); dispatched to ingest workers"
                 if discovered
                 else "No new RUM files"
-            ),
+            )
+            error_message = None
+
+        log_cron_run(
+            src,
+            "rum_discovery",
+            duration,
+            status,
+            run_id=run_id,
+            files_downloaded=discovered,
+            summary=summary,
+            error_message=error_message,
         )
     except Exception as e:
         log_cron_run(
@@ -135,6 +167,10 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
             summary="RUM discovery failed",
         )
         logger.exception("[ledger] %s: RUM discovery failed: %s", service_id, e)
+    finally:
+        end_progress(run_id)
+        if run_id is not None:
+            finalize_cron_run_if_running(src, "rum_discovery", run_id)
 
 
 @cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
@@ -143,37 +179,68 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
     of ``backend.cron.jobs.sync._run_ledger_sweep``. Registered by the
     scheduler only when high-throughput mode and RUM is enabled for this
     service."""
+    from backend.cron.scheduler import dev_mode_no_crons
+
+    if dev_mode_no_crons():
+        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — RUM ledger sweep refused.", service_id)
+        return
+
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import finalize_cron_run_if_running, get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import sweep_rum_ledger_once
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
     src = get_source_for_service(service_id)
     if src is None or not svcconfig.is_high_throughput_mode(src):
+        return
+    if src.get("access_level") == "read_only":
         return
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
 
+    rum_cfg = cfg.get("rum") or {}
+    if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
+        return
+
+    run_id = None
     try:
         run_id = start_cron_run(src, "ledger_rum_sweep")
     except RuntimeError as e:
         logger.info("[ledger_rum_sweep] %s: skipping — %s", service_id, str(e))
         return
 
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="ledger_rum_sweep")
+
     started = time.time()
     try:
         summary = sweep_rum_ledger_once(service_id)
+        run_status = "success"
+        warnings = []
+        if not summary.get("broker_ok", True):
+            warnings.append("Celery broker/queue depth probe failed")
+        if summary.get("dead_letter", 0) > 0:
+            warnings.append(f"{summary['dead_letter']} dead-letter/quarantined RUM row(s)")
+        if warnings:
+            run_status = "warning"
+
+        summary_msg = (
+            f"reclaimed={summary.get('reclaimed', 0)} redispatched={summary.get('redispatched', 0)} "
+            f"discovered={summary.get('discovered', 0)}"
+        )
+        if warnings:
+            summary_msg += f" ({'; '.join(warnings)})"
+
         log_cron_run(
             src,
             "ledger_rum_sweep",
             time.time() - started,
-            "success",
+            run_status,
             run_id=run_id,
             files_downloaded=summary.get("discovered", 0),
-            summary=(
-                f"reclaimed={summary['reclaimed']} redispatched={summary['redispatched']} "
-                f"discovered={summary['discovered']}"
-            ),
+            summary=summary_msg,
+            error_message="; ".join(warnings) if warnings else None,
         )
     except Exception as e:
         log_cron_run(
@@ -186,3 +253,7 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
             summary="RUM ledger sweep failed",
         )
         logger.exception("[ledger_rum_sweep] %s: sweep failed", service_id)
+    finally:
+        end_progress(run_id)
+        if run_id is not None:
+            finalize_cron_run_if_running(src, "ledger_rum_sweep", run_id)

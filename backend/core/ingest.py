@@ -3192,6 +3192,7 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     pending = len(stuck) + len(reclaimed)
     pending_messages = math.ceil(pending / LEDGER_CONVERT_BATCH_SIZE) if pending else 0
     redispatched = 0
+    broker_ok = True
     if pending:
         broker_ok = False
         try:
@@ -3234,7 +3235,23 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
     st = (datetime.now(UTC) - timedelta(hours=lookback_hours)).isoformat()
     discovered = discover_rum_prefix(service_id, start_time=st)
 
-    return {"reclaimed": len(reclaimed), "redispatched": redispatched, "discovered": discovered}
+    dead_letter_count = 0
+    try:
+        dead_letter_row = con.execute(
+            "SELECT COUNT(*) FROM ingest_ledger WHERE service_id=? AND object_key LIKE ? AND status IN ('quarantined', 'dead_letter')",
+            (service_id, like_pattern),
+        ).fetchone()
+        dead_letter_count = int(dead_letter_row[0]) if dead_letter_row else 0
+    except Exception:
+        dead_letter_count = 0
+
+    return {
+        "reclaimed": len(reclaimed),
+        "redispatched": redispatched,
+        "discovered": discovered,
+        "broker_ok": broker_ok if pending else True,
+        "dead_letter": dead_letter_count,
+    }
 
 
 # ── Celery task wrappers ──────────────────────────────────────────────────────
