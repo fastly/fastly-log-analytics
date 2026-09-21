@@ -90,8 +90,9 @@
 
 ## 7. Failure Modes & Recovery Runbooks
 - **Upstream DNS Resolver Down / Degraded:**
-  - Resolver timeouts and network failures return `status="error"`, leaving other lookups unaffected.
-  - If `errors > 0` and `resolved == 0`, job records `status="warning"` with `(DNS lookup failures detected)`.
+  - Per-address resolver timeouts and network failures are counted in `errors`; other lookups continue and pending addresses remain eligible for a later tick.
+  - If `errors > 0` and `resolved == 0`, the job records `status="warning"` with `(DNS lookup failures detected)`. A mixed batch with at least one successful resolution remains `status="success"` and exposes the error count in its summary.
+  - An unhandled batch or storage exception records `status="error"`; this is distinct from ordinary per-address lookup failures.
   - Next scheduled tick automatically retries remaining pending IPs.
 - **Stale DuckDB Buffer View Race:**
   - Automatically caught and healed via `execute_with_stale_view_retry()`.
