@@ -6,7 +6,7 @@ import logging
 
 from fastapi import HTTPException, Query
 
-from backend.utils.router_utils import not_found, raise_internal
+from backend.utils.router_utils import bad_request, not_found, raise_internal
 
 from ._router import router
 
@@ -26,7 +26,7 @@ def trigger_ngwaf_sync_endpoint(service_id: str):
 
     workspace_id = svcconfig.get_ngwaf_workspace_id(service_id)
     if not workspace_id:
-        raise HTTPException(status_code=400, detail="NGWAF workspace not configured for this service")
+        raise HTTPException(status_code=400, detail=bad_request("NGWAF workspace not configured for this service"))
 
     try:
         _run_ngwaf_bot_sync(service_id)

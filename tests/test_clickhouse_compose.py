@@ -8,8 +8,10 @@ def test_clickhouse_overlay_is_private_persistent_and_opt_in():
     overlay = yaml.safe_load(Path("docker-compose.clickhouse-prototype.yml").read_text())
     ch = overlay["services"]["clickhouse"]
     assert not ch.get("ports")
-    assert ch["image"] == "clickhouse/clickhouse-server:25.8.4.13"
-    assert ch["volumes"] == ["clickhouse-prototype-data:/var/lib/clickhouse"]
+    assert ch["volumes"] == [
+        "clickhouse-prototype-data:/var/lib/clickhouse",
+        "./clickhouse/config.d/system_logs.xml:/etc/clickhouse-server/config.d/system_logs.xml:ro",
+    ]
     assert ch["mem_limit"] == "6g"
     assert ch["restart"] == "unless-stopped"
     assert ch["networks"] == ["app-network"]

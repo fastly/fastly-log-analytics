@@ -34,10 +34,23 @@ def test_init_repeats_and_checks_actual_schema(monkeypatch):
     monkeypatch.setattr(schema, "target_identity", lambda c: "target")
     record = MagicMock()
     monkeypatch.setattr(schema, "_record_schema", record)
+    maintain = MagicMock()
+    monkeypatch.setattr(schema, "maintain_clickhouse_system_tables", maintain)
     schema.create_clickhouse_schema(client)
     schema.create_clickhouse_schema(client)
     assert client.execute.call_count == 2
+    client.execute.assert_called_with(schema.CLICKHOUSE_FACT_DDL)
+    assert maintain.call_count == 2
     assert record.call_count == 2
+
+
+def test_maintain_clickhouse_system_tables_executes_truncates_and_ttl_alters():
+    client = MagicMock()
+    schema.maintain_clickhouse_system_tables(client)
+    assert client.execute.call_count == 9
+    queries = [call.args[0] for call in client.execute.call_args_list]
+    assert any("TRUNCATE TABLE IF EXISTS system.trace_log" in q for q in queries)
+    assert any("ALTER TABLE system.query_log MODIFY TTL" in q for q in queries)
 
 
 def test_reject_sqlite_before_ddl(monkeypatch):
