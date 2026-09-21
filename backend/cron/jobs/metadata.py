@@ -285,11 +285,14 @@ def _run_metadata_sync(
             job_name="metadata_sync",
             event={"type": "status", "message": "Updating DuckDB views..."},
         )
-        # read_only=False is load-bearing: a read-only connection makes the
-        # slow-path rebuild bind a TEMP view that dies with this connection
+        # read_only=False is load-bearing in standard mode: a read-only connection
+        # makes the slow-path rebuild bind a TEMP view that dies with this connection
         # moments later — the cron would pay the full rebuild cost for a
         # no-op and the persistent per-service view would never refresh.
-        con = get_connection(source=src, read_only=False)
+        # In durable serving mode, connections are ephemeral in-memory, so read-only
+        # is required by the durable serving guard.
+        durable_serving = svcconfig.is_durable_serving_mode(src)
+        con = get_connection(source=src, read_only=durable_serving)
         try:
             db_iceberg.update_iceberg_view(con, src)
         finally:

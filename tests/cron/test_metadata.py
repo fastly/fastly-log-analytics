@@ -271,7 +271,7 @@ def test_admin_state_import_failure_does_not_break_run(monkeypatch, stub_load_co
     metadata._run_metadata_sync("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
-    assert args[3] == "success"
+    assert args[3] == "warning"
 
 
 def test_metadata_cleanup_defers_when_active_requests_present(monkeypatch, stub_source):

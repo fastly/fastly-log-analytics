@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 
 from backend.core import duckdb as _db
-from backend.core.duckdb_recycle import _recycle_rss_threshold_bytes, recycle_once
+from backend.core import duckdb_recycle as _recycle
 from backend.core.memory_guard import maybe_graceful_restart
 from backend.cron.decorators import global_job
 
@@ -75,9 +75,9 @@ def run_duckdb_recycle() -> str:
                 _maybe_adjust_recycle_schedule(expedite=True)
             elif rss < int(threshold * 0.5):
                 _maybe_adjust_recycle_schedule(expedite=False)
-            return f"skipped: RSS {rss / 1e6:.0f}MB < threshold {threshold / 1e6:.0f}MB"
+            return f"skipped: RSS {rss / (1024 * 1024):.0f}MB < threshold {threshold / (1024 * 1024):.0f}MB"
 
-    res = recycle_once(reason="interval")
+    res = _recycle.recycle_once(reason="interval")
 
     # Evaluate post-recycle memory to adapt schedule for next tick
     rss_after = _db.current_rss_bytes()

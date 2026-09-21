@@ -519,7 +519,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     files = buffer_files(source, table_name=table_name)
     if not files:
         return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
-    con = get_connection(source)
+    con = get_connection(source, read_only=True)
 
     # Detach and re-attach as read-write
     try:
@@ -677,7 +677,7 @@ def _optimize_table_impl(
 
     con = None
     try:
-        con = get_connection(source)
+        con = get_connection(source, read_only=True)
         # Pool connections hold a READ-ONLY lake attach — re-attach
         # read-write for the rewrite (same dance as _commit_buffer_impl).
         try:
@@ -985,7 +985,7 @@ def _run_ducklake_maintenance(
 
     con = None
     try:
-        con = get_connection(source)
+        con = get_connection(source, read_only=True)
         try:
             con.execute("ROLLBACK")
         except Exception:

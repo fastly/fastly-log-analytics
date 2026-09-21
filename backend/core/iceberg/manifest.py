@@ -451,7 +451,7 @@ def ducklake_table_exists(source: dict, table_name: str = "logs") -> bool:
     from backend.core.duckdb import get_connection
     from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 
-    con = get_connection(source, skip_view_update=True)
+    con = get_connection(source, read_only=True, skip_view_update=True)
     try:
         if not _ducklake_attach(con, source, read_only=True):
             raise RuntimeError("failed to attach DuckLake catalog")
@@ -496,7 +496,7 @@ def get_table_info(source: dict, table=None, table_name: str = "logs") -> dict:
 
     con = None
     try:
-        con = get_connection(source, skip_view_update=True)
+        con = get_connection(source, read_only=True, skip_view_update=True)
         if not _ducklake_attach(con, source, read_only=True):
             raise RuntimeError("failed to attach DuckLake catalog")
 
@@ -574,7 +574,7 @@ def get_snapshot_calendar(source: dict, table=None, table_name: str = "logs") ->
 
     con = None
     try:
-        con = get_connection(source, skip_view_update=True)
+        con = get_connection(source, read_only=True, skip_view_update=True)
         if not _ducklake_attach(con, source, read_only=True):
             return {}
 

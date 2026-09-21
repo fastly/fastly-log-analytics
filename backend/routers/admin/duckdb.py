@@ -25,12 +25,14 @@ def trigger_duckdb_recycle_endpoint(
     threshold = _recycle._recycle_rss_threshold_bytes()
 
     if not force and threshold > 0 and rss_before is not None and rss_before < threshold:
+        mb_before = rss_before / (1024 * 1024)
+        mb_thresh = threshold / (1024 * 1024)
         return {
             "ok": True,
             "status": "skipped",
-            "reason": f"RSS {rss_before / 1e6:.0f}MB < threshold {threshold / 1e6:.0f}MB",
-            "rss_mb": round(rss_before / 1e6, 1),
-            "threshold_mb": round(threshold / 1e6, 1),
+            "reason": f"RSS {mb_before:.0f}MB < threshold {mb_thresh:.0f}MB",
+            "rss_mb": round(mb_before, 1),
+            "threshold_mb": round(mb_thresh, 1),
         }
 
     detail = _recycle.recycle_once(reason="manual_admin")
@@ -41,9 +43,9 @@ def trigger_duckdb_recycle_endpoint(
         "ok": True,
         "status": "recycled",
         "detail": detail,
-        "rss_before_mb": round(rss_before / 1e6, 1) if rss_before is not None else None,
-        "rss_after_mb": round(rss_after / 1e6, 1) if rss_after is not None else None,
-        "freed_mb": round(freed / 1e6, 1) if freed is not None else None,
+        "rss_before_mb": round(rss_before / (1024 * 1024), 1) if rss_before is not None else None,
+        "rss_after_mb": round(rss_after / (1024 * 1024), 1) if rss_after is not None else None,
+        "freed_mb": round(freed / (1024 * 1024), 1) if freed is not None else None,
     }
 
 
@@ -59,8 +61,8 @@ def get_duckdb_status_endpoint() -> dict[str, Any]:
     return {
         "ok": True,
         "memory": {
-            "current_rss_mb": round(rss / 1e6, 1) if rss is not None else None,
-            "recycle_threshold_mb": round(threshold / 1e6, 1) if threshold > 0 else None,
+            "current_rss_mb": round(rss / (1024 * 1024), 1) if rss is not None else None,
+            "recycle_threshold_mb": round(threshold / (1024 * 1024), 1) if threshold > 0 else None,
             "recycle_interval_min": interval_min,
         },
         "barrier": {

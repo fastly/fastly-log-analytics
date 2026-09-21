@@ -1258,7 +1258,7 @@ def _init_iceberg_table_locked(source: dict, create: bool = True, table_name: st
 
     con = get_connection(source, read_only=True)
     try:
-        if _ducklake_attach(con, source):
+        if _ducklake_attach(con, source, read_only=True):
             return True
         return None
     finally:

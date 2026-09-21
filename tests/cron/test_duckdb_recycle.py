@@ -46,7 +46,7 @@ def test_run_duckdb_recycle_rss_threshold_skip():
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
         patch("backend.core.duckdb_recycle.recycle_once") as mock_recycle,
     ):
-        result = run_duckdb_recycle()
+        result = run_duckdb_recycle.__wrapped__()
         assert "skipped" in result
         assert "100MB < threshold 500MB" in result
         mock_recycle.assert_not_called()
