@@ -250,7 +250,7 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 
 > **Gotcha (verify before trusting `cron_runs`/telemetry queries):** the DB-persisted `task` string for a job is not always the same token used in its APScheduler job id or this list. Confirmed aliases in `backend/cron/schedule.py`'s `_TASK_MAP`: `sync_metadata` → `metadata_sync`, `expire` → `expire_snapshots`, `alerts_evaluation` → `alerts`, `rollup_heal` → `rollup_hour_heal`, `rollup_compact` → `rollup_compact_daily`. Querying `cron_runs`/`recent_cron_failures` by the job-id token instead of the DB task string will silently return zero rows, not an error.
 
-- [ ] Cron 1: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md))
+- [x] Cron 1 documentation/design: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md)); implementation and runtime verification remain deferred.
 - [ ] Cron 2: `log_commit_{id}` — Parquet Buffer to DuckLake Catalog Commit ([docs/cron/jobs/commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md))
 - [ ] Cron 3: `local_compact_{id}` — Local Hourly & Daily/Weekly Tier Compaction ([docs/cron/jobs/local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md))
 - [ ] Cron 4: `partial_hour_merge_{id}` — Active Partial-Hour Ingest Merge ([docs/cron/jobs/partial-hour-merge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/partial-hour-merge.md))
@@ -275,7 +275,7 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [ ] Cron 23: `share_audit_purge` — Remote Share Audit Trail Retention Purge ([docs/cron/jobs/share-audit-purge.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/share-audit-purge.md))
 - [ ] Cron 24: `duckdb_recycle` — DuckDB Native Memory Pool Recycling & Heap Trim ([docs/cron/jobs/duckdb-recycle.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/duckdb-recycle.md))
 
-#### Current Work Item: Phase 2, Cron 1 — `log_discovery_{service_id}`
+#### Current Work Item: Phase 2, Cron 1 — `log_discovery_{service_id}` documentation/design complete; implementation and runtime verification are the next session
 
 The current session is in requirements clarification and documentation only; implementation
 and end-to-end verification are intentionally deferred to a new session. The agreed

@@ -1,7 +1,8 @@
 > [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `log_discovery_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
+> **Cron Specification Status: DESIGN COMPLETE; RUNTIME VERIFICATION PENDING**
+> The execution lifecycle, role/architecture behaviors, telemetry attribution, query audits,
+> quarantine contract, and testing checklist are complete. Implementation and live verification
+> remain deferred to the dedicated execution session.
 
 # Background Job Specification: `log_discovery_{service_id}`
 
@@ -127,3 +128,28 @@
 - [ ] 7. In High-Scale mode, verify rows transition properly in `ingest_ledger` (`discovered → claimed`).
 - [ ] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
   immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
+
+## 10. Marketplace Comparison & Design Decisions
+
+The design was compared with the failure-handling patterns documented by Amazon Data
+Firehose, Apache Kafka Connect, and Amazon S3:
+
+| Marketplace pattern | Reference behavior | Decision for `log_discovery` |
+|---|---|---|
+| Batch transformation with bounded retries | Firehose retries failed transformation invocations, then emits the unprocessed batch as explicit failure evidence instead of acknowledging it as successful. | Retry transient FOS/download failures with a bound; preserve explicit per-source and per-record failure outcomes after exhaustion. |
+| At-least-once delivery | Firehose documents at-least-once delivery and possible duplicates during retryable delivery timeouts. | Treat source processing as at-least-once, use the existing ingested-file/ledger deduplication, and never make deletion the success criterion by itself. |
+| Durable dead-letter/error records | Firehose writes failed records with raw data and error metadata to a processing-failed prefix. | Keep malformed lines and corrupt containers as local diagnostic evidence with source identity, offsets, bounded error text, and integrity hashes; quarantine is not a re-ingest queue. |
+| Offset/watermark ownership | Kafka Connect persists offsets and supports exactly-once source support only when the source and sink transaction model can guarantee it. | Keep discovery, conversion, acknowledgement, and commit state explicit; do not claim exactly-once semantics across FOS, local evidence, DuckLake, and deletion. |
+| Recovery from accidental deletion | S3 Versioning preserves prior object versions and delete markers when enabled. | Do not depend on bucket versioning being enabled; record deletion failures as unacknowledged sources and retry through the normal discovery/reconciliation path. |
+
+These comparisons reinforce the existing choices: bounded retries, explicit error states,
+durable failure evidence, idempotent deduplication, and conservative source acknowledgement.
+They also rule out silently treating quarantine-capture failure or source-delete failure as a
+successful ingest.
+
+References:
+
+- [Amazon Data Firehose transformation failure handling](https://docs.aws.amazon.com/firehose/latest/dev/data-transformation-failure-handling.html)
+- [Amazon Data Firehose delivery semantics](https://docs.aws.amazon.com/firehose/latest/dev/basic-deliver.html)
+- [Apache Kafka Connect configuration and exactly-once source support](https://kafka.apache.org/41/generated/connect_config.html)
+- [Amazon S3 Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
