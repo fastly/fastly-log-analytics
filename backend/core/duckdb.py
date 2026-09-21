@@ -870,17 +870,20 @@ _CORRUPTION_MARKERS = (
     "failure while replaying wal file",
     "unrecognized magic bytes",
     "checksum mismatch",
+    "failed to deserialize",
+    "serialization error",
+    "field id mismatch",
 )
 
 
 def _is_corruption_error(err: Exception) -> bool:
     """True if the exception text looks like on-disk corruption.
 
-    Conservative on purpose: only IOException-derived messages that name
-    file-level damage. User-query errors (BinderException, ParserException,
+    Conservative on purpose: only IOException or SerializationException messages
+    that name file-level damage. User-query errors (BinderException, ParserException,
     InvalidInputException) must NOT trigger file deletion.
     """
-    if not isinstance(err, duckdb.IOException):
+    if not isinstance(err, (duckdb.IOException, duckdb.SerializationException)):
         return False
     msg = str(err).lower()
     return any(marker in msg for marker in _CORRUPTION_MARKERS)
@@ -1051,13 +1054,14 @@ def get_connection(
         except Exception as e:
             err_str = str(e).lower()
 
-            # Handle WAL corruption by deleting the database and attempting stateless recovery.
-            # DuckDB internal errors during WAL replay are usually unrecoverable without
-            # deleting the WAL (and potentially the DB). Since this app is designed for
+            # Handle corruption by deleting the database and attempting stateless recovery.
+            # DuckDB internal errors during WAL replay, file deserialization, or checksum mismatches
+            # are usually unrecoverable without deleting the file. Since this app is designed for
             # stateless recovery (metadata/tracking is reconstructed from Iceberg/FOS),
             # deleting the local cache is safe.
-            if "failure while replaying wal file" in err_str and not read_only and not durable_serving:
-                logger.error(f"[duckdb] WAL corruption detected for {db_path}: {e}")
+            is_corrupt = any(marker in err_str for marker in _CORRUPTION_MARKERS)
+            if is_corrupt and not read_only and not durable_serving:
+                logger.error(f"[duckdb] Database corruption detected for {db_path}: {e}")
                 logger.info(f"[duckdb] Attempting stateless recovery by deleting corrupted database: {db_path}")
                 for f in [db_path, db_path + ".wal"]:
                     if os.path.exists(f):

@@ -236,7 +236,7 @@ def _run_rollup_hour_heal(service_id: str) -> None:
             coverage_ready = rollup_coverage_ready(service_id)
         else:
             coverage_ready = True
-        lookback_days = 1
+        lookback_days = 2
         max_missing_hours = 1 if durable_mode and not coverage_ready else None
         heal = backfill_missing_hour_bundles(
             service_id,
