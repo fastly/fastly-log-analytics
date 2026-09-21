@@ -89,7 +89,7 @@ Background jobs respect tenant isolation and dual-role permission models:
 
 ## 4. Complete Background Job Inventory & Specification Catalog
 
-Below is the master catalog of all 26 scheduled background tasks. Click the link in the **Specification File** column to view the complete operational contract, query audit rules, and testing checklist for each job:
+Below is the master catalog of all 24 active scheduled background tasks plus one retired entry. Standard and High-Scale RUM discovery are execution variants of the same logical `rum_discovery_{id}` job, so they appear in one row. Click the link in the **Specification File** column to view the complete operational contract, query audit rules, and testing checklist for each job:
 
 | Job Identifier | Default Cadence | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
 |---|---|---|---|---|---|
@@ -109,9 +109,8 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/sync-metadata.md) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-sweep.md) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
-| `rum_discovery_{id}` | Every 60 sec | APScheduler | Disabled | Admin | [rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md) |
+| `rum_discovery_{id}` | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md); [High-Scale mode](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md) |
 | `rum_commit_{id}` | Every 5 min | APScheduler | Disabled | Admin | [rum-commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-commit.md) |
-| `rum_discovery_{id}` | Every 60 sec | Disabled | RedBeat + Celery | Admin | [rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md) |
 | `ledger_rum_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-rum-sweep.md) |
 | `metric_snapshot` | Every 60 sec | APScheduler | Pod APScheduler | Global / Admin | [metric-snapshot.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/metric-snapshot.md) |
 | `rdns_enrichment` | Every 5 min | APScheduler | Pod APScheduler | Global / Admin | [rdns-enrichment.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rdns-enrichment.md) |
@@ -167,7 +166,7 @@ When verifying background jobs during automated test suites or dedicated AI test
 ### Verification Checklist:
 - [ ] **1. Scheduler Registration Audit:**
   - Inspect `scheduler.get_jobs()` or `redbeat_schedule_entries()`.
-  - Confirm all 26 jobs are registered according to their deployment mode, role, and activation gates (e.g. `alerts_evaluation` only registers when alerts exist).
+  - Confirm all 24 active jobs are registered according to their deployment mode, role, and activation gates (e.g. `alerts_evaluation` only registers when alerts exist); the retired ClickHouse backup entry must never register.
 - [ ] **2. Manual API Triggering:**
   - Execute manual POST triggers for each job and verify HTTP 200 response:
     - `/api/admin/sync/{service_id}` (`log_discovery`)
