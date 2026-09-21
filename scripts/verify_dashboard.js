@@ -53,26 +53,33 @@ function getUrlWithParam(url, key, value) {
     }
     console.log(`[Dashboard 24h] Verified: 24h data is active with ${totalMatch24h[1]} total rows.`);
 
-    // 1.2. Verify 5m Range strictly contains our recent edge load-test (at least 300 rows)
+    // 1.2. Verify 5m Range with ROBUST POLLING (At least 300 rows)
     const url5m = getUrlWithParam(baseUrl, "range", "5m");
-    console.log(`[Dashboard 5m] Checking ${url5m} ...`);
-    response = await page.goto(url5m, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[Dashboard 5m] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
-      await browser.close();
-      process.exit(1);
-    }
-    await page.waitForSelector('main', { timeout: 10000 });
-    await page.waitForTimeout(4000);
-
-    const bodyText5m = await page.evaluate(() => document.body.innerText);
-    const totalMatch5m = bodyText5m.match(/total:\s*([\d,]+)/i);
-    const count5m = totalMatch5m ? parseInt(totalMatch5m[1].replace(/,/g, ''), 10) : 0;
+    console.log(`[Dashboard 5m] Checking ${url5m} with active polling...`);
     
-    // We sent 500 total requests (70% standard = ~350). Assert at least 300 arrived.
+    let count5m = 0;
     const MIN_REQ_5M = 300;
+    let bodyText5m = "";
+    
+    for (let attempt = 1; attempt <= 12; attempt++) {
+      response = await page.goto(url5m, { timeout: 20000 });
+      if (response && response.ok()) {
+        await page.waitForSelector('main', { timeout: 10000 });
+        await page.waitForTimeout(4000);
+        bodyText5m = await page.evaluate(() => document.body.innerText);
+        const totalMatch5m = bodyText5m.match(/total:\s*([\d,]+)/i);
+        count5m = totalMatch5m ? parseInt(totalMatch5m[1].replace(/,/g, ''), 10) : 0;
+        
+        if (count5m >= MIN_REQ_5M) {
+          break;
+        }
+      }
+      console.log(`[Dashboard 5m] Attempt ${attempt}/12: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 5s for background ingestion...`);
+      await page.waitForTimeout(5000);
+    }
+
     if (count5m < MIN_REQ_5M) {
-      console.error(`[Dashboard 5m] Verification Failed: Recent 5m data count is only ${count5m} (expected at least ${MIN_REQ_5M} from our recent edge load-test!). Ingestion is lagging or failed.`);
+      console.error(`[Dashboard 5m] Verification Failed: Recent 5m data count is only ${count5m} (expected at least ${MIN_REQ_5M} from our recent edge load-test!). Ingestion did not complete.`);
       console.error(`Body text sample:\n${bodyText5m.slice(0, 1000)}`);
       await browser.close();
       process.exit(1);
@@ -107,65 +114,71 @@ function getUrlWithParam(url, key, value) {
     // ────────────────────────────────────────────────────────────────────────
     const rumBaseUrl = baseUrl.replace('/dashboard', '/rum');
     
-    // 2.1. Verify 24h Overall RUM Data is present
+    // 2.1. Verify 24h Overall RUM Data is present with active polling
     const rumUrl24h = getUrlWithParam(rumBaseUrl, "range", "24h");
-    console.log(`[RUM 24h] Checking ${rumUrl24h} ...`);
-    response = await page.goto(rumUrl24h, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[RUM 24h] Failed to load RUM page. Status: ${response ? response.status() : 'Unknown'}`);
-      await browser.close();
-      process.exit(1);
+    console.log(`[RUM 24h] Checking ${rumUrl24h} with active polling...`);
+    
+    let rumBodyText24h = "";
+    let hasVitalsTitle24h = false;
+    let hasVitalsRating24h = false;
+    
+    for (let attempt = 1; attempt <= 12; attempt++) {
+      response = await page.goto(rumUrl24h, { timeout: 20000 });
+      if (response && response.ok()) {
+        await page.waitForSelector('main', { timeout: 10000 });
+        await page.waitForTimeout(4000);
+        rumBodyText24h = await page.evaluate(() => document.body.innerText);
+        const rumFailedToLoad24h = rumBodyText24h.includes("Failed to load") && !rumBodyText24h.includes("Faro version");
+        
+        hasVitalsTitle24h = rumBodyText24h.includes("Largest Contentful Paint") || rumBodyText24h.includes("LCP");
+        hasVitalsRating24h = rumBodyText24h.includes("GOOD") || rumBodyText24h.includes("POOR") || rumBodyText24h.includes("NEEDS IMP.");
+        
+        if (!rumFailedToLoad24h && hasVitalsTitle24h && hasVitalsRating24h) {
+          break;
+        }
+      }
+      console.log(`[RUM 24h] Attempt ${attempt}/12: Web Vitals metrics not fully rendered yet. Waiting 5s for cron commit...`);
+      await page.waitForTimeout(5000);
     }
-    await page.waitForSelector('main', { timeout: 10000 });
-    await page.waitForTimeout(4000);
 
-    const rumBodyText24h = await page.evaluate(() => document.body.innerText);
-    const rumFailedToLoad24h = rumBodyText24h.includes("Failed to load") && !rumBodyText24h.includes("Faro version");
-    if (rumFailedToLoad24h || rumBodyText24h.includes("No data for this time period") || rumBodyText24h.includes("Waiting for real-time RUM") || rumBodyText24h.includes("Internal Server Error")) {
-      console.error(`[RUM 24h] Verification Failed: RUM page is displaying errors or empty RUM state!`);
-      await browser.close();
-      process.exit(1);
-    }
-
-    const hasVitalsTitle24h = rumBodyText24h.includes("Largest Contentful Paint") || rumBodyText24h.includes("LCP");
-    const hasVitalsRating24h = rumBodyText24h.includes("GOOD") || rumBodyText24h.includes("POOR") || rumBodyText24h.includes("NEEDS IMP.");
     if (!hasVitalsTitle24h || !hasVitalsRating24h) {
       console.error(`[RUM 24h] Verification Failed: Web Vitals metrics are missing or empty on the RUM page!`);
+      console.error(`Body text sample:\n${rumBodyText24h.slice(0, 1000)}`);
       await browser.close();
       process.exit(1);
     }
     console.log(`[RUM 24h] Verified: 24h RUM data is active and charts/ratings successfully populated.`);
 
-    // 2.2. Verify 5m RUM Range contains our recent beacons (at least 120 beacons)
+    // 2.2. Verify 5m RUM Range with active polling (At least 120 beacons)
     const rumUrl5m = getUrlWithParam(rumBaseUrl, "range", "5m");
-    console.log(`[RUM 5m] Checking ${rumUrl5m} ...`);
-    response = await page.goto(rumUrl5m, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[RUM 5m] Failed to load RUM page. Status: ${response ? response.status() : 'Unknown'}`);
-      await browser.close();
-      process.exit(1);
-    }
-    await page.waitForSelector('main', { timeout: 10000 });
-    await page.waitForTimeout(4000);
-
-    const rumBodyText5m = await page.evaluate(() => document.body.innerText);
+    console.log(`[RUM 5m] Checking ${rumUrl5m} with active polling...`);
     
-    // Assert metrics headers are visible
-    if (!rumBodyText5m.includes("TOTAL BEACONS") || !rumBodyText5m.includes("PAGEVIEWS")) {
-      console.error(`[RUM 5m] Verification Failed: RUM page headers (TOTAL BEACONS/PAGEVIEWS) not found.`);
-      await browser.close();
-      process.exit(1);
+    let beaconCount5m = 0;
+    const MIN_BEACONS_5M = 120;
+    let rumBodyText5m = "";
+    
+    for (let attempt = 1; attempt <= 12; attempt++) {
+      response = await page.goto(rumUrl5m, { timeout: 20000 });
+      if (response && response.ok()) {
+        await page.waitForSelector('main', { timeout: 10000 });
+        await page.waitForTimeout(4000);
+        rumBodyText5m = await page.evaluate(() => document.body.innerText);
+        
+        if (rumBodyText5m.includes("TOTAL BEACONS")) {
+          const beaconMatch = rumBodyText5m.match(/TOTAL BEACONS\s*([\d,]+)/i);
+          beaconCount5m = beaconMatch ? parseInt(beaconMatch[1].replace(/,/g, ''), 10) : 0;
+          
+          if (beaconCount5m >= MIN_BEACONS_5M) {
+            break;
+          }
+        }
+      }
+      console.log(`[RUM 5m] Attempt ${attempt}/12: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 5s for background ingestion...`);
+      await page.waitForTimeout(5000);
     }
 
-    // Extract beacon count from 5m range
-    // Pattern matches TOTAL BEACONS followed by whitespace/newlines and then the count digits
-    const beaconMatch = rumBodyText5m.match(/TOTAL BEACONS\s*([\d,]+)/i);
-    const beaconCount5m = beaconMatch ? parseInt(beaconMatch[1].replace(/,/g, ''), 10) : 0;
-
-    // We sent 500 total requests (30% RUM ratio = ~150). Assert at least 120 arrived.
-    const MIN_BEACONS_5M = 120;
     if (beaconCount5m < MIN_BEACONS_5M) {
-      console.error(`[RUM 5m] Verification Failed: Recent 5m RUM beacon count is only ${beaconCount5m} (expected at least ${MIN_BEACONS_5M} from our recent edge load-test!). Ingestion is lagging or failed.`);
+      console.error(`[RUM 5m] Verification Failed: Recent 5m RUM beacon count is only ${beaconCount5m} (expected at least ${MIN_BEACONS_5M} from our recent edge load-test!). Ingestion did not complete.`);
       console.error(`Body text sample:\n${rumBodyText5m.slice(0, 1000)}`);
       await browser.close();
       process.exit(1);

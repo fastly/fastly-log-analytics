@@ -42,11 +42,35 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
     if not sync_cfg.get("enabled", True) and not force:
         return
 
+    is_manual = kwargs.get("is_manual", False) or run_id is not None
+    if not is_manual and not force:
+        from backend.utils.active_requests import should_defer_cron
+
+        if should_defer_cron("rum_commit", service_id):
+            logger.info("⏸️ [rum_commit] %s: active queries running, deferring RUM commit tick", service_id)
+            return
+
     try:
         if run_id is None:
             run_id = start_cron_run(src, "rum_commit")
     except RuntimeError as e:
         logger.info("[rum_commit] %s: skipping — %s", service_id, str(e))
+        return
+
+    from backend.core.duckdb import _cache_dir as _commit_cache_dir
+    from backend.cron.scheduler import _check_disk_space
+
+    ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "rum_commit")
+    if not ok:
+        log_cron_run(
+            src,
+            "rum_commit",
+            0.0,
+            "error",
+            run_id=run_id,
+            error_message=disk_msg,
+            summary=f"RUM commit aborted: {disk_msg}",
+        )
         return
 
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
@@ -62,28 +86,41 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
         total_committed_vitals = 0
         total_committed_errors = 0
+        vitals_err = None
+        errors_err = None
+        vitals_res = {}
+        errors_res = {}
 
         # Commit client_vitals
-        vitals_res = db_iceberg.commit_buffer(src, table_name="client_vitals")
-        if vitals_res.get("files_committed", 0) > 0:
-            total_committed_vitals = vitals_res.get("rows_committed", 0)
-            # Sync client_vitals view/metadata
-            db_iceberg.sync_data(src, table_name="client_vitals")
+        try:
+            vitals_res = db_iceberg.commit_buffer(src, table_name="client_vitals")
+            if vitals_res.get("files_committed", 0) > 0:
+                total_committed_vitals = vitals_res.get("rows_committed", 0)
+                # Sync client_vitals view/metadata
+                db_iceberg.sync_data(src, table_name="client_vitals")
+        except Exception as e:
+            vitals_err = str(e)
+            logger.warning("[rum_commit] %s: client_vitals commit failed: %s", service_id, e)
 
         # Commit client_errors
-        errors_res = db_iceberg.commit_buffer(src, table_name="client_errors")
-        if errors_res.get("files_committed", 0) > 0:
-            total_committed_errors = errors_res.get("rows_committed", 0)
-            # Sync client_errors view/metadata
-            db_iceberg.sync_data(src, table_name="client_errors")
+        try:
+            errors_res = db_iceberg.commit_buffer(src, table_name="client_errors")
+            if errors_res.get("files_committed", 0) > 0:
+                total_committed_errors = errors_res.get("rows_committed", 0)
+                # Sync client_errors view/metadata
+                db_iceberg.sync_data(src, table_name="client_errors")
+        except Exception as e:
+            errors_err = str(e)
+            logger.warning("[rum_commit] %s: client_errors commit failed: %s", service_id, e)
 
         # Raw RUM objects may only be deleted after both DuckLake commit paths
         # have completed successfully and their publication is durable.
-        from backend.core.ingest import _mark_ledger_published
+        if vitals_err is None and errors_err is None:
+            from backend.core.ingest import _mark_ledger_published
 
-        _mark_ledger_published(service_id, rum=True)
+            _mark_ledger_published(service_id, rum=True)
 
-        # Also launch local compaction for BOTH tables
+        # Also launch local compaction for BOTH tables with error logging
         try:
             import threading as _t
 
@@ -100,23 +137,45 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 daemon=True,
             ).start()
         except Exception as lc_err:
-            logger.warning("[rum_commit] %s: post-sync local compaction failed to launch: %s", service_id, lc_err)
+            logger.warning("[rum_commit] %s: post-commit local compaction failed to launch: %s", service_id, lc_err)
 
         duration = time.time() - start_time
-        summary = (
-            f"Committed {vitals_res.get('files_committed', 0)} vitals files ({total_committed_vitals} rows) "
-            f"and {errors_res.get('files_committed', 0)} errors files ({total_committed_errors} rows)"
-        )
+        v_files = vitals_res.get("files_committed", 0)
+        e_files = errors_res.get("files_committed", 0)
+        total_rows = total_committed_vitals + total_committed_errors
+
+        if vitals_err and errors_err:
+            status = "error"
+            summary = f"RUM commit failed for both tables: vitals ({vitals_err}), errors ({errors_err})"
+            error_message = summary
+        elif vitals_err or errors_err:
+            status = "warning"
+            failed_tab = "vitals" if vitals_err else "errors"
+            err_details = vitals_err or errors_err
+            summary = (
+                f"Partial RUM commit: {v_files} vitals ({total_committed_vitals} rows) "
+                f"and {e_files} errors ({total_committed_errors} rows); {failed_tab} failed: {err_details}"
+            )
+            error_message = err_details
+        else:
+            status = "success"
+            summary = (
+                f"Committed {v_files} vitals files ({total_committed_vitals} rows) "
+                f"and {e_files} errors files ({total_committed_errors} rows)"
+            )
+            error_message = None
+
         log_cron_run(
             src,
             "rum_commit",
             duration,
-            "success",
+            status,
             run_id=run_id,
-            rows_ingested=total_committed_vitals + total_committed_errors,
+            rows_ingested=total_rows,
             summary=summary,
+            error_message=error_message,
         )
-        logger.info("RUM commit complete")
+        logger.info("RUM commit complete: %s", summary)
 
     except Exception as e:
         logger.error(f"RUM commit failed: {e}", exc_info=True)

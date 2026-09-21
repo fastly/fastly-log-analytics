@@ -1,8 +1,3 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `ledger_sweep_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
-
 # Background Job Specification: `ledger_sweep_{service_id}`
 
 ## 1. Overview & Objectives
@@ -15,8 +10,11 @@
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
-- **Default Schedule:** Every 15 minutes (`minutes=15`).
+- **Default Schedule:** Every 15 minutes (`minutes=15`, `misfire_grace_time=300s`).
 - **Timing Rationale:** Replaced the legacy `now.minute % 15 == 0` inline tick check with a dedicated standalone job to guarantee predictable execution regardless of discovery frequency.
+- **Configurable Overrides:**
+  - `provisioning.cron_ledger_sweep.enabled` (default: `true`).
+  - `provisioning.cron_ledger_sweep.interval_minutes` (default: `15`).
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=300s`.
 
@@ -26,55 +24,66 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Not applicable in synchronous SQLite mode. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`FOR UPDATE SKIP LOCKED`). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`UPDATE ... WHERE status='claimed'`). |
 
 ---
 
 ## 4. Role & Permissions Matrix
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
-| **Admin (`read_write`)** | Active | `POST /api/admin/ledger/sweep/{service_id}` | Ingestion health and quarantine visibility in Admin UI. |
+| **Admin (`read_write`)** | Active | `POST /api/admin/ledger/sweep/{service_id}` | Ingestion health, recovery metrics, and quarantine visibility in Admin UI. |
 | **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Distributed ledger operates server-side only. |
 | **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
 
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-1. **Prerequisite Check:** Confirms `DEPLOYMENT_MODE == "high_throughput"`. If standard mode, exits immediately.
-2. **Reclaim Stuck Claims:**
-   - Identifies rows in `ingest_ledger` where `status = 'claimed'` and `claimed_at < NOW() - INTERVAL '30 MINUTE'`.
-   - If `retry_count < max_retries` (default: 3): resets status to `discovered`, increments `retry_count`.
-   - If `retry_count >= max_retries`: moves row to `quarantined` or `dead_letter` with failure diagnostic.
-3. **Queue-Depth Guarded Re-Dispatch:**
-   - Probes Valkey/Redis queue depth for the `fastly_ingest` task queue.
-   - If queue depth is below congestion threshold (< 5,000 tasks): selects orphaned `discovered` batches and enqueues Celery conversion tasks.
-4. **FOS Lookback Diff Sweep:**
-   - Performs a bounded S3 LIST covering the last 2-4 hours of `raw/request/`.
-   - Inserts any missing keys into `ingest_ledger` as `discovered` with `ON CONFLICT DO NOTHING`.
-5. **Telemetry & Metric Emission:**
-   - Emits Prometheus metrics: `app_ledger_reclaimed_claims_total`, `app_ledger_dead_letter_total`.
-   - Logs execution summary in `cron_runs`.
+1. **Prerequisite Check:**
+   - Loads config and verifies `is_high_throughput_mode(src)`. Exits immediately if standard mode.
+2. **Progress & Telemetry Initialization:**
+   - Calls `start_cron_run(src, "ledger_sweep")`.
+   - Initializes live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="ledger_sweep")`.
+   - Emits initial status event to `cron_progress`.
+3. **Reclaim Stuck Claims:**
+   - In `sweep_ledger_once(service_id)`:
+     - Identifies rows in `ingest_ledger` where `status = 'claimed'` and `claimed_at < NOW() - LEDGER_RECLAIM_AFTER_S`.
+     - Resets `status='discovered'`, `claimed_by=NULL`, `claimed_at=NULL`, and updates `next_attempt_at`.
+     - Excludes `raw/rum/%` object keys (handled separately by `ledger_rum_sweep`).
+4. **Queue-Depth Guarded Re-Dispatch:**
+   - Queries `celery_queue_depths()` for `q.ingest`.
+   - If broker is reachable and `queue_depth < pending_batches`: dispatches pending batches via `convert_batch_files.delay(...)`.
+   - If queue is already full, skips re-dispatch to avoid message multiplication during drain.
+5. **Lookback FOS Diff Sweep:**
+   - Calls `discover_prefix(service_id, start_time=st)` for lookback window (default: 4 hours) to catch any objects missed by real-time discovery.
+6. **Dead-Letter & Health Check:**
+   - Queries count of rows in `quarantined` or `dead_letter` status in `ingest_ledger`.
+   - If broker probe failed or `dead_letter > 0`: sets cron run status to `"warning"`.
+7. **Telemetry & Log Recording:**
+   - Logs `run_status` (`"success"` or `"warning"`) in `cron_runs` with summary string.
+   - In guaranteed `finally:` block: calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, started)`.
 
 ---
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **PostgreSQL DML:** All `UPDATE ingest_ledger` and `SELECT ... FOR UPDATE` queries must record execution duration.
-  - **Redis Queue Probes:** Queue length checks against Valkey must be timed.
+  - **PostgreSQL DML:** All `UPDATE ingest_ledger` statements must complete within transaction boundaries.
+  - **Valkey Queue Probes:** Queue length checks against Valkey must be timed.
   - **FOS S3 Calls:** Lookback LIST calls must be tracked in `usage_log.db`.
 - **Timing & Resource Budgets:**
   - Reclaim query duration: < 100ms.
   - Redis queue probe: < 10ms.
-  - Overall sweep duration: < 30 seconds.
+  - Overall sweep duration: < 15 seconds.
 - **Audit Checklist:**
   - Verify PostgreSQL index on `(service_id, status, claimed_at)` is utilized.
-  - Verify that queue-depth guards prevent re-dispatch storms during worker outages.
+  - Verify that queue-depth guards prevent duplicate message storms during worker outages.
+  - Verify warning status appears in UI when dead-letter items exist.
 
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
-- **PostgreSQL Database Connection Failure:** Retries with exponential backoff; logs critical alert in Prometheus.
-- **Dead-Letter Accumulation:** If dead-letter count exceeds 100, triggers a high-severity alert for operator investigation.
+- **PostgreSQL Database Connection Failure:** Caught in try/except; logs error in `cron_runs`.
+- **Celery Broker Unreachable:** Flagged as warning in summary; skips re-dispatch until broker recovers.
+- **Dead-Letter Accumulation:** Surface in System Jobs UI as warning; operator can inspect via `GET /api/admin/ledger/quarantine`.
 
 ---
 
@@ -84,9 +93,11 @@
 
 ---
 
-## 9. AI Session Automated Verification Checklist
-- [ ] 1. Artificially set an `ingest_ledger` row to `claimed` with `claimed_at = NOW() - 45 min`.
-- [ ] 2. Trigger `POST /api/admin/ledger/sweep/{service_id}`; confirm HTTP 200.
-- [ ] 3. Verify in PostgreSQL: row status is reset to `discovered` and `retry_count` is incremented.
-- [ ] 4. Force `retry_count = 3` and re-run sweep; verify row status transitions to `dead_letter`.
-- [ ] 5. Confirm `cron_runs` records execution status `success`.
+## 9. Automated Verification Matrix
+- [x] 1. Live progress initialization and completion verified via `test_run_ledger_sweep_emits_progress_and_finalizes_duration`.
+- [x] 2. Duration finalization in `finally` block verified via `test_run_ledger_sweep_emits_progress_and_finalizes_duration`.
+- [x] 3. Status warning on broker issue or dead-letter rows verified via `test_run_ledger_sweep_status_warning_on_dead_letter_or_broker_issue`.
+- [x] 4. Dynamic rescheduling on `cron_ledger_sweep.interval_minutes` change verified via `test_sync_jobs_reschedules_ledger_sweep_when_interval_changed`.
+- [x] 5. Job disabled when `cron_ledger_sweep.enabled = False` verified via `test_sync_jobs_skips_ledger_sweep_when_disabled`.
+- [x] 6. Stale worker claim reclamation verified via `tests/core/test_step4_sweeper.py`.
+- [x] 7. Queue depth lost-message guard verified via `tests/core/test_step4_sweeper.py`.

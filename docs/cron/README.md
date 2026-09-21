@@ -82,7 +82,7 @@ Background jobs respect tenant isolation and dual-role permission models:
 | Role | Permitted Jobs | Prohibited Jobs | Architectural Rationale |
 |---|---|---|---|
 | **Admin (`read_write`)** | **All 26 Jobs:** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, backups, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
-| **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_sync_{id}`, `rum_commit_{id}`, `clickhouse_backup_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
+| **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_sync_{id}`, `rum_commit_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
 | **Analyst Path B (Remote Live Share)** | **Zero Cron Execution:** Read-only analyst sessions connect over HTTPS to the admin's running process. | All cron execution APIs blocked with HTTP 403. | Analysts share the running host server; all background maintenance is handled by the host admin process. |
 
 ---
@@ -108,7 +108,7 @@ Below is the master catalog of all 26 scheduled background tasks. Click the link
 | `insights_prewarmer_{id}` | Every 240 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/insights-prewarmer.md) |
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/sync-metadata.md) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/ledger-sweep.md) |
-| `clickhouse_backup_{id}` | Daily 01:00 UTC | Disabled | Celery / Pod | Admin | [clickhouse-backup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/clickhouse-backup.md) |
+| `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
 | `rum_sync_{id}` | Every 60 sec | APScheduler | Disabled | Admin | [rum-sync.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-sync.md) |
 | `rum_commit_{id}` | Every 5 min | APScheduler | Disabled | Admin | [rum-commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-commit.md) |
 | `rum_discovery_{id}` | Every 60 sec | Disabled | RedBeat + Celery | Admin | [rum-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/rum-discovery.md) |

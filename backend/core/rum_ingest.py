@@ -379,6 +379,7 @@ def ingest_rum_logs(
 
         total_vitals_rows = 0
         total_errors_rows = 0
+        error_count = 0
 
         # Download and process in parallel chunks to unify request and RUM ingestion logic
         CHUNK_SIZE = 50
@@ -396,6 +397,7 @@ def ingest_rum_logs(
 
                 for s3_path in chunk:
                     if s3_path not in s3_to_local:
+                        error_count += 1
                         logger.error(f"RUM sync: Failed to download {s3_path}")
                         yield ("error", s3_path, "Download failed")
                         continue
@@ -633,6 +635,7 @@ def ingest_rum_logs(
                         errors_batch_records.append((s3_path, errors_count_for_file, size))
                         yield ("file_done", s3_path.split("/")[-1], vitals_count_for_file + errors_count_for_file)
                     except Exception as e:
+                        error_count += 1
                         logger.error(f"RUM sync: Failed to ingest RUM log file {s3_path}: {e}")
                         yield ("error", s3_path, str(e))
                         continue
@@ -686,14 +689,22 @@ def ingest_rum_logs(
 
         yield ("done", total_vitals_rows + total_errors_rows)
         duration_s = time.time() - start_time
+        had_errors = error_count > 0
+        run_status = "warning" if had_errors else "success"
+        summary_msg = (
+            f"Ingested {total_vitals_rows + total_errors_rows} RUM rows ({error_count} file error(s))"
+            if had_errors
+            else f"Ingested {total_vitals_rows + total_errors_rows} RUM rows"
+        )
         log_cron_run(
             service_id,
             "rum_sync",
             duration_s,
-            "success",
+            run_status,
             files_downloaded=len(new_files_s3),
             rows_ingested=total_vitals_rows + total_errors_rows,
             run_id=run_id,
+            summary=summary_msg,
         )
     except Exception as e:
         logger.error(f"RUM ingest failed: {e}", exc_info=True)

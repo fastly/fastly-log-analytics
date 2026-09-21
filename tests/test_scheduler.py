@@ -3052,6 +3052,143 @@ def test_sync_jobs_skips_metadata_sync_when_disabled():
     assert "sync_metadata_svc-meta-disabled" not in s._job_ids
 
 
+def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
+    """Ledger sweep initializes progress tracking, logs execution, and finalizes duration."""
+    from backend.cron.jobs.sync import _run_ledger_sweep
+
+    fake_cfg = {"service_id": "svc-sweep-1"}
+    fake_src = {"name": "svc-sweep-1", "service_id": "svc-sweep-1"}
+
+    prog_started = []
+    prog_ended = []
+    finalized = []
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.core.duckdb.start_cron_run", return_value=55),
+        patch("backend.cron_progress.start_progress", side_effect=lambda rid, **kw: prog_started.append((rid, kw))),
+        patch("backend.cron_progress.end_progress", side_effect=lambda rid: prog_ended.append(rid)),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress"),
+        patch("backend.cron.jobs._common.finalize_cron_duration", side_effect=lambda s, rid, started: finalized.append((s, rid))),
+        patch(
+            "backend.core.ingest.sweep_ledger_once",
+            return_value={"reclaimed": 5, "redispatched": 5, "discovered": 10, "broker_ok": True, "dead_letter": 0},
+        ),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *args, **kw: log_calls.append((args, kw))),
+    ):
+        _run_ledger_sweep.__wrapped__("svc-sweep-1")
+
+    assert prog_started == [(55, {"service_id": "svc-sweep-1", "task": "ledger_sweep"})]
+    assert prog_ended == [55]
+    assert finalized == [(fake_src, 55)]
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "success"
+    assert "reclaimed=5 redispatched=5 discovered=10" in kwargs.get("summary", "")
+
+
+def test_run_ledger_sweep_status_warning_on_dead_letter_or_broker_issue():
+    """When dead-letter rows exist or broker probe fails, ledger sweep records warning status."""
+    from backend.cron.jobs.sync import _run_ledger_sweep
+
+    fake_cfg = {"service_id": "svc-sweep-warn"}
+    fake_src = {"name": "svc-sweep-warn", "service_id": "svc-sweep-warn"}
+    log_calls = []
+
+    with (
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.core.duckdb.start_cron_run", return_value=56),
+        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.jobs.metadata._log_and_add_progress"),
+        patch("backend.cron.jobs._common.finalize_cron_duration"),
+        patch(
+            "backend.core.ingest.sweep_ledger_once",
+            return_value={"reclaimed": 0, "redispatched": 0, "discovered": 0, "broker_ok": False, "dead_letter": 3},
+        ),
+        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *args, **kw: log_calls.append((args, kw))),
+    ):
+        _run_ledger_sweep.__wrapped__("svc-sweep-warn")
+
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    summary = kwargs.get("summary", "")
+    assert "Celery broker/queue depth probe failed" in summary
+    assert "3 dead-letter/quarantined row(s)" in summary
+
+
+def test_sync_jobs_reschedules_ledger_sweep_when_interval_changed():
+    """When cron_ledger_sweep.interval_minutes changes, existing job is rescheduled."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-sweep-resched",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_ledger_sweep": {"interval_minutes": 30},
+        },
+    }
+
+    s = Scheduler()
+    mock_job = MagicMock()
+    s._sched = MagicMock()
+    s._sched.get_job = MagicMock(return_value=mock_job)
+    s._job_ids["ledger_sweep_svc-sweep-resched"] = "ledger_sweep_svc-sweep-resched"
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-resched")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    mock_job.reschedule.assert_called_once_with("interval", minutes=30)
+
+
+def test_sync_jobs_skips_ledger_sweep_when_disabled():
+    """When cron_ledger_sweep.enabled is False, ledger_sweep job is not registered."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-sweep-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+            "cron_ledger_sweep": {"enabled": False},
+        },
+    }
+
+    s = Scheduler()
+    s._sched = MagicMock()
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "ledger_sweep_svc-sweep-disabled" not in s._job_ids
+
+
+
 
 
 
