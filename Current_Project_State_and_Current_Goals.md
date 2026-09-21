@@ -96,7 +96,7 @@ To repeat, all functionality, pages, and interactions need to be tested for both
 
 ## What you are allowed to do
 
-You have full control over the v3.0.0-beta1 branch as well as the GCE machine, my local laptop and Elevation dev-usc1 cluster for compiling and testing everything. You are free to build and deploy to those systems as needed, and if you need image tags from me for Elevation deploys please ask.
+You have full control over the `release/v3.0.0-beta2` branch (current active branch — supersedes the earlier `v3.0.0-beta1` this doc originally referenced) as well as the GCE machine, my local laptop and Elevation dev-usc1 cluster for compiling and testing everything. You are free to build and deploy to those systems as needed, and if you need image tags from me for Elevation deploys please ask.
 
 You are welcome to upload to each service's raw log bucket as many logs as you want or send real synthetic traffic and also delete log data at will if needed. You are also authorized to deploy VCL updates during testing to either service or its ancillary services using the tokens from the existing services or better yet using the mechanisms already built into the code and UI.
 
@@ -157,7 +157,7 @@ The project currently maintains 4 isolated deployments for testing, each fronted
 
 ## Missing Architecture Gaps & Auto-Discovery
 
-As we work through the finalization of "high-scale" (v3.0.0-beta1), our approach is to tackle issues one at a time, auto-discovering edge cases and bugs during testing, and continuously updating this document.
+As we work through the finalization of "high-scale" (`release/v3.0.0-beta2`), our approach is to tackle issues one at a time, auto-discovering edge cases and bugs during testing, and continuously updating this document.
 
 A few immediate architecture decisions/gaps to address:
 - [x] **Disable Analyst Path A (Standalone Mode) for High-Scale**: Since the DuckLake cutover means the catalog is no longer FOS-resident, Analyst Path A (where analysts use FOS credentials to download files locally/standalone) is incompatible with high-scale. We will disable this flow entirely for high-scale services rather than building a workaround.
@@ -195,6 +195,7 @@ To properly validate both "standard" and "high-scale" architectures, we follow a
     - Automatically heals, tests, and locks SSH tunnels (ports 3001/8001) and Kubernetes port-forwards (ports 3002/8002).
     - Executes headless Playwright commit-hash verification (`scripts/verify_dashboard.js`) asserting that every environment's footer and architecture badge match the deployed commit.
     - Seamlessly transitions into a 5-minute real-time audit stability watch (`--watch --duration 5 --interval 10`) post-deployment to ensure no scheduler lag, memory leaks, or cron failures occur after rollout.
+    - **Harness hardening (2026-09-21)**: the Jenkins registry poll was serializing in front of ALL four deploys even though only Elevation reads that registry (GCE/local build from source); it now runs inside the Elevation subshell so it overlaps with the other three. `kubectl rollout status` calls now carry `--timeout=300s` so a bad image can't hang the script forever. `scale_harness.py` invocations now pass `--backend` explicitly — without it every checkpoint probe (freshness lag, OTel p95s) silently hit a nonexistent default port. `audit_environments.py`'s dashboard probe was sending a dead `range=24h` query param instead of the real `range_token` body field, so with no time bounds set it ran an unbounded full-table scan (no partition pruning) on every audit tick — fixed to bound it to 24h, and its 4-5 per-target HTTP probes are now fired concurrently instead of sequentially.
 
 4.  **Multi-Environment Health, Tenancy & RBAC Verification (`scripts/check_environment_health.py`)**:
     - Validates connectivity, strict tenancy isolation (confirming each environment serves only its authorized Fastly service ID), and role-based access control (Admin direct vs Analyst remote share).
@@ -246,6 +247,9 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [x] Document deployment architectures and throughput sizing guidelines (Standard vs. High-Scale) in `README.md`.
 
 ### Phase 2: Background Tasks & Cron Jobs Audit (One Single Session per Cron)
+
+> **Gotcha (verify before trusting `cron_runs`/telemetry queries):** the DB-persisted `task` string for a job is not always the same token used in its APScheduler job id or this list. Confirmed aliases in `backend/cron/schedule.py`'s `_TASK_MAP`: `sync_metadata` → `metadata_sync`, `expire` → `expire_snapshots`, `alerts_evaluation` → `alerts`, `rollup_heal` → `rollup_hour_heal`, `rollup_compact` → `rollup_compact_daily`. Querying `cron_runs`/`recent_cron_failures` by the job-id token instead of the DB task string will silently return zero rows, not an error.
+
 - [ ] Cron 1: `log_discovery_{id}` — Log Discovery, Download & Conversion ([docs/cron/jobs/log-discovery.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/log-discovery.md))
 - [ ] Cron 2: `commit_{id}` — Parquet Buffer to DuckLake Catalog Commit ([docs/cron/jobs/commit.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/commit.md))
 - [ ] Cron 3: `local_compact_{id}` — Local Hourly & Daily/Weekly Tier Compaction ([docs/cron/jobs/local-compact.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md))
@@ -300,7 +304,7 @@ We will tackle these one at a time, strictly dedicating **only ONE cron job or O
 - [ ] Page 25: Live Share Management (`/admin/share`) ([docs/pages/admin/share.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/share.md))
 - [ ] Page 26: System Metric Trends (`/admin/trends`) ([docs/pages/admin/trends.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/trends.md))
 - [ ] Page 27: FOS Usage Ledger (`/admin/usage-log`) ([docs/pages/admin/usage-log.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/usage-log.md))
-- [ ] Page 28: ClickHouse Cluster Admin (`/admin/clickhouse`) ([docs/pages/admin/clickhouse.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/clickhouse.md))
+- [ ] Page 28: ClickHouse Cluster Admin (`/admin/clickhouse`) ([docs/pages/admin/clickhouse.md](file:///Users/drew.michael/Projects/fastly-log-analytics/docs/pages/admin/clickhouse.md)) — **BUILD, not just verify**: confirmed the backend API exists (`backend/routers/admin/clickhouse.py`, `/api/admin/clickhouse/status` + `/replay`) but there is no `frontend/app/admin/clickhouse` route yet. This session needs to build the page per the spec before it can run the verification checklist.
 
 ### Phase 4: Full System Load & Stress Testing
 - [ ] Execute baseline performance tests on "standard" architecture (GCE) under target load.
