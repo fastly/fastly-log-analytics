@@ -59,7 +59,9 @@ def test_rum_commit_success(monkeypatch):
 
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit_buffer)
     monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
-    monkeypatch.setattr("backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum)))
+    monkeypatch.setattr(
+        "backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum))
+    )
 
     start_progress = MagicMock()
     end_progress = MagicMock()
@@ -110,7 +112,9 @@ def test_rum_commit_partial_failure_warning(monkeypatch):
 
     monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit_buffer)
     monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
-    monkeypatch.setattr("backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum)))
+    monkeypatch.setattr(
+        "backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum))
+    )
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
@@ -167,7 +171,9 @@ def test_rum_commit_aborts_on_low_disk(monkeypatch):
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1003)
-    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (False, "Disk free space is below 500MB"))
+    monkeypatch.setattr(
+        "backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (False, "Disk free space is below 500MB")
+    )
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",

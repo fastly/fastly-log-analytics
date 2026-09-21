@@ -180,7 +180,11 @@ function SyncStatusBadgeInner() {
   // Derive real-time values for REQUEST using the live-updated sync status query
   const rumTotal = rumMetrics?.total_rows ?? 0
   const liveLocalRows = snapshot?.local_rows ?? null
-  const requestTotal = liveLocalRows !== null ? Math.max(0, liveLocalRows - rumTotal) : (requestMetrics?.total_rows ?? null)
+  const requestTotal =
+    requestMetrics?.total_rows ??
+    (liveLocalRows !== null
+      ? (liveLocalRows > rumTotal && rumTotal > 0 ? liveLocalRows - rumTotal : liveLocalRows)
+      : null)
 
   const requestLatestLogAt = snapshot?.request !== undefined
     ? requestMetrics?.latest_log_at ?? null

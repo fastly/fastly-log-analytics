@@ -76,6 +76,31 @@ def celery_queue_depths() -> tuple[dict[str, int], bool]:
         return {}, False
 
 
+_REDBEAT_STATIC_PREFIX = "redbeat::"  # schedule zset + lock, not entries
+_REDBEAT_ENTRY_PREFIX = "redbeat:"
+
+
+def redbeat_schedule_entries() -> list[dict[str, str]]:
+    """List RedBeat schedule entries as {name, task} dicts."""
+    entries: list[dict[str, str]] = []
+    try:
+        r = _get_redis()
+        for key in r.scan_iter(match=f"{_REDBEAT_ENTRY_PREFIX}*", count=500):
+            if key.startswith(_REDBEAT_STATIC_PREFIX):
+                continue
+            try:
+                definition = r.hget(key, "definition")
+                task = ""
+                if definition:
+                    task = json.loads(definition).get("task", "")
+                entries.append({"name": key[len(_REDBEAT_ENTRY_PREFIX) :], "task": task})
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("[celery_status] broker unreachable for redbeat entries: %s", e)
+    return entries
+
+
 def ingest_ledger_summary() -> dict[str, int]:
     """Aggregate ingest_ledger status counts across all configured services."""
     ledger: dict[str, int] = {}
@@ -119,7 +144,7 @@ def get_celery_status(timeout: float = 1.0) -> dict[str, Any]:
         scheduled = {}
 
     queues, broker_reachable = celery_queue_depths()
-    schedules = []
+    schedules: list[dict[str, Any]] = redbeat_schedule_entries() if broker_reachable else []
     ledger = ingest_ledger_summary()
 
     return {

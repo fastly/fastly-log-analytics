@@ -128,4 +128,18 @@ describe('request header timestamp', () => {
     await waitFor(() => expect(screen.getByText(requestTimestamp)).toBeInTheDocument())
     expect(screen.getByText(rumTimestamp)).toBeInTheDocument()
   })
+
+  it('renders request total rows when rumTotal exceeds local_rows', async () => {
+    mocks.bootstrap.mockReturnValue({ data: { services: [{ service_id: 'test-service', rum_enabled: true }] } })
+    mocks.status.mockReturnValue({
+      data: {
+        local_rows: 2700,
+        request: { latest_log_at: requestTimestamp, total_rows: 2700 },
+        rum: { latest_log_at: '2026-09-08T17:00:00Z', total_rows: 4430 },
+      },
+    })
+    mountBadge()
+    await waitFor(() => expect(screen.getByText('total: 2,700')).toBeInTheDocument())
+    expect(screen.getByText('total: 4,430')).toBeInTheDocument()
+  })
 })

@@ -170,4 +170,3 @@ def purge_all_share_records(
         "audit_retention_days": audit_retention_days,
         "max_idle_session_days": max_idle_session_days,
     }
-

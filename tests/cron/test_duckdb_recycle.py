@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from backend.core import duckdb as _db
@@ -42,9 +41,9 @@ def test_run_duckdb_recycle_rss_threshold_skip():
     """Recycle is skipped when RSS is below the configured threshold."""
     with (
         patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
-        patch("backend.core.duckdb_recycle.recycle_once") as mock_recycle,
+        patch("backend.cron.jobs.duckdb_recycle.recycle_once") as mock_recycle,
     ):
         result = run_duckdb_recycle.__wrapped__()
         assert "skipped" in result
@@ -67,7 +66,9 @@ def test_run_duckdb_recycle_adaptive_expedite():
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[850 * 1024 * 1024, 400 * 1024 * 1024]),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
-        patch("backend.core.duckdb_recycle.recycle_once", return_value="interval: recycled 1/1 instance(s), freed ~450MB") as mock_recycle,
+        patch(
+            "backend.core.duckdb_recycle.recycle_once", return_value="interval: recycled 1/1 instance(s), freed ~450MB"
+        ) as mock_recycle,
     ):
         # 850MB is >= 800MB (80% of threshold), should adapt schedule
         _maybe_adjust_recycle_schedule(expedite=True)
@@ -93,7 +94,10 @@ def test_admin_duckdb_recycle_endpoint():
     with (
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[300 * 1024 * 1024, 200 * 1024 * 1024]),
         patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
-        patch("backend.core.duckdb_recycle.recycle_once", return_value="manual_admin: recycled 1/1 instance(s), freed ~100MB"),
+        patch(
+            "backend.core.duckdb_recycle.recycle_once",
+            return_value="manual_admin: recycled 1/1 instance(s), freed ~100MB",
+        ),
     ):
         resp = client.post("/api/admin/duckdb/recycle?force=true")
         assert resp.status_code == 200

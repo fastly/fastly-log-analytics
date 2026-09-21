@@ -34,7 +34,7 @@ import threading
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from backend.utils.date_utils import iso_z, iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now, parse_relative_time_window
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ def record_snapshot(
 def get_history(
     metric: str,
     *,
-    since: datetime,
+    since: datetime | str,
     service_id: str | None = None,
     task: str | None = None,
 ) -> list[dict]:
@@ -196,6 +196,8 @@ def get_history(
     Each row: ``{"ts": "...", "value": 12.3}``. Service / task are baked
     into the query when provided so the caller doesn't have to filter.
     """
+    if isinstance(since, str):
+        since = parse_relative_time_window(since)
     if _use_postgres():
         try:
             with closing(_pg_connection()) as con:
@@ -228,7 +230,7 @@ def get_history(
         con.close()
 
 
-def get_batch(*, since: datetime) -> dict:
+def get_batch(*, since: datetime | str) -> dict:
     """Return every series newer than ``since``, grouped by series key.
 
     Series key shape: ``"{metric}"`` for global, ``"{metric}|{service_id}"``
@@ -236,6 +238,8 @@ def get_batch(*, since: datetime) -> dict:
     admin Trends page does one round-trip; the frontend partitions
     by metric prefix.
     """
+    if isinstance(since, str):
+        since = parse_relative_time_window(since)
     if _use_postgres():
         try:
             with closing(_pg_connection()) as con:

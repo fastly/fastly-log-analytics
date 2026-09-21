@@ -144,6 +144,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         e_files = errors_res.get("files_committed", 0)
         total_rows = total_committed_vitals + total_committed_errors
 
+        error_message: str | None = None
         if vitals_err and errors_err:
             status = "error"
             summary = f"RUM commit failed for both tables: vitals ({vitals_err}), errors ({errors_err})"
@@ -151,7 +152,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         elif vitals_err or errors_err:
             status = "warning"
             failed_tab = "vitals" if vitals_err else "errors"
-            err_details = vitals_err or errors_err
+            err_details = str(vitals_err or errors_err or "")
             summary = (
                 f"Partial RUM commit: {v_files} vitals ({total_committed_vitals} rows) "
                 f"and {e_files} errors ({total_committed_errors} rows); {failed_tab} failed: {err_details}"
@@ -163,7 +164,6 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 f"Committed {v_files} vitals files ({total_committed_vitals} rows) "
                 f"and {e_files} errors files ({total_committed_errors} rows)"
             )
-            error_message = None
 
         log_cron_run(
             src,

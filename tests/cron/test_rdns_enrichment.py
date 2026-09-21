@@ -8,7 +8,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -78,11 +78,11 @@ def test_run_rdns_enrichment_skips_when_dev_mode_active():
 @pytest.mark.parametrize(
     ("pending_count", "expected_batch_limit"),
     [
-        (0, 200),     # empty backlog defaults to standard 200 limit
-        (50, 100),    # small backlog uses baseline minimum 100
-        (150, 150),   # moderate small backlog scales to exact count
-        (500, 500),   # medium backlog scales up to 500
-        (2500, 1000), # large backlog caps at safety ceiling 1000
+        (0, 200),  # empty backlog defaults to standard 200 limit
+        (50, 100),  # small backlog uses baseline minimum 100
+        (150, 150),  # moderate small backlog scales to exact count
+        (500, 500),  # medium backlog scales up to 500
+        (2500, 1000),  # large backlog caps at safety ceiling 1000
     ],
 )
 def test_enrich_batch_dynamic_batch_sizing(pending_count, expected_batch_limit):

@@ -22,6 +22,17 @@ from functools import wraps
 # ``logger="backend.scheduler"`` keep receiving watchdog error lines.
 logger = logging.getLogger("backend.scheduler")
 
+
+def dev_mode_no_crons() -> bool:
+    """Kill switch for local-dev runs: never schedule or execute cron work.
+
+    Evaluates FLA_DEV_NO_CRONS environment variable.
+    """
+    import os
+
+    return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
+
+
 # Watchdog threshold for reporting an overlong invocation. The wrapped body is
 # still allowed to finish before the APScheduler worker is released: Python
 # cannot safely kill a thread that owns DuckDB/FOS resources, and abandoning it

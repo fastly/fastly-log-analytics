@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from backend.core import share_db
 from backend.cron.jobs.metadata import _run_share_audit_purge
 from backend.main import app
-from backend.utils.date_utils import iso_z, iso_z_now
+from backend.utils.date_utils import iso_z
 
 
 @pytest.fixture
@@ -87,12 +87,34 @@ def test_purge_stale_share_records(test_share_db):
 
     # Stale session (> 30 days) and active session
     con.execute(
-        "INSERT INTO remote_sessions(session_id, invite_id, name, email, ip_address, user_agent, fingerprint_signature, login_time, last_active_time) VALUES (?,?,?,?,?,?,?,?,?)",
-        ("sess_stale", "inv_active", "Active User", "active@test.com", "1.1.1.1", "ua", "fp", past_iso, stale_session_ts),
+        "INSERT INTO remote_sessions(session_id, invite_id, name, email, ip_address, user_agent, fingerprint_signature, pii_policy, login_time, last_active_time) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "sess_stale",
+            "inv_active",
+            "Active User",
+            "active@test.com",
+            "1.1.1.1",
+            "ua",
+            "fp",
+            "{}",
+            past_iso,
+            stale_session_ts,
+        ),
     )
     con.execute(
-        "INSERT INTO remote_sessions(session_id, invite_id, name, email, ip_address, user_agent, fingerprint_signature, login_time, last_active_time) VALUES (?,?,?,?,?,?,?,?,?)",
-        ("sess_active", "inv_active", "Active User", "active@test.com", "1.1.1.1", "ua", "fp", past_iso, active_session_ts),
+        "INSERT INTO remote_sessions(session_id, invite_id, name, email, ip_address, user_agent, fingerprint_signature, pii_policy, login_time, last_active_time) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "sess_active",
+            "inv_active",
+            "Active User",
+            "active@test.com",
+            "1.1.1.1",
+            "ua",
+            "fp",
+            "{}",
+            past_iso,
+            active_session_ts,
+        ),
     )
     con.commit()
 
@@ -119,7 +141,7 @@ def test_run_share_audit_purge_lifecycle():
             return_value={"deleted_expired_invites": 2, "deleted_stale_sessions": 3, "deleted_claim_tokens": 1},
         ) as mock_stale,
     ):
-        result = _run_share_audit_purge()
+        result = _run_share_audit_purge.__wrapped__()
 
     mock_audit.assert_called_once_with(retention_days=60)
     mock_stale.assert_called_once_with(max_idle_session_days=30)

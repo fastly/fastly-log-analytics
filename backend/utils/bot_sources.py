@@ -366,7 +366,15 @@ def refresh_all_sources() -> list[dict]:
                 results.append(fetch_and_cache_source(src["id"]))
             except Exception as e:
                 logger.error("[bot_sources] Failed to refresh %s: %s", src["id"], e)
-                results.append({"id": src["id"], "name": src.get("name", src["id"]), "error": str(e), "entry_count": 0, "failed": True})
+                results.append(
+                    {
+                        "id": src["id"],
+                        "name": src.get("name", src["id"]),
+                        "error": str(e),
+                        "entry_count": 0,
+                        "failed": True,
+                    }
+                )
     return results
 
 

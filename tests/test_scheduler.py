@@ -1136,7 +1136,6 @@ def test_run_service_alerts_evaluation_emits_progress_events():
     assert "done" == progress_mock.call_args_list[1][1]["event"]["type"]
 
 
-
 # ── _run_metadata_sync (analyst metadata refresh) ────────────────────────
 
 
@@ -1491,7 +1490,6 @@ def test_run_metadata_sync_status_warning_when_import_admin_state_fails():
     args, kwargs = log_calls[0]
     assert args[3] == "warning"
     assert "admin state import warning" in kwargs.get("summary", "")
-
 
 
 # ── _run_commit (Iceberg snapshot commit) ────────────────────────────────
@@ -3073,7 +3071,10 @@ def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
         patch("backend.cron_progress.end_progress", side_effect=lambda rid: prog_ended.append(rid)),
         patch("backend.cron_progress.cleanup_progress_and_reap"),
         patch("backend.cron.jobs.metadata._log_and_add_progress"),
-        patch("backend.cron.jobs._common.finalize_cron_duration", side_effect=lambda s, rid, started: finalized.append((s, rid))),
+        patch(
+            "backend.cron.jobs._common.finalize_cron_duration",
+            side_effect=lambda s, rid, started: finalized.append((s, rid)),
+        ),
         patch(
             "backend.core.ingest.sweep_ledger_once",
             return_value={"reclaimed": 5, "redispatched": 5, "discovered": 10, "broker_ok": True, "dead_letter": 0},
@@ -3186,11 +3187,6 @@ def test_sync_jobs_skips_ledger_sweep_when_disabled():
         s._sync_jobs()
 
     assert "ledger_sweep_svc-sweep-disabled" not in s._job_ids
-
-
-
-
-
 
 
 def test_check_disk_space_passes_when_plenty_free(tmp_path):

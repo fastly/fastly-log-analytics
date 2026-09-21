@@ -65,6 +65,7 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
+from typing import Any
 
 import duckdb
 
@@ -1156,7 +1157,6 @@ def get_pool_status() -> dict[str, Any]:
         "pools": pools_info,
         "retired_pools": retired_info,
     }
-
 
 
 # R-1: drain the per-connection metadata dict between tests so a recycled

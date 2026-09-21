@@ -564,4 +564,3 @@ def trigger_share_purge(
         max_idle_session_days=max_idle_session_days,
     )
     return {"ok": True, **stats}
-

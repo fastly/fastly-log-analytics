@@ -1166,28 +1166,29 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         try:
             from backend.core.metadata import delete_quarantined_rows, get_expired_quarantined_files
 
-            service_id = source.get("service_id") or source.get("name")
-            expired = get_expired_quarantined_files(service_id, retention_days=quarantine_retention_days)
-            if expired:
-                from backend.core.duckdb import _get_fos_client
-                from backend.core.ingest import _delete_objects_robust
+            service_id = str(source.get("service_id") or source.get("name") or "")
+            if service_id:
+                expired = get_expired_quarantined_files(service_id, retention_days=quarantine_retention_days)
+                if expired:
+                    from backend.core.duckdb import _get_fos_client
+                    from backend.core.ingest import _delete_objects_robust
 
-                fos_client = _get_fos_client(source)
-                keys_to_delete = []
-                ids_to_delete = []
-                for row in expired:
-                    if row.get("error_key"):
-                        keys_to_delete.append(row["error_key"])
-                    if row.get("meta_key"):
-                        keys_to_delete.append(row["meta_key"])
-                    ids_to_delete.append(row["id"])
-                purged_fos = 0
-                if keys_to_delete and source.get("bucket"):
-                    purged_fos = _delete_objects_robust(fos_client, source["bucket"], keys_to_delete)
-                if ids_to_delete:
-                    delete_quarantined_rows(service_id, ids_to_delete)
-                results["quarantined_files_purged"] = len(expired)
-                results["quarantined_fos_objects_deleted"] = purged_fos
+                    fos_client = _get_fos_client(source)
+                    keys_to_delete = []
+                    ids_to_delete = []
+                    for row in expired:
+                        if row.get("error_key"):
+                            keys_to_delete.append(row["error_key"])
+                        if row.get("meta_key"):
+                            keys_to_delete.append(row["meta_key"])
+                        ids_to_delete.append(row["id"])
+                    purged_fos = 0
+                    if keys_to_delete and source.get("bucket"):
+                        purged_fos = _delete_objects_robust(fos_client, source["bucket"], keys_to_delete)
+                    if ids_to_delete:
+                        delete_quarantined_rows(service_id, ids_to_delete)
+                    results["quarantined_files_purged"] = len(expired)
+                    results["quarantined_fos_objects_deleted"] = purged_fos
         except Exception as e:
             logger.warning("[iceberg] Quarantine cleanup skipped: %s", e)
             results["quarantine_cleanup_error"] = str(e)

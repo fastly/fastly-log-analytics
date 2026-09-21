@@ -7,14 +7,12 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from backend.cron.jobs.metadata import _run_bot_data_refresh
 from backend.main import app
-from backend.utils import bot_sources
 
 
 def test_run_bot_data_refresh_records_success_with_total_entries():

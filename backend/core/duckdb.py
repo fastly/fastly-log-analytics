@@ -810,7 +810,6 @@ def is_recycle_barrier_active(db_path: str | None = None) -> bool | set[str]:
         return set(_recycle_barrier_active)
 
 
-
 def _register_live_connection(con, db_path: str) -> None:
     """Track a freshly-opened raw connection in the per-db_path liveness set."""
     with _live_conns_lock:

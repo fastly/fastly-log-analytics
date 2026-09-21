@@ -27,43 +27,61 @@ function getUrlWithParam(url, key, value) {
     // ────────────────────────────────────────────────────────────────────────
     // ── STAGE 1: DASHBOARD PAGE VERIFICATION
     // ────────────────────────────────────────────────────────────────────────
-    
+
     // 1.1. Verify 24h Overall Data is present
     const url24h = getUrlWithParam(baseUrl, "range", "24h");
     console.log(`[Dashboard 24h] Checking ${url24h} ...`);
-    let response = await page.goto(url24h, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[Dashboard 24h] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
-      await browser.close();
-      process.exit(1);
-    }
-    await page.waitForSelector('main', { timeout: 10000 });
-    await page.waitForTimeout(4000); // Allow hydration
+    let bodyText24h = "";
+    let totalMatch24h = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let response = await page.goto(url24h, { timeout: 20000 });
+      if (!response || !response.ok()) {
+        if (attempt === 3) {
+          console.error(`[Dashboard 24h] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
+          await browser.close();
+          process.exit(1);
+        }
+        await page.waitForTimeout(4000);
+        continue;
+      }
+      await page.waitForSelector('main', { timeout: 10000 });
+      await page.waitForTimeout(4000); // Allow hydration
 
-    const bodyText24h = await page.evaluate(() => document.body.innerText);
-    const hasFailedToLoad24h = bodyText24h.includes("Failed to load") && !bodyText24h.includes("Faro version");
-    if (hasFailedToLoad24h || bodyText24h.includes("saturated at") || bodyText24h.includes("PoolBusy") || bodyText24h.includes("No data for this filter")) {
-      console.error(`[Dashboard 24h] Verification Failed: 24h page shows errors or empty 'No data for this filter' state!`);
-      await browser.close();
-      process.exit(1);
-    }
+      bodyText24h = await page.evaluate(() => document.body.innerText);
+      const hasFailedToLoad24h = bodyText24h.includes("Failed to load") && !bodyText24h.includes("Faro version");
+      if (hasFailedToLoad24h || bodyText24h.includes("saturated at") || bodyText24h.includes("PoolBusy") || bodyText24h.includes("No data for this filter")) {
+        if (attempt === 3) {
+          console.error(`[Dashboard 24h] Verification Failed: 24h page shows errors or empty 'No data for this filter' state!`);
+          await browser.close();
+          process.exit(1);
+        }
+        console.log(`[Dashboard 24h] Attempt ${attempt}/3: transient error or warming up. Waiting 4s...`);
+        await page.waitForTimeout(4000);
+        continue;
+      }
 
-    const totalMatch24h = bodyText24h.match(/total:\s*([\d,]+)/i);
-    if (!totalMatch24h || parseInt(totalMatch24h[1].replace(/,/g, ''), 10) === 0) {
-      console.error(`[Dashboard 24h] Verification Failed: 24h request row count is missing or zero!`);
-      await browser.close();
-      process.exit(1);
+      totalMatch24h = bodyText24h.match(/total:\s*([\d,]+)/i);
+      if (!totalMatch24h || parseInt(totalMatch24h[1].replace(/,/g, ''), 10) === 0) {
+        if (attempt === 3) {
+          console.error(`[Dashboard 24h] Verification Failed: 24h request row count is missing or zero!`);
+          await browser.close();
+          process.exit(1);
+        }
+        await page.waitForTimeout(4000);
+        continue;
+      }
+      break;
     }
     console.log(`[Dashboard 24h] Verified: 24h data is active with ${totalMatch24h[1]} total rows.`);
 
     // 1.2. Verify 5m Range with ROBUST POLLING (At least 150 rows)
     const url5m = getUrlWithParam(baseUrl, "range", "5m");
     console.log(`[Dashboard 5m] Checking ${url5m} with active polling...`);
-    
+
     let count5m = 0;
     const MIN_REQ_5M = 150; // Safe minimum for standard traffic seeding
     let bodyText5m = "";
-    
+
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await page.goto(url5m, { timeout: 15000 });
@@ -73,7 +91,7 @@ function getUrlWithParam(url, key, value) {
           bodyText5m = await page.evaluate(() => document.body.innerText);
           const totalMatch5m = bodyText5m.match(/total:\s*([\d,]+)/i);
           count5m = totalMatch5m ? parseInt(totalMatch5m[1].replace(/,/g, ''), 10) : 0;
-          
+
           if (count5m >= MIN_REQ_5M) {
             break;
           }
@@ -122,7 +140,7 @@ function getUrlWithParam(url, key, value) {
     await page.waitForTimeout(4000);
 
     const bodyText30d = await page.evaluate(() => document.body.innerText);
-    
+
     // Extract Header Request Total
     const headerReqMatch = bodyText30d.match(/REQUEST[\s\n]*latest:[\s\n]*[^\n]*[\s\n]*total:\s*([\d,]+)/i);
     if (!headerReqMatch) {
@@ -175,19 +193,19 @@ function getUrlWithParam(url, key, value) {
     // ── STAGE 2: RUM PAGE VERIFICATION
     // ────────────────────────────────────────────────────────────────────────
     const rumBaseUrl = baseUrl.replace('/dashboard', '/rum');
-    
+
     // Create a completely clean, isolated incognito browser context for Stage 2 to prevent any cookie or storage conflicts
     const rumContext = await browser.newContext();
     const rumPage = await rumContext.newPage();
-    
+
     // 2.1. Verify 24h Overall RUM Data is present with active polling
     const rumUrl24h = getUrlWithParam(rumBaseUrl, "range", "24h");
     console.log(`[RUM 24h] Checking ${rumUrl24h} with active polling...`);
-    
+
     let rumBodyText24h = "";
     let hasVitalsTitle24h = false;
     let hasVitalsRating24h = false;
-    
+
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await rumPage.goto(rumUrl24h, { timeout: 15000 });
@@ -196,10 +214,10 @@ function getUrlWithParam(url, key, value) {
           await rumPage.waitForTimeout(4000);
           rumBodyText24h = await rumPage.evaluate(() => document.body.innerText);
           const rumFailedToLoad24h = rumBodyText24h.includes("Failed to load") && !rumBodyText24h.includes("Faro version");
-          
+
           hasVitalsTitle24h = rumBodyText24h.includes("Largest Contentful Paint") || rumBodyText24h.includes("LCP");
           hasVitalsRating24h = rumBodyText24h.includes("GOOD") || rumBodyText24h.includes("POOR") || rumBodyText24h.includes("NEEDS IMP.");
-          
+
           if (!rumFailedToLoad24h && hasVitalsTitle24h && hasVitalsRating24h) {
             break;
           }
@@ -222,11 +240,11 @@ function getUrlWithParam(url, key, value) {
     // 2.2. Verify 5m RUM Range with active polling (At least 50 beacons)
     const rumUrl5m = getUrlWithParam(rumBaseUrl, "range", "5m");
     console.log(`[RUM 5m] Checking ${rumUrl5m} with active polling...`);
-    
+
     let beaconCount5m = 0;
     const MIN_BEACONS_5M = 50; // Safe threshold allowing for global edge S3 streaming latency
     let rumBodyText5m = "";
-    
+
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         response = await rumPage.goto(rumUrl5m, { timeout: 15000 });
@@ -234,11 +252,11 @@ function getUrlWithParam(url, key, value) {
           await rumPage.waitForSelector('main', { timeout: 10000 });
           await rumPage.waitForTimeout(4000);
           rumBodyText5m = await rumPage.evaluate(() => document.body.innerText);
-          
+
           if (rumBodyText5m.includes("TOTAL BEACONS")) {
             const beaconMatch = rumBodyText5m.match(/TOTAL BEACONS\s*([\d,]+)/i);
             beaconCount5m = beaconMatch ? parseInt(beaconMatch[1].replace(/,/g, ''), 10) : 0;
-            
+
             if (beaconCount5m >= MIN_BEACONS_5M) {
               break;
             }

@@ -485,4 +485,3 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     assert len(prog_events) == 1
     assert prog_events[0][3]["type"] == "done"
     assert finalized == [(src, 99)]
-

@@ -738,7 +738,6 @@ class Scheduler:
         from backend.cron.jobs.commit import _run_commit
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal
         from backend.cron.jobs.expire import _run_expire_snapshots
-        from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
             _run_metadata_cleanup,

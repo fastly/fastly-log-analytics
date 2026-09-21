@@ -38,7 +38,7 @@ def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
         logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", logging_service_id, exc_info=True)
 
 
-def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
+def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
     """Keep the operator's pinned Faro bundle present and intact in FOS.
 
     Two deliberately different cadences: a cheap FOS HEAD every tick (catches

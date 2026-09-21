@@ -99,7 +99,9 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
     except Exception as fe:
         faro_ok = False
         faro_err = str(fe)
-        logger.warning("[rum_discovery] %s: Faro bundle reconcile failed (non-fatal): %s", service_id, fe, exc_info=True)
+        logger.warning(
+            "[rum_discovery] %s: Faro bundle reconcile failed (non-fatal): %s", service_id, fe, exc_info=True
+        )
 
     if not svcconfig.CELERY_BROKER_URL:
         log_cron_run(

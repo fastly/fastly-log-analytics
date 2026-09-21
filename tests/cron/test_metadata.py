@@ -360,4 +360,3 @@ def test_metadata_cleanup_handles_failure_and_finalizes_duration(monkeypatch, st
 
     end_prog.assert_called_once_with(456)
     finalize_dur.assert_called_once()
-
