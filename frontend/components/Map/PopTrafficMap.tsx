@@ -322,7 +322,12 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
   return (
     <div
       className={`relative min-h-[300px] w-full rounded-lg overflow-hidden bg-background ${className}`}
-      role="img"
+      // role="group" (not "img"): the wrapper holds the interactive MapLibre
+      // controls + the sr-only data table below, so it can't be an "img"
+      // (axe: nested-interactive — an img must not contain focusable
+      // descendants). group is a structural role that legitimately groups
+      // interactive content under the aria-label.
+      role="group"
       aria-label={ariaLabel}
     >
       {mapError ? (

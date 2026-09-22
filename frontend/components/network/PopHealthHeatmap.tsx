@@ -170,32 +170,34 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
               return (
                 <Tooltip key={pop.pop}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedPop(pop)}
-                      className={cn(
-                        'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
-                        'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
-                        borderClass,
-                        bgClass
-                      )}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
-                        <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
-                          {pop.pop.toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="w-full flex flex-col items-center mt-1">
-                        <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
-                          {formatCompactCount(pop.requests)} reqs
-                        </span>
-                        <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
-                          {pop.cache_hit_rate.toFixed(1)}% Hit
-                        </span>
-                      </div>
-                    </button>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPop(pop)}
+                        className={cn(
+                          'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
+                          'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
+                          borderClass,
+                          bgClass
+                        )}
+                      />
+                    }
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
+                      <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
+                        {pop.pop.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="w-full flex flex-col items-center mt-1">
+                      <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
+                        {formatCompactCount(pop.requests)} reqs
+                      </span>
+                      <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
+                        {pop.cache_hit_rate.toFixed(1)}% Hit
+                      </span>
+                    </div>
                   </TooltipTrigger>
                   <TooltipContent className="p-0 border border-muted bg-popover text-popover-foreground shadow-xl rounded-lg w-64 overflow-hidden">
                     <div className="bg-muted/50 border-b border-muted px-3 py-2 flex items-center justify-between">
