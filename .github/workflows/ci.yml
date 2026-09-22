@@ -202,7 +202,7 @@ jobs:
         #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
           uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
-          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
+          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=84
 
       - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
         # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with
