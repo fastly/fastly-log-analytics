@@ -1,0 +1,13 @@
+# Temporary, single-replica Postgres for the ingest load test's DuckLake
+# catalog + metadata store. Not HA, not backed up -- delete with the rest of
+# the cluster when testing is done. Password comes from a Secret generated
+# at apply time (see README.md in this directory), not hardcoded here.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi

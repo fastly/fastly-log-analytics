@@ -31,6 +31,9 @@ export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error"
 
 export type JoinPhase = "form" | "connecting" | "importing" | "done";
 
+export const ANALYST_PATH_A_UNSUPPORTED_REASON =
+  "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
+
 export interface TokenInfo {
   id: string;
   name: string;
@@ -67,6 +70,8 @@ export interface ProvisionConfig {
   rum_enabled: boolean;
   log_retention_days: number;
   rum_retention_days: number;
+  cache_retention_days: number;
+  rollup_retention_months: number;
   rum_custom_condition: string;
   // Pinned Faro Web SDK version chosen in the RUM version picker
   // (StorageStep). null = unpinned — the backend serves whatever is
@@ -104,6 +109,8 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_enabled: false,
   log_retention_days: 30,
   rum_retention_days: 30,
+  cache_retention_days: 14,
+  rollup_retention_months: 12,
   rum_custom_condition: "",
   faro_version: null,
 };
@@ -265,6 +272,8 @@ export interface WizardState {
   ngwafDebugRaw: string;
 
   // Analyst Flow
+  analystPathASupported: boolean;
+  analystPathAReason: string | null;
   lakeInfo: any;
   isAnalyzing: boolean;
   importMode: "all" | "range";

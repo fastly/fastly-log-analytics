@@ -37,10 +37,9 @@ its 300 s mark, leaving a ~(TTL - interval) window each cycle where a user
 pays cold. Forcing the recompute at 240 s < 300 s TTL keeps the entry
 continuously warm with margin.
 
-Active-request gate (#84) intentionally NOT applied here — the
-prewarmer's whole point is to win during quiet moments; it doesn't
-contend with user traffic the way sync/optimize do (no FOS calls,
-just read-only DuckDB queries against the local Iceberg view).
+Active-request gate (#84) applied — if active dashboard queries are
+running, prewarming defers to avoid competing for DuckDB threads and CPU
+with user queries.
 """
 
 from __future__ import annotations
@@ -115,7 +114,7 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
     return ordered
 
 
-@cron_task("insights_prewarmer")
+@cron_task("insights_prewarmer", job_name="insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
     """Warm the default insights selection — the pair the adaptive frontend
     picker will request for this service's history, for the admin/unclamped
@@ -123,7 +122,9 @@ def _run_insights_prewarmer(service_id: str) -> None:
     analyst) lands on a cache hit instead of the cold path."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.jobs.metadata import _log_and_add_progress
     from backend.repositories.insights import get_insights
+    from backend.utils.active_requests import should_defer_cron
     from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
     from backend.utils.remote_access import resolve_analyst_insights_clamp
     from backend.utils.tunnel import get_tunnel_manager
@@ -132,11 +133,19 @@ def _run_insights_prewarmer(service_id: str) -> None:
     if src is None:
         return
 
+    if should_defer_cron("insights_prewarmer", service_id):
+        return
+
     try:
         run_id = start_cron_run(src, "insights_prewarmer")
     except RuntimeError as e:
         logger.info("⏭️  [insights-prewarmer] %s: skipping — %s", service_id, str(e))
         return
+
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="insights_prewarmer")
 
     _display = _display_label(src, service_id)
 
@@ -156,6 +165,15 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # boundaries is fine here (the next prewarmer tick will resolve
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
+
+        # OOM fix: Prewarmer is a solitary background task and shouldn't exceed container memory limits.
+        # Enforcing a safe ceiling (like 384MB) and limiting execution threads to 2 prevents parallel
+        # thread-memory bloat, keeping standard execution extremely fast without OOM-killer crashes.
+        try:
+            con.execute("SET memory_limit = '384MB';")
+            con.execute("SET threads = 2;")
+        except Exception:
+            pass
 
         # 1) Admin / unclamped default selection.
         get_insights(
@@ -214,6 +232,12 @@ def _run_insights_prewarmer(service_id: str) -> None:
             summary=summary,
             run_id=run_id,
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="insights_prewarmer",
+            event={"type": "done", "message": summary},
+        )
         logger.info(
             "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
             _display,
@@ -233,10 +257,14 @@ def _run_insights_prewarmer(service_id: str) -> None:
             error_message=str(e),
             run_id=run_id,
         )
-        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e)
+        logger.warning("⚠️  [insights-prewarmer] %s: %s", _display, e, exc_info=True)
     finally:
         if con is not None:
             try:
                 con.close()
             except Exception:
                 pass
+        end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
+
+        finalize_cron_duration(src, run_id, started)

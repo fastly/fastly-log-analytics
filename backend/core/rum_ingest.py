@@ -49,11 +49,18 @@ def safe_float(val, default: float | None = None) -> float | None:
 def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
     """Delete RUM beacon logs from FOS older than rum.delete_after days.
 
+    Stands down unconditionally when
+    ``provisioning.cron_sync.high_scale_shared_source`` is set — a high-scale
+    consumer owns raw-deletion authority for this service's stream, RUM
+    included. See ``backend.config.resolve_raw_delete_after``.
+
     Returns (files_deleted, bytes_freed).
     """
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(service_id) or {}
+    if svcconfig.high_scale_shared_source_enabled(cfg):
+        return 0, 0
     rum_cfg = cfg.get("rum", {})
 
     # Only cleanup if delete_after is explicitly enabled
@@ -73,7 +80,7 @@ def cleanup_old_rum_logs(service_id: str) -> tuple[int, int]:
         s3 = _get_fos_client(src)
         bucket = src["bucket"]
         prefix = src.get("prefix", "").strip("/")
-        rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
+        rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
 
         cutoff_time = datetime.now(UTC) - timedelta(days=delete_after_days)
         files_deleted = 0
@@ -336,10 +343,10 @@ def ingest_rum_logs(
             else:
                 already_ingested.add(f"{bucket_prefix}{p}")
 
-        # Use the shared list_fos_files helper to discover files in rum/raw/ prefix
+        # Use the shared list_fos_files helper to discover files in raw/rum/ prefix
         list_gen = list_fos_files(
             src=src,
-            prefix_subpath="rum/raw/",
+            prefix_subpath="raw/rum/",
             already_ingested=already_ingested,
             incremental_only=False,
             elapsed_fn=lambda: f"{time.time() - start_time:.1f}s",
@@ -372,6 +379,7 @@ def ingest_rum_logs(
 
         total_vitals_rows = 0
         total_errors_rows = 0
+        error_count = 0
 
         # Download and process in parallel chunks to unify request and RUM ingestion logic
         CHUNK_SIZE = 50
@@ -389,6 +397,7 @@ def ingest_rum_logs(
 
                 for s3_path in chunk:
                     if s3_path not in s3_to_local:
+                        error_count += 1
                         logger.error(f"RUM sync: Failed to download {s3_path}")
                         yield ("error", s3_path, "Download failed")
                         continue
@@ -626,6 +635,7 @@ def ingest_rum_logs(
                         errors_batch_records.append((s3_path, errors_count_for_file, size))
                         yield ("file_done", s3_path.split("/")[-1], vitals_count_for_file + errors_count_for_file)
                     except Exception as e:
+                        error_count += 1
                         logger.error(f"RUM sync: Failed to ingest RUM log file {s3_path}: {e}")
                         yield ("error", s3_path, str(e))
                         continue
@@ -679,14 +689,22 @@ def ingest_rum_logs(
 
         yield ("done", total_vitals_rows + total_errors_rows)
         duration_s = time.time() - start_time
+        had_errors = error_count > 0
+        run_status = "warning" if had_errors else "success"
+        summary_msg = (
+            f"Ingested {total_vitals_rows + total_errors_rows} RUM rows ({error_count} file error(s))"
+            if had_errors
+            else f"Ingested {total_vitals_rows + total_errors_rows} RUM rows"
+        )
         log_cron_run(
             service_id,
             "rum_sync",
             duration_s,
-            "success",
+            run_status,
             files_downloaded=len(new_files_s3),
             rows_ingested=total_vitals_rows + total_errors_rows,
             run_id=run_id,
+            summary=summary_msg,
         )
     except Exception as e:
         logger.error(f"RUM ingest failed: {e}", exc_info=True)

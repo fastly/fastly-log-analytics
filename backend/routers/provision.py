@@ -152,6 +152,7 @@ def provision_validate(body: ProvisionValidateRequest):
 
         safe_service_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
         safe_service_id = re.sub(r"-+", "-", safe_service_id).strip("-")
+        safe_service_id_lower = safe_service_id.lower()
 
         return {
             "service_name": svc_name,
@@ -159,7 +160,7 @@ def provision_validate(body: ProvisionValidateRequest):
             "defaults": {
                 "endpoint_name": "Fastly Object Storage Logs",
                 "fos_region": "us-east-1",
-                "fos_bucket_name": f"fos-{safe_service_id}-logs",
+                "fos_bucket_name": f"fos-{safe_service_id_lower}-logs",
                 "fos_prefix": "",
                 "sample_rate": 100,
                 "edge_only": True,
@@ -1087,6 +1088,15 @@ def provision_ingest(payload: ProvisionConfigRequest):
     # top of the handler (validate_destructive_token above); the prior second
     # pass here re-imported and re-validated the identical token+service_id.
     write_service_config(state)
+
+    # Reload scheduler immediately to pick up any changed log periods or sync intervals
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+        logger.info("[provision_ingest] Successfully reloaded scheduler with new intervals! 🔄")
+    except Exception as e:
+        logger.warning("[provision_ingest] Failed to reload scheduler after ingest: %s", e)
 
     # Re-ingest can carry refreshed FOS creds; drop the credential-bearing
     # caches so the next sync/read picks them up rather than 401ing on a stale

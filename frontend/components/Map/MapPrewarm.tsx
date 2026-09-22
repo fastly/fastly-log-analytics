@@ -29,6 +29,8 @@ import dynamic from 'next/dynamic'
 const PrewarmMap = dynamic(
   async () => {
     const maplibre = await import('maplibre-gl')
+    // Prewarm can create the shared worker pool before any visible map loads.
+    maplibre.setWorkerUrl('/maplibre-gl-worker.mjs')
     const MaplibreMap = maplibre.Map || (maplibre as any).default?.Map
 
     function PrewarmInner() {

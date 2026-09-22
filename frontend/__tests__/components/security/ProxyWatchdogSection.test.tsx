@@ -14,7 +14,7 @@ describe('ProxyWatchdogSection', () => {
       suspicious_isps: [],
       active_clients: []
     }
-    render(<ProxyWatchdogSection data={mockData} isLoading={false} />)
+    render(<ProxyWatchdogSection data={mockData as any} isLoading={false} />)
     expect(screen.getByText('Active VPN & Proxy Users')).toBeInTheDocument()
     expect(screen.getByText('10')).toBeInTheDocument()
   })

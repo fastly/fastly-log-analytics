@@ -371,7 +371,7 @@ def test_backfill_missing_hour_bundles_detects_gaps_via_view(tmp_path, monkeypat
 
     def _fake_update_iceberg_view(con, _src):
         con.execute(
-            "CREATE OR REPLACE VIEW logs_test AS SELECT * FROM (VALUES "
+            "CREATE OR REPLACE VIEW logs_svc_heal AS SELECT * FROM (VALUES "
             "(TIMESTAMP '2026-06-04 09:30:00+00'), "
             "(TIMESTAMP '2026-06-04 09:45:00+00'), "
             "(TIMESTAMP '2026-06-04 10:15:00+00')"
@@ -406,6 +406,46 @@ def test_backfill_missing_hour_bundles_detects_gaps_via_view(tmp_path, monkeypat
     assert result["missing"] == 1, f"expected 1 missing; got {result}"
 
 
+def test_backfill_ignores_rum_child_views_when_finding_request_view(tmp_path, monkeypatch):
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-rum", "service_id": "svc-rum"}
+
+    def _fake_update_iceberg_view(con, _src):
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_svc_rum__client_errors AS "
+            "SELECT * FROM (VALUES (TIMESTAMP '2026-06-04 09:30:00+00')) AS t(timestamp)"
+        )
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_svc_rum AS "
+            "SELECT * FROM (VALUES (TIMESTAMP '2026-06-04 09:45:00+00')) AS t(timestamp)"
+        )
+
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+
+    from datetime import UTC, datetime
+
+    class _FrozenNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+
+    monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
+    captured_hours: list[set[str]] = []
+    monkeypatch.setattr(
+        "backend.core.rollups.recompute.recompute_touched_hours",
+        lambda _sid, _src, hours: captured_hours.append(set(hours)),
+    )
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result = rollups.backfill_missing_hour_bundles("svc-rum", src, lookback_days=2)
+
+    assert captured_hours == [{"2026-06-04-09"}]
+    assert result["missing"] == 1
+
+
 def test_backfill_missing_hour_bundles_noop_when_complete(tmp_path, monkeypatch):
     """Bundle tree is complete → no dispatch, no log noise, returns 0."""
     from backend.core import rollups
@@ -423,7 +463,7 @@ def test_backfill_missing_hour_bundles_noop_when_complete(tmp_path, monkeypatch)
 
     def _fake_update_iceberg_view(con, _src):
         con.execute(
-            "CREATE OR REPLACE VIEW logs_test AS SELECT * FROM (VALUES "
+            "CREATE OR REPLACE VIEW logs_svc_noop AS SELECT * FROM (VALUES "
             "(TIMESTAMP '2026-06-04 09:30:00+00')"
             ") AS t(timestamp)"
         )
@@ -459,7 +499,82 @@ def test_backfill_missing_hour_bundles_noop_when_complete(tmp_path, monkeypatch)
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
         result2 = rollups.backfill_missing_hour_bundles("svc-noop", src, lookback_days=2)
     assert dispatched == []
-    assert result2 == {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
+    assert result2 == {
+        "missing": 0,
+        "rebuilt_fields": 0,
+        "bundled": 0,
+        "stamped_empty": 0,
+        "coverage_verified": True,
+    }
+
+
+def test_backfill_rebuilds_empty_sentinel_when_late_rows_arrive(tmp_path, monkeypatch):
+    """A verified-empty hour must be rebuilt when durable data arrives later."""
+    from backend.core import rollups
+
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    src = {"name": "svc-late", "service_id": "svc-late"}
+    _write_hour_bundle(str(cache_root), "2026-06-04-09", [])
+
+    def _fake_update_iceberg_view(con, _src):
+        con.execute(
+            "CREATE OR REPLACE VIEW logs_svc_late AS SELECT * FROM (VALUES "
+            "(TIMESTAMP '2026-06-04 09:30:00+00')"
+            ") AS t(timestamp)"
+        )
+
+    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+
+    from datetime import UTC, datetime
+
+    class _FrozenNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+
+    monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
+    dispatched: list[set[str]] = []
+
+    def _fake_recompute(_sid, _src, hours):
+        dispatched.append(set(hours))
+        field_dir = cache_root / "rollups" / "hour" / "field=method" / "hour=2026-06-04-09"
+        field_dir.mkdir(parents=True, exist_ok=True)
+        source_path = field_dir / "late.parquet"
+        pq.write_table(
+            pa.table(
+                {
+                    "field": ["method"],
+                    "value": ["GET"],
+                    "count": pa.array([7], type=pa.int64()),
+                }
+            ),
+            source_path,
+        )
+        os.utime(source_path, (source_path.stat().st_mtime + 2, source_path.stat().st_mtime + 2))
+        assert rollups.bundle_hours("svc-late", src, list(hours)) == 1
+
+    monkeypatch.setattr(
+        "backend.core.rollups.recompute.recompute_touched_hours",
+        _fake_recompute,
+    )
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        result = rollups.backfill_missing_hour_bundles("svc-late", src, lookback_days=2)
+
+    assert dispatched == [{"2026-06-04-09"}]
+    assert result["missing"] == 1
+    bundle = cache_root / "rollups" / "hour_bundled" / "hour=2026-06-04-09" / "all_fields.parquet"
+    assert pq.read_metadata(bundle).num_rows == 1
+
+
+def test_corrupt_hour_bundle_is_not_treated_as_coverage(tmp_path):
+    from backend.core.rollups.recompute import _bundle_metadata
+
+    corrupt = tmp_path / "all_fields.parquet"
+    corrupt.write_bytes(b"not parquet")
+
+    assert _bundle_metadata(str(corrupt)) is None
 
 
 def test_compact_returns_zero_when_rollups_dir_missing(tmp_path):

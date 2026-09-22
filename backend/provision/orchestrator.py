@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from backend.core import field_registry as lf
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import fastly
+from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import (
     region_endpoint,
 )
@@ -99,11 +100,10 @@ def write_service_config(state: dict):
     fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
     fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
     bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
-    fos_prefix = state.get("fos_prefix", "")
-    # L8: validate path-shape before persisting (bucket composes into the
-    # local cache root; prefix checked defensively for traversal).
+    fos_prefix = ""
+    # The v3 bucket is dedicated to this service; raw objects always start at
+    # the fixed request/RUM roots.
     _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
-    _reject_unsafe_fos_component("fos_prefix", fos_prefix, allow_slash=True)
     region = state.get("fos_region", "us-east-1")
     cdn_url = state.get("cdn_url", "")
 
@@ -137,6 +137,7 @@ def write_service_config(state: dict):
         "fos_secret_access_key": fos_secret,
         "fos_bucket": bucket,
         "fos_prefix": fos_prefix,
+        "raw_layout_version": 3,
         "fos_region": region,
         "cdn_url": cdn_url,
         "cdn_secret": state.get("cdn_secret", ""),
@@ -236,7 +237,16 @@ def write_service_config(state: dict):
                 )
             ),
             "cache_retention_days": int(
-                state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90)
+                state.get(
+                    "cache_retention_days",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90),
+                )
+            ),
+            "rollup_retention_months": int(
+                state.get(
+                    "rollup_retention_months",
+                    state.get("provisioning", {}).get("cron_sync", {}).get("rollup_retention_months", 12),
+                )
             ),
         },
         "cron_compact": {
@@ -621,6 +631,16 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(8, total, "Finalizing configuration")
         write_service_config(state)
 
+        # FASTLY_MOCK_MODE provides mock Fastly/FOS control-plane calls for
+        # browser journeys, but it does not provide a real object-storage
+        # catalog for DuckDB/PyIceberg initialization. Avoid entering that
+        # network-backed path in mock runs so the SSE stream can terminate.
+        if is_mock_mode():
+            yield {"type": "status", "message": "⚠ Skipping Iceberg initialization in mock mode."}
+            yield {"type": "progress", "current": 8, "total": total}
+            yield {"type": "done", "message": "🎉 Provisioning complete!"}
+            return
+
         try:
             from backend.core import duckdb as db
             from backend.core import iceberg as db_iceberg
@@ -879,11 +899,27 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
 
     yield {"type": "progress", "current": 5, "total": total_steps}
     step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
-    if opts.get("remove_cdn") and state.get("cdn_service_id") and state.get("cdn_service_name"):
+    if (
+        opts.get("remove_cdn")
+        and state.get("cdn_service_id")
+        and state.get("cdn_service_name")
+        and state.get("cdn_service_id") != state.get("logging_service_id")
+    ):
         try:
             yield from run_with_events(delete_cdn_service, state["cdn_service_id"], state["cdn_service_name"], token)
         except Exception:
             pass
+    elif opts.get("remove_cdn") and state.get("cdn_service_id") == state.get("logging_service_id"):
+        logger.error(
+            "[provision] refusing to delete CDN service %s because it is the logging service",
+            state.get("cdn_service_id"),
+        )
+        yield {
+            "type": "status",
+            "message": (
+                f"Refusing to delete CDN service {state.get('cdn_service_id')}: it matches the logging service."
+            ),
+        }
 
 
 def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = False):
@@ -968,6 +1004,15 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
     _sync_crontab()
 
 
+def analyst_path_a_supported(source: dict | None = None) -> bool:
+    """Return whether independent FOS-only analyst invites are usable."""
+    from backend import config as svcconfig
+
+    # Celery workers commit through the shared DuckLake catalog. That catalog
+    # is not present in the FOS-only payload consumed by an independent copy.
+    return not svcconfig.is_high_throughput_mode(source)
+
+
 def generate_analyst_invite(service_id: str) -> dict:
     from backend import config as svcconfig
 
@@ -976,6 +1021,12 @@ def generate_analyst_invite(service_id: str) -> dict:
         raise RuntimeError(f"Service {service_id} not found")
     if cfg.get("access_level") != "read_write":
         raise RuntimeError("Invite generation requires a read_write service configuration")
+    if not analyst_path_a_supported(cfg):
+        raise RuntimeError(
+            "Independent analyst invites are unavailable when DEPLOYMENT_MODE=high_throughput: "
+            "the scalable DuckLake catalog is not included in the FOS-only invite. "
+            "Use live shared-instance analyst access (Path B) instead."
+        )
     api_token = cfg.get("fastly_api_key", "").strip()
     # Fail fast when the stored token is missing. Without this, the Fastly
     # API call below would go out with token="" and either time out or

@@ -506,7 +506,7 @@ class track_query:
         elapsed = round((time.time() - self.t0) * 1000, 2)
 
         queries = get_queries()
-        queries.append({"sql": self.query.strip(), "time_ms": elapsed})
+        queries.append({"sql": self.query.strip(), "time_ms": elapsed, "engine": "DuckDB"})
         _QUERIES.set(queries)
 
         # New persistent SQLite recording

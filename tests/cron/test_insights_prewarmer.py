@@ -433,3 +433,55 @@ def test_active_analyst_shapes_caps(monkeypatch, caplog):
 
     assert len(shapes) == insights_prewarmer._MAX_ANALYST_SHAPES
     assert any("warming first" in r.message for r in caplog.records)
+
+
+def test_run_insights_prewarmer_defers_when_active_requests_present(monkeypatch):
+    """When active requests are executing on the dashboard, prewarmer defers to avoid DuckDB contention."""
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: True)
+
+    started_runs = []
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: started_runs.append((s, t)))
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+    assert len(started_runs) == 0
+
+
+def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatch):
+    """Prewarmer initializes progress, emits completion event, and finalizes duration in finally block."""
+    src = {"name": "svc-1", "service_id": "svc-1"}
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: 99)
+    monkeypatch.setattr("backend.config.get_status", lambda name: {})
+    monkeypatch.setattr("backend.utils.insights_defaults.pick_insights_default", lambda h: (1, 168))
+    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda **kwargs: MagicMock())
+    monkeypatch.setattr("backend.repositories.insights.get_insights", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(insights_prewarmer, "_analyst_prewarm_enabled", lambda: False)
+
+    prog_started = []
+    prog_ended = []
+    prog_events = []
+    finalized = []
+
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda: None)
+    monkeypatch.setattr("backend.cron_progress.start_progress", lambda rid, **kw: prog_started.append((rid, kw)))
+    monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: prog_ended.append(rid))
+    monkeypatch.setattr(
+        "backend.cron.jobs.metadata._log_and_add_progress",
+        lambda rid, sid, job_name, event: prog_events.append((rid, sid, job_name, event)),
+    )
+    monkeypatch.setattr(
+        "backend.cron.jobs._common.finalize_cron_duration",
+        lambda s, rid, started: finalized.append((s, rid)),
+    )
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    assert prog_started == [(99, {"service_id": "svc-1", "task": "insights_prewarmer"})]
+    assert prog_ended == [99]
+    assert len(prog_events) == 1
+    assert prog_events[0][3]["type"] == "done"
+    assert finalized == [(src, 99)]

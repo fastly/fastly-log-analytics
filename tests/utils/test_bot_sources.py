@@ -481,8 +481,14 @@ def test_refresh_all_sources_continues_when_one_source_fails():
     ):
         out = bot_sources.refresh_all_sources()
 
-    assert len(out) == 1  # only the good one succeeded
-    assert out[0]["id"] == "good"
+    assert len(out) == 2
+    succeeded = [r for r in out if not r.get("failed")]
+    failed = [r for r in out if r.get("failed")]
+    assert len(succeeded) == 1
+    assert succeeded[0]["id"] == "good"
+    assert len(failed) == 1
+    assert failed[0]["id"] == "bad"
+    assert "Network down" in failed[0]["error"]
 
 
 def test_refresh_all_sources_skips_disabled_sources():

@@ -78,6 +78,14 @@ def query_endpoint(
     # — the repo masks any cell that parses as an IP.
     mask_ips = mask_ips_for(analyst_session)
 
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.query import query_endpoint as hs_query
+
+        return hs_query(high_scale_service, req, start_time, end_time, mask_ips)
+
     # Two-layer retry. The PermissionError → 403 path stays inline (it
     # short-circuits both retry classes — there's no point rebinding the
     # view on a validator rejection).

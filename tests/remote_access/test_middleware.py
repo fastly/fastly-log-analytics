@@ -292,6 +292,32 @@ def test_remote_request_unknown_host_rejected(client):
     assert r.json()["error"] == "host_not_allowed"
 
 
+def test_remote_frontend_configured_host_allowed(client, monkeypatch):
+    """A host configured in a service's remote_frontend block is permitted."""
+    _start_share()
+    fake_config = [
+        {
+            "service_id": "svc_test_rf",
+            "remote_frontend": {
+                "service_id": "fastly_test_123",
+                "domain_name": "fla-test.global.ssl.fastly.net",
+            },
+        }
+    ]
+    monkeypatch.setattr("backend.config.list_configs", lambda: fake_config)
+    r = client.get(
+        "/api/dashboard",
+        headers={
+            "X-Remote-Analyst": "1",
+            "Host": "fla-test.global.ssl.fastly.net",
+        },
+    )
+    # The host check must succeed (not return 400 host_not_allowed).
+    # Since it's an unauthenticated remote request to /api/dashboard, it receives 401 unauthenticated.
+    assert r.status_code == 401
+    assert r.json()["error"] == "unauthenticated"
+
+
 # ── Local pass-through ─────────────────────────────────────────────────────
 
 
@@ -299,6 +325,28 @@ def test_local_admin_can_hit_admin_paths(client):
     """No X-Remote-Analyst header → local-admin → admin endpoints work."""
     r = client.get("/api/admin/share/status")
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/api/admin/clickhouse/status?service_id=svcA"),
+        ("POST", "/api/admin/clickhouse/replay"),
+    ],
+)
+def test_clickhouse_controls_block_authenticated_analyst(client, method, path):
+    from backend.routers.admin import router
+
+    client.app.include_router(router)
+    _start_share()
+    _login_analyst(client, _seed_invite())
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
+    allowed = client.get("/api/dashboard?service_id=svcA", headers=headers)
+    assert allowed.status_code == 200, allowed.text
+    response = client.request(method, path, headers=headers, json={"service_id": "svcA", "dataset_id": "dataset"})
+    assert response.status_code == 403
+    assert response.json()["error"] == "admin_only"
 
 
 def test_local_admin_writes_pass_through(client):

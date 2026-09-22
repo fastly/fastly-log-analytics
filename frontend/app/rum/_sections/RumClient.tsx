@@ -306,10 +306,19 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
 
   // Fetch live ticker
   const { data: liveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId],
+    queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return [];
-      const res = await adminFetch(`/api/services/${serviceId}/rum/live-events`);
+      const params = new URLSearchParams();
+      if (startTime) params.append('start_time', startTime);
+      if (endTime) params.append('end_time', endTime);
+      if (filterPayload) {
+        params.append('filters', JSON.stringify(filterPayload));
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`;
+
+      const res = await adminFetch(url);
       return res.ok ? res.json() : [];
     },
     enabled: !!serviceId && !!status?.enabled,
@@ -361,6 +370,26 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
     );
   }
 
+  if (analytics.beacon_count === 0) {
+    return (
+      <div className="space-y-6">
+        <AnalyticsCard title="Real User Monitoring Dashboard">
+          <div className="space-y-6 text-center py-12">
+            <div>
+              <div className="mx-auto w-16 h-16 bg-muted/20 rounded-full flex items-center justify-center mb-4 border border-border">
+                <Activity className="h-8 w-8 text-muted-foreground/50" />
+              </div>
+              <p className="text-lg font-semibold text-foreground">No data for this time period</p>
+              <p className="text-sm text-muted-foreground mt-2 max-w-sm mx-auto">
+                No real-time beacons were received during the selected time window. Try expanding your time range or check back later.
+              </p>
+            </div>
+          </div>
+        </AnalyticsCard>
+      </div>
+    );
+  }
+
   const lcpColors = getLcpColors(analytics.vitals.lcp.p75);
   const clsColors = getClsColors(analytics.vitals.cls.p75);
   const inpColors = getInpColors(analytics.vitals.inp.p75);
@@ -390,7 +419,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Total Beacons</p>
-            <p className="text-2xl font-extrabold text-blue-500">{analytics.beacon_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-blue-500">{(analytics.beacon_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-blue-500/10 rounded-lg">
             <Activity className="h-5 w-5 text-blue-500" />
@@ -400,7 +429,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Pageviews</p>
-            <p className="text-2xl font-extrabold text-emerald-500">{analytics.pageview_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-emerald-500">{(analytics.pageview_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-emerald-500/10 rounded-lg">
             <Eye className="h-5 w-5 text-emerald-500" />
@@ -410,7 +439,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">Interactions</p>
-            <p className="text-2xl font-extrabold text-amber-500">{analytics.interaction_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-amber-500">{(analytics.interaction_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-amber-500/10 rounded-lg">
             <Cpu className="h-5 w-5 text-amber-500" />
@@ -420,7 +449,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         <div className="bg-background/40 backdrop-blur-md border border-muted/50 rounded-xl p-4 flex items-center justify-between shadow-sm">
           <div className="space-y-1">
             <p className="text-xs text-muted-foreground font-semibold uppercase tracking-wider">JavaScript Errors</p>
-            <p className="text-2xl font-extrabold text-rose-500">{analytics.error_count ?? 0}</p>
+            <p className="text-2xl font-extrabold text-rose-500">{(analytics.error_count ?? 0).toLocaleString()}</p>
           </div>
           <div className="p-2.5 bg-rose-500/10 rounded-lg">
             <ShieldAlert className="h-5 w-5 text-rose-500" />
@@ -459,7 +488,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${clsColors.text}`}>
-              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(3) : '—'}
+              {analytics.vitals.cls.p75 != null ? analytics.vitals.cls.p75.toFixed(2) : '—'}
             </p>
             <p className={`text-xs ${clsColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.cls.distribution)}
@@ -477,7 +506,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
         >
           <div className="space-y-2">
             <p className={`text-3xl font-extrabold ${inpColors.text}`}>
-              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75}ms` : '—'}
+              {analytics.vitals.inp.p75 != null ? `${analytics.vitals.inp.p75.toFixed(2)}ms` : '—'}
             </p>
             <p className={`text-xs ${inpColors.text} font-semibold uppercase tracking-wider`}>75th Percentile</p>
             {renderDistributionBar(analytics.vitals.inp.distribution)}

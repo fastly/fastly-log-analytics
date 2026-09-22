@@ -978,6 +978,22 @@ def test_get_fields_includes_safe_custom_fields_skips_unsafe():
     assert "hidden_cf" not in fields
 
 
+def test_get_fields_excludes_metrics_only_synthetic_fields():
+    """Regression test for a live production incident: METRICS-group
+    catalog entries (requests, hit_rate, p50_latency, ...) have vcl=None —
+    a chart-metric-only concept, never a real per-row column — so including
+    them here means the per-field rollup writer tries to SELECT a column
+    that doesn't exist in the raw/buffer parquet and errors."""
+    from backend.core.rollups._common import _get_fields
+
+    fields = _get_fields({"log_fields": {"custom_fields": []}})
+
+    assert "requests" not in fields
+    assert "hit_rate" not in fields
+    assert "p95_latency" not in fields
+    assert "country" in fields
+
+
 # ── _build_copy_query and _build_copy_ip_query NULL filters ─────────────────
 
 

@@ -7,6 +7,7 @@ const baseParams = {
   compareMode: false,
   compareStartTime: null,
   startTime: null,
+      endTime: null,
   trend: 'off',
   timezone: 'UTC',
   metric: 'requests',
@@ -26,6 +27,22 @@ describe('densifyBarSeries', () => {
     expect(dense).toHaveLength(4)
     expect(dense.map((d) => d.value)).toEqual([5, 0, 0, 8])
     // Synthesized buckets land exactly on the interval grid.
+    expect(dense.map((d) => Date.parse(d.time))).toEqual([
+      Date.parse('2026-06-30T09:00:00Z'),
+      Date.parse('2026-06-30T10:00:00Z'),
+      Date.parse('2026-06-30T11:00:00Z'),
+      Date.parse('2026-06-30T12:00:00Z'),
+    ])
+  })
+
+  it('densifies space-separated naive timestamps (e.g. ClickHouse JSON) correctly', () => {
+    const sparse = [
+      { time: '2026-06-30 09:00:00', value: 5 },
+      { time: '2026-06-30 12:00:00', value: 8 },
+    ]
+    const dense = densifyBarSeries(sparse, 3600, false)
+    expect(dense).toHaveLength(4)
+    expect(dense.map((d) => d.value)).toEqual([5, 0, 0, 8])
     expect(dense.map((d) => Date.parse(d.time))).toEqual([
       Date.parse('2026-06-30T09:00:00Z'),
       Date.parse('2026-06-30T10:00:00Z'),

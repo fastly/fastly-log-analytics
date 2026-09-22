@@ -58,11 +58,9 @@ router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR
 asset_router = APIRouter(tags=["rum-assets"], responses=DEFAULT_ERROR_RESPONSES)
 
 import re
-import uuid
 
 from fastapi import Response
 
-from backend.core.duckdb import get_source_for_service
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 
 _FARO_BUNDLE_CACHE: dict[str, bytes] = {}
@@ -186,244 +184,6 @@ async def get_faro_sdk(request: Request, service_id: str | None = None):
         media_type="application/javascript",
         headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
     )
-
-
-@asset_router.post("/rum-beacon")
-@asset_router.get("/rum-beacon")
-async def receive_rum_beacon(
-    request: Request,
-    service_id: str | None = None,
-    rum_metric_name: str | None = None,
-    rum_metric_value: float | None = None,
-    rum_metric_rating: str | None = None,
-    cid: str | None = None,
-    rum_pathname: str | None = None,
-    rum_error_message: str | None = None,
-    rum_error_file: str | None = None,
-    rum_error_line: int | None = None,
-    rum_error_col: int | None = None,
-):
-    # 1. Resolve service ID
-    sid = service_id
-    if not sid:
-        sid = request.headers.get("x-service-id")
-    if not sid:
-        sid = request.cookies.get("active_service_id")
-
-    if not sid:
-        sid = svcconfig.get_active_service_id(fallback_to_first=True)
-
-    if not sid:
-        return Response(status_code=204)
-
-    # Load service config
-    src = get_source_for_service(sid)
-    if not src:
-        # Fallback to the first configured service if missing
-        fallback_sid = svcconfig.get_active_service_id(fallback_to_first=True)
-        if fallback_sid:
-            sid = fallback_sid
-            src = get_source_for_service(sid)
-
-    if not src:
-        return Response(status_code=204)
-
-    # Get user agent details
-    ua = request.headers.get("user-agent", "")
-    browser, os_name, device = parse_ua_simple(ua)
-
-    # 2. Try to parse JSON body if present
-    body_payload = None
-    if request.method == "POST":
-        try:
-            body_bytes = await request.body()
-            if body_bytes:
-                body_payload = json.loads(body_bytes.decode("utf-8"))
-        except Exception:
-            pass
-
-    from datetime import UTC, datetime
-
-    import pyarrow as pa
-
-    from backend.core import iceberg as db_iceberg
-
-    dt = datetime.now(UTC)
-    filename = f"beacon_{uuid.uuid4().hex[:16]}.parquet"
-
-    # Extract edge connection variables from headers
-    city_val = (
-        request.headers.get("x-geo-city")
-        or request.headers.get("fastly-client-city")
-        or request.headers.get("x-client-city")
-        or request.headers.get("x-city")
-        or ""
-    )
-    region_val = (
-        request.headers.get("x-geo-region")
-        or request.headers.get("x-client-region")
-        or request.headers.get("x-region")
-        or ""
-    )
-    country_val = (
-        request.headers.get("x-geo-country")
-        or request.headers.get("x-client-country")
-        or request.headers.get("x-country")
-        or ""
-    )
-    pop_val = (
-        request.headers.get("fastly-pop") or request.headers.get("x-client-pop") or request.headers.get("x-pop") or ""
-    )
-    tls_val = (
-        request.headers.get("fastly-tls-version")
-        or request.headers.get("x-client-tls")
-        or request.headers.get("x-tls")
-        or ""
-    )
-
-    ttfb_val = None
-    ttfb_header = request.headers.get("x-client-ttfb") or request.headers.get("x-ttfb")
-    if ttfb_header:
-        try:
-            ttfb_val = float(ttfb_header)
-        except Exception:
-            pass
-
-    if body_payload and isinstance(body_payload, dict):
-        # Full Faro JSON payload batch
-        from backend.core.rum_ingest import extract_metrics_from_faro_payload
-
-        log_data = {
-            "browser": browser,
-            "os": os_name,
-            "url": str(request.url),
-            "rum_cid": cid or "",
-        }
-        try:
-            extracted = extract_metrics_from_faro_payload(body_payload, log_data)
-            vitals_rows = []
-            errors_rows = []
-
-            for m in extracted:
-                is_exception = (m.get("metric_name") == "exception") or m.get("error_message")
-                if is_exception:
-                    errors_rows.append(
-                        {
-                            "timestamp": dt,
-                            "error_message": m.get("error_message") or "Unknown error",
-                            "error_file": m.get("error_file") or "unknown.js",
-                            "error_line": int(m.get("error_line") or 0),
-                            "error_col": int(m.get("error_col") or 0),
-                            "pathname": m.get("pathname") or "/",
-                            "browser": browser,
-                            "os": os_name,
-                            "device": device,
-                            "cid": m.get("cid") or cid or "",
-                            "req_id": request.headers.get("x-request-id") or "",
-                            "city": city_val,
-                            "region": region_val,
-                            "country": country_val,
-                            "pop": pop_val,
-                            "tls": tls_val,
-                            "ttfb": ttfb_val,
-                        }
-                    )
-                else:
-                    val = m.get("metric_value")
-                    vitals_rows.append(
-                        {
-                            "timestamp": dt,
-                            "metric_name": m.get("metric_name") or "unknown",
-                            "metric_value": float(val) if val is not None else 0.0,
-                            "metric_rating": m.get("metric_rating") or "",
-                            "pathname": m.get("pathname") or "/",
-                            "browser": browser,
-                            "os": os_name,
-                            "device": device,
-                            "cid": m.get("cid") or cid or "",
-                            "req_id": request.headers.get("x-request-id") or "",
-                            "city": city_val,
-                            "region": region_val,
-                            "country": country_val,
-                            "pop": pop_val,
-                            "tls": tls_val,
-                            "ttfb": ttfb_val,
-                        }
-                    )
-
-            if vitals_rows:
-                from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
-
-                table = pa.Table.from_pylist(vitals_rows, schema=CLIENT_VITALS_ARROW_SCHEMA)
-                db_iceberg.write_to_buffer(src, table, filename, table_name="client_vitals")
-
-            if errors_rows:
-                from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA
-
-                table = pa.Table.from_pylist(errors_rows, schema=CLIENT_ERRORS_ARROW_SCHEMA)
-                db_iceberg.write_to_buffer(src, table, filename, table_name="client_errors")
-        except Exception as e:
-            logger.error(f"Failed to process RUM body payload: {e}")
-
-    else:
-        # Unrolled simple query beacons
-        pathname_val = rum_pathname or "/"
-        cid_val = cid or ""
-        req_id_val = request.headers.get("x-request-id") or ""
-
-        if rum_metric_name:
-            # client_vitals row
-            val = rum_metric_value if rum_metric_value is not None else 0.0
-            row = {
-                "timestamp": dt,
-                "metric_name": rum_metric_name,
-                "metric_value": float(val),
-                "metric_rating": rum_metric_rating or "",
-                "pathname": pathname_val,
-                "browser": browser,
-                "os": os_name,
-                "device": device,
-                "cid": cid_val,
-                "req_id": req_id_val,
-                "city": city_val,
-                "region": region_val,
-                "country": country_val,
-                "pop": pop_val,
-                "tls": tls_val,
-                "ttfb": ttfb_val,
-            }
-            from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
-
-            table = pa.Table.from_pylist([row], schema=CLIENT_VITALS_ARROW_SCHEMA)
-            db_iceberg.write_to_buffer(src, table, filename, table_name="client_vitals")
-
-        elif rum_error_message:
-            # client_errors row
-            row = {
-                "timestamp": dt,
-                "error_message": rum_error_message,
-                "error_file": rum_error_file or "unknown.js",
-                "error_line": int(rum_error_line or 0),
-                "error_col": int(rum_error_col or 0),
-                "pathname": pathname_val,
-                "browser": browser,
-                "os": os_name,
-                "device": device,
-                "cid": cid_val,
-                "req_id": req_id_val,
-                "city": city_val,
-                "region": region_val,
-                "country": country_val,
-                "pop": pop_val,
-                "tls": tls_val,
-                "ttfb": ttfb_val,
-            }
-            from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA
-
-            table = pa.Table.from_pylist([row], schema=CLIENT_ERRORS_ARROW_SCHEMA)
-            db_iceberg.write_to_buffer(src, table, filename, table_name="client_errors")
-
-    return Response(status_code=204)
 
 
 def _get_fastly_token(service_id: str) -> str:
@@ -795,6 +555,14 @@ async def rum_beacon_health(
     """Check if RUM beacons are arriving (validation endpoint for setup).
     Queries DuckDB views using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_beacon_health as hs_rum_health
+
+        return _inject_telemetry(hs_rum_health(high_scale_service))
+
     service_id = ctx.service_id
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
@@ -888,6 +656,15 @@ async def rum_analytics(
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_analytics as hs_rum_analytics
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return _inject_telemetry(hs_rum_analytics(high_scale_service, start_time, end_time))
+
     service_id = ctx.service_id
 
     # 1. Clamp timebounds against analyst session limits
@@ -947,12 +724,390 @@ async def rum_analytics(
         def _get_analytics(con):
             from backend.utils.telemetry import track_query
 
+            use_rollup = False
+            # Check eligibility:
+            # 1. No filters allowed for rollups (same as standard rollups)
+            # 2. RUM aggregates tables must exist and have data
+
+            target_hours = None
+            try:
+                st = parse_iso_utc(start_time)
+                et = parse_iso_utc(end_time)
+                if st and et:
+                    st_hour = st.replace(minute=0, second=0, microsecond=0)
+                    et_hour = et.replace(minute=0, second=0, microsecond=0)
+                    target_hours = []
+                    curr = st_hour
+                    while curr <= et_hour:
+                        target_hours.append(curr)
+                        curr += datetime.timedelta(hours=1)
+            except Exception:
+                pass
+
+            if not parsed_filters:
+                from backend.core.rollups.rum import table_exists
+
+                if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
+                    use_rollup = True
+                    try:
+                        raw_max = None
+                        if table_exists(con, "client_vitals"):
+                            ts_raw_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()[0]
+                            if ts_raw_v:
+                                # handle timezone if needed
+                                raw_max = ts_raw_v.replace(tzinfo=None) if hasattr(ts_raw_v, "replace") else ts_raw_v
+                        if table_exists(con, "client_errors"):
+                            ts_raw_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()[0]
+                            if ts_raw_e:
+                                ts_raw_e_naive = (
+                                    ts_raw_e.replace(tzinfo=None) if hasattr(ts_raw_e, "replace") else ts_raw_e
+                                )
+                                if not raw_max or ts_raw_e_naive > raw_max:
+                                    raw_max = ts_raw_e_naive
+
+                        agg_max = None
+                        ts_agg_v = con.execute("SELECT MAX(bucket_start) FROM rum_vitals_aggregates").fetchone()[0]
+                        if ts_agg_v:
+                            agg_max = ts_agg_v.replace(tzinfo=None) if hasattr(ts_agg_v, "replace") else ts_agg_v
+                        ts_agg_e = con.execute("SELECT MAX(bucket_start) FROM rum_error_aggregates").fetchone()[0]
+                        if ts_agg_e:
+                            ts_agg_e_naive = ts_agg_e.replace(tzinfo=None) if hasattr(ts_agg_e, "replace") else ts_agg_e
+                            if not agg_max or ts_agg_e_naive > agg_max:
+                                agg_max = ts_agg_e_naive
+
+                        if raw_max and (not agg_max or raw_max > agg_max):
+                            logger.info(
+                                "[rum_rollups] %s: RUM aggregates are stale compared to raw views. Forcing on-demand recomputation.",
+                                service_id,
+                            )
+                            use_rollup = False
+                    except Exception as stale_check_err:
+                        logger.warning("[rum_rollups] Failed to check liveness of RUM aggregates: %s", stale_check_err)
+                else:
+                    # Tables don't exist yet! Let's see if raw data exists and trigger creation + recompute
+                    if table_exists(con, "client_vitals") or table_exists(con, "client_errors"):
+                        with track_query(
+                            con,
+                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END",
+                            [],
+                            "rum_any_data_initial",
+                        ) as cur_raw_any_init:
+                            if cur_raw_any_init.fetchone()[0]:
+                                try:
+                                    logger.info(
+                                        "[rum_rollups] %s: RUM aggregates tables do not exist. Triggering initial on-demand creation and recomputation...",
+                                        service_id,
+                                    )
+                                    from backend.core.duckdb import get_connection
+
+                                    with get_connection(rum_source, read_only=False) as write_con:
+                                        from backend.core.rollups.rum import recompute_rum_aggregates
+
+                                        recompute_rum_aggregates(write_con, service_id)
+                                    use_rollup = True
+                                except Exception as init_err:
+                                    logger.warning(
+                                        "[rum_rollups] %s: Initial on-demand RUM aggregates recomputation failed: %s",
+                                        service_id,
+                                        init_err,
+                                    )
+
+            if use_rollup:
+                # Run optimized rollup-based query
+                logger.info("[rum_rollups] %s: Querying from precomputed RUM aggregates...", service_id)
+
+                # Check if we have any data
+                with track_query(
+                    con,
+                    "SELECT COUNT(*) FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)",
+                    [service_id, start_time, end_time],
+                    "rum_rollup_any_data",
+                ) as cur_any:
+                    if cur_any.fetchone()[0] == 0:
+                        # Double check if any raw data exists at all
+                        if not table_exists(con, "client_vitals") or not table_exists(con, "client_errors"):
+                            return {"no_data": True}
+                        with track_query(
+                            con,
+                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END",
+                            [],
+                            "rum_any_data",
+                        ) as cur_raw_any:
+                            if not cur_raw_any.fetchone()[0]:
+                                return {"no_data": True}
+
+                            # On-demand RUM aggregates recomputation!
+                            try:
+                                logger.info(
+                                    "[rum_rollups] %s: No rollup data in range but raw exists. Triggering on-demand RUM aggregates recomputation...",
+                                    service_id,
+                                )
+                                from backend.core.duckdb import get_connection
+
+                                # Open a temporary read-write connection to the RUM source
+                                with get_connection(rum_source, read_only=False) as write_con:
+                                    from backend.core.rollups.rum import recompute_rum_aggregates
+
+                                    recompute_rum_aggregates(write_con, service_id, hours=target_hours)
+
+                                # If successful, we can re-verify if we now have rollup data!
+                                with track_query(
+                                    con,
+                                    "SELECT COUNT(*) FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)",
+                                    [service_id, start_time, end_time],
+                                    "rum_rollup_any_data_retry",
+                                ) as cur_any_retry:
+                                    if cur_any_retry.fetchone()[0] > 0:
+                                        logger.info(
+                                            "[rum_rollups] %s: On-demand RUM aggregates successfully populated. Querying from rollups!",
+                                            service_id,
+                                        )
+                                        use_rollup = True
+                                    else:
+                                        logger.warning(
+                                            "[rum_rollups] %s: On-demand RUM aggregates populated but range is still empty. Falling back to raw query.",
+                                            service_id,
+                                        )
+                                        use_rollup = False
+                            except Exception as on_demand_err:
+                                logger.warning(
+                                    "[rum_rollups] %s: On-demand RUM aggregates recomputation failed: %s. Falling back to raw query.",
+                                    service_id,
+                                    on_demand_err,
+                                )
+                                use_rollup = False
+
+            if use_rollup:
+                # 1. Pageviews, interactions, errors, total beacons
+                with track_query(
+                    con,
+                    """
+                    SELECT
+                        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'pageviews'), 0) AS pageviews,
+                        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'interactions'), 0) AS interactions
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_vitals",
+                ) as cur_v:
+                    pageviews, interactions = cur_v.fetchone()
+                    pageviews = pageviews or 0
+                    interactions = interactions or 0
+
+                with track_query(
+                    con,
+                    """
+                    SELECT
+                        COALESCE(SUM(error_count) FILTER (WHERE dimension = 'total' AND value = 'errors'), 0) AS errors_count
+                    FROM rum_error_aggregates
+                    WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_errors",
+                ) as cur_e:
+                    errors_count = cur_e.fetchone()[0] or 0
+
+                total_beacons = pageviews + interactions + errors_count
+
+                # 2. Vitals summary
+                with track_query(
+                    con,
+                    """
+                    SELECT
+                        value AS metric_name,
+                        CASE WHEN SUM(event_count) > 0 THEN SUM(p75_value * event_count) / SUM(event_count) ELSE 0.0 END AS p75,
+                        SUM(event_count) AS total_count,
+                        SUM(good_count) AS good_count,
+                        SUM(ni_count) AS ni_count,
+                        SUM(poor_count) AS poor_count
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND dimension = 'metric_name' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    GROUP BY value
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_vitals_summary",
+                ) as cur_vitals:
+                    vitals_rows = cur_vitals.fetchall()
+
+                # 3. Environments
+                browsers = {}
+                os_dict = {}
+                devices = {}
+
+                with track_query(
+                    con,
+                    """
+                    SELECT value, SUM(event_count) AS count
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND dimension = 'browser' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    GROUP BY value
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_browsers",
+                ) as cur_b:
+                    for val, count in cur_b.fetchall():
+                        browsers[val] = count
+
+                with track_query(
+                    con,
+                    """
+                    SELECT value, SUM(event_count) AS count
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND dimension = 'os' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    GROUP BY value
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_os",
+                ) as cur_o:
+                    for val, count in cur_o.fetchall():
+                        os_dict[val] = count
+
+                with track_query(
+                    con,
+                    """
+                    SELECT value, SUM(event_count) AS count
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND dimension = 'device' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    GROUP BY value
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_devices",
+                ) as cur_d:
+                    for val, count in cur_d.fetchall():
+                        devices[val] = count
+
+                # 4. Worst Pages
+                with track_query(
+                    con,
+                    """
+                    WITH page_metrics AS (
+                        SELECT
+                            value AS path,
+                            COALESCE(SUM(event_count) FILTER (WHERE dimension = 'pathname'), 0) AS views,
+                            CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_load') > 0 THEN SUM(value_sum) FILTER (WHERE dimension = 'path_metric_load') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_load') ELSE 0.0 END AS avg_load_time,
+                            CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_lcp') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'path_metric_lcp') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_lcp') ELSE 0.0 END AS lcp,
+                            CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'path_metric_cls') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'path_metric_cls') / SUM(event_count) FILTER (WHERE dimension = 'path_metric_cls') ELSE 0.0 END AS cls
+                        FROM rum_vitals_aggregates
+                        WHERE service_id = ?
+                          AND dimension IN ('pathname', 'path_metric_load', 'path_metric_lcp', 'path_metric_cls')
+                          AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                        GROUP BY value
+                    ),
+                    page_errors AS (
+                        SELECT
+                            value AS path,
+                            SUM(error_count) AS error_count
+                        FROM rum_error_aggregates
+                        WHERE service_id = ? AND dimension = 'pathname' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                        GROUP BY value
+                    )
+                    SELECT
+                        m.path,
+                        m.views,
+                        m.avg_load_time,
+                        m.lcp,
+                        m.cls,
+                        COALESCE(e.error_count, 0) * 100.0 / NULLIF(m.views, 0) AS error_rate
+                    FROM page_metrics m
+                    LEFT JOIN page_errors e ON m.path = e.path
+                    ORDER BY error_rate DESC, m.avg_load_time DESC
+                    LIMIT 5
+                    """,
+                    [service_id, start_time, end_time, service_id, start_time, end_time],
+                    "rum_rollup_worst_pages",
+                ) as cur_pages:
+                    worst_pages_rows = cur_pages.fetchall()
+
+                # 5. Top Exceptions
+                errors_rows = []
+                with track_query(
+                    con,
+                    """
+                    SELECT
+                        value AS serialized,
+                        SUM(error_count) AS count
+                    FROM rum_error_aggregates
+                    WHERE service_id = ? AND dimension = 'exception' AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    GROUP BY value
+                    ORDER BY count DESC
+                    LIMIT 3
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_top_exceptions",
+                ) as cur_errors:
+                    for row in cur_errors.fetchall():
+                        serialized, count = row
+                        parts = serialized.split("|")
+                        if len(parts) >= 4:
+                            msg, file, line, col = parts[0], parts[1], int(parts[2] or 0), int(parts[3] or 0)
+                            errors_rows.append((msg, file, line, col, count))
+                        else:
+                            errors_rows.append((serialized, "Unknown", 0, 0, count))
+
+                # 6. Trends Rows
+                with track_query(
+                    con,
+                    """
+                    WITH hourly_vitals AS (
+                        SELECT
+                            bucket_start AS hour,
+                            CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') / SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'LCP') ELSE 0.0 END AS lcp,
+                            CASE WHEN SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') > 0 THEN SUM(p75_value * event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') / SUM(event_count) FILTER (WHERE dimension = 'metric_name' AND value = 'CLS') ELSE 0.0 END AS cls,
+                            SUM(event_count) FILTER (WHERE dimension = 'pathname') AS views,
+                            COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'pageviews'), 0) AS pageviews,
+                            COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'interactions'), 0) AS interactions
+                        FROM rum_vitals_aggregates
+                        WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                        GROUP BY hour
+                    ),
+                    hourly_errors AS (
+                        SELECT
+                            bucket_start AS hour,
+                            SUM(error_count) FILTER (WHERE dimension = 'total' AND value = 'errors') AS errors
+                        FROM rum_error_aggregates
+                        WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                        GROUP BY hour
+                    )
+                    SELECT
+                        COALESCE(v.hour, e.hour) AS hour_ts,
+                        v.lcp,
+                        v.cls,
+                        COALESCE(v.pageviews, 0) AS pageviews,
+                        COALESCE(v.interactions, 0) AS interactions,
+                        COALESCE(e.errors, 0) AS errors,
+                        COALESCE(e.errors, 0) * 100.0 / NULLIF(COALESCE(v.views, 0) + COALESCE(e.errors, 0), 0) AS error_rate
+                    FROM hourly_vitals v
+                    FULL OUTER JOIN hourly_errors e ON v.hour = e.hour
+                    ORDER BY hour_ts DESC
+                    """,
+                    [service_id, start_time, end_time, service_id, start_time, end_time],
+                    "rum_rollup_trends",
+                ) as cur_trends:
+                    trends_rows = cur_trends.fetchall()
+
+                return {
+                    "no_data": False,
+                    "total_beacons": total_beacons,
+                    "pageviews": pageviews,
+                    "interactions": interactions,
+                    "errors_count": errors_count,
+                    "vitals_rows": vitals_rows,
+                    "browsers": browsers,
+                    "os": os_dict,
+                    "devices": devices,
+                    "worst_pages_rows": worst_pages_rows,
+                    "errors_rows": errors_rows,
+                    "trends_rows": trends_rows,
+                    "_approx": True,
+                }
+
             distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
 
             # Create transient temporary tables pre-filtered for our bounds/filters to cut repeated parquet scans
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_vitals AS SELECT * FROM client_vitals WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_vitals AS SELECT timestamp, req_id, cid, metric_name, metric_value, metric_rating, browser, os, device, pathname FROM client_vitals WHERE {where_sql}",
                 params,
                 "rum_temp_vitals_create",
             ):
@@ -960,7 +1115,7 @@ async def rum_analytics(
 
             with track_query(
                 con,
-                f"CREATE TEMP TABLE t_client_errors AS SELECT * FROM client_errors WHERE {where_sql}",
+                f"CREATE TEMP TABLE t_client_errors AS SELECT timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col FROM client_errors WHERE {where_sql}",
                 params,
                 "rum_temp_errors_create",
             ):
@@ -974,8 +1129,7 @@ async def rum_analytics(
                     SELECT
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name NOT LIKE 'event_%' THEN distinct_id END) AS pageviews,
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name LIKE 'event_%' THEN distinct_id END) AS interactions,
-                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count,
-                        COUNT(DISTINCT distinct_id) AS total_beacons
+                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count
                     FROM (
                         SELECT 'vitals' AS src, metric_name, {distinct_id} AS distinct_id
                         FROM t_client_vitals
@@ -987,11 +1141,11 @@ async def rum_analytics(
                     [],
                     "rum_consolidated_counts",
                 ) as cur_counts:
-                    pageviews, interactions, errors_count, total_beacons = cur_counts.fetchone()
+                    pageviews, interactions, errors_count = cur_counts.fetchone()
                     pageviews = pageviews or 0
                     interactions = interactions or 0
                     errors_count = errors_count or 0
-                    total_beacons = total_beacons or 0
+                    total_beacons = pageviews + interactions + errors_count
 
                 # A. Check if any data exists at all (Deferred check ONLY if no matches in selected bounds)
                 if total_beacons == 0:
@@ -1392,12 +1546,51 @@ async def rum_analytics(
 
 @router.get("/{service_id}/rum/live-events")
 async def rum_live_events(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    filters: str | None = None,
     ctx: RequestContext = Depends(build_request_context),
 ) -> list[dict[str, Any]]:
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.rum import rum_live_events as hs_rum_live
+
+        start_time, end_time = ctx.clamp(start_time, end_time)
+        return hs_rum_live(high_scale_service, start_time, end_time, 50)
+
     service_id = ctx.service_id
+
+    # 1. Clamp timebounds against analyst session limits
+    start_time, end_time = ctx.clamp(start_time, end_time)
+
+    # 2. Establish fallback ranges
+    if not start_time and not end_time:
+        from backend.utils.date_utils import iso_z
+
+        end_dt = datetime.datetime.now(datetime.UTC)
+        start_dt = end_dt - datetime.timedelta(hours=24)
+        start_time = iso_z(start_dt)
+        end_time = iso_z(end_dt)
+
+    # Parse JSON filters
+    parsed_filters = {}
+    if filters:
+        import json
+
+        try:
+            parsed_filters = json.loads(filters)
+        except Exception:
+            pass
+
+    from backend.repositories.utils.filters import build_where_clause
+
+    params, where_sql = build_where_clause(start_time, end_time, parsed_filters)
+
     rum_source = rum_source_for(ctx.source)
 
     try:
@@ -1405,7 +1598,7 @@ async def rum_live_events(
         def _get_live_events(con):
             from backend.utils.telemetry import track_query
 
-            query_str = """
+            query_str = f"""
             WITH vitals_base AS (
                 SELECT
                     'pageview' AS type,
@@ -1427,6 +1620,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_vitals
+                WHERE {where_sql}
             ),
             errors_base AS (
                 SELECT
@@ -1449,6 +1643,7 @@ async def rum_live_events(
                     tls,
                     ttfb
                 FROM client_errors
+                WHERE {where_sql}
             ),
             combined AS (
                 SELECT * FROM vitals_base
@@ -1476,10 +1671,10 @@ async def rum_live_events(
                 ttfb
             FROM combined
             ORDER BY timestamp DESC
-            LIMIT 10
+            LIMIT 50
             """
 
-            with track_query(con, query_str, [], "rum_live_events") as cur:
+            with track_query(con, query_str, params * 2, "rum_live_events") as cur:
                 return cur.fetchall()
 
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
@@ -1529,7 +1724,7 @@ async def rum_live_events(
                 import hashlib
 
                 key = cid or req_id or path or "default"
-                idx = int(hashlib.md5(key.encode()).hexdigest(), 16) % len(fallback_profiles)
+                idx = int(hashlib.md5(key.encode(), usedforsecurity=False).hexdigest(), 16) % len(fallback_profiles)
                 prof = fallback_profiles[idx]
                 city = city or prof["city"]
                 region = region or prof["region"]

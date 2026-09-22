@@ -44,6 +44,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
   const [dataRetention, setDataRetention] = useState('30')
   const [rumRetention, setRumRetention] = useState('90')
   const [cacheRetention, setCacheRetention] = useState('90')
+  const [rollupRetention, setRollupRetention] = useState('12')
 
   const [compactEnabled, setCompactEnabled] = useState(false)
   const [compactLogEnabled, setCompactLogEnabled] = useState(true)
@@ -70,6 +71,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       setDataRetention(String(service.cron_sync?.data_retention_days ?? 30))
       setRumRetention(String(service.cron_sync?.rum_retention_days ?? 30))
       setCacheRetention(String(service.cron_sync?.cache_retention_days ?? 90))
+      setRollupRetention(String(service.cron_sync?.rollup_retention_months ?? 12))
 
       setCompactEnabled(service.cron_compact?.enabled ?? false)
       setCompactLogEnabled(service.cron_compact?.log_enabled !== false)
@@ -95,7 +97,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
         cron_sync: {
           enabled: syncEnabled,
           interval_mins: intervalMins,
-          cache_retention_days: parseInt(cacheRetention)
+          cache_retention_days: parseInt(cacheRetention),
+        rollup_retention_months: parseInt(rollupRetention)
         },
       })
       return
@@ -110,7 +113,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
         log_retention_days: parseInt(syncRetention),
         data_retention_days: parseInt(dataRetention),
         rum_retention_days: parseInt(rumRetention),
-        cache_retention_days: parseInt(cacheRetention)
+        cache_retention_days: parseInt(cacheRetention),
+        rollup_retention_months: parseInt(rollupRetention)
       },
       cron_compact: {
         enabled: compactEnabled,
@@ -196,6 +200,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
                 setDataRetention={setDataRetention}
                 cacheRetention={cacheRetention}
                 setCacheRetention={setCacheRetention}
+                rollupRetention={rollupRetention}
+                setRollupRetention={setRollupRetention}
                 commitInterval={commitInterval}
                 setCommitInterval={setCommitInterval}
                 syncLogEnabled={syncLogEnabled}

@@ -16,6 +16,9 @@ import os
 import shutil
 from datetime import UTC, datetime, timedelta
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
     IP_SAMPLE_CAP,
@@ -400,11 +403,31 @@ def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = N
     _save_markers(source, markers)
 
 
+def _bundle_metadata(path: str) -> pq.FileMetaData | None:
+    """Return readable metadata for a valid all-fields bundle."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        metadata = pq.read_metadata(path)
+    except (OSError, ValueError, pa.ArrowException):
+        return None
+    if not {"field", "value", "count"}.issubset(metadata.schema.names):
+        return None
+    return metadata
+
+
+def _bundle_has_rows(path: str) -> bool:
+    """Return whether an all-fields bundle is a non-empty data bundle."""
+    metadata = _bundle_metadata(path)
+    return metadata is not None and metadata.num_rows > 0
+
+
 def backfill_missing_hour_bundles(
     service_id: str,
     source: dict,
     lookback_days: int = 30,
-) -> dict[str, int]:
+    max_missing_hours: int | None = None,
+) -> dict[str, int | bool]:
     """Self-heal pass: find closed hours where the iceberg view has rows
     but no ``hour_bundled/`` file exists, then rebuild per-field rollups
     + bundle for those hours.
@@ -422,6 +445,12 @@ def backfill_missing_hour_bundles(
     and runs the rebuild via the same code path the cron tick uses. Safe
     to call on every daily compaction tick — idempotent (no-op when the
     bundle tree is complete).
+
+    ``max_missing_hours`` bounds the number of non-empty hours rebuilt in one
+    pass. This lets scheduled durable-serving catch-up make incremental
+    progress without allowing one large DuckDB operation to evict the serving
+    pod. Coverage remains unverified until a later pass confirms the complete
+    lookback.
 
     Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
     "bundled": B, "stamped_empty": E}`` so callers can log a concise
@@ -441,7 +470,9 @@ def backfill_missing_hour_bundles(
         try:
             for e in os.listdir(bundled_root):
                 if e.startswith("hour="):
-                    existing.add(e[len("hour=") :])
+                    hour = e[len("hour=") :]
+                    if _bundle_has_rows(os.path.join(bundled_root, e, "all_fields.parquet")):
+                        existing.add(hour)
         except OSError:
             pass
 
@@ -449,28 +480,54 @@ def backfill_missing_hour_bundles(
     end_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     start_dt = end_dt - timedelta(days=lookback_days)
 
+    def _coverage_complete() -> bool:
+        cur = start_dt
+        while cur < end_dt:
+            hour = cur.strftime("%Y-%m-%d-%H")
+            cur += timedelta(hours=1)
+            if hour >= active:
+                break
+            if _bundle_metadata(os.path.join(bundled_root, f"hour={hour}", "all_fields.parquet")) is None:
+                return False
+        return True
+
     # Discover hours with data via the iceberg view. We use the view (not
     # the per-service .duckdb file directly) so this runs concurrently
     # with uvicorn's RW connection on that file — backed by a fresh
     # in-memory DuckDB connection that holds no persistent state.
     con = _ddb.connect(":memory:")
+    con.execute("SET TimeZone='UTC'")
     from backend.core.duckdb import _configure_fos
 
     _configure_fos(con, source)
     try:
         update_iceberg_view(con, source)
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(source):
+            lake_row = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
+            if lake_row is None:
+                logger.warning(
+                    "[rollups] %s: backfill_missing_hour_bundles could not attach DuckLake catalog",
+                    service_id,
+                )
+                return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         # The view's actual SQL identifier is set by update_iceberg_view
         # — query through ``information_schema`` to find it rather than
         # guess (the name is derived from source["name"]/svc_name, not
         # source["service_id"]).
+        from backend.core.duckdb import _safe_table_name
+
+        view_name = _safe_table_name(source.get("name") or service_id)
         view_row = con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'logs_%' LIMIT 1"
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+            [view_name],
         ).fetchone()
         if view_row is None:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         view_name = view_row[0]
         if not _is_safe_ident(view_name):
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         try:
             rows = con.execute(
                 f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS h, COUNT(*) AS n "
@@ -480,9 +537,13 @@ def backfill_missing_hour_bundles(
             ).fetchall()
         except _ddb.Error as e:
             logger.warning("[rollups] %s: backfill_missing_hour_bundles view query failed: %s", service_id, e)
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
 
         missing = sorted(h for h, _ in rows if h < active and h not in existing)
+        if max_missing_hours is not None:
+            if max_missing_hours < 1:
+                raise ValueError("max_missing_hours must be positive")
+            missing = missing[:max_missing_hours]
 
         # Closed hours with genuinely ZERO rows can never acquire coverage
         # through the data-driven writers (the HAVING n > 0 above never
@@ -500,8 +561,13 @@ def backfill_missing_hour_bundles(
             empty_hours.append(h)
 
         if not missing and not empty_hours:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
-
+            return {
+                "missing": 0,
+                "rebuilt_fields": 0,
+                "bundled": 0,
+                "stamped_empty": 0,
+                "coverage_verified": _coverage_complete(),
+            }
         if missing:
             logger.info(
                 "[rollups] %s: backfill_missing_hour_bundles found %d hour(s) missing bundles: %s",
@@ -521,7 +587,13 @@ def backfill_missing_hour_bundles(
 
     stamped = stamp_empty_hour_sentinels(service_id, source, empty_hours)
     if not missing:
-        return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": stamped}
+        return {
+            "missing": 0,
+            "rebuilt_fields": 0,
+            "bundled": 0,
+            "stamped_empty": stamped,
+            "coverage_verified": _coverage_complete(),
+        }
 
     recompute_touched_hours(service_id, source, set(missing))
 
@@ -536,7 +608,7 @@ def backfill_missing_hour_bundles(
         try:
             for entry in os.listdir(bundled_root):
                 if entry.startswith("hour=") and entry[len("hour=") :] in missing_set:
-                    if os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet")):
+                    if _bundle_metadata(os.path.join(bundled_root, entry, "all_fields.parquet")) is not None:
                         bundled_now += 1
         except OSError:
             pass
@@ -546,6 +618,7 @@ def backfill_missing_hour_bundles(
         "rebuilt_fields": len(_get_fields(source)),
         "bundled": bundled_now,
         "stamped_empty": stamped,
+        "coverage_verified": _coverage_complete(),
     }
 
 

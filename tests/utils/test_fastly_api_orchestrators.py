@@ -473,7 +473,7 @@ def _run_update_logging_endpoint(cfg_in, stored_cfg):
 
 
 def test_update_logging_endpoint_preserves_custom_fields_when_incoming_omits_them():
-    """REGRESSION: 2026-08-12 SE-demo incident — the root cause. This
+    """REGRESSION: 2026-08-12 production incident — the root cause. This
     orchestrator assigned ``cfg["log_fields"]`` WHOLESALE over the stored
     config with no merge guard (unlike its cli.py and log-fields-set
     siblings). Callers build ``log_fields`` from groups alone, so the assign
@@ -526,7 +526,7 @@ def test_update_logging_endpoint_reasserts_cmcd_without_a_state_transition():
     stored = {
         "logging_enabled": True,
         "cmcd": {"enabled": True, "mode": "query_string", "version": 1},
-        # Already-stripped config — the broken state the SE-demo service was in.
+        # Already-stripped config — the broken state the affected service was in.
         "log_fields": {"schema_version": 2, "groups": ["A", "B"], "field_overrides": {}},
     }
 

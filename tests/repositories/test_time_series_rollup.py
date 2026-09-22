@@ -56,6 +56,33 @@ def _write_per_field_marker(per_field_root: Path, field: str, hour_str: str) -> 
     (per_field_root / f"field={field}" / f"hour={hour_str}").mkdir(parents=True, exist_ok=True)
 
 
+def _write_empty_all_fields_sentinel(bundled_root: Path, hour_str: str) -> None:
+    """Create the verified-empty bundle written for a zero-traffic hour."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hour_dir = bundled_root / f"hour={hour_str}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
+    pq.write_table(pa.table({"field": [], "value": [], "count": []}, schema=schema), hour_dir / "all_fields.parquet")
+
+
+def _write_nonempty_all_fields_bundle(bundled_root: Path, hour_str: str) -> None:
+    """Create a normal non-empty all-fields bundle without time-series data."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hour_dir = bundled_root / f"hour={hour_str}"
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {"field": ["country"], "value": ["US"], "count": [1]},
+            schema=pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())]),
+        ),
+        hour_dir / "all_fields.parquet",
+    )
+
+
 @pytest.fixture
 def rollup_layout(tmp_path):
     """Build a fake rollup layout under tmp_path and return the bundled root."""
@@ -295,3 +322,462 @@ class TestActiveHourDirectLiveSlice:
         )
 
         assert rows is None, "filtered window must not serve the live slice via the direct read"
+
+
+class TestPartialHourMergeIntoRollupReaders:
+    """The partial-hour speed layer (Task 7's ``_partial_hour_adjusted_live_start``)
+    must be wired into BOTH the time_series and count readers' live branches:
+    narrowing ``live_start`` to the partial rollup's watermark (so the direct
+    live read never re-scans rows the partial rollup already folded in) AND
+    summing the partial rollup's rows into the response.
+
+    Each test is built so it fails if EITHER half of the wiring is missing:
+    dropping the narrowing double-counts the watermark-covered buffer row,
+    dropping the partial-rows merge undercounts by that same row — neither
+    produces the expected total.
+    """
+
+    def _merge_partial_hour_via_writer(
+        self,
+        cache_dir: str,
+        active_start: datetime,
+        *,
+        watermark_instant: datetime,
+        service_id: str = "svc-a",
+        fields: tuple[str, ...] = ("country", "method"),
+    ) -> None:
+        """Feed ONE real request (with TWO populated fields) through the
+        actual merge_partial_hour writer so the partial rollup these tests
+        exercise is built the same way the cron job builds it in prod (real
+        per-field rows + a genuine ``__total__`` row) — not a
+        hand-fabricated ``('requests', '', count)`` row a real writer never
+        produces.
+
+        Deliberately populates MORE THAN ONE field for this single request:
+        the C1 bug (final whole-branch review) is summing partial_rows
+        across every field, which is invisible with only one field merged
+        (1 row summed == 1 row read from __total__ either way) and only
+        shows up once more than one field is populated (pre-fix, this
+        single request would be counted twice — once per field).
+
+        Writes the fixture row into the hourly-partition directory (like
+        ``merge_partial_hour``'s own real inputs) with an event timestamp of
+        exactly ``active_start`` (always safely before ``watermark_instant``
+        for any watermark after the hour begins) and pins the file's mtime
+        to ``watermark_instant`` via ``os.utime`` so the writer's own
+        watermark computation (``max(mtime of new_files)``) is deterministic
+        for the test — mirroring how a real file's mtime is just a
+        filesystem timestamp, independent of the row content the C1 fix
+        cares about getting right.
+        """
+        import os
+
+        from backend.core.rollups import partial_hour as ph
+
+        hour = active_start.strftime("%Y-%m-%d-%H")
+        hourly_dir = Path(cache_dir) / "data" / f"timestamp_hour={hour}"
+        hourly_dir.mkdir(parents=True, exist_ok=True)
+        out_path = hourly_dir / "batch1.parquet"
+        cols_sql = ", ".join(f"{f} VARCHAR" for f in fields)
+        placeholders = ", ".join("?" for _ in fields)
+        con = duckdb.connect(":memory:")
+        try:
+            con.execute("SET TimeZone='UTC';")
+            con.execute(f"CREATE TABLE t (timestamp TIMESTAMP, {cols_sql})")
+            con.execute(
+                f"INSERT INTO t VALUES (?, {placeholders})",
+                [active_start, *[f"{f}-value" for f in fields]],
+            )
+            con.execute(f"COPY t TO '{out_path}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        ts = watermark_instant.timestamp()
+        os.utime(out_path, (ts, ts))
+
+        stats = ph.merge_partial_hour(service_id, {"_cache_dir_override": cache_dir}, list(fields))
+        assert stats["new_files"] == 1
+
+    def _write_buffer_rows(self, cache_dir: str, *timestamps: datetime) -> None:
+        """Write buffer rows and pin the file's mtime to the LATEST of the
+        given timestamps (never the real wall-clock "now").
+
+        _create_active_hour_temp_direct prunes buffer files by mtime (a
+        file finalized before `live_start - skew margin` cannot hold rows
+        >= live_start — see backend/repositories/_base.py). Using the real
+        wall-clock mtime made this test's pass/fail depend on what minute
+        of the real hour it happened to run in: if the suite ran within the
+        first few minutes of an hour, the file's real mtime could fall
+        BELOW the margin floor and get pruned entirely, silently dropping
+        the "not yet merged" row and undercounting — a genuine, observed
+        flake (601 instead of 602), not a hypothetical one. Pinning the
+        mtime to the row's own timestamp makes the fixture deterministic
+        regardless of wall-clock timing.
+        """
+        import os
+
+        buffer_dir = Path(cache_dir) / "buffer"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        values_sql = ", ".join(f"(TIMESTAMPTZ '{ts.isoformat()}')" for ts in timestamps)
+        out_path = buffer_dir / "live.parquet"
+        con = duckdb.connect()
+        try:
+            con.execute(f"COPY (SELECT * FROM (VALUES {values_sql}) AS t(timestamp)) TO '{out_path}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        mtime = max(ts.timestamp() for ts in timestamps)
+        os.utime(out_path, (mtime, mtime))
+
+    def test_time_series_merges_partial_hour_without_double_counting(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+
+        # One closed hour before the active hour.
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        # The real writer folds in one row at active_start (always before
+        # the watermark below) — this is the "already merged" row. A
+        # second, separate buffer row lands AFTER the watermark and must be
+        # picked up by the narrowed live scan instead.
+        watermark_instant = active_start + timedelta(minutes=10)
+        not_yet_merged_row = active_start + timedelta(minutes=20)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
+        self._write_buffer_rows(cache_dir, not_yet_merged_row)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert rows is not None, "reader fell back to raw — partial-hour wiring likely broke the live SQL"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        # Expected: 600 (closed hour) + 1 (partial rollup's already-merged
+        # row) + 1 (live direct read's not-yet-merged row) = 602.
+        # If narrowing were dropped: the live direct read would ALSO count
+        # the already-merged row (its business timestamp is still >=
+        # active_start), giving 603 (double count).
+        # If the partial-rows merge were dropped: the already-merged row
+        # would never surface at all (the narrowed live scan explicitly
+        # excludes it), giving 601 (undercount).
+        assert by_time[active_start] == 2, f"active-hour bucket should sum to 2 (1 partial + 1 live), got {by_time}"
+        assert sum(by_time.values()) == 602, f"expected 602 total, got {sum(by_time.values())} ({by_time})"
+
+    def test_count_merges_partial_hour_without_double_counting(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        watermark_instant = active_start + timedelta(minutes=10)
+        not_yet_merged_row = active_start + timedelta(minutes=20)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
+        self._write_buffer_rows(cache_dir, not_yet_merged_row)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert total is not None, "reader fell back to raw — partial-hour wiring likely broke the live SQL"
+        assert total == 602, f"expected 602 (600 closed + 1 partial + 1 live), got {total}"
+
+    def test_non_requests_metric_keeps_full_live_scan_when_partial_hour_exists(self, rollup_layout):
+        """REGRESSION (Task 8 review round 1): only "requests" has a
+        compensating partial-rollup merge. Before this fix, live_start was
+        narrowed for EVERY chart_metric whenever a partial-hour rollup
+        watermark existed — for "5xx"/"4xx"/"hit_rate" (no compensating
+        merge), that silently dropped the
+        [original_live_start, watermark) range from BOTH the rollup branch
+        (still-open hour, not covered) and the narrowed live branch
+        (skipped) — real data loss, not just "no active-hour boost".
+
+        This pins that a non-"requests" metric's live branch keeps scanning
+        the FULL original live range regardless of whether a partial-hour
+        rollup happens to exist for the active hour.
+        """
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+
+        closed_hs = (active_start - timedelta(hours=1)).strftime("%Y-%m-%d-%H")
+        _write_bundle(bundled, closed_hs, total_requests=600)
+        _write_per_field_marker(per_field, "requests", closed_hs)
+
+        # A partial-hour rollup watermark exists for the active hour (the
+        # steady-state case) — this alone must NOT narrow live_start for a
+        # metric with no compensating merge.
+        watermark_instant = active_start + timedelta(minutes=10)
+        self._merge_partial_hour_via_writer(cache_dir, active_start, watermark_instant=watermark_instant)
+
+        before_watermark_row = active_start + timedelta(minutes=5)  # status 500 -> counts as 5xx
+        after_watermark_row = active_start + timedelta(minutes=20)  # status 200 -> does not
+
+        con = duckdb.connect()
+        table_name = "live_5xx_regression_table"
+        con.execute(
+            f"CREATE TABLE {table_name} AS SELECT * FROM (VALUES "
+            f"(TIMESTAMPTZ '{before_watermark_row.isoformat()}', 500), "
+            f"(TIMESTAMPTZ '{after_watermark_row.isoformat()}', 200)) "
+            f"AS t(timestamp, status)"
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="5xx",
+            interval="1 hour",
+            start_time=(active_start - timedelta(hours=1)).isoformat(),
+            end_time=(active_start + timedelta(minutes=30)).isoformat(),
+            table_name=table_name,
+            where_clause="1=1",
+            params=[],
+        )
+
+        assert rows is not None, "reader fell back to raw unexpectedly"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        # 1 of 2 active-hour rows is 5xx -> 50.0%. Pre-fix (unconditional
+        # narrowing), the before_watermark_row would have been silently
+        # excluded from the live scan with nothing compensating for it,
+        # yielding 0.0 instead of 50.0.
+        assert by_time[active_start] == 50.0, (
+            f"expected 50.0 (1 of 2 active-hour rows is 5xx) — a value of 0.0 means the "
+            f"before-watermark 5xx row was dropped by an unconditional narrowing, got {by_time}"
+        )
+
+
+class TestMissingHourLiveHealInTimeSeriesAndCountReaders:
+    """REGRESSION (2026-09-09, verified live): unlike ``execute_top_n_rollups``
+    (which live-heals a CLOSED hour with no rollup bundle), the time_series
+    and count readers silently SKIP such an hour via
+    ``collect_hourly_bundle_paths`` — contributing zero for it instead of
+    live-healing. On a real deployment with a 9/24-hour writer-coverage gap,
+    top-N panels stayed correct (they heal) while the traffic chart showed
+    ``[]`` and the total-requests count showed ``0``, despite real traffic
+    existing in those gap hours.
+
+    Each test writes one CLOSED hour with a real rollup bundle (H1) and one
+    CLOSED hour with NO bundle and NO per-field marker at all (H2) — a pure
+    writer-coverage gap, not the mid-build case that already triggers
+    ``collect_hourly_bundle_paths``'s "return None" fallback. H2's rows exist
+    only in the raw base table (``logs_<service>``), so a correct reader must
+    live-heal H2 to include them.
+    """
+
+    def test_time_series_heals_missing_bundle_hour(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        h1_start = active_start - timedelta(hours=2)
+        h2_start = active_start - timedelta(hours=1)
+        h1_str = h1_start.strftime("%Y-%m-%d-%H")
+
+        # H1: normal, fully-bundled closed hour.
+        _write_bundle(bundled, h1_str, total_requests=600)
+        _write_per_field_marker(per_field, "requests", h1_str)
+
+        # H2: writer-coverage gap — no bundle, no per-field marker either.
+        # Its rows exist only in the raw base table.
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?), (?), (?)",
+            [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=h1_start.isoformat(),
+            end_time=(h2_start + timedelta(hours=1)).isoformat(),
+            table_name="not_used",
+            where_clause="1=1",
+            params=[],
+        )
+        con.close()
+
+        assert rows is not None, "reader fell back to raw unexpectedly"
+        by_time = {datetime.fromisoformat(r["time"]).astimezone(UTC): r["value"] for r in rows}
+        assert by_time.get(h2_start) == 5, (
+            f"H2 (writer-coverage gap hour) contributed {by_time.get(h2_start)!r} instead of 5 — "
+            f"the missing-hour heal did not run. Full response: {by_time}"
+        )
+        assert sum(by_time.values()) == 605, f"expected 600 (H1) + 5 (healed H2) = 605, got {by_time}"
+
+    def test_count_heals_missing_bundle_hour(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        active_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        h1_start = active_start - timedelta(hours=2)
+        h2_start = active_start - timedelta(hours=1)
+        h1_str = h1_start.strftime("%Y-%m-%d-%H")
+
+        _write_bundle(bundled, h1_str, total_requests=600)
+        _write_per_field_marker(per_field, "requests", h1_str)
+
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?), (?), (?)",
+            [h2_start + timedelta(minutes=m) for m in (1, 2, 3, 4, 5)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=h1_start.isoformat(),
+            end_time=(h2_start + timedelta(hours=1)).isoformat(),
+            table_name="not_used",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+        con.close()
+
+        assert total is not None, "reader fell back to raw unexpectedly"
+        assert total == 605, (
+            f"expected 600 (H1 bundle) + 5 (healed H2) = 605, got {total} — "
+            f"the missing-hour heal did not run, undercounting the writer-coverage gap hour."
+        )
+
+    def test_time_series_accepts_verified_empty_hour_beyond_heal_cap(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        empty_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == empty_hour:
+                _write_empty_all_fields_sentinel(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        rows = runner.try_time_series_from_rollup(
+            chart_metric="requests",
+            interval="1 hour",
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+        )
+
+        assert rows is not None, "a verified-empty hour must not force a raw-scan fallback"
+        assert len(rows) == 49, "the empty sentinel should contribute a zero-valued hour"
+
+    def test_count_accepts_verified_empty_hour_beyond_heal_cap(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        empty_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == empty_hour:
+                _write_empty_all_fields_sentinel(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        runner = QueryRunner(duckdb.connect(), _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="this_view_does_not_exist",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+
+        assert total == 49 * 600, "the verified-empty hour must not force a raw-scan fallback"
+
+    def test_nonempty_all_fields_bundle_is_live_healed(self, rollup_layout):
+        bundled, per_field, cache_dir = rollup_layout
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        end = now - timedelta(hours=10)
+        start = end - timedelta(hours=50)
+        missing_time_series_hour = start + timedelta(hours=17)
+
+        cursor = start
+        while cursor < end:
+            hour_str = cursor.strftime("%Y-%m-%d-%H")
+            if cursor == missing_time_series_hour:
+                _write_nonempty_all_fields_bundle(bundled, hour_str)
+            else:
+                _write_bundle(bundled, hour_str, total_requests=600)
+            _write_per_field_marker(per_field, "requests", hour_str)
+            cursor += timedelta(hours=1)
+
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        con.execute("CREATE TABLE logs_test_service (timestamp TIMESTAMPTZ)")
+        con.execute(
+            "INSERT INTO logs_test_service VALUES (?), (?), (?)",
+            [missing_time_series_hour + timedelta(minutes=m) for m in (1, 2, 3)],
+        )
+
+        runner = QueryRunner(con, _make_source(cache_dir))
+        total = runner.try_count_from_rollup(
+            start_time=start.isoformat(),
+            end_time=end.isoformat(),
+            table_name="logs_test_service",
+            where_clause="1=1",
+            params=[],
+            unfiltered_window=True,
+        )
+        con.close()
+
+        assert total == 49 * 600 + 3
+
+    def test_walk_is_bounded_by_cap_not_by_full_window(self, rollup_layout, tmp_path):
+        """REGRESSION (fix round 1): the walk itself must be bounded by
+        ``cap`` hours back from "now" — not walk the entire [st, et) window
+        and truncate the result afterward. A window spanning far more than
+        ``cap`` hours (e.g. a 10-day dashboard range with cap=48) must never
+        stat hours older than the cap floor; if it does, this test's older
+        "no bundle" hours would incorrectly show up as `missing`.
+        """
+        from backend.repositories._base import _find_missing_bundle_hours
+
+        bundled, _per_field, _cache_dir = rollup_layout
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        cap = 48
+
+        # Window spans 10 days — far more than cap — with NO bundles
+        # written anywhere. A correct, cap-bounded walk only ever visits
+        # the most recent `cap` closed hours, so `missing` must be exactly
+        # `cap` hours long and none of them older than the floor.
+        st = active_dt - timedelta(days=10)
+        et = active_dt
+
+        missing = _find_missing_bundle_hours(st, et, str(bundled), "time_series.parquet", cap=cap)
+
+        floor_dt = active_dt - timedelta(hours=cap)
+        assert len(missing) == cap, f"expected exactly {cap} missing hours (walk bounded by cap), got {len(missing)}"
+        oldest_missing_dt = datetime.strptime(missing[0], "%Y-%m-%d-%H").replace(tzinfo=UTC)
+        assert oldest_missing_dt >= floor_dt, (
+            f"walk visited an hour ({missing[0]}) older than the cap floor "
+            f"({floor_dt.strftime('%Y-%m-%d-%H')}) — the walk is scanning the full window "
+            f"instead of being bounded by cap."
+        )

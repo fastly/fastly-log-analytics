@@ -19,10 +19,13 @@ dist/
 *.cron.lock
 /cache/*
 .claude/*
+!.claude/commands/
+.agents/
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
 local-docs/*
+pending-docs/*
 .superpowers/
 docs/superpowers/
 docs/plans/
@@ -48,10 +51,14 @@ node_modules/
 .swival/
 /audit-findings/
 
+# ChatGPT
+.codex/
+
 # Ad-hoc debug screenshots dropped at the repo root by browser-driven
 # verification sessions. Intentional docs/assets/*.png are tracked; these
 # root-level ones are throwaway.
 /test_*.png
+/screenshot.png
 
 # Ad-hoc lint/test output dumps
 frontend/*_out.txt
@@ -120,3 +127,12 @@ compute/scorer/pkg/*
 # Separate Next.js dev cache for the Playwright dev server (port 13004)
 # so its lockfile doesn't collide with the dev shell on 13002.
 /frontend/.next-e2e/
+
+# editor/backup debris
+*.bak
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+configs-hs/
+/scripts/dev/deploy_test_all.sh
+/reports/

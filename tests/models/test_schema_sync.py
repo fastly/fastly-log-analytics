@@ -67,7 +67,12 @@ def test_repository_keys_match_pydantic_model(in_memory_duckdb, repo_fn, pydanti
     src = _src_empty()
 
     # Call the repository with an empty source/table to get the default empty structure
-    repo_result = repo_fn(con=in_memory_duckdb, src=src, start_time=None, end_time=None, filters={}, **extra_args)
+    if repo_fn.__name__ in ("get_health", "get_quality"):
+        repo_result = repo_fn(
+            con_factory=lambda: in_memory_duckdb, src=src, start_time=None, end_time=None, filters={}, **extra_args
+        )
+    else:
+        repo_result = repo_fn(con=in_memory_duckdb, src=src, start_time=None, end_time=None, filters={}, **extra_args)
 
     # Pydantic models automatically include _debug_queries and _debug_calls when initialized normally
     # We remove these telemetry keys from the check because Pydantic serialization aliases handle them.

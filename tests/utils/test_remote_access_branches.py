@@ -183,6 +183,60 @@ def test_is_private_or_loopback_hostname_stubs():
     assert _is_private_or_loopback("") is False
 
 
+# ── Helper: LOCAL_ADMIN_CIDRS opt-in trust segment ─────────────────────────
+
+
+@pytest.mark.security_regression
+def test_local_admin_cidrs_default_off(monkeypatch):
+    """With the env unset, RFC1918 stays remote — prod behavior unchanged."""
+    monkeypatch.delenv("LOCAL_ADMIN_CIDRS", raising=False)
+    assert _is_private_or_loopback("172.28.0.1") is False
+
+
+@pytest.mark.security_regression
+def test_local_admin_cidrs_scoped_trust(monkeypatch):
+    """A declared infra subnet classifies as admin; everything else stays
+    remote (a VPN analyst on another private range must NOT be promoted)."""
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "172.28.0.0/16")
+    assert _is_private_or_loopback("172.28.0.1") is True
+    assert _is_private_or_loopback("172.28.44.9") is True
+    assert _is_private_or_loopback("10.0.0.5") is False
+    assert _is_private_or_loopback("192.168.1.1") is False
+    assert _is_private_or_loopback("169.254.169.254") is False
+
+
+@pytest.mark.security_regression
+def test_local_admin_cidrs_rejects_catch_all(monkeypatch):
+    """0.0.0.0/0 (or anything catch-all-sized) is the Host-spoof admin bypass
+    reborn — it must be refused, not honored."""
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "0.0.0.0/0")
+    assert _is_private_or_loopback("8.8.8.8") is False
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "::/0")
+    assert _is_private_or_loopback("2001:db8::1") is False
+
+
+@pytest.mark.security_regression
+def test_local_admin_cidrs_rejects_historical_bypass_classes(monkeypatch):
+    """The guard must make the two removed bypasses unconfigurable: broad
+    RFC1918 (VPN analyst → admin) and link-local (169.254.169.254 cloud
+    metadata SSRF → admin). Public ranges are refused outright."""
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "10.0.0.0/8")
+    assert _is_private_or_loopback("10.1.2.3") is False
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "169.254.0.0/16")
+    assert _is_private_or_loopback("169.254.169.254") is False
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "169.254.169.254/32")
+    assert _is_private_or_loopback("169.254.169.254") is False
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "8.8.8.0/24")
+    assert _is_private_or_loopback("8.8.8.8") is False
+
+
+@pytest.mark.security_regression
+def test_local_admin_cidrs_ignores_garbage(monkeypatch):
+    monkeypatch.setenv("LOCAL_ADMIN_CIDRS", "not-a-cidr, ,172.28.0.0/16")
+    assert _is_private_or_loopback("172.28.0.1") is True
+    assert _is_private_or_loopback("8.8.8.8") is False
+
+
 # ── Helper: client_ip ────────────────────────────────────────────────────
 
 

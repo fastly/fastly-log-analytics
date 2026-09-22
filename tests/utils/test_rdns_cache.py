@@ -423,7 +423,7 @@ def test_enrich_batch_no_op_when_nothing_pending():
     with patch("backend.utils.rdns_cache._discover_new_ips", return_value=0):
         summary = rdns_cache.enrich_batch(limit=10)
 
-    assert summary == {"resolved": 0, "errors": 0, "discovered": 0}
+    assert summary == {"resolved": 0, "errors": 0, "discovered": 0, "batch_limit": 10}
 
 
 # ── reap (audit finding 008) ─────────────────────────────────────────────────

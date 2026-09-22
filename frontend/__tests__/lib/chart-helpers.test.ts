@@ -83,6 +83,19 @@ describe('denseTimeGrid', () => {
     ])
   })
 
+  it('treats space-separated naive timestamps (e.g. ClickHouse JSON) as UTC', () => {
+    const grid = denseTimeGrid(
+      ['2026-06-30 09:00:00', '2026-06-30 11:00:00'],
+      3600,
+    )
+    expect(grid).not.toBeNull()
+    expect(grid!.map((iso) => Date.parse(iso))).toEqual([
+      Date.parse('2026-06-30T09:00:00Z'),
+      Date.parse('2026-06-30T10:00:00Z'),
+      Date.parse('2026-06-30T11:00:00Z'),
+    ])
+  })
+
   it('fills a per-minute grid for short scoring windows', () => {
     const grid = denseTimeGrid(
       ['2026-06-30T09:00:00Z', '2026-06-30T09:03:00Z'],

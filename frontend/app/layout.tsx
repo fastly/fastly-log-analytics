@@ -8,6 +8,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider from "@/components/QueryProvider";
 import ThemeProvider from "@/components/ThemeProvider";
 import { AppLayout } from "@/components/AppLayout";
+import { ServerFooter } from "@/components/ServerFooter";
 import { HydrateAdminToken } from "@/components/HydrateAdminToken";
 import { StoreHydrator } from "@/components/StoreHydrator";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
@@ -16,6 +17,7 @@ import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
 import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";
 import { queryKeys } from "@/lib/query-keys";
 import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
+import { shouldLoadRumScript } from "@/lib/rum-script";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -75,7 +77,8 @@ export default async function RootLayout({
   // its own injected <script>/<link> tags; we have to pass it manually to
   // next-themes (its theme-bootstrap inline script doesn't read the
   // header) so the strict script-src nonce policy doesn't drop it.
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
+  const requestHeaders = await headers();
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
 
   // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
   // useBootstrap (and every hook that reads bootstrap.* via
@@ -149,6 +152,11 @@ export default async function RootLayout({
     // header.
     dehydratedState = dehydrate(client);
   }
+  const loadRumScript = shouldLoadRumScript({
+    host: requestHeaders.get("host"),
+    proxiedByCaddy: requestHeaders.get("x-proxied-by-caddy") === "true",
+    rumEnabled: isRumEnabled,
+  });
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -161,11 +169,11 @@ export default async function RootLayout({
             gzip of bandwidth on every non-chart page (/share-login,
             /admin/*, /alerts, /usage, /logs). See P-1 / P-2 in the
             2026-06-15 audit. */}
-        <script
-          src="/js/rum.js"
-          nonce={nonce}
-          async
-        />
+        {/* RUM collector script only when the active service has RUM
+            enabled — an unconditional emit makes every page load proxy
+            /js/rum.js to the backend, which fails (ECONNRESET log spam)
+            or 404s on services without RUM. */}
+        {loadRumScript && <script src="/js/rum.js" nonce={nonce} async />}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden
@@ -218,6 +226,7 @@ export default async function RootLayout({
               initialCollapsed={initialSidebarCollapsed}
               ssrActiveServiceId={sid}
               ssrIsRumEnabled={isRumEnabled}
+              serverFooter={<ServerFooter />}
             >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>

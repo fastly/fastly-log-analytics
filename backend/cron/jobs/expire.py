@@ -15,11 +15,17 @@ from backend.cron.scheduler import (
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("expire_snapshots")
+@cron_task("expire_snapshots", job_name="expire_snapshots")
 def _run_expire_snapshots(service_id: str) -> None:
-    """Weekly job: perform cloud maintenance including data deletion, cache cleanup, and snapshot expiry."""
+    """Maintenance job: perform cloud maintenance including data deletion, cache cleanup, and snapshot expiry."""
     from backend.core import iceberg as db_iceberg
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.scheduler import _extract_log_text, _log_and_add_progress
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+    from backend.utils.active_requests import should_defer_cron
+
+    if should_defer_cron("expire_snapshots", service_id):
+        return
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -31,9 +37,18 @@ def _run_expire_snapshots(service_id: str) -> None:
         logger.info("⏭️  [expire] %s: skipping — %s", service_id, str(e))
         return
 
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="expire_snapshots")
+
     svc_id = src.get("service_id", "unknown")
     display_name = _display_label(src, svc_id)
-    logger.info("▶️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
+    logger.info("🏎️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
+    _log_and_add_progress(
+        run_id,
+        service_id,
+        job_name="expire_snapshots",
+        event={"type": "status", "message": "Starting snapshot expiry and retention cleanup..."},
+    )
 
     start_time = time.time()
     try:
@@ -49,6 +64,13 @@ def _run_expire_snapshots(service_id: str) -> None:
                 error_message=str(result["error"]),
                 summary="Maintenance failed at catalog load",
                 run_id=run_id,
+                log_output=_extract_log_text(run_id),
+            )
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="expire_snapshots",
+                event={"type": "error", "message": str(result["error"])},
             )
         else:
             summary_parts = []
@@ -70,6 +92,14 @@ def _run_expire_snapshots(service_id: str) -> None:
                 error_message=error_message,
                 summary=summary,
                 run_id=run_id,
+                log_output=_extract_log_text(run_id),
+            )
+            event_type = "done" if status == "success" else status
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="expire_snapshots",
+                event={"type": event_type, "message": summary},
             )
     except Exception as e:
         duration = time.time() - start_time
@@ -84,6 +114,19 @@ def _run_expire_snapshots(service_id: str) -> None:
             error_message=str(e),
             summary="Maintenance raised an uncaught exception",
             run_id=run_id,
+            log_output=_extract_log_text(run_id),
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="expire_snapshots",
+            event={"type": "error", "message": str(e)},
+        )
+    finally:
+        end_progress(run_id)
 
-    logger.info("⏹️  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
+    from backend.cron.jobs._common import finalize_cron_duration
+
+    finalize_cron_duration(src, run_id, start_time)
+
+    logger.info("🏁  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)

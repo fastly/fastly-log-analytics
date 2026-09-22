@@ -101,7 +101,7 @@ def test_request_context_carries_required_fields():
     ctx = RequestContext(
         service_id="svc-1",
         source={"name": "svc-1", "endpoint_url": "http://localhost"},
-        con=MagicMock(),
+        _con_override=MagicMock(),
         telemetry=RequestTelemetry("GET", "/api/x"),
         analyst_session=None,
     )
@@ -122,13 +122,13 @@ def test_cached_temps_are_per_instance():
     a = RequestContext(
         service_id="svc",
         source={"name": "svc"},
-        con=MagicMock(),
+        _con_override=MagicMock(),
         telemetry=RequestTelemetry("GET", "/"),
     )
     b = RequestContext(
         service_id="svc",
         source={"name": "svc"},
-        con=MagicMock(),
+        _con_override=MagicMock(),
         telemetry=RequestTelemetry("GET", "/"),
     )
     a.cached_temps["window:1h"] = "tmp_1234"
@@ -293,8 +293,8 @@ def _drive_request_context_to_yield(service_key: str):
     request.method = "GET"
     request.url.path = "/api/test"
     gen = rc.build_request_context(request, service_id=service_key)
-    next(gen)  # runs setup + checkout, parks at `yield ctx`
-    return gen
+    ctx = next(gen)  # runs setup + yields ctx
+    return gen, ctx
 
 
 def test_client_cancel_returns_connection_to_pool(monkeypatch):
@@ -312,7 +312,8 @@ def test_client_cancel_returns_connection_to_pool(monkeypatch):
         "backend.core.request_context._resolve_source",
         return_value={"name": "svc-cancel", "endpoint_url": "http://localhost"},
     ):
-        gen = _drive_request_context_to_yield("svc-cancel")
+        gen, ctx = _drive_request_context_to_yield("svc-cancel")
+        _ = ctx.con  # Trigger lazy load
         # Connection is checked out: idle drained, slot still owned.
         assert pool._in_use == 1
         assert pool._idle.qsize() == 0
@@ -337,7 +338,8 @@ def test_real_exception_discards_connection(monkeypatch):
         "backend.core.request_context._resolve_source",
         return_value={"name": "svc-err", "endpoint_url": "http://localhost"},
     ):
-        gen = _drive_request_context_to_yield("svc-err")
+        gen, ctx = _drive_request_context_to_yield("svc-err")
+        _ = ctx.con  # Trigger lazy load
         assert pool._in_use == 1
         with pytest.raises(RuntimeError, match="boom"):
             gen.throw(RuntimeError("boom"))

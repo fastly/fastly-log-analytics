@@ -10,12 +10,14 @@ from backend.core.duckdb import _get_fos_client, get_source_for_service
 
 
 def inspect_raw_rum():
-    service_id = os.getenv("SERVICE_ID", "cVnu9mYB3Cvmob3lsqjQU3")
+    service_id = os.getenv("SERVICE_ID")
+    if not service_id:
+        raise SystemExit("SERVICE_ID is required")
     src = get_source_for_service(service_id)
     s3 = _get_fos_client(src)
     bucket = src["bucket"]
     prefix = src.get("prefix", "").strip("/")
-    rum_prefix = f"{prefix}/rum/raw/" if prefix else "rum/raw/"
+    rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
 
     print(f"Connecting to bucket: {bucket}, prefix: {rum_prefix}")
 

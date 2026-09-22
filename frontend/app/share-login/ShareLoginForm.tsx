@@ -296,6 +296,10 @@ export function ShareLoginForm() {
             {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Sign in
           </Button>
+
+          <p className="text-[11px] text-muted-foreground text-center">
+            Upon signing in, you will be prompted to review and agree to the Terms of Access before viewing the dashboard.
+          </p>
         </form>
       )}
     </div>

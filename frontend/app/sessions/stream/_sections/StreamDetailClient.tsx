@@ -64,10 +64,11 @@ export function StreamDetailClient() {
   } = useQuery({
     queryKey: ['stream-detail', activeServiceId, token],
     queryFn: async ({ signal }) => {
-      const { data } = await client.POST('/api/sessions/detail', {
+      const { data, error } = await client.POST('/api/sessions/detail', {
         signal,
         body: { session_token: token! },
       })
+      if (error) throw error
       return data
     },
     enabled: !!activeServiceId && !!token,

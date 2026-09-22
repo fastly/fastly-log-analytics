@@ -93,10 +93,11 @@ def wizard(args) -> dict:
 
     safe_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
     safe_id = re.sub(r"-+", "-", safe_id).strip("-")
-    bucket_name = args.bucket or (f"fos-{safe_id}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id}-logs"))
-    fos_prefix = (
-        args.prefix if args.prefix is not None else ("" if args.yes else ask("Base log prefix inside bucket", ""))
+    safe_id_lower = safe_id.lower()
+    bucket_name = args.bucket or (
+        f"fos-{safe_id_lower}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id_lower}-logs")
     )
+    fos_prefix = ""
     sample_rate = max(
         1,
         min(
@@ -272,7 +273,7 @@ def handle_reset_logs(args):
         print(f"  {_c(DIM, 'Local DuckDB analytical database + cache')}")
         print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
         if args.delete_raw:
-            print(f"  {_c(YLW + BOLD, 'Raw .gz logs in cloud storage (raw/)')}")
+            print(f"  {_c(YLW + BOLD, 'Raw .gz request logs in cloud storage (raw/request/)')}")
         if args.wipe_usage:
             print(f"  {_c(DIM, 'Usage-log (Class A/B) billing history')}")
         blank()
@@ -282,7 +283,7 @@ def handle_reset_logs(args):
         if args.delete_raw and not is_ingested_files_dedup_active(service_id):
             blank()
             warn(
-                "This source keeps raw logs after ingest (delete_after=False). Deleting raw/ now "
+                "This source keeps request logs after ingest (delete_after=False). Deleting raw/request/ now "
                 "means the next full sync has no dedup record left and will re-ingest this "
                 "service's ENTIRE history."
             )
@@ -604,7 +605,6 @@ def cmd_provision(
     endpoint_name: str | None = typer.Option(None, "--endpoint-name"),
     region: str | None = typer.Option(None, "--region", help="FOS region (e.g. us-east-1)."),
     bucket: str | None = typer.Option(None, "--bucket", help="FOS bucket name."),
-    prefix: str | None = typer.Option(None, "--prefix", help="Base log prefix inside bucket."),
     sample_rate: int | None = typer.Option(None, "--sample-rate", min=1, max=100),
     edge_only: bool | None = typer.Option(None, "--edge-only/--no-edge-only"),
     period: str | None = typer.Option(None, "--period", help="Log rotation period (e.g. '1 minute')."),
@@ -629,7 +629,7 @@ def cmd_provision(
         endpoint_name=endpoint_name,
         region=region,
         bucket=bucket,
-        prefix=prefix,
+        prefix="",
         sample_rate=sample_rate,
         edge_only=edge_only,
         period=period,
@@ -647,7 +647,20 @@ def cmd_provision(
         enable_field=enable_field,
         disable_field=disable_field,
     )
-    wizard(args)
+    cfg = wizard(args)
+    import sys
+
+    from backend.provision.orchestrator import provision
+
+    try:
+        for event in provision(cfg):
+            if event.get("type") == "status":
+                info(event.get("message", ""))
+            elif event.get("type") == "done":
+                ok(event.get("message", ""))
+    except Exception as e:
+        fail(f"Provisioning failed: {e}")
+        sys.exit(1)
 
 
 @app.command("teardown", help="Tear down a provisioned service.")

@@ -1,4 +1,4 @@
-import { formatDate } from '@/lib/date'
+import { formatDate, toUTCDate } from '@/lib/date'
 import { INTERVAL_SECONDS } from '@/lib/constants'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 
@@ -13,6 +13,7 @@ export interface BuildTrafficDataParams {
   compareMode: boolean
   compareStartTime: string | null | undefined
   startTime: string | null
+  endTime: string | null
   trend: string
   timezone: string
   metric: string
@@ -31,6 +32,7 @@ export function buildTrafficData({
   compareMode,
   compareStartTime,
   startTime,
+  endTime,
   trend,
   timezone,
   metric,
@@ -66,7 +68,7 @@ export function buildTrafficData({
   const actualInterval = aggregates?.interval || effectiveInterval
   const intervalSeconds = INTERVAL_SECONDS[actualInterval as keyof typeof INTERVAL_SECONDS]
   const barSeries: BarSeriesPoint[] = isBar
-    ? densifyBarSeries(time_series, intervalSeconds, hasCategories)
+    ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
     : time_series
 
   let traces: any[] = []
@@ -90,7 +92,7 @@ export function buildTrafficData({
     traces = Object.entries(catMap).map(([cat, data], i) => ({
       x: data.x,
       y: data.y,
-      type: 'bar',
+      type: 'bar', width: intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
       name: cat,
       showlegend: false, // Custom legend will handle these
       visible: hiddenCategories.has(cat) ? 'legendonly' : true,
@@ -104,7 +106,7 @@ export function buildTrafficData({
     traces = [{
       x: xValues,
       y: yValues,
-      type: isBar ? 'bar' : 'scatter',
+      type: isBar ? 'bar' : 'scatter', width: isBar && intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
       mode: isBar ? undefined : 'lines+markers',
       name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
       showlegend: compareMode,
@@ -119,7 +121,7 @@ export function buildTrafficData({
     const shift = currentStart - compareStart
 
     const compX = compareAggregates.time_series.map((d: any) => {
-      const t = new Date(d.time).getTime() + shift
+      const t = toUTCDate(d.time).getTime() + shift
       return formatDate(new Date(t).toISOString(), timezone, "yyyy-MM-dd HH:mm:ss")
     })
     const compY = compareAggregates.time_series.map((d: any) => d.value)

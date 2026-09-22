@@ -126,6 +126,17 @@ def _lock_key(src: dict) -> str:
     return src.get("name", "default")
 
 
+def _trim_memory() -> None:
+    """Trigger Python GC and C allocator memory trim (glibc malloc_trim) if available."""
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
     """Recycle the DuckDB instance for one db file. Returns a status dict."""
     from backend.core.iceberg.view import _get_service_lock
@@ -154,19 +165,20 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
 
         # Locks held → raise the barrier so no NEW connection opens for this file.
         _db.set_recycle_barrier(db_path, True)
+        retired_pools = {}
         try:
-            _pool.begin_drain_pools(service_keys)
-            drained = _pool.wait_pools_drained(service_keys, drain_timeout)
+            retired_pools = _pool.begin_drain_pools(service_keys)
+            drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
 
             # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
-            gc.collect()
+            _trim_memory()
             deadline = time.monotonic() + grace
             while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
                 time.sleep(0.05)
-                gc.collect()
+                _trim_memory()
             live = _db.live_connection_count(db_path)
         finally:
-            _pool.end_drain_pools(service_keys)
+            _pool.end_drain_pools(retired_pools or service_keys)
             _db.set_recycle_barrier(db_path, False)
     finally:
         for lock in reversed(acquired):
@@ -175,6 +187,7 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
             except RuntimeError:
                 pass
 
+    _trim_memory()
     rss_after = _db.current_rss_bytes()
     freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
     status = "recycled" if (drained and live == 0) else "incomplete"

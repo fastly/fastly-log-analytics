@@ -222,7 +222,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 <DropdownMenuItem onClick={() => openNgwaf(service)}>
                   <Bot className="mr-2 h-4 w-4" /> NGWAF Config
                 </DropdownMenuItem>
-                {service.access_level === 'read_write' && (
+                {service.access_level === 'read_write' && service.analyst_path_a_supported && (
                   <DropdownMenuItem onClick={() => setInviteService(service)}>
                     <UserPlus className="mr-2 h-4 w-4" /> Invite User
                   </DropdownMenuItem>

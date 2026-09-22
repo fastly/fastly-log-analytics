@@ -258,7 +258,7 @@ def test_log_fields_saves_to_config():
 
 
 def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
-    """REGRESSION: 2026-08-12 SE-demo incident — CMCD's 14 ``cmcd_*`` fields are
+    """REGRESSION: 2026-08-12 production incident — CMCD's 14 ``cmcd_*`` fields are
     system-managed and hidden from the user-editable list by
     ``_is_system_field``, so the UI always POSTs a ``custom_fields`` that omits
     them. The pre-existing merge guard only fired when the incoming list was

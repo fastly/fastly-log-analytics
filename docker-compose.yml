@@ -12,6 +12,7 @@
 # production (docker-compose.prod.yml) overrides this to network_mode: host.
 services:
   backend:
+    image: fastly-log-analytics-backend:latest
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -31,11 +32,14 @@ services:
       - "80:80"
     volumes:
       - ./configs:/app/configs
-      - ./data:/app/data
-      - ./cache:/app/cache
+      - backend-cache:/app/cache
+      - ./scripts:/app/scripts
+      - backend-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
       - DUCKDB_MEMORY_LIMIT=4GB
+      - DUCKDB_RECYCLE_INTERVAL_MIN=5
+      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=6000
       # Friendly local hostnames added to the backend's Host allowlist
       # (localhost / 127.0.0.1 are allowed by default). fastly.localhost
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
@@ -50,16 +54,21 @@ services:
       # prod-only) so a localhost run still boots if someone removes them.
       - TRUSTED_PROXY_IPS=127.0.0.1
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
+      # Admin trust for this containerized topology: nothing reaches the
+      # backend over loopback here (operator traffic lands as the docker
+      # gateway IP), so the isolated compose subnet is declared admin-trusted.
+      - LOCAL_ADMIN_CIDRS=172.29.0.0/16
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 45s
     networks:
       - app-network
 
   frontend:
+    image: fastly-log-analytics-frontend:latest
     build:
       context: .
       dockerfile: frontend/Dockerfile
@@ -73,6 +82,8 @@ services:
       # Loopback in the shared namespace (NOT backend:8000 — a service-name
       # address would resolve to the bridge IP and be classified remote → 400).
       - API_PROXY_URL=http://127.0.0.1:8000
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+      - ENV_NAME=local-standard
     depends_on:
       backend:
         condition: service_healthy
@@ -91,3 +102,10 @@ services:
 networks:
   app-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+
+volumes:
+  backend-data:
+  backend-cache:

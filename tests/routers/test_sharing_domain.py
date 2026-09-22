@@ -60,13 +60,14 @@ def test_deploy_frontend_resolves_token_from_config(client):
     payload = {
         "service_name": "test-config-service",
         "domain_name": "config-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     mock_res = {
         "service_id": "service_config",
         "version": 2,
         "domain_name": "config-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     mock_configs = [
@@ -84,7 +85,7 @@ def test_deploy_frontend_resolves_token_from_config(client):
         mock_deploy.assert_called_once_with(
             service_name="test-config-service",
             domain_name="config-domain.global.ssl.fastly.net",
-            origin_host="34.123.30.195",
+            origin_host="203.0.113.10",
             origin_port=80,
             use_ssl=False,
             token="config-resolved-token",
@@ -97,13 +98,14 @@ def test_deploy_frontend_resolves_token_from_env(client):
     payload = {
         "service_name": "test-env-service",
         "domain_name": "env-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     mock_res = {
         "service_id": "service_env",
         "version": 3,
         "domain_name": "env-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     with (
@@ -117,7 +119,7 @@ def test_deploy_frontend_resolves_token_from_env(client):
         mock_deploy.assert_called_once_with(
             service_name="test-env-service",
             domain_name="env-domain.global.ssl.fastly.net",
-            origin_host="34.123.30.195",
+            origin_host="203.0.113.10",
             origin_port=80,
             use_ssl=False,
             token="env-resolved-token",
@@ -130,6 +132,7 @@ def test_deploy_frontend_missing_token_error(client):
     payload = {
         "service_name": "test-fail-service",
         "domain_name": "fail-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
     }
 
     with (
@@ -147,11 +150,25 @@ def test_deploy_frontend_missing_token_error(client):
         assert "Token is required" in response.json()["detail"]["message"]
 
 
+def test_deploy_frontend_requires_origin_host(client):
+    response = client.post(
+        "/api/sharing/deploy-frontend",
+        json={
+            "service_name": "test-service",
+            "domain_name": "test-domain.global.ssl.fastly.net",
+            "token_override": "test-token",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_deploy_frontend_fails_500(client):
     """Verify that a 500 error is returned when the deployment process raises an exception."""
     payload = {
         "service_name": "test-error-service",
         "domain_name": "error-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "some-token",
     }
 
@@ -212,7 +229,7 @@ def test_teardown_frontend_success(client):
             "service_id": "remote_service_123",
             "version": 1,
             "domain_name": "remote-domain.global.ssl.fastly.net",
-            "origin_host": "34.123.30.195",
+            "origin_host": "203.0.113.10",
         },
     }
 
@@ -259,6 +276,7 @@ def test_deploy_frontend_with_service_id_writes_config(client):
     payload = {
         "service_name": "test-service",
         "domain_name": "test-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "token-123",
         "service_id": "logging-service-123",
     }
@@ -267,7 +285,7 @@ def test_deploy_frontend_with_service_id_writes_config(client):
         "service_id": "service_remote_id",
         "version": 1,
         "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     mock_config = {
@@ -287,7 +305,7 @@ def test_deploy_frontend_with_service_id_writes_config(client):
             "service_id": "service_remote_id",
             "version": 1,
             "domain_name": "test-domain.global.ssl.fastly.net",
-            "origin_host": "34.123.30.195",
+            "origin_host": "203.0.113.10",
         }
         mock_save.assert_called_once_with("logging-service-123", mock_config)
 
@@ -297,6 +315,7 @@ def test_deploy_frontend_with_service_id_save_config_error_graceful(client):
     payload = {
         "service_name": "test-service",
         "domain_name": "test-domain.global.ssl.fastly.net",
+        "origin_host": "203.0.113.10",
         "token_override": "token-123",
         "service_id": "logging-service-123",
     }
@@ -305,7 +324,7 @@ def test_deploy_frontend_with_service_id_save_config_error_graceful(client):
         "service_id": "service_remote_id",
         "version": 1,
         "domain_name": "test-domain.global.ssl.fastly.net",
-        "origin_host": "34.123.30.195",
+        "origin_host": "203.0.113.10",
     }
 
     with (

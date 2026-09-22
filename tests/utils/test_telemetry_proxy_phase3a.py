@@ -1,7 +1,5 @@
 """Phase 3a tests for the telemetry proxy — DuckDB httpfs through the proxy.
 
-Design spec: docs/superpowers/specs/2026-05-19-telemetry-proxy-design.md (§Phase 3a)
-
 These tests live in their own file (matching the Phase 2 split) so the
 Phase 3a fixtures don't pollute earlier files. Shared infrastructure with
 Phase 1/2 is duplicated on purpose — moving it to conftest.py would

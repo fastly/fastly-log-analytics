@@ -276,15 +276,15 @@ def test_rollup_heal_skips_when_start_cron_run_raises(monkeypatch, stub_source, 
     heal_mock.assert_not_called()
 
 
-def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stub_progress):
-    """The hourly tick must stay CHEAP: 1-day lookback, not the daily
+def test_rollup_heal_success_uses_48h_lookback(monkeypatch, stub_source, stub_progress):
+    """The hourly tick must stay CHEAP: 48h lookback, not the daily
     deep pass's 30 — the whole point of the split cadence."""
     heal_mock = MagicMock(return_value={"missing": 2, "rebuilt_fields": 8, "bundled": 2})
     monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
 
     compaction._run_rollup_hour_heal.__wrapped__("svc-1")
 
-    assert heal_mock.call_args.kwargs.get("lookback_days") == 1
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 2
 
     from backend.core import duckdb as _db
 
@@ -293,6 +293,48 @@ def test_rollup_heal_success_uses_one_day_lookback(monkeypatch, stub_source, stu
     assert args[3] == "success"
     assert "Healed 2 missing hour(s)" in kwargs["summary"]
     assert "2 hour(s) bundled" in kwargs["summary"]
+
+
+def test_rollup_heal_dashboard_catchup_marks_ready_under_durable_mode(monkeypatch, stub_source, stub_progress):
+    """A durable service gets a complete dashboard-window pass before becoming trusted."""
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1, "coverage_verified": True})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.rollup_readiness.rollup_coverage_ready", lambda sid: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_called_once_with("svc-1")
+    assert heal_mock.call_args.kwargs.get("lookback_days") == 2
+    assert heal_mock.call_args.kwargs.get("max_missing_hours") == 1
+
+
+def test_rollup_heal_does_not_mark_ready_when_not_durable_mode(monkeypatch, stub_source, stub_progress):
+    heal_mock = MagicMock(return_value={"missing": 1, "rebuilt_fields": 1, "bundled": 1})
+    monkeypatch.setattr("backend.core.rollups.backfill_missing_hour_bundles", heal_mock)
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: False)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
+
+
+def test_rollup_heal_does_not_mark_ready_on_failure(monkeypatch, stub_source, stub_progress):
+    monkeypatch.setattr(
+        "backend.core.rollups.backfill_missing_hour_bundles",
+        MagicMock(side_effect=RuntimeError("view refresh failed")),
+    )
+    monkeypatch.setattr("backend.config.is_durable_serving_mode", lambda src: True)
+    mark_mock = MagicMock()
+    monkeypatch.setattr("backend.core.rollup_readiness.mark_rollup_coverage_ready", mark_mock)
+
+    compaction._run_rollup_hour_heal.__wrapped__("svc-1")
+
+    mark_mock.assert_not_called()
 
 
 def test_rollup_heal_records_error_on_exception(monkeypatch, stub_source, stub_progress):

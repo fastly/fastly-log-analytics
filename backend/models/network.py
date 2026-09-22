@@ -118,6 +118,7 @@ class NetworkHealthResponse(BaseResponse):
     metro_leaderboard: list[dict[str, Any]] = []
     summary: NetworkHealthSummary | None = None
     countries: list[str] = []
+    _approx: bool = False
     has_metro: bool = False
     # Phase 3 item 13 — shielding-analysis is conceptually network-level
     # (edge → shield latency arcs). Folding it into the network-health
@@ -138,3 +139,4 @@ class NetworkQualityResponse(BaseResponse):
     by_pop: list[dict[str, Any]] = []
     scatter: list[dict[str, Any]] = []
     countries: list[str] = []
+    _approx: bool = False

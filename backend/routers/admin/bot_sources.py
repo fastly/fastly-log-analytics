@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Query
 
 from backend.models.admin import BotSourcesResponse
 from backend.utils.router_utils import not_found, raise_internal
@@ -35,3 +35,42 @@ def refresh_bot_source_endpoint(source_id: str):
     except Exception as e:
         raise_internal(logger, e, code="bot_source_fetch_failed", status=502)
     return {"ok": True, "source": meta}
+
+
+@router.post("/admin/bot-sources/refresh")
+@router.post("/admin/bots/refresh")
+def refresh_all_bot_sources_endpoint():
+    """Fetch and re-cache all enabled bot sources."""
+    from backend.utils.bot_sources import refresh_all_sources
+
+    try:
+        results = refresh_all_sources()
+        failed = [r for r in results if r.get("failed")]
+        succeeded = [r for r in results if not r.get("failed")]
+        return {
+            "ok": len(failed) == 0,
+            "sources": results,
+            "updated_count": len(succeeded),
+            "failed_count": len(failed),
+        }
+    except Exception as e:
+        raise_internal(logger, e, code="bot_sources_refresh_failed", status=502)
+
+
+@router.post("/admin/rdns/enrich")
+def trigger_rdns_enrich_endpoint(
+    limit: int | None = Query(None, description="Optional override for batch limit"),
+):
+    """Trigger manual rDNS enrichment batch."""
+    from backend.utils.rdns_cache import enrich_batch
+
+    summary = enrich_batch(limit=limit)
+    return {"ok": True, "summary": summary}
+
+
+@router.get("/admin/rdns/stats")
+def get_rdns_stats_endpoint():
+    """Return rDNS cache stats."""
+    from backend.utils.rdns_cache import get_stats as rdns_stats
+
+    return {"ok": True, "stats": rdns_stats()}

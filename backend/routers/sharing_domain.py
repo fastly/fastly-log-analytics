@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/sharing", tags=["sharing"], responses=DEFAULT_ER
 class SharingDeployRequest(BaseModel):
     service_name: str
     domain_name: str
-    origin_host: str = "34.123.30.195"
+    origin_host: str
     origin_port: int = 80
     use_ssl: bool = False
     token_override: str | None = None
@@ -100,6 +100,14 @@ def deploy_frontend(payload: SharingDeployRequest):
                 svcconfig.save_config(payload.service_id, cfg)
             except Exception as e:
                 logger.warning(f"Could not save remote_frontend to config of service {payload.service_id}: {e}")
+
+        # Automatically start sharing with this public endpoint
+        try:
+            from backend.utils.tunnel import get_tunnel_manager
+
+            get_tunnel_manager().start_sharing(public_endpoint=f"https://{res['domain_name']}")
+        except Exception as e:
+            logger.warning(f"Could not automatically activate sharing for {res['domain_name']}: {e}")
 
         return res
     except Exception as exc:

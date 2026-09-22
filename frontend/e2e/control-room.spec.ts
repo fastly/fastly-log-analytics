@@ -100,6 +100,7 @@ test.describe('Control Room', () => {
     const results = await new AxeBuilder({ page })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
       .exclude('[data-empty-placeholder="true"]')
+      .exclude('[data-axe-ignore="true"]')
       .analyze()
 
     expect(
@@ -167,7 +168,7 @@ test.describe('Control Room', () => {
     await page.goto('/control-room')
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
 
-    const originTab = page.locator('[role="tablist"] button:text("CDN & Caching")')
+    const originTab = page.locator('[role="tablist"] button:text("CDN & Caching")').first()
     await originTab.click()
 
     await expect(page.locator('text=Origin Requests/s').first()).toBeVisible({ timeout: 10_000 })

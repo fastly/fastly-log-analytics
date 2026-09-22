@@ -58,6 +58,7 @@ test('admin dashboard has no detectable WCAG 2.1 AA violations on first paint', 
     .exclude('.recharts-wrapper')
     .exclude('[data-testid="plotly-host"]')
     .exclude('[data-empty-placeholder="true"]')
+    .exclude('[data-axe-ignore="true"]')
     .analyze()
 
   expect(

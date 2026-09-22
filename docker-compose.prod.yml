@@ -132,22 +132,22 @@ services:
       # were never set. Plain `- DEBUG_RESPONSES` (no value) would also
       # work but the explicit substitution makes the source obvious.
       - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
-      # Pre-acquire 4 pool conns per service at startup so the first
-      # /api/origin/aggregates request finds idle slots — the three
-      # extras' max_wait=0.2s deadline doesn't cover a cold conn build
-      # (~150 ms each), which silently falls back to serial on a cold
-      # pool. With this on, startup pays ~600 ms per service one time
-      # and the first composite request parallelizes cleanly.
+      # Pre-warm our upgraded 4-connection pool at startup to eliminate cold-start paint delays.
       - DUCKDB_POOL_WARM_AT_BOOT=true
-      # Cap concurrent pool connections per service. The prod VM is 4 cores,
-      # so the default of 8 oversubscribes (8 conns x up-to-4 DuckDB threads)
-      # AND raises peak RSS — each in-flight query holds uncounted httpfs read
-      # buffers + object-cache growth outside DUCKDB_MEMORY_LIMIT. Lowering to
-      # 4 cuts peak memory and, crucially, lets the recycle drain the pool to
-      # in_use==0 quickly so it can actually destroy+rebuild the instance and
-      # free the leaked cache (an undrainable pool => recycle returns
-      # 'incomplete' and frees nothing => OOM). See [[backend-oom-restart-loop]].
+      # Bound request concurrency to the memory envelope of this 4-core,
+      # 16GB single-host deployment. Cold connections are preferable to
+      # repeated OOM restarts and first-byte timeouts.
       - DUCKDB_POOL_MAX_SIZE=4
+      # Cap pooled connections independently; httpfs and object-cache
+      # allocations are not fully represented by DuckDB's memory accounting.
+      - DUCKDB_POOL_CONN_MEMORY_LIMIT=512MB
+      # Existing deployments that have completed the v3 migration can opt
+      # out of the boot-time legacy Iceberg adoption sweep. Keep the actual
+      # decision in the host-local .env because fresh installs may need it.
+      - FLA_SKIP_LEGACY_ADOPTION=${FLA_SKIP_LEGACY_ADOPTION:-}
+      # Optional emergency switch for the local active-hour optimization.
+      # Readers fall back to the existing live scan when this is disabled.
+      - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}
       # Periodic DuckDB instance recycle (backend/core/duckdb_recycle.py).
       # DuckDB's enable_object_cache caches parquet metadata keyed by
       # filename and never evicts deleted files; under continuous buffer +
@@ -287,11 +287,13 @@ services:
       # HOSTNAME=0.0.0.0).
       - HOSTNAME=127.0.0.1
       - API_PROXY_URL=http://127.0.0.1:8000
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
       # SSR helpers in lib/ssr/*.ts inject this on the loopback upstream
       # fetch when the backend's admin-token gate is active (Phase Q).
       # Same passthrough rationale as the backend block — empty = no-op
       # on the SSR fetch.
       - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
+      - ENV_NAME=gce
 
   caddy:
     # Custom build with the caddy-ratelimit plugin (see caddy/Dockerfile).

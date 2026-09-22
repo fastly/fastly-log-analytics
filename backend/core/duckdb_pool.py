@@ -35,9 +35,20 @@ Lifecycle:
 
 Concurrency:
   * Multiple connections to the same DuckDB file on the same process are safe
-    — they share the in-memory database state.
-  * All connections open with ``read_only=False`` (``get_connection`` forces
-    this) so cron write connections never conflict with pool connections.
+    — they share the in-memory database state. In durable serving mode each
+    pooled connection is instead an independent in-memory DuckDB instance.
+  * File-backed connections open with ``read_only=False`` (``get_connection``
+    forces this) so cron write connections never conflict with pool
+    connections. Durable serving connections never open the native service
+    file and attach DuckLake read-only.
+  * That safety is WITHIN ONE PROCESS only for the file-backed path. DuckDB
+    takes a process-exclusive lock on a read-write single-file database, so a
+    SECOND backend process (e.g. a second pod sharing the PVC) fails every
+    checkout with ``Could not set lock on file``; the retry loop below
+    classifies it transient and surfaces ``DBBusyError`` -> 503 on every data
+    request. Durable serving avoids this file ownership, though pod-local
+    accelerators remain a separate constraint. See
+    docs/adr/18-serving-tier-single-pod.md.
 
 Failure handling:
   * If view rebind fails on checkout, we discard the connection and try a
@@ -54,6 +65,7 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
+from typing import Any
 
 import duckdb
 
@@ -229,6 +241,10 @@ def _safe_buffer_mtime(src: dict | None) -> float | None:
     if src is None:
         return None
     try:
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(src):
+            return None
         from backend.core.iceberg._core import _buffer_dir
 
         if src.get("name", "").endswith("::rum"):
@@ -439,6 +455,13 @@ class _Pool:
         # and the FastAPI thread pool then fills with stuck checkouts until
         # the backend stops accepting new connections.
         if reused_con is not None:
+            # Re-attach lake since release() detached it to free the process-wide lock
+            from backend.core.iceberg._ducklake import _ducklake_attach
+
+            if not _ducklake_attach(reused_con, src, read_only=True):
+                self._discard(reused_con)
+                raise RuntimeError("Failed to re-attach DuckLake")
+
             if skip_view_update:
                 # Caller has guaranteed the view state is fresh for the
                 # duration of this acquire (in-request extras after a
@@ -505,6 +528,14 @@ class _Pool:
         if errored or self._draining:
             self._discard(con)
             return
+
+        # Detach lake from idle connections so background writers can acquire the process-wide lock.
+        # It gets re-attached on the next acquire().
+        try:
+            con.execute("DETACH lake")
+        except Exception:
+            pass
+
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see
         # _pool_sweep_enabled). Runs outside the lock — TEMP tables live
@@ -848,6 +879,7 @@ class _PoolBusy(Exception):
 
 
 _pools: dict[str, _Pool] = {}
+_retired_pools: dict[str, _Pool] = {}
 _pools_lock = threading.Lock()
 
 
@@ -1003,36 +1035,68 @@ def _existing_pools(service_keys) -> list[_Pool]:
         return [p for k in service_keys if (p := _pools.get(k)) is not None]
 
 
-def begin_drain_pools(service_keys) -> None:
-    """Put every existing pool for ``service_keys`` into draining mode.
+def begin_drain_pools(service_keys) -> dict[str, _Pool]:
+    """Put every existing pool for ``service_keys`` into draining mode and swap them.
 
-    Used by the DuckDB instance recycle: ALL pools sharing a db file must drain
-    together (a single un-drained pool keeps handing out conns and pins the
-    shared instance). Call before ``wait_pools_drained``.
+    This implements 'Blue/Green' connection pool swapping: we instantly retire the
+    old ('Blue') pool instance and remove/pop it from the active ``_pools`` mapping, so
+    that any new incoming web requests instantly construct and checkout from a fresh,
+    clean active 'Green' pool instance with 0ms delay and zero blocking.
+
+    The retired pool object continues to gracefully drain and close its active
+    connections in the background, and is safely garbage-collected once in_use reaches 0.
     """
-    for pool in _existing_pools(service_keys):
-        pool.begin_drain()
+    retired = {}
+    with _pools_lock:
+        for k in service_keys:
+            pool = _pools.get(k)
+            if pool is not None:
+                pool.begin_drain()
+                retired[k] = pool
+                _retired_pools[k] = pool
+                _pools.pop(k, None)
+    return retired
 
 
-def wait_pools_drained(service_keys, timeout: float) -> bool:
+def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
     """Wait (up to ``timeout`` total) for every drained pool to reach in_use==0.
 
     Returns True iff all pools drained within the shared deadline.
     """
-    pools = _existing_pools(service_keys)
+    targets: list[_Pool] = []
+    if isinstance(pools_or_keys, dict):
+        targets = list(pools_or_keys.values())
+    elif isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        targets = pools_or_keys
+    else:
+        # Fallback to string keys for backward compatibility
+        with _pools_lock:
+            targets = [p for k in pools_or_keys if (p := (_retired_pools.get(k) or _pools.get(k))) is not None]
+
     deadline = time.monotonic() + timeout
     ok = True
-    for pool in pools:
+    for pool in targets:
         remaining = max(0.0, deadline - time.monotonic())
         if not pool.wait_drained(remaining):
             ok = False
     return ok
 
 
-def end_drain_pools(service_keys) -> None:
-    """Take every existing pool for ``service_keys`` out of draining mode."""
-    for pool in _existing_pools(service_keys):
-        pool.end_drain()
+def end_drain_pools(pools_or_keys) -> None:
+    """Take every existing pool out of draining mode (no-op for swapped pools)."""
+    if isinstance(pools_or_keys, dict):
+        for pool in pools_or_keys.values():
+            pool.end_drain()
+        return
+    if isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        for pool in pools_or_keys:
+            pool.end_drain()
+        return
+    with _pools_lock:
+        for k in pools_or_keys:
+            pool = _retired_pools.pop(k, None) or _pools.get(k)
+            if pool is not None:
+                pool.end_drain()
 
 
 def reset_pool_for_service(service_key: str) -> int:
@@ -1067,6 +1131,32 @@ def shutdown_all() -> None:
                 con.close()
             except Exception:
                 pass
+
+
+def get_pool_status() -> dict[str, Any]:
+    """Return status and connection metrics across all active and retired pools."""
+    with _pools_lock:
+        pools_info = {}
+        for k, pool in _pools.items():
+            pools_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "max_size": pool.max_size,
+                "created_total": pool._created_total,
+                "reused_total": pool._reused_total,
+                "draining": pool._draining,
+            }
+        retired_info = {}
+        for k, pool in _retired_pools.items():
+            retired_info[k] = {
+                "in_use": pool._in_use,
+                "idle": pool._idle.qsize(),
+                "draining": pool._draining,
+            }
+    return {
+        "pools": pools_info,
+        "retired_pools": retired_info,
+    }
 
 
 # R-1: drain the per-connection metadata dict between tests so a recycled

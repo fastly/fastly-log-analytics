@@ -9,14 +9,33 @@ class TestFeatureStateValidation:
     """Test FeatureState validation constraints."""
 
     def test_featurestate_validates_log_period_range(self):
-        """Verify log_period is within valid range [30, 3600]."""
+        """Verify log_period is within valid range [1, 3600].
+
+        Floor is 1, not 30: confirmed live against the real Fastly API
+        (fastly service logging s3 update --period 1 succeeds and the
+        value is stored as-is) and Fastly's own API reference (no min/max
+        documented). A prior [30, 3600] floor here silently rejected the
+        1/5/10/20-second options the provisioning wizard's own dropdown
+        already offered.
+        """
         cfg = {
             "service_id": "srv_test",
-            "log_period": 5,  # Too small
+            "log_period": 0,  # Too small
             "sample_rate": 100,
         }
-        with pytest.raises(ValueError, match="log_period.*30.*3600"):
+        with pytest.raises(ValueError, match="log_period.*1.*3600"):
             FeatureState.from_config(cfg)
+
+    def test_featurestate_allows_low_log_period_for_high_rps_services(self):
+        """Low-latency services need sub-30s periods -- must not regress."""
+        for period in (1, 5, 10, 20):
+            cfg = {
+                "service_id": "srv_test",
+                "log_period": period,
+                "sample_rate": 100,
+            }
+            state = FeatureState.from_config(cfg)
+            assert state.log_period == period
 
     def test_featurestate_validates_sample_rate_range(self):
         """Verify sample_rate is within valid range [1, 100]."""

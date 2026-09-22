@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 
+from backend.core.metadata.pg_connection import get_pg_thread_connection, is_postgres
 from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,16 @@ _pool = ThreadLocalPool(
 
 
 def get_global_share_con() -> sqlite3.Connection:
-    """Return a thread-local connection to the global share DB."""
+    """Return a thread-local connection to the global share DB.
+
+    Under a Postgres metadata backend this is the SAME shared connection
+    ``metadata.base.get_con`` hands out on this thread (one connection per
+    thread, not per logical database) — share_db's tables carry no
+    service_id and were never meant to be a separate physical database
+    under Postgres, only under the historical per-file SQLite layout.
+    """
+    if is_postgres():
+        return get_pg_thread_connection()  # type: ignore[return-value]
     return _pool.get("__global_share__")
 
 

@@ -7,11 +7,14 @@ and it's gated on a retention window (default 90 days) driven by the
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from backend.core.share_db.connection import get_global_share_con
 from backend.utils.date_utils import iso_z, iso_z_now
+
+logger = logging.getLogger(__name__)
 
 
 def log_share_audit_event(
@@ -107,3 +110,63 @@ def purge_old_audit_logs(retention_days: int = 90, *, con: sqlite3.Connection | 
     cur = con.execute("DELETE FROM remote_share_audit_logs WHERE timestamp < ?", (cutoff,))
     con.commit()
     return cur.rowcount or 0
+
+
+def purge_stale_share_records(
+    max_idle_session_days: int = 30,
+    *,
+    con: sqlite3.Connection | None = None,
+) -> dict[str, int]:
+    """Purge expired claim tokens, expired invites, and stale sessions.
+
+    Also executes PRAGMA wal_checkpoint(TRUNCATE).
+    """
+    con = con or get_global_share_con()
+    now_iso = iso_z_now()
+    session_cutoff = iso_z(datetime.now(UTC) - timedelta(days=int(max_idle_session_days)))
+
+    # 1. Purge expired claim tokens
+    cur = con.execute("DELETE FROM remote_invite_claim_tokens WHERE expires_at < ?", (now_iso,))
+    deleted_tokens = cur.rowcount or 0
+
+    # 2. Purge expired invites (cascades to invite_services, remote_sessions, and claim tokens via FK)
+    cur = con.execute("DELETE FROM remote_invites WHERE expires_at IS NOT NULL AND expires_at < ?", (now_iso,))
+    deleted_invites = cur.rowcount or 0
+
+    # 3. Purge stale sessions (> max_idle_session_days idle)
+    cur = con.execute("DELETE FROM remote_sessions WHERE last_active_time < ?", (session_cutoff,))
+    deleted_sessions = cur.rowcount or 0
+
+    con.commit()
+
+    # 4. Checkpoint WAL
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as e:
+        logger.warning("[share_db] wal_checkpoint failed: %s", e)
+
+    return {
+        "deleted_claim_tokens": deleted_tokens,
+        "deleted_expired_invites": deleted_invites,
+        "deleted_stale_sessions": deleted_sessions,
+    }
+
+
+def purge_all_share_records(
+    audit_retention_days: int = 90,
+    max_idle_session_days: int = 30,
+    *,
+    con: sqlite3.Connection | None = None,
+) -> dict[str, int]:
+    """Purge old audit logs, expired invites, stale sessions, and expired tokens."""
+    con = con or get_global_share_con()
+    deleted_audit = purge_old_audit_logs(retention_days=audit_retention_days, con=con)
+    stale_res = purge_stale_share_records(max_idle_session_days=max_idle_session_days, con=con)
+    return {
+        "deleted_audit_logs": deleted_audit,
+        "deleted_expired_invites": stale_res["deleted_expired_invites"],
+        "deleted_stale_sessions": stale_res["deleted_stale_sessions"],
+        "deleted_claim_tokens": stale_res["deleted_claim_tokens"],
+        "audit_retention_days": audit_retention_days,
+        "max_idle_session_days": max_idle_session_days,
+    }

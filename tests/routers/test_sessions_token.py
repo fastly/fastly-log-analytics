@@ -72,7 +72,7 @@ def _use_analyst(in_memory_duckdb, source, *, mask_ips: bool):
     we exercise the router's analyst branch via the injected ctx.analyst_session.)"""
     session = SimpleNamespace(service_ids=[source["service_id"]], pii_policy={"mask_ips": mask_ips})
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=source, con=in_memory_duckdb, session=session
+        source=source, _con_override=in_memory_duckdb, session=session
     )
 
 

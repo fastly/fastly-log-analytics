@@ -183,7 +183,7 @@ def reconcile_cmcd_custom_fields(custom_fields: list[dict] | None, *, enabled: b
     generated log format while ``cmcd.enabled`` stays true. The edge keeps
     extracting CMCD into ``req.http.x-cmcd:*`` and nothing logs it, so every
     ``cmcd_*`` column ingests empty and /streaming renders all zeros with no
-    error — the 2026-08-12 SE-demo incident.
+    error — the 2026-08-12 production incident.
 
     Every such writer must route its list through here, keyed on the CURRENT
     ``cmcd.enabled`` state, so enabling and disabling both converge.

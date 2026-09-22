@@ -145,6 +145,15 @@ async def origin_aggregates(
     else:
         start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     sections = _expand_sections(req.sections)
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.origin import aggregates as high_scale_aggregates
+
+        res = high_scale_aggregates(high_scale_service, req, start_time, end_time, sections=sections)
+        return OriginAggregatesResponse.with_telemetry(**res)
+
     res = await repo.get_aggregates(
         con=ctx.con,
         src=ctx.source,

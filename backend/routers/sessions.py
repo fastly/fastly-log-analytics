@@ -37,6 +37,14 @@ def sessions_endpoint(
     # Guard against unbounded scans (14–20s observed) when the frontend hasn't
     # sent a time range yet. Default to the last 7 days — matches the max
     # window the repository enforces when a range IS provided.
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.sessions import sessions_endpoint as hs_sessions
+
+        return hs_sessions(high_scale_service, req, start_time, end_time)
+
     if not start_time or not end_time:
         _now = datetime.now(UTC)
         if not end_time:
@@ -123,6 +131,14 @@ def sessions_detail(
     # there's no analyst session; we already required both inputs above,
     # so the clamp always returns concrete ISO strings here.
     assert start_time is not None and end_time is not None
+
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.sessions import sessions_detail as hs_detail
+
+        return hs_detail(high_scale_service, req, start_time, end_time, ip, ja4)
 
     from backend.core.iceberg import execute_with_stale_view_retry
 

@@ -521,7 +521,7 @@ def test_import_reinjects_scoring_fields_when_scoring_enabled():
 
 
 def test_import_reinjects_cmcd_fields_when_cmcd_enabled():
-    """REGRESSION: 2026-08-12 SE-demo incident — the sibling of the scoring
+    """REGRESSION: 2026-08-12 production incident — the sibling of the scoring
     case above, for CMCD's 14 ``cmcd_*`` fields. A remote admin_state.json
     written before CMCD was enabled (or by a host without it) carries no
     ``cmcd_*`` entries, and ``import_admin_state`` used to re-inject only the

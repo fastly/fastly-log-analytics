@@ -271,4 +271,92 @@ def test_admin_state_import_failure_does_not_break_run(monkeypatch, stub_load_co
     metadata._run_metadata_sync("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
-    assert args[3] == "success"
+    assert args[3] == "warning"
+
+
+def test_metadata_cleanup_defers_when_active_requests_present(monkeypatch, stub_source):
+    """When active queries are running on the dashboard, metadata_cleanup must defer to avoid SQLite lock contention."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=True))
+    start_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
+
+    _run_metadata_cleanup("svc-1")
+
+    start_cron.assert_not_called()
+
+
+def test_metadata_cleanup_happy_path_emits_progress_and_finalizes(monkeypatch, stub_source, stub_load_config):
+    """Happy path: cleans up tables, emits progress, logs success with rows trimmed, and finalizes duration."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=123))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+
+    cleanup_mock = MagicMock(
+        return_value={
+            "deleted": {"usage_log": 50, "ingested_files": 100, "cron_runs": 20},
+            "vacuumed": True,
+            "duration_s": 0.45,
+        }
+    )
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", cleanup_mock)
+    monkeypatch.setattr("backend.core.metric_snapshots.purge_old", MagicMock())
+    monkeypatch.setattr("backend.core.metadata.quarantine.get_expired_quarantined_files", MagicMock(return_value=[]))
+
+    start_prog = MagicMock()
+    end_prog = MagicMock()
+    log_prog = MagicMock()
+    finalize_dur = MagicMock()
+    monkeypatch.setattr("backend.cron_progress.start_progress", start_prog)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", log_prog)
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
+
+    _run_metadata_cleanup("svc-1")
+
+    start_prog.assert_called_once_with(123, service_id="svc-1", task="metadata_cleanup")
+    cleanup_mock.assert_called_once()
+    assert log_cron.call_count == 1
+    call_args = log_cron.call_args
+    assert call_args[0][1] == "metadata_cleanup"
+    assert call_args[0][3] == "success"
+    assert call_args[1]["rows_ingested"] == 170
+    assert "Trimmed 170 rows" in call_args[1]["summary"]
+    assert "VACUUM=yes" in call_args[1]["summary"]
+
+    end_prog.assert_called_once_with(123)
+    finalize_dur.assert_called_once()
+
+
+def test_metadata_cleanup_handles_failure_and_finalizes_duration(monkeypatch, stub_source, stub_load_config):
+    """When cleanup_metadata raises, error is logged and finalize_cron_duration is guaranteed in finally."""
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=456))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", MagicMock(side_effect=RuntimeError("db locked")))
+
+    end_prog = MagicMock()
+    finalize_dur = MagicMock()
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
+
+    _run_metadata_cleanup("svc-1")
+
+    assert log_cron.call_count == 1
+    call_args = log_cron.call_args
+    assert call_args[0][1] == "metadata_cleanup"
+    assert call_args[0][3] == "error"
+    assert "db locked" in call_args[1]["summary"]
+
+    end_prog.assert_called_once_with(456)
+    finalize_dur.assert_called_once()

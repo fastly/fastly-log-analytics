@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { formatDate } from '@/lib/date'
+import { formatDate, toUTCDate } from '@/lib/date'
 import { CHART_LAYOUT_DEFAULTS } from '@/lib/constants'
 
 /**
@@ -82,9 +82,18 @@ const MAX_DENSE_BUCKETS = 5000
  * the grid must key by `Date.parse` (epoch ms), not the raw string, so a `Z` vs
  * `+00:00` suffix difference between the grid and the source rows can't miss.
  */
+function parseUtcMs(t: string | number | null | undefined): number {
+  if (t == null) return NaN
+  if (typeof t === 'number') return t
+  const parsed = toUTCDate(t).getTime()
+  return Number.isNaN(parsed) ? Date.parse(t) : parsed
+}
+
 export function denseTimeGrid(
   times: Array<string | number | null | undefined>,
   intervalSeconds: number | undefined,
+  startTime?: string | null,
+  endTime?: string | null,
 ): string[] | null {
   if (!intervalSeconds || intervalSeconds <= 0) return null
   const stepMs = intervalSeconds * 1000
@@ -92,14 +101,31 @@ export function denseTimeGrid(
   const timesMs = [
     ...new Set(
       times
-        .map((t) => (t == null ? NaN : typeof t === 'number' ? t : Date.parse(t)))
+        .map((t) => parseUtcMs(t))
         .filter((t) => !Number.isNaN(t)),
     ),
   ].sort((a, b) => a - b)
-  if (timesMs.length < 2) return null
 
-  const first = timesMs[0]
-  const last = timesMs[timesMs.length - 1]
+  let first = timesMs.length > 0 ? timesMs[0] : undefined
+  let last = timesMs.length > 0 ? timesMs[timesMs.length - 1] : undefined
+
+  if (startTime) {
+    const sMs = parseUtcMs(startTime)
+    if (!Number.isNaN(sMs)) {
+      const startBucket = sMs - (sMs % stepMs)
+      if (first === undefined || startBucket < first) first = startBucket
+    }
+  }
+  if (endTime) {
+    const eMs = parseUtcMs(endTime)
+    if (!Number.isNaN(eMs)) {
+      const endBucket = eMs - (eMs % stepMs)
+      if (last === undefined || endBucket > last) last = endBucket
+    }
+  }
+
+  if (first === undefined || last === undefined || first > last) return null
+
   // Bail if any present bucket is off the interval grid — filling would silently
   // drop its value. DuckDB guarantees alignment, so this only trips on a mixed
   // or unexpected grain.
@@ -107,7 +133,8 @@ export function denseTimeGrid(
 
   const nBuckets = Math.round((last - first) / stepMs) + 1
   // Already contiguous (no gaps) or grid too large to be worth/safe filling.
-  if (nBuckets <= timesMs.length || nBuckets > MAX_DENSE_BUCKETS) return null
+  if (nBuckets <= timesMs.length && !startTime && !endTime) return null
+  if (nBuckets > MAX_DENSE_BUCKETS) return null
 
   const grid: string[] = []
   for (let k = 0; k < nBuckets; k++) grid.push(new Date(first + k * stepMs).toISOString())
@@ -137,10 +164,14 @@ export function densifyBarSeries(
   time_series: BarSeriesPoint[],
   intervalSeconds: number | undefined,
   hasCategories: boolean,
+  startTime?: string | null,
+  endTime?: string | null,
 ): BarSeriesPoint[] {
   const grid = denseTimeGrid(
     time_series.map((d) => d.time),
     intervalSeconds,
+    startTime,
+    endTime,
   )
   if (!grid) return time_series
 
@@ -151,7 +182,7 @@ export function densifyBarSeries(
     const seen = new Set<string>()
     const byKey = new Map<string, number>()
     for (const d of time_series) {
-      const ms = Date.parse(d.time)
+      const ms = parseUtcMs(d.time)
       if (Number.isNaN(ms)) continue
       const cat = d.category != null ? String(d.category) : 'Other'
       if (!seen.has(cat)) { seen.add(cat); categories.push(cat) }
@@ -159,7 +190,7 @@ export function densifyBarSeries(
     }
     const out: BarSeriesPoint[] = []
     for (const iso of grid) {
-      const ms = Date.parse(iso)
+      const ms = parseUtcMs(iso)
       for (const cat of categories) {
         out.push({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat })
       }
@@ -169,8 +200,8 @@ export function densifyBarSeries(
 
   const byMs = new Map<number, number>()
   for (const d of time_series) {
-    const ms = Date.parse(d.time)
+    const ms = parseUtcMs(d.time)
     if (!Number.isNaN(ms)) byMs.set(ms, d.value)
   }
-  return grid.map((iso) => ({ time: iso, value: byMs.get(Date.parse(iso)) ?? 0 }))
+  return grid.map((iso) => ({ time: iso, value: byMs.get(parseUtcMs(iso)) ?? 0 }))
 }

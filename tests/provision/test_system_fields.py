@@ -1,6 +1,6 @@
 """Regression coverage for system-managed custom-field reconciliation.
 
-Pins the invariant behind the 2026-08-12 SE-demo CMCD incident: CMCD's 14
+Pins the invariant behind the 2026-08-12 production CMCD incident: CMCD's 14
 ``cmcd_*`` custom fields are generated from code and hidden from the
 user-editable list by ``_is_system_field``, so any writer that persists
 ``log_fields`` from a list it did not author omits them. The omission removes

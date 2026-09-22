@@ -49,6 +49,7 @@ export const SECURITY_SSR_SECTIONS = [
   'ipv6_adoption',
   'proxy_dist',
   'conn_reuse_dist',
+  'proxies',
 ] as const
 
 // bucketSeconds=3600 is load-bearing for the key-match: ReportLayout derives it

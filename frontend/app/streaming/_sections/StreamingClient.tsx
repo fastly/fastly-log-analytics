@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useFilterStore } from '@/stores/filterStore'
@@ -67,7 +68,14 @@ function StreamingBody({
   timezone,
 }: StreamingBodyProps) {
   const setRange = useFilterStore((s) => s.setRange)
+  const queryClient = useQueryClient()
   const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
+
+  React.useEffect(() => {
+    return () => {
+      queryClient.cancelQueries({ queryKey: ['cmcd'] })
+    }
+  }, [queryClient])
 
   const handleChartRelayout = React.useCallback((event: Record<string, unknown>) => {
     if (event?.['xaxis.autorange'] === true || event?.['xaxis.showspikes'] !== undefined) return
@@ -92,7 +100,7 @@ function StreamingBody({
   const cmcdQuery = useServiceQuery(
     ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
     async ({ signal }) => {
-      const { data } = await client.POST('/api/cmcd/aggregates', {
+      const { data, error } = await client.POST('/api/cmcd/aggregates', {
         signal,
         body: {
           filters: filterPayload,
@@ -101,6 +109,7 @@ function StreamingBody({
           ...rangeBody,
         },
       })
+      if (error) throw error
       return data
     },
     { refetchInterval: 30_000 },

@@ -19,7 +19,7 @@
 #   5. The temp workspace is removed on exit; the working tree is never touched.
 #
 # Required:
-#   --service-id   target Compute service id (e.g. eHDt37QGSEfihZOuXJOREe)
+#   --service-id   target Compute service id (e.g. <service-id>)
 #   --token        Fastly API token (or set FASTLY_API_TOKEN env var)
 #
 # Optional:

@@ -195,5 +195,5 @@ Assets Shield aggregates and visualizes CDN performance, cache efficiency, and p
 ### Enterprise-Grade Edge Proxy
 Live Shared Instance (Path B) utilizes a highly secure, high-performance edge-proxy architecture to connect analysts with the local running server, completely replacing the obsolete SSH-reverse-tunnel relays.
 * **One-Click Wizard:** Nested in the `/admin/share` control panel, an interactive `DeployRemoteFrontendDialog` allows operators to register and configure a dedicated Fastly service acting as a secure HTTPS reverse proxy.
-* **Auto-Provisioning Origin Mapping:** Provisions custom or Fastly SSL hostnames, auto-configuring backend server records to map the local GCE VM public IP (`34.123.30.195`), port 80, and TLS configurations.
+* **Auto-Provisioning Origin Mapping:** Provisions custom or Fastly SSL hostnames, auto-configuring backend server records to map an operator-provided origin host, port, and TLS configuration.
 * **Interactive Selective Teardown:** A dedicated teardown wizard form guides the operator through teardown options. It permits selective teardown of request logging snippet components, RUM snippet components, or complete service teardown with safe, dependency-ordered resource dereferencing.

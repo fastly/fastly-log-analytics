@@ -139,44 +139,60 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
               <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription className="text-[13px] ml-1 font-medium">
-                  This permanently deletes all of this service&apos;s log data — both local (the analytical
-                  database and cache) and cloud-stored (the Iceberg log table in Fastly Object Storage).
-                  New logs from the live edge will start populating immediately afterward. This cannot be
-                  undone.
+                  {service.is_high_scale
+                    ? "This permanently deletes all of this service's log data from the high-scale ClickHouse cluster. New logs from the live edge will start populating immediately afterward. This cannot be undone."
+                    : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the Iceberg log table in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
+                  }
                 </AlertDescription>
               </Alert>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                    <HardDrive className="h-3 w-3" /> Local
+              {!service.is_high_scale ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      <HardDrive className="h-3 w-3" /> Local
+                    </div>
+                    <div className="text-lg font-mono font-bold tracking-tight">
+                      {formatBytes(service.duckdb_size_bytes ?? 0)}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {(service.cache_file_count ?? 0).toLocaleString()} file{service.cache_file_count === 1 ? '' : 's'}
+                    </div>
                   </div>
-                  <div className="text-lg font-mono font-bold tracking-tight">
-                    {formatBytes(service.duckdb_size_bytes ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {(service.cache_file_count ?? 0).toLocaleString()} file{service.cache_file_count === 1 ? '' : 's'}
-                  </div>
-                </div>
 
-                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                    <Cloud className="h-3 w-3" /> Cloud
+                  <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      <Cloud className="h-3 w-3" /> Cloud
+                    </div>
+                    {icebergLoading ? (
+                      <div className="text-lg font-mono font-bold tracking-tight text-muted-foreground">…</div>
+                    ) : (
+                      <>
+                        <div className="text-lg font-mono font-bold tracking-tight">
+                          {formatBytes(icebergInfo?.size_bytes ?? 0)}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {(icebergInfo?.data_files ?? 0).toLocaleString()} file{icebergInfo?.data_files === 1 ? '' : 's'}
+                        </div>
+                      </>
+                    )}
                   </div>
-                  {icebergLoading ? (
-                    <div className="text-lg font-mono font-bold tracking-tight text-muted-foreground">…</div>
-                  ) : (
-                    <>
-                      <div className="text-lg font-mono font-bold tracking-tight">
-                        {formatBytes(icebergInfo?.size_bytes ?? 0)}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        {(icebergInfo?.data_files ?? 0).toLocaleString()} file{icebergInfo?.data_files === 1 ? '' : 's'}
-                      </div>
-                    </>
-                  )}
                 </div>
-              </div>
+              ) : (
+                <div className="grid gap-3">
+                  <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                      <HardDrive className="h-3 w-3" /> Analytics Cluster
+                    </div>
+                    <div className="text-sm font-medium tracking-tight">
+                      High-Scale ClickHouse Backend
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Data deletion is synchronous and cluster-wide.
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <p className="text-xs text-muted-foreground">
                 Preserved: saved views, alerts, source configuration, audit history, and scoring labels.

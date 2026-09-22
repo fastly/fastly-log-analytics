@@ -1,6 +1,6 @@
 """Regression coverage for the 2026-08 Iceberg metadata-rollback incident.
 
-The SE-demo service silently lost 41 days of data (2026-07-01 → 2026-08-10)
+A production service silently lost 41 days of data (2026-07-01 → 2026-08-10)
 while ingest kept reporting success. Mechanism:
 
   1. ``_read_metadata_pointer`` reads ``metadata_location.txt``. Both candidate

@@ -280,11 +280,13 @@ export function AppLayout({
   initialCollapsed = false,
   ssrActiveServiceId,
   ssrIsRumEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -442,7 +444,11 @@ export function AppLayout({
     // other layout/redirect logic kicks in. Skip while already there.
     if (needsLogin && !pathname.startsWith('/share-login')) {
       setRedirectAnnouncement('Sign in required. Redirecting to the sign-in page.')
-      React.startTransition(() => router.replace('/share-login'))
+      if (typeof window !== 'undefined') {
+        window.location.replace('/share-login')
+      } else {
+        React.startTransition(() => router.replace('/share-login'))
+      }
       return
     }
     // Analysts can't access admin pages, the Usage & Cost page, the Alerts
@@ -464,7 +470,7 @@ export function AppLayout({
     // by the destination route's own effects, and it preserves browser
     // history correctly.
     const analystBlocked =
-      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts'))
+      isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
     const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
     if (analystBlocked || logsBlocked) {
       const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
@@ -743,9 +749,9 @@ export function AppLayout({
             // text-muted-foreground (no /opacity-step) keeps the version
             // string above WCAG 2.1 AA 4.5:1 at 10px on bg-muted/20.
             // /50 dropped to 2.19, which axe flagged on /dashboard.
-            // data-empty-placeholder excludes from the e2e axe scope —
+            // data-axe-ignore excludes from the e2e axe scope —
             // 10px decorative version string is intentional low-emphasis.
-            <div data-empty-placeholder="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
+            <div data-axe-ignore="true" className="mt-4 mb-1 text-[10px] text-muted-foreground text-center font-mono select-all">
               v{packageJson.version}
             </div>
           )}
@@ -753,7 +759,7 @@ export function AppLayout({
             <div
               data-testid="analyst-watermark"
               data-analyst-email={analystEmail || ''}
-              data-empty-placeholder="true"
+              data-axe-ignore="true"
               className="text-[10px] text-muted-foreground text-center mt-1"
             >
               Viewing as <span className="font-medium">{analystName || analystEmail}</span>
@@ -866,15 +872,13 @@ export function AppLayout({
             set, so it's free on the cold path. */}
         {hideFilterBar && <ActiveFiltersBanner />}
 
-        {/* A-11 (a11y): tabIndex={-1} makes <main> a programmatic focus
-            target so the RouteFocus effect above can move SR reading
-            position here on client-side navigation. -1 keeps it out of
-            the keyboard tab order. outline-none avoids a visible focus
-            ring on the landmark itself (the new page's first focusable
-            element / heading is what users will actually see/hear). */}
+        {/* A-11 (a11y): tabIndex={0} makes <main> a programmatic focus
+            target and keyboard-accessible scrollable region (WCAG 2.1 AA
+            scrollable-region-focusable). outline-none avoids an intrusive
+            focus ring on the landmark itself. */}
         <main
           id="main"
-          tabIndex={-1}
+          tabIndex={0}
           className="flex-1 overflow-auto p-4 md:p-6 outline-none"
         >
           {/* Render children IMMEDIATELY on navigation. The previous
@@ -900,6 +904,7 @@ export function AppLayout({
             </div>
           ) : children}
           {debugEnabled && <DebugPanel />}
+          {serverFooter && !isAnalyst && serverFooter}
         </main>
       </div>
       </TooltipProvider>

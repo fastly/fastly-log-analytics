@@ -54,18 +54,19 @@ const BOTS_SECTIONS: SecuritySections = [
 ]
 const HEADER_ANOMALIES_SECTIONS: SecuritySections = ['req_size_dist', 'top_ips_header']
 const NETWORK_SECTIONS: SecuritySections = ['ipv6_adoption', 'proxy_dist', 'conn_reuse_dist']
-// Union of all three section groups — fetched in a single POST so the page
-// makes one /api/security/aggregates call instead of three concurrent ones.
-// On the 4-core prod VM, three parallel DuckDB scans oversubscribe the cores
+const PROXY_SECTIONS: SecuritySections = ['proxies']
+// Union of all section groups — fetched in a single POST so the page
+// makes one /api/security/aggregates call instead of concurrent ones.
+// On the 4-core prod VM, parallel DuckDB scans oversubscribe the cores
 // (see memory: cpu-bound queries don't parallelize there); one combined scan
-// avoids that contention. Trade-off vs. the prior split: the three sections
+// avoids that contention. Trade-off vs. the prior split: the sections
 // now share a single loading state (no progressive above-the-fold paint) and
 // a single error boundary.
 //
 // MUST stay in lockstep with SECURITY_SSR_SECTIONS in lib/ssr/security.ts —
 // the section list is part of the SSR-seed query key, so a divergence here
 // would miss the dehydrated cache and double-fetch on first paint.
-const SECURITY_SECTIONS: SecuritySections = [...BOTS_SECTIONS, ...HEADER_ANOMALIES_SECTIONS, ...NETWORK_SECTIONS]
+const SECURITY_SECTIONS: SecuritySections = [...BOTS_SECTIONS, ...HEADER_ANOMALIES_SECTIONS, ...NETWORK_SECTIONS, ...PROXY_SECTIONS]
 
 // Lifted out of the ReportLayout render-prop so useTimeLayout + useServiceQuery
 // live at the top of a STABLE component instead of being called inside the
@@ -165,27 +166,6 @@ function SecurityBody({
     },
   )
 
-  const proxiesQuery = useServiceQuery<components['schemas']['SecurityProxiesResponse'] | undefined>(
-    ['security', 'proxies', activeServiceId, rangeKey, anchor, filterPayload],
-    async ({ signal }) => {
-      const { data, error } = await client.POST('/api/security/proxies', {
-        signal,
-        body: {
-          filters: filterPayload,
-          ...rangeBody,
-        },
-      })
-      if (error) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((error as any)?.detail || (error as any)?.message || "Failed to fetch security proxies")
-      }
-      return data
-    },
-    {
-      enabled: activeTab === 'proxy-watchdog' && !!activeServiceId,
-    }
-  )
-
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
       <TabsList className="grid grid-cols-3 max-w-[600px]">
@@ -245,9 +225,9 @@ function SecurityBody({
 
       <TabsContent value="proxy-watchdog">
         <ProxyWatchdogSection
-          data={proxiesQuery.data}
-          isLoading={proxiesQuery.isLoading}
-          error={proxiesQuery.error ?? null}
+          data={securityQuery.data as any}
+          isLoading={securityQuery.isLoading}
+          error={securityQuery.error ?? null}
           startTime={startTime}
           endTime={endTime}
           activeServiceId={activeServiceId}

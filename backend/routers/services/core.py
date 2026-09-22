@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -781,7 +780,7 @@ def api_service_update_logging_settings(
     prov = cfg.setdefault("provisioning", {})
     old_period = int(cfg.get("log_period", 60))
     old_sample_rate = int(prov.get("sample_rate", 100))
-    old_prefix = cfg.get("fos_prefix", "")
+    old_prefix = ""
     old_edge_only = prov.get("edge_only", False)
     old_custom_condition = prov.get("custom_condition", "")
 
@@ -789,8 +788,9 @@ def api_service_update_logging_settings(
         period = old_period
     if sample_rate is None:
         sample_rate = old_sample_rate
-    if prefix is None:
-        prefix = old_prefix
+    if prefix:
+        raise HTTPException(status_code=400, detail={"error": "Custom FOS prefixes are not supported in v3"})
+    prefix = ""
     if edge_only is None:
         edge_only = old_edge_only
     if custom_condition is None:
@@ -799,15 +799,11 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
-    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "Invalid prefix. Use alphanumerics, /, _, -."},
-        )
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-    prefix = prefix.strip("/")
-    path = f"/{prefix}/raw/%Y-%m-%d/%H/" if prefix else "/raw/%Y-%m-%d/%H/"
+    from backend.provision.log_paths import analytics_log_path
+
+    path = analytics_log_path()
 
     def stream():
         try:
@@ -845,7 +841,7 @@ def api_service_update_logging_settings(
                             from backend.models.services import CmcdSettingsResponse
 
                             _logging_settings_cache[service_id] = {
-                                "prefix": prefix,
+                                "prefix": "",
                                 "period": period,
                                 "sample_rate": sample_rate,
                                 "edge_only": edge_only,
@@ -870,7 +866,7 @@ def api_service_update_logging_settings(
                     fresh_prov["edge_only"] = edge_only
                     fresh_prov["custom_condition"] = custom_condition
                     fresh_cfg["log_period"] = period
-                    fresh_cfg["fos_prefix"] = prefix
+                    fresh_cfg["fos_prefix"] = ""
                     if "cron_sync" in fresh_prov:
                         if period < 60:
                             fresh_prov["cron_sync"]["interval_seconds"] = period
@@ -939,6 +935,8 @@ def api_invite_analyst(service_id: str):
             raise HTTPException(status_code=404, detail={"error": msg})
         if "read_write" in msg.lower():
             raise HTTPException(status_code=403, detail={"error": msg})
+        if "independent analyst invites are unavailable" in msg.lower():
+            raise HTTPException(status_code=409, detail={"error": msg})
         raise HTTPException(status_code=400, detail={"error": msg})
 
     result["_debug_calls"] = get_tracked_calls()

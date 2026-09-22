@@ -8,7 +8,7 @@ prod is reading. Four enforcement points:
                                    local-only allowlist (local_compact,
                                    rollup_compact); never call _sync_jobs
   2. ``Scheduler.reload()``      — refuse to re-arm jobs after start bailed
-  3. ``_run_service_cron``       — refuse manual /admin/ingest-logs force=True
+  3. ``_run_log_discovery_cron``       — refuse manual /admin/ingest-logs force=True
   4. ``_run_full_sweep``         — refuse gap_heal's direct invocation
   5. ``_run_gap_heal``           — refuse the gap heal itself
 
@@ -96,9 +96,14 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sorted(sched._job_ids) == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
+    assert sorted(sched._job_ids) == [
+        "local_compact_svc-x",
+        "partial_hour_merge_svc-x",
+        "rollup_compact_svc-x",
+        "rollup_heal_svc-x",
+    ]
     added = sorted(c.kwargs["id"] for c in add_job.call_args_list)
-    assert added == ["local_compact_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
+    assert added == ["local_compact_svc-x", "partial_hour_merge_svc-x", "rollup_compact_svc-x", "rollup_heal_svc-x"]
 
 
 def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
@@ -117,9 +122,32 @@ def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sorted(sched._job_ids) == ["local_compact_svc-ro"]
+    assert sorted(sched._job_ids) == ["local_compact_svc-ro", "partial_hour_merge_svc-ro"]
     added = [c.kwargs["id"] for c in add_job.call_args_list]
-    assert added == ["local_compact_svc-ro"]
+    assert added == ["local_compact_svc-ro", "partial_hour_merge_svc-ro"]
+
+
+def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
+    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
+
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {"service_id": "svc-high", "provisioning": {"access_level": "read_write"}}
+    sched = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc-high"}),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
+        ),
+        patch.object(sched._sched, "add_job") as add_job,
+    ):
+        sched._register_dev_local_safe_jobs()
+
+    assert sched._job_ids == {}
+    add_job.assert_not_called()
 
 
 def test_scheduler_reload_is_a_noop_when_kill_switch_on(monkeypatch):
@@ -155,21 +183,21 @@ def test_scheduler_start_runs_normally_when_kill_switch_off(monkeypatch):
 # ── Ingest-class job entry points ───────────────────────────────────────────
 
 
-def test_run_service_cron_refuses_when_kill_switch_on(monkeypatch, caplog):
-    """_run_service_cron is the path that manual /admin/ingest-logs hits
+def test_run_log_discovery_cron_refuses_when_kill_switch_on(monkeypatch, caplog):
+    """_run_log_discovery_cron is the path that manual /admin/ingest-logs hits
     with force=True. force=True intentionally bypasses
     provisioning.cron_sync.enabled. The env var beats both."""
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     caplog.set_level("WARNING")
 
-    from backend.cron.jobs.sync import _run_service_cron
+    from backend.cron.jobs.sync import _run_log_discovery_cron
 
-    # If the gate works, _run_service_cron returns immediately and
+    # If the gate works, _run_log_discovery_cron returns immediately and
     # ingest() is never imported. Patch get_source_for_service to a
     # MagicMock; if the gate fails, the function would call it and the
     # MagicMock would record the call.
     with patch("backend.core.duckdb.get_source_for_service") as get_src:
-        _run_service_cron("svc-test", force=True)
+        _run_log_discovery_cron("svc-test", force=True)
         get_src.assert_not_called()
 
     assert any("FLA_DEV_NO_CRONS=1" in r.message for r in caplog.records)

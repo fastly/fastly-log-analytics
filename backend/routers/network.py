@@ -83,6 +83,14 @@ def network_health(
     req: NetworkHealthRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_health as hs_network_health
+
+        return hs_network_health(high_scale_service, req, req.start_time, req.end_time)
+
     # ── Relative-range keyed path ───────────────────────────────────────────
     # When the caller sends a recognized ``range_token``, the SERVER resolves
     # the scan window from (token, quantized anchor) — we do NOT trust the
@@ -124,7 +132,7 @@ def network_health(
 
     if want_core:
         res = repo.get_health(
-            con=ctx.con,
+            con_factory=lambda: ctx.con,
             src=ctx.source,
             start_time=start_time,
             end_time=end_time,
@@ -177,9 +185,17 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_quality as hs_network_quality
+
+        return hs_network_quality(high_scale_service, req, req.start_time, req.end_time)
+
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     res = repo.get_quality(
-        con=ctx.con,
+        con_factory=lambda: ctx.con,
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
@@ -211,40 +227,80 @@ def get_pop_health(
     end_time: datetime | None = Query(default=None),
 ):
     """Aggregate edge-routing and cache metrics across Fastly POP locations."""
-    table_name = _safe_table(ctx.source["name"])
-    time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
-    params = [start_time or (datetime.now(UTC) - timedelta(hours=24)), end_time or datetime.now(UTC)]
+    from backend.high_scale.registry import get_high_scale_service_registry
 
-    query = f"""
-        SELECT
-            pop,
-            COUNT(*) AS requests,
-            COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
-            ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
-            approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
-            approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
-            ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
-            SUM(resp_bytes) AS bandwidth_bytes
-        FROM {table_name}
-        {time_filter} AND pop IS NOT NULL AND pop != ''
-        GROUP BY pop
-        ORDER BY requests DESC
-    """
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import get_pop_health as hs_get_pop_health
+
+        return hs_get_pop_health(high_scale_service, start_time, end_time)
+
+    table_name = _safe_table(ctx.source["name"])
+    start_time_dt = start_time or (datetime.now(UTC) - timedelta(hours=24))
+    end_time_dt = end_time or datetime.now(UTC)
+
+    from backend.repositories._base import QueryRunner
+
+    runner = QueryRunner(ctx.con, ctx.source)
+    rolled = runner.try_pop_health_from_rollup(
+        start_time_dt.isoformat(),
+        end_time_dt.isoformat(),
+        has_filters=False,
+    )
 
     data = []
-    with track_query(ctx.con, query, params, "pop_health") as cursor:
-        for row in cursor.fetchall():
+    if rolled is not None:
+        for row in rolled:
+            reqs = row[1]
+            errs = row[2]
+            hits = row[3]
             data.append(
                 PopHealthItem(
                     pop=row[0],
-                    requests=row[1],
-                    errors=row[2],
-                    error_rate=row[3],
-                    p50_rtt_us=row[4],
-                    p95_ttfb_ms=row[5],
-                    cache_hit_rate=row[6],
-                    bandwidth_bytes=row[7] or 0,
+                    requests=reqs,
+                    errors=errs,
+                    error_rate=round(errs * 100.0 / reqs, 2) if reqs else 0.0,
+                    p50_rtt_us=row[5],
+                    p95_ttfb_ms=row[6],
+                    cache_hit_rate=round(hits * 100.0 / reqs, 2) if reqs else 0.0,
+                    bandwidth_bytes=row[4] or 0,
                 )
             )
+        data.sort(key=lambda x: x.requests, reverse=True)
+        return PopHealthListResponse.with_telemetry(data=data, approximate=True)
+    else:
+        time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
+        params = [start_time_dt, end_time_dt]
 
-    return PopHealthListResponse.with_telemetry(data=data)
+        query = f"""
+            SELECT
+                pop,
+                COUNT(*) AS requests,
+                COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
+                ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
+                approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
+                approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
+                ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
+                SUM(resp_bytes) AS bandwidth_bytes
+            FROM {table_name}
+            {time_filter} AND pop IS NOT NULL AND pop != ''
+            GROUP BY pop
+            ORDER BY requests DESC
+        """
+
+        with track_query(ctx.con, query, params, "pop_health") as cursor:
+            for row in cursor.fetchall():
+                data.append(
+                    PopHealthItem(
+                        pop=row[0],
+                        requests=row[1],
+                        errors=row[2],
+                        error_rate=row[3],
+                        p50_rtt_us=row[4],
+                        p95_ttfb_ms=row[5],
+                        cache_hit_rate=row[6],
+                        bandwidth_bytes=row[7] or 0,
+                    )
+                )
+
+        return PopHealthListResponse.with_telemetry(data=data)

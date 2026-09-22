@@ -1,0 +1,29 @@
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+    @api path /api/* /js/* /rum-beacon
+    # Caddy forwards the REAL client IP (it appends the peer address to
+    # X-Forwarded-For by default). Never stamp a synthetic XFF here: a
+    # hardcoded `header_up X-Forwarded-For 127.0.0.1` classifies every
+    # request that reaches this listener as loopback-admin in the backend's
+    # RemoteAccessMiddleware — a full auth bypass for anyone who can reach
+    # port 80. The backend only trusts XFF from the pinned compose subnet
+    # (TRUSTED_PROXY_IPS / UVICORN_FORWARDED_ALLOW_IPS in
+    # docker-compose.multipod.yml), so this proxy is the only party that can
+    # assert a client IP.
+    reverse_proxy @api backend:8000 {
+        flush_interval -1
+        transport http {
+            response_header_timeout 120s
+            read_timeout 120s
+        }
+    }
+
+    # Everything else → Next.js frontend.
+    reverse_proxy frontend:3000 {
+        flush_interval -1
+    }
+}

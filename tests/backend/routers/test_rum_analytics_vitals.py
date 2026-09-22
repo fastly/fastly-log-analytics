@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import datetime
 import json
+from unittest.mock import patch
 
 import duckdb
 import pytest
+import time_machine
+
+
+@pytest.fixture(autouse=True)
+def skip_view_update():
+    with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
+        yield mock
+
+
 from fastapi.testclient import TestClient
 
 from backend.main import app
@@ -72,6 +82,10 @@ def setup_temp_rum_db(tmp_path, monkeypatch):
         "region": "mock",
     }
 
+    import backend.core.duckdb_pool as duckdb_pool
+
+    duckdb_pool.reset_pool_for_service("test_service")
+    duckdb_pool.reset_pool_for_service("test_service_rum")
     monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
 
     return temp_db_path
@@ -182,6 +196,7 @@ def _faro_beacon(path: str, lcp: float, cls: float, inp: float, load_time: float
     }
 
 
+@time_machine.travel("2026-09-22 12:30:00+00:00", tick=False)
 def test_real_faro_shaped_beacons_produce_correct_p75_and_avg_load_time(setup_temp_rum_db):
     service_id = "test_vitals_faro_shape"
     # 4 beacons on the same page: LCP values 1.0, 2.0, 3.0, 4.0 -> p75 index

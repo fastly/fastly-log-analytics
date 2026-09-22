@@ -191,7 +191,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
 
             <p className="text-[10px] text-muted-foreground mt-1 leading-tight flex items-start gap-1">
               <span className="text-primary font-bold">Pro Tip:</span>
-              <span>Exact matches by default. Use <code className="bg-background border rounded-[3px] px-1 font-mono text-[9px]">*</code> for wildcards.</span>
+              <span>Exact matches by default. Use <code className="bg-background border rounded-sm px-1 font-mono text-[9px]">*</code> for wildcards.</span>
             </p>
           </div>
         </div>

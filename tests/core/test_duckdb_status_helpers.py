@@ -749,6 +749,28 @@ def test_refresh_config_status_returns_silently_when_config_missing():
     mock_update.assert_not_called()
 
 
+def test_refresh_config_status_skips_legacy_reads_for_high_scale_service():
+    from backend.core._duckdb_status import refresh_config_status
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"name": "svc", "bucket": "b", "service_id": "svc"},
+        ),
+        patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b"}),
+        patch(
+            "backend.high_scale.registry.get_high_scale_service_registry",
+            return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
+        ),
+        patch("backend.core.duckdb.get_connection") as get_connection,
+        patch("backend.config.update_status") as update_status,
+    ):
+        refresh_config_status("svc")
+
+    get_connection.assert_not_called()
+    update_status.assert_not_called()
+
+
 def test_refresh_config_status_writes_iceberg_and_edge_ratio_on_happy_path(monkeypatch, tmp_path):
     """When get_table_info succeeds and get_edge_ratio returns a
     value, both iceberg_bytes/iceberg_files AND edge_ratio land in
@@ -816,7 +838,8 @@ def test_refresh_config_status_writes_iceberg_and_edge_ratio_on_happy_path(monke
     assert status["schema"] == [{"name": "ip", "type": "VARCHAR"}]
 
 
-def test_refresh_config_status_skip_top_values_omits_schema_key():
+@pytest.mark.parametrize("discovery_time", ["2026-09-08T18:00:00Z", None])
+def test_refresh_config_status_skip_top_values_omits_schema_key(discovery_time):
     """include_top_values=False MUST skip the schema SUMMARIZE
     write — that's the load-bearing optimisation that lets the
     high-cadence (5s) tick avoid the ~800 ms SUMMARIZE cost.
@@ -864,6 +887,13 @@ def test_refresh_config_status_skip_top_values_omits_schema_key():
         ),
         patch("backend.core._duckdb_status.get_schema", side_effect=_track_schema),
         patch("backend.core._duckdb_status.update_top_values") as mock_tv,
+        patch(
+            "backend.core.metadata.cron_log.latest_cron_per_task",
+            return_value={
+                "sync": {"started_at": "2026-09-01T18:00:00Z"},
+                "log_discovery": {"started_at": discovery_time},
+            },
+        ),
     ):
         refresh_config_status("svc", include_top_values=False)
 
@@ -873,6 +903,7 @@ def test_refresh_config_status_skip_top_values_omits_schema_key():
     mock_tv.assert_not_called()
     # And get_schema must not have been called by the refresh path.
     assert schema_calls["count"] == 0
+    assert captured["status"]["request"]["last_sync_at"] == (discovery_time or "2026-09-01T18:00:00Z")
 
 
 # ── delete_ingested_files remaining paths ────────────────────────────

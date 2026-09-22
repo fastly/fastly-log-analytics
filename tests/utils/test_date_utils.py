@@ -74,13 +74,22 @@ def test_parse_date_window():
 
 def test_safe_iso():
     assert safe_iso(None) is None
+    assert safe_iso("") is None
 
     # Datetime-like object
     dt = datetime(2026, 8, 19, 12, 0, 0)
     assert safe_iso(dt) == "2026-08-19T12:00:00Z"
 
-    # Naive string fallback
+    # Naive date string fallback
     assert safe_iso("2026-08-19") == "2026-08-19"
+
+    # Space-separated timestamp string (e.g. from ClickHouse JSON)
+    assert safe_iso("2026-08-19 12:00:00") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19 12:00:00.123") == "2026-08-19T12:00:00.123Z"
+
+    # Already ISO-8601 with Z or offset
+    assert safe_iso("2026-08-19T12:00:00Z") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19T12:00:00+00:00") == "2026-08-19T12:00:00+00:00"
 
 
 def test_parse_window_str_to_dt():

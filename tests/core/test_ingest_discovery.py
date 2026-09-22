@@ -93,6 +93,53 @@ class TestComputeIncrementalStartAfter:
         already = {"s3://bkt/raw/2026/01/garbage.gz"}
         assert _compute_incremental_start_after(already) is None
 
+    # ── slashed layout (raw/%Y/%m/%d/%H/analytics_log_%M.json.gz + Fastly
+    #    suffix "<ISO-with-colons>-<unique>.log.gz") — the layout the
+    #    declarative provisioner writes ─────────────────────────────────────
+
+    def test_slashed_layout_derives_slashed_bound(self):
+        already = {"s3://bkt/raw/2026/08/27/16/analytics_log_53.json.gz2026-08-27T16:53:00.000-2vepDhOP.log.gz"}
+        # 16:53 − 4h → 12:53 → hour bucket 12, formatted in the slashed layout
+        assert _compute_incremental_start_after(already, lookback_hours=4) == "raw/2026/08/27/12/"
+
+    def test_slashed_layout_uses_max_key(self):
+        already = {
+            "s3://bkt/raw/2026/08/27/10/analytics_log_05.json.gz2026-08-27T10:05:00.000-aa.log.gz",
+            "s3://bkt/raw/2026/08/27/16/analytics_log_53.json.gz2026-08-27T16:53:00.000-bb.log.gz",
+        }
+        assert _compute_incremental_start_after(already, lookback_hours=4) == "raw/2026/08/27/12/"
+
+    def test_slashed_layout_crosses_day_boundary(self):
+        already = {"s3://bkt/raw/2026/08/27/02/analytics_log_10.json.gz2026-08-27T02:10:00.000-aa.log.gz"}
+        assert _compute_incremental_start_after(already, lookback_hours=4) == "raw/2026/08/26/22/"
+
+    def test_mixed_layouts_use_conservative_dash_bound(self):
+        # Dash-layout keys sort lexicographically BEFORE slashed keys
+        # ("2026-" < "2026/"), so when both layouts are present the bound must
+        # be dash-formatted or the slashed listing would skip nothing while a
+        # slashed-formatted bound would skip ALL remaining dash keys.
+        already = {
+            "s3://bkt/raw/2026-08-27/14/2026-08-27T14-00-00.svc.gz",
+            "s3://bkt/raw/2026/08/27/16/analytics_log_53.json.gz2026-08-27T16:53:00.000-bb.log.gz",
+        }
+        # max timestamp is 16:53 → 12:xx, but formatted in the DASH layout
+        assert _compute_incremental_start_after(already, lookback_hours=4) == "raw/2026-08-27/12/"
+
+    def test_minute_layout_derives_minute_bound(self):
+        already = {"s3://bkt/raw/year=2026/month=08/day=27/hour=16/minute=53/2026-08-27T16:53:00.000-2vepDhOP.log.gz"}
+        assert (
+            _compute_incremental_start_after(already, lookback_hours=4)
+            == "raw/year=2026/month=08/day=27/hour=12/minute=53/"
+        )
+
+    def test_mixed_minute_and_slashed_layout_uses_conservative_slashed_bound(self):
+        # Slashed-layout keys sort BEFORE minute keys ("2026/" < "year=")
+        already = {
+            "s3://bkt/raw/2026/08/27/14/analytics_log_53.json.gz2026-08-27T14:53:00.000-bb.log.gz",
+            "s3://bkt/raw/year=2026/month=08/day=27/hour=16/minute=53/2026-08-27T16:53:00.000-cc.log.gz",
+        }
+        assert _compute_incremental_start_after(already, lookback_hours=4) == "raw/2026/08/27/12/"
+
 
 # ── Listing-phase integration ────────────────────────────────────────────────
 #
@@ -164,7 +211,7 @@ def test_explicit_start_time_with_no_history_uses_that_as_start_after():
     ):
         _drain_until_done(ingest(source=src, start_time="2026-05-04T18:00:00Z"))
 
-    assert paginator.last_kwargs.get("StartAfter") == "raw/2026-05-04/18/"
+    assert paginator.last_kwargs.get("StartAfter") == "raw/request/year=2026/month=05/day=04/hour=18/minute=00/"
 
 
 def test_incremental_only_with_history_uses_lookback_start_after():
@@ -185,6 +232,25 @@ def test_incremental_only_with_history_uses_lookback_start_after():
 
     # Latest is 14:00, 4h lookback → 10:00 bucket
     assert paginator.last_kwargs.get("StartAfter") == "raw/2026-05-04/10/"
+
+
+def test_incremental_with_prefixed_source_prepends_prefix_to_start_after():
+    """StartAfter must live in the same keyspace as Prefix: for a source with
+    fos_prefix "logs", a bound of "raw/…" sorts AFTER every "logs/raw/…" key
+    and the listing would return nothing."""
+    paginator = _FakePaginator()
+    src = _make_source()
+    src["prefix"] = "logs"
+    already = {"s3://test-bucket/logs/raw/2026-05-04/14/2026-05-04T14-00-00.svc.gz"}
+
+    with (
+        patch("backend.core.ingest._ensure_source_registered"),
+        patch("backend.core.ingest._get_fos_client", return_value=_FakeFosClient(paginator)),
+        patch("backend.core.metadata.get_ingested_filenames", return_value=already),
+    ):
+        _drain_until_done(ingest(source=src, incremental_only=True))
+
+    assert paginator.last_kwargs.get("StartAfter") == "logs/raw/2026-05-04/10/"
 
 
 def test_manual_import_with_history_does_not_use_start_after():
@@ -394,7 +460,7 @@ def test_listing_breaks_when_last_key_in_page_exceeds_end_time():
     page2 = [_fake_obj("raw/2026-05-04/18/should-not-be-fetched.svc.gz")]
     paginator = _MultiPagePaginator([page1, page2])
     _drive_through_listing(_make_source(), paginator, end_time="2026-05-04T15:30:00Z")
-    assert paginator.last_kwargs.get("Prefix") == "raw/"
+    assert paginator.last_kwargs.get("Prefix") == "raw/request/"
 
 
 def test_discovery_progress_yielded_every_10k_files():
@@ -430,7 +496,7 @@ def test_ingest_swallows_recover_in_flight_exception():
     # recovery exception.
     assert events
     # And the FOS scan still ran.
-    assert paginator.last_kwargs.get("Prefix") == "raw/"
+    assert paginator.last_kwargs.get("Prefix") == "raw/request/"
 
 
 def test_ingest_yields_recovery_status_when_buffers_promoted():

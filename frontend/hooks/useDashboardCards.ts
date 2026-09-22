@@ -9,6 +9,8 @@ export interface DashboardCard {
   inActiveFormat: boolean
 }
 
+const NGWAF_CARD_IDS = new Set(['_ngwaf_bot_name', 'waf_sig_ind'])
+
 // Numerical metrics, IPs, and high-cardinality IDs that do not support
 // categorical top-N lists and are excluded from the aggregates endpoint on the backend.
 const NON_TOP_N_FIELDS = new Set([
@@ -70,9 +72,8 @@ export function useDashboardCards(): DashboardCard[] {
 
     // VIRTUAL fields aren't in any user-toggleable log group, so the
     // active_log_field_ids check below would hide them by default. Force-show
-    // them — they're client-derived from data the user already has (UA/IP for
-    // bot lookup, waf_sig for signal split).
-    const FORCE_VISIBLE = new Set(['_bot_name', '_ngwaf_bot_name', 'waf_sig_ind'])
+    // them when supported — NGWAF cards are filtered by attachment below.
+    const FORCE_VISIBLE = new Set(['_bot_name', ...NGWAF_CARD_IDS])
     // Cards that ARE in an active group but are noisy and rarely wanted on
     // the default dashboard (per-request IDs, raw WAF tag blob).
     const FORCE_HIDDEN = new Set(['rid', 'prid', 'waf_sig', 'waf_req_id'])
@@ -135,6 +136,7 @@ export function useDashboardCards(): DashboardCard[] {
 
     const seen = new Set<string>()
     return [...standardCards, ...customCards].filter(c => {
+      if (NGWAF_CARD_IDS.has(c.id) && bootstrap.ngwaf_configured !== true) return false
       if (seen.has(c.id)) return false
       seen.add(c.id)
       return true
