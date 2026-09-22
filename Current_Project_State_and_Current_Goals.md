@@ -143,6 +143,21 @@ High-Scale services, not by stale config status; this is now covered by focused
 regression tests and verified in Local High-Scale. Remote High-Scale still needs
 the same code deployed and rechecked.
 
+**Known follow-up (not fixed this session, out of scope for the log-discovery
+cron work item):** Local High-Scale's `/dashboard` intermittently shows
+"Failed to load dashboard data. unhandled_error". Root-caused to
+`backend/high_scale/dashboard.py`'s `bundle()` routing `/api/dashboard/bundle`
+through ClickHouse for any service resolved by `HighScaleServiceRegistry`
+(confirmed via `_debug_queries` showing `"engine": "ClickHouse"` SQL against
+`request_facts`/`request_aggregates`), and the local `fla-hs-clickhouse-1`
+container's background MergeTree merge hitting
+`MEMORY_LIMIT_EXCEEDED (5.40 GiB)` in
+`/var/log/clickhouse-server/clickhouse-server.err.log`, which fails whatever
+concurrent SELECT the dashboard bundle issued. Not a credentials problem —
+raising `max_server_memory_usage` / tuning `max_bytes_to_merge_at_max_space_in_pool`
+or reducing retained history in the local ClickHouse container is the likely
+fix. Needs its own dedicated session per the "one cron/page per session" rule.
+
 ## Phase 3: Pages
 
 After all cron jobs are implemented and verified, audit pages one at a time
