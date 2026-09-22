@@ -1265,8 +1265,8 @@ def _apply_diff(
             status_cb(f"➕ Installing edge dictionary '{dictionary.name}'...")
         try:
             fastly_integration.create_or_update_dictionary(service_id, draft_version, dictionary, token)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to install/update edge dictionary '%s': %s", dictionary.name, e)
 
     # Step 6.7: Install/update consolidated snippets
     for snippet in diff.snippets_to_add + diff.snippets_to_update:
@@ -1293,9 +1293,6 @@ def _apply_diff(
                 secret_key=secret_key,
             )
         except Exception as e:
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:
                 status_cb(f"❌ Failed to install logging endpoint '{endpoint.name}': {e}")

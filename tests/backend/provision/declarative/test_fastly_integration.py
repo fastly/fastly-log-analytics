@@ -492,7 +492,7 @@ def test_create_or_update_backend_updates_and_nulls_shield_when_absent():
 # ── create_or_update_dictionary ───────────────────────────────────────────
 
 
-def test_create_or_update_dictionary_creates_and_upserts_items_via_patch():
+def test_create_or_update_dictionary_creates_and_upserts_items_via_put():
     calls: list[tuple[str, str, Any]] = []
 
     def _fake(method, path, body=None, *, token, **kwargs):
@@ -507,11 +507,11 @@ def test_create_or_update_dictionary_creates_and_upserts_items_via_patch():
     with patch.object(fi, "fastly", _fake):
         fi.create_or_update_dictionary("svc1", 3, dictionary, "tok")
 
-    # GET (miss) -> POST create dict -> PATCH item upsert
+    # GET (miss) -> POST create dict -> PUT item upsert
     kinds = [(c[0], c[1].split("/")[-1]) for c in calls]
     assert ("GET", "my_dict") in kinds
     assert ("POST", "dictionary") in kinds
-    assert ("PATCH", "key1") in kinds
+    assert ("PUT", "key1") in kinds
 
 
 def test_create_or_update_dictionary_updates_existing_and_falls_back_to_post_for_new_items():
@@ -523,9 +523,9 @@ def test_create_or_update_dictionary_updates_existing_and_falls_back_to_post_for
             return {"name": "my_dict"}
         if method == "PUT" and "/dictionary/my_dict" in path:
             return {"id": "dict-id-1"}
-        if method == "PATCH":
-            raise RuntimeError("HTTP 404 item not found")
-        if method == "POST" and path.endswith("/items"):
+        if method == "PUT" and "/item/new_key" in path:
+            raise RuntimeError("HTTP 500 upsert failed")
+        if method == "POST" and path.endswith("/item"):
             return {}
         raise AssertionError(f"unexpected call {method} {path}")
 
@@ -534,7 +534,7 @@ def test_create_or_update_dictionary_updates_existing_and_falls_back_to_post_for
         fi.create_or_update_dictionary("svc1", 3, dictionary, "tok")
 
     methods = [c[0] for c in calls]
-    assert methods == ["GET", "PUT", "PATCH", "POST"]
+    assert methods == ["GET", "PUT", "PUT", "POST"]
 
 
 def test_create_or_update_dictionary_raises_when_response_missing_id():

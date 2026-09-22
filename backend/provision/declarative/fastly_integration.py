@@ -594,7 +594,7 @@ def _upsert_dictionary_items(service_id: str, dict_id: str, items: dict[str, str
         encoded_key = urllib.parse.quote(key, safe="")
         try:
             fastly(
-                "PATCH",
+                "PUT",
                 f"/service/{service_id}/dictionary/{dict_id}/item/{encoded_key}",
                 {"item_value": value},
                 token=token,
@@ -602,7 +602,7 @@ def _upsert_dictionary_items(service_id: str, dict_id: str, items: dict[str, str
         except RuntimeError:
             fastly(
                 "POST",
-                f"/service/{service_id}/dictionary/{dict_id}/items",
+                f"/service/{service_id}/dictionary/{dict_id}/item",
                 {
                     "item_key": key,
                     "item_value": value,
