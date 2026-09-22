@@ -942,6 +942,13 @@ def provision_ingest(payload: ProvisionConfigRequest):
 
     fetch_pop_locations(token)
 
+    from backend import config as svcconfig
+
+    existing_cfg = svcconfig.load_config(logging_service_id) or {}
+    existing_fos_proxy = existing_cfg.get("fos_proxy")
+    if not isinstance(existing_fos_proxy, dict):
+        existing_fos_proxy = {}
+
     try:
         if body.get("log_period"):
             body["log_period"] = parse_period(body["log_period"])
@@ -993,7 +1000,9 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 raise_internal(logger, e, code="ensure_access_key_failed", status=400)
 
     if not body.get("cdn_secret"):
-        body["cdn_secret"] = secrets.token_urlsafe(24)
+        body["cdn_secret"] = (
+            existing_cfg.get("cdn_secret") or existing_fos_proxy.get("secret") or secrets.token_urlsafe(24)
+        )
 
     # Store state just like execute does
     state = {
@@ -1099,10 +1108,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 if k in existing_rum:
                     state["rum"][k] = existing_rum[k]
         else:
-            from backend import config as svcconfig
-
-            on_disk_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
-            on_disk_rum = on_disk_cfg.get("rum")
+            on_disk_rum = existing_cfg.get("rum")
             if isinstance(on_disk_rum, dict) and on_disk_rum.get("faro_version"):
                 for k in _faro_keys:
                     if k in on_disk_rum:

@@ -991,6 +991,60 @@ def test_ingest_rerun_preserves_existing_faro_pin_when_body_omits_it(tmp_path, m
     assert captured["state"]["rum"]["faro_fos_etag_md5"] == "existing-etag"
 
 
+def test_ingest_rerun_preserves_existing_cdn_secret_when_body_omits_it(tmp_path, monkeypatch):
+    """Re-running /api/provision/ingest from the admin wizard omits
+    ``cdn_secret``. Preserve the on-disk secret instead of minting a fresh one,
+    or the local config drifts away from the deployed ``cdn_auth`` dictionary
+    and every CDN-backed GET/HEAD 401s."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    config.save_config(
+        "svc-1",
+        {
+            "service_id": "svc-1",
+            "cdn_secret": "persisted-cdn-secret",
+        },
+    )
+
+    captured = {}
+
+    def fake_write(state):
+        captured["state"] = state
+
+    with (
+        TestClient(app) as c,
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", side_effect=lambda x: 60),
+        patch("backend.provision.find_fos_key", return_value=None),
+        patch(
+            "backend.provision.ensure_fos_access_key",
+            return_value={"access_key": "AK", "secret_key": "SK", "id": "kid"},
+        ),
+        patch("backend.provision.write_service_config", side_effect=fake_write),
+        patch("backend.provision._sync_crontab"),
+        patch(
+            "backend.utils.fastly_auth.fastly",
+            side_effect=lambda method, path, *, token, **kw: (
+                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-T"}
+                if path == "/tokens/self"
+                else {"id": "svc-1", "customer_id": "cust-T"}
+            ),
+        ),
+    ):
+        resp = c.post(
+            "/api/provision/ingest",
+            json={
+                "token": "t",
+                "service_id": "svc-1",
+                "fos_bucket_name": "b",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
+
+
 def test_ingest_rerun_honors_explicit_faro_version_in_body(tmp_path, monkeypatch):
     """Negative control for the fix above: an explicit ``rum.faro_version``
     in the request body (a deliberate operator re-pin) must still win over

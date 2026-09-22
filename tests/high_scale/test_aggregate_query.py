@@ -10,15 +10,17 @@ NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 
 
 class FakeClient:
-    def __init__(self, rows: list[dict[str, object]]) -> None:
-        self.rows = rows
+    def __init__(self, responses: list[list[dict[str, object]]]) -> None:
+        self.responses = list(responses)
         self.sql = ""
         self.params: dict[str, object] | None = None
+        self.calls: list[tuple[str, dict[str, object] | None]] = []
 
     def execute(self, sql: str, params: dict[str, object] | None = None) -> list[dict[str, object]]:
+        self.calls.append((sql, params))
         self.sql = sql
         self.params = params
-        return self.rows
+        return self.responses.pop(0)
 
 
 def watermark(domain: str = "request") -> ServingWatermark:
@@ -38,9 +40,12 @@ def watermark(domain: str = "request") -> ServingWatermark:
 def test_query_reads_visible_rows_with_bound_values() -> None:
     client = FakeClient(
         [
-            {"value": "/a", "aggregate_count": 3, "total_count": 9},
-            {"value": "/b", "aggregate_count": 2, "total_count": 9},
-        ]
+            [{"total_count": 9}],
+            [
+                {"value": "/a", "aggregate_count": 3},
+                {"value": "/b", "aggregate_count": 2},
+            ],
+        ],
     )
 
     response = query_clickhouse_aggregate(
@@ -57,6 +62,8 @@ def test_query_reads_visible_rows_with_bound_values() -> None:
     assert "LIMIT 10" in client.sql
     assert client.params is not None
     assert client.params["service_id"] == "svc"
+    assert len(client.calls) == 2
+    assert "OVER ()" not in client.calls[1][0]
 
 
 @pytest.mark.parametrize(
@@ -68,7 +75,7 @@ def test_query_reads_visible_rows_with_bound_values() -> None:
     ],
 )
 def test_domain_tables_are_isolated(domain: str, table: str, metric: str) -> None:
-    client = FakeClient([])
+    client = FakeClient([[], []])
 
     query_clickhouse_aggregate(
         client,
@@ -90,7 +97,7 @@ def test_range_parameters_use_a_clickhouse_type_matching_the_parameter_format() 
     every range-bounded call failed with a live HTTP 500 (empty request
     windows never hit the range clause, so no fake-client unit test caught
     it)."""
-    client = FakeClient([])
+    client = FakeClient([[], []])
 
     query_clickhouse_aggregate(
         client,
@@ -106,7 +113,7 @@ def test_range_parameters_use_a_clickhouse_type_matching_the_parameter_format() 
 
 
 def test_query_allows_digit_suffix_in_internal_dimension_identifier() -> None:
-    client = FakeClient([])
+    client = FakeClient([[], []])
 
     query_clickhouse_aggregate(
         client,
@@ -123,7 +130,7 @@ def test_query_allows_digit_suffix_in_internal_dimension_identifier() -> None:
 def test_query_rejects_non_identifier_dimension(dimension: str) -> None:
     with pytest.raises(ValueError, match="internal identifier"):
         query_clickhouse_aggregate(
-            FakeClient([]),
+            FakeClient([[], []]),
             AggregateRequest("svc", "request", dimension=dimension),
             watermark=watermark(),
             now=NOW,
@@ -133,7 +140,7 @@ def test_query_rejects_non_identifier_dimension(dimension: str) -> None:
 def test_watermark_must_match_request_domain() -> None:
     with pytest.raises(ValueError, match="watermark"):
         query_clickhouse_aggregate(
-            FakeClient([]),
+            FakeClient([[], []]),
             AggregateRequest("svc", "request"),
             watermark=watermark("cmcd"),
         )

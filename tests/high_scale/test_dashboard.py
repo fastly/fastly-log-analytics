@@ -161,3 +161,38 @@ def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
     assert metrics["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
     assert metrics["latest_log_at"] == "2026-09-15T19:00:00+00:00"
     assert metrics["local_rows"] == 22
+
+
+def test_high_scale_dashboard_reuses_request_watermark_once_per_bundle():
+    calls = {"count": 0}
+
+    def request_watermark():
+        calls["count"] += 1
+        return ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        )
+
+    service = HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=request_watermark,
+    )
+
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url", "country", "host"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert response.total_rows == 12
+    assert calls["count"] == 1

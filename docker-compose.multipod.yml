@@ -254,6 +254,16 @@ services:
     # metadata today — set here anyway so it can never quietly open a
     # pod-local SQLite metadata file if that ever changes.
     - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - >-
+        python -c "from pathlib import Path; import sys; cmd = Path('/proc/1/cmdline').read_bytes();
+        sys.exit(0 if b'backend.celery_app' in cmd and b'beat' in cmd else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
     - app-network
     restart: unless-stopped

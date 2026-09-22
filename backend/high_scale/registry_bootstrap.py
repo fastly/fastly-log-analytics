@@ -160,23 +160,35 @@ def _watermark(
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
     rows = client.execute(
         f"SELECT min(event_timestamp) AS coverage_start, "
-        f"max(event_timestamp) AS coverage_end, "
-        f"argMax(toString({event_id_column}), event_timestamp) "
-        "AS last_visible_event_id "
+        f"max(event_timestamp) AS coverage_end "
         f"FROM {table} "
         "WHERE service_id={service_id:String} AND publication_state='visible'",
         {"service_id": service_id},
     )
     row = rows[0] if rows else {}
+    coverage_end = _datetime_or_none(row.get("coverage_end"))
+    last_visible_event_id: str | None = None
+    if coverage_end is not None:
+        latest_rows = client.execute(
+            f"SELECT toString({event_id_column}) AS last_visible_event_id "
+            f"FROM {table} "
+            "WHERE service_id={service_id:String} "
+            "AND publication_state='visible' "
+            "AND event_timestamp={coverage_end:DateTime64(3)} "
+            f"ORDER BY {event_id_column} DESC LIMIT 1",
+            {"service_id": service_id, "coverage_end": coverage_end},
+        )
+        latest_row = latest_rows[0] if latest_rows else {}
+        last_visible_event_id = _string_or_none(latest_row.get("last_visible_event_id"))
     return ServingWatermark(
         service_id=service_id,
         domain=domain,
         owner_epoch=owner_epoch,
         coverage_start=_datetime_or_none(row.get("coverage_start")),
-        coverage_end=_datetime_or_none(row.get("coverage_end")),
+        coverage_end=coverage_end,
         last_accepted_cursor=None,
         last_archived_event_id=None,
-        last_visible_event_id=_string_or_none(row.get("last_visible_event_id")),
+        last_visible_event_id=last_visible_event_id,
         exact=True,
     )
 

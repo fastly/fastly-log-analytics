@@ -65,9 +65,12 @@ def query_clickhouse_aggregate(
     from backend.core.clickhouse_client import ClickHouseError
 
     try:
+        totals = client.execute(
+            f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}",
+            params,
+        )
         rows = client.execute(
-            f"SELECT value, sum({metric}) AS aggregate_count, "
-            f"sum(sum({metric})) OVER () AS total_count "
+            f"SELECT value, sum({metric}) AS aggregate_count "
             f"FROM {table} WHERE {' AND '.join(clauses)} "
             "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
             params,
@@ -75,7 +78,8 @@ def query_clickhouse_aggregate(
     except ClickHouseError as e:
         raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
     values = tuple((str(row["value"]), max(0, int(row["aggregate_count"]))) for row in rows)
-    request_count = max(0, int(rows[0]["total_count"])) if rows else 0
+    total_row = totals[0] if totals else {}
+    request_count = max(0, int(total_row.get("total_count") or 0))
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
     return AggregateResponse(

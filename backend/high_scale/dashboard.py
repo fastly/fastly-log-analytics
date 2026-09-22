@@ -161,6 +161,7 @@ def _aggregate(
     start_time: str | None,
     end_time: str | None,
     dimension: str,
+    watermark,
 ):
     start = _range_value(start_time)
     end = _range_value(end_time)
@@ -173,7 +174,7 @@ def _aggregate(
             end=end,
             dimension=dimension,
         ),
-        watermark=service.watermark_for("request"),
+        watermark=watermark,
     )
 
 
@@ -372,19 +373,27 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         return _filtered_aggregates(service, req, start_time, end_time)
 
     requested_fields = req.fields or list(_FIELD_DIMENSIONS)
+    request_watermark = service.watermark_for("request")
     responses = {
         field: _aggregate(
             service,
             start_time=start_time,
             end_time=end_time,
             dimension=_FIELD_DIMENSIONS[field],
+            watermark=request_watermark,
         )
         for field in requested_fields
         if field in _FIELD_DIMENSIONS
     }
     total = responses.get("url")
     if total is None:
-        total = _aggregate(service, start_time=start_time, end_time=end_time, dimension="url")
+        total = _aggregate(
+            service,
+            start_time=start_time,
+            end_time=end_time,
+            dimension="url",
+            watermark=request_watermark,
+        )
 
     data = {
         field: FieldAggregate(
