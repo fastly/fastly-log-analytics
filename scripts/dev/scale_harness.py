@@ -248,9 +248,17 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Some backends (notably Elevation's DuckLake-backed request view) can
+    # return a naive timestamp with no UTC offset. Without this, comparing it
+    # against an offset-aware `now` in freshness_lag_seconds() raises
+    # `TypeError: can't subtract offset-naive and offset-aware datetimes` and
+    # kills the whole deploy_test_all.sh pipeline under `set -e`.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def freshness_lag_seconds(latest_log_at: str | None, now: datetime | None = None) -> float | None:
