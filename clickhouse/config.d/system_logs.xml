@@ -20,4 +20,17 @@
     <part_log>
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </part_log>
+
+    <!-- Optimize background merges and memory usage for a constrained 6G container -->
+    <background_pool_size>2</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+
+    <merge_tree>
+        <!-- Limit the size of parts that can be merged in the background (default is ~150GB) to prevent huge memory spikes -->
+        <max_bytes_to_merge_at_max_space_in_pool>5368709120</max_bytes_to_merge_at_max_space_in_pool> <!-- 5 GB -->
+        <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192) -->
+        <merge_max_block_size>4096</merge_max_block_size>
+        <!-- Enable vertical merge algorithm for wide tables to process columns independently -->
+        <enable_vertical_merge>1</enable_vertical_merge>
+    </merge_tree>
 </clickhouse>
