@@ -530,15 +530,15 @@ class _Pool:
             return
 
         # Detach lake from idle connections so background writers can acquire the process-wide lock.
-        # It gets re-attached on the next acquire().
-        try:
-            con.execute("DETACH lake")
-        except Exception:
-            pass
-        try:
-            con.execute("DETACH __ducklake_metadata_lake")
-        except Exception:
-            pass
+        # It gets re-attached on the next acquire(). Routed through _ducklake_detach so this
+        # mutation of the shared catalog state is itself serialized by _attach_lock — a raw,
+        # unlocked DETACH here can race with another connection's locked _ducklake_attach and
+        # rip "lake" out from under it mid-operation (see _ducklake.py's _attach_lock docstring;
+        # this was the root cause of production "Schema with name lake does not exist!" commit
+        # failures — this release() path is the highest-traffic unlocked DETACH in the codebase).
+        from backend.core.iceberg._ducklake import _ducklake_detach
+
+        _ducklake_detach(con, aliases=("lake", "__ducklake_metadata_lake"), service_id=self.service_key)
 
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see

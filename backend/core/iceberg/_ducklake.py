@@ -316,6 +316,39 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
         _attach_lock.release()
 
 
+def _ducklake_detach(con, aliases: tuple[str, ...] = ("lake",), service_id: str = "default") -> None:
+    """Detach ``aliases`` from ``con`` under the same process-wide lock ``_ducklake_attach`` uses.
+
+    DETACH mutates the same shared/racy DuckLake catalog state that ATTACH
+    does (see ``_attach_lock``'s docstring — the race was verified
+    empirically across connections attached to the same on-disk file). A
+    raw, unlocked ``con.execute("DETACH lake")`` from one connection can rip
+    the catalog out from under another connection concurrently inside a
+    locked ``_ducklake_attach`` call on a different connection, which is
+    what produced production's "Schema with name lake does not exist!"
+    commit failures — the OTHER connection's attach/inspection assumed
+    "lake" would stay attached and was never re-verified afterward. Every
+    caller that used to call ``con.execute("DETACH lake")`` directly must
+    route through this helper instead.
+    """
+    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+        logger.warning(
+            "[ducklake] %s: timed out after %.0fs waiting for the process-wide attach lock to detach %s",
+            service_id,
+            _ATTACH_LOCK_TIMEOUT_S,
+            aliases,
+        )
+        return
+    try:
+        for alias in aliases:
+            try:
+                con.execute(f"DETACH {alias}")
+            except Exception:
+                pass
+    finally:
+        _attach_lock.release()
+
+
 def _apply_target_file_size(con, alias: str = "lake") -> None:
     """Pin DuckLake's target file size to the compaction cap (idempotent).
 

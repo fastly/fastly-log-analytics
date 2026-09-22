@@ -259,7 +259,12 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
     table exists but is unreadable.
     """
     from backend.core.duckdb import _cache_dir, get_connection, get_source_for_service
-    from backend.core.iceberg._ducklake import _ducklake_add_data_files, _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import (
+        _ducklake_add_data_files,
+        _ducklake_attach,
+        _ducklake_detach,
+        ducklake_table_name,
+    )
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -298,10 +303,7 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
     con = get_connection(src)
     try:
         # Re-attach read-write (get_connection attaches read-only for the pool).
-        try:
-            con.execute("DETACH lake")
-        except Exception:
-            pass
+        _ducklake_detach(con, service_id=service_id)
         if not _ducklake_attach(con, src, read_only=False):
             raise RuntimeError(f"failed to attach DuckLake read-write for {service_id}")
 
@@ -382,10 +384,7 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
             "candidate_files": len(data_files),
         }
     finally:
-        try:
-            con.execute("DETACH lake")
-        except Exception:
-            pass
+        _ducklake_detach(con, service_id=service_id)
         _ducklake_attach(con, src, read_only=True)
         con.close()
 

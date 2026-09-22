@@ -521,10 +521,11 @@ def _ducklake_write_connection(source: dict):
     """
     from backend import config
     from backend.core.duckdb import get_connection, get_memory_connection
-    from backend.core.iceberg._ducklake import _ducklake_attach
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach
 
     catalog_dsn = config.DUCKLAKE_CATALOG or ""
     uses_postgres = catalog_dsn.startswith(("postgres://", "postgresql://", "postgres:"))
+    service_id = source.get("service_id") or source.get("name", "default")
     con = None
     try:
         if uses_postgres:
@@ -533,10 +534,7 @@ def _ducklake_write_connection(source: dict):
                 raise RuntimeError("Failed to attach DuckLake in read-write mode")
         else:
             con = get_connection(source, read_only=True)
-            try:
-                con.execute("DETACH lake")
-            except Exception:
-                pass
+            _ducklake_detach(con, service_id=service_id)
             if not _ducklake_attach(con, source, read_only=False):
                 raise RuntimeError("Failed to attach DuckLake in read-write mode")
         yield con
@@ -547,10 +545,7 @@ def _ducklake_write_connection(source: dict):
                     con.execute("ROLLBACK")
                 except Exception:
                     pass
-                try:
-                    con.execute("DETACH lake")
-                except Exception as e:
-                    logger.warning("[ducklake] Failed to DETACH lake: %s", e)
+                _ducklake_detach(con, service_id=service_id)
             try:
                 con.close()
             except Exception:

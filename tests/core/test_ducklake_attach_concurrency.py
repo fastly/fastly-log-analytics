@@ -207,6 +207,76 @@ def test_update_iceberg_view_locked_skips_reattach_when_lake_already_attached(tm
         con.close()
 
 
+def test_ducklake_detach_is_serialized_by_the_attach_lock():
+    """``_ducklake_detach`` (used by pool release, commit_buffer's
+    read-write reattach, and legacy adoption) must acquire the SAME
+    process-wide ``_attach_lock`` that ``_ducklake_attach`` does.
+
+    Before this fix, ``release()``/``_ducklake_write_connection()``/
+    ``adopt_iceberg_to_ducklake()`` each called a raw, unlocked
+    ``con.execute("DETACH lake")``. That raced with any OTHER connection
+    concurrently inside a locked ``_ducklake_attach`` call and ripped
+    ``lake`` out from under it mid-operation — reproduced in production as
+    "Catalog Error: Schema with name lake does not exist!" commit
+    failures on connections that had just successfully attached moments
+    earlier. This test proves ``_ducklake_detach`` cannot run while
+    another caller holds ``_attach_lock``.
+    """
+    from backend.core.iceberg import _ducklake as ducklake_mod
+
+    class FakeConnection:
+        def __init__(self):
+            self.commands: list[str] = []
+
+        def execute(self, sql: str):
+            self.commands.append(sql)
+            return self
+
+    fake_con = FakeConnection()
+    release_event = threading.Event()
+    detach_started = threading.Event()
+    detach_done = threading.Event()
+
+    def holder():
+        ducklake_mod._attach_lock.acquire()
+        try:
+            release_event.wait(timeout=5)
+        finally:
+            ducklake_mod._attach_lock.release()
+
+    def detacher():
+        detach_started.set()
+        ducklake_mod._ducklake_detach(fake_con, aliases=("lake",), service_id="test")
+        detach_done.set()
+
+    holder_thread = threading.Thread(target=holder)
+    holder_thread.start()
+    try:
+        # Wait until the holder thread definitely has the lock.
+        for _ in range(200):
+            if ducklake_mod._attach_lock.locked():
+                break
+            import time as _time
+
+            _time.sleep(0.005)
+        assert ducklake_mod._attach_lock.locked()
+
+        detach_thread = threading.Thread(target=detacher)
+        detach_thread.start()
+        detach_started.wait(timeout=2)
+        # The detach must NOT have executed its DETACH statement yet —
+        # it's blocked waiting for the lock the holder thread is holding.
+        assert fake_con.commands == [], "DETACH ran without waiting for the process-wide attach lock"
+        assert not detach_done.is_set()
+
+        release_event.set()
+        detach_thread.join(timeout=5)
+        assert detach_done.is_set()
+        assert fake_con.commands == ["DETACH lake"]
+    finally:
+        holder_thread.join(timeout=5)
+
+
 def test_update_iceberg_view_locked_attaches_matching_connection_mode(tmp_path, monkeypatch):
     """When ``lake`` is NOT yet attached on the connection,
     ``_update_iceberg_view_locked`` must attach it matching the
