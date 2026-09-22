@@ -41,6 +41,48 @@ RBAC, data freshness, failure handling, and user-visible status.
 6. Use the canonical multi-environment deployment and verification tooling.
 7. Keep deployment-private values outside the tracked tree.
 
+## Phase 0: Environment health baseline
+
+Before auditing or implementing any cron job or page, confirm that all four
+deployment environments are currently healthy, running real services with
+real traffic, and free of errors:
+
+- Local Standard
+- Local High-Scale
+- GCE Remote Standard
+- Elevation Remote High-Scale
+
+Use the live deploy status page (`scripts/dev/report_server.py`, served at
+`http://127.0.0.1:41705/`, always resolving to `reports/deploys/current/`) as
+the source of truth. It exposes, per environment:
+
+- Live port/credentials/bootstrap reachability panels (polled every 4s).
+- A "Monitored Logs & Exception Dumps" panel that live-tails each container's
+  backend and frontend log stream and filters for errors/warnings, independent
+  of whether a deploy is actively running.
+
+Run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh` (per the
+canonical multi-tier deployment mandate) to produce/refresh a report, then
+review `http://127.0.0.1:41705/` for each environment:
+
+- No error/warning entries in the monitored backend or frontend logs that are
+  not already known, documented follow-ups (e.g. the Local High-Scale
+  ClickHouse `MEMORY_LIMIT_EXCEEDED` follow-up noted below).
+- Each environment's dashboard loads with real, non-zero data (not a mock or
+  stale bootstrap).
+- Credentials/FOS/CDN status panels show healthy, not expired/401.
+
+Any error found here that is new (not already a documented known-follow-up)
+must be triaged and, if it blocks correctness of the cron/page under audit or
+is a shared-code defect, fixed before continuing — per the working protocol's
+allowance for shared-code fixes found along the way. If it's unrelated and
+non-blocking, document it as a new known follow-up in this file and move on;
+do not silently ignore it.
+
+This phase is a recurring gate, not a one-time step: re-run it at the start of
+each new cron/page work session, since environments can drift (credential
+rotation, container restarts, upstream Fastly changes) between sessions.
+
 ## Phase 2: Background Tasks and Cron Jobs
 
 The cron inventory contains 24 active logical jobs. Request and RUM discovery
