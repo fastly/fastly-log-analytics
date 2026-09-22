@@ -425,7 +425,19 @@ def test_backfill_bundle_rollups_success(client):
         "compact_overview_closed_days_to_daily",
     ]
 
-    with patch.multiple("backend.core.rollups", **{name: MagicMock(return_value=1) for name in mocks}):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def mock_get_connection(*args, **kwargs):
+        mock_con = MagicMock()
+        mock_con.execute.return_value.fetchone.return_value = (1,)
+        yield mock_con
+
+    with (
+        patch.multiple("backend.core.rollups", **{name: MagicMock(return_value=1) for name in mocks}),
+        patch("backend.core.duckdb.get_connection", mock_get_connection),
+        patch("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock()),
+    ):
         resp = client.post("/api/admin/backfill-bundle-rollups")
         assert resp.status_code == 200
         body = resp.json()
