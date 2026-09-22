@@ -10,8 +10,6 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import duckdb
-import pytest
-
 
 # ── Rollup atomic publish: a crash mid-rename leaves no trusted half-bundle ──
 

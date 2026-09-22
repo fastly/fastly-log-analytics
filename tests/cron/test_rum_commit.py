@@ -26,6 +26,7 @@ FAKE_SRC = {
 
 from contextlib import contextmanager
 
+
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
@@ -37,6 +38,7 @@ def clean_env(monkeypatch):
         yield mock_con
 
     import backend.core.iceberg._ducklake as _dl
+
     monkeypatch.setattr("backend.core.duckdb.get_connection", mock_get_connection)
     monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock())
     monkeypatch.setattr(_dl, "_ducklake_attach", MagicMock())
