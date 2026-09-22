@@ -603,7 +603,8 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
                             f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
                         )
                     con.execute(
-                        f"INSERT INTO {lake_ident} SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
+                        f"INSERT INTO {lake_ident} BY NAME "
+                        f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
                     )
                     con.execute("COMMIT")
                     return len(paths)

@@ -564,13 +564,12 @@ def test_check_domain_available_treats_dns_error_as_available():
 
 
 def test_check_fos_returns_ok_when_list_succeeds():
-    """Valid creds → ``{ok: true}``. Pinned because the wizard
-    advances on ``ok: true`` (no other shape variant)."""
+    """Valid creds → list the real ingest prefixes and return ``{ok: true}``."""
     fake_client = MagicMock()
-    fake_client.list_objects_v2.return_value = {"Contents": []}
+    fake_client.list_objects_v2.side_effect = [{"Contents": []}, {"Contents": []}]
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client) as get_client,
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -578,6 +577,41 @@ def test_check_fos_returns_ok_when_list_succeeds():
         )
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+    get_client.assert_called_once_with(
+        "ak",
+        "sk",
+        "us-east-1",
+        bucket_name="b",
+        context="provision:check-fos",
+    )
+    assert [call.kwargs["Prefix"] for call in fake_client.list_objects_v2.call_args_list] == [
+        "raw/request/",
+        "raw/rum/",
+    ]
+
+
+def test_check_fos_reads_representative_request_object():
+    """A successful LIST must be paired with a real raw/request GET."""
+    fake_client = MagicMock()
+    fake_client.list_objects_v2.return_value = {
+        "Contents": [{"Key": "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"}]
+    }
+    fake_client.get_object.return_value = {"Body": MagicMock()}
+    with (
+        TestClient(app) as c,
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
+    ):
+        resp = c.post(
+            "/api/provision/check-fos",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    fake_client.get_object.assert_called_once_with(
+        Bucket="b",
+        Key="raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz",
+        Range="bytes=0-0",
+    )
 
 
 def test_check_fos_maps_access_denied_to_friendly_message():
@@ -593,7 +627,7 @@ def test_check_fos_maps_access_denied_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -616,7 +650,7 @@ def test_check_fos_maps_no_such_bucket_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -639,7 +673,7 @@ def test_check_fos_maps_region_mismatch_to_friendly_message():
     )
     with (
         TestClient(app) as c,
-        patch("backend.core.duckdb._get_fos_client", return_value=fake_client),
+        patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client),
     ):
         resp = c.post(
             "/api/provision/check-fos",
@@ -658,7 +692,7 @@ def test_check_fos_maps_endpoint_connection_error_to_friendly_message():
     with (
         TestClient(app) as c,
         patch(
-            "backend.core.duckdb._get_fos_client",
+            "backend.routers.provision._get_fos_s3_client",
             side_effect=RuntimeError("boto3 EndpointConnectionError on x.object.fastlystorage.app"),
         ),
     ):

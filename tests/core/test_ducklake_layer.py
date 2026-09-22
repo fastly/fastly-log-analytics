@@ -131,6 +131,25 @@ class TestCommitTombstoneContract:
         assert _commit_buffer_impl(src)["rows_committed"] == 2
         assert _lake_count(src) == 5
 
+    def test_commit_matches_narrower_buffer_by_column_name(self, tmp_path):
+        """A later buffer can have fewer columns than the evolved lake table."""
+        src = _make_source(tmp_path, f"dl{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+        _write_buffer(
+            src,
+            "batch_wide.parquet",
+            ts=ts,
+            source_file="s3://b/raw/wide.gz",
+            extra={f"custom_{i}": f"value-{i}" for i in range(5)},
+        )
+        assert _commit_buffer_impl(src)["rows_committed"] == 1
+
+        _write_buffer(src, "batch_narrow.parquet", ts=ts + timedelta(minutes=1), source_file="s3://b/raw/narrow.gz")
+        result = _commit_buffer_impl(src)
+
+        assert result["rows_committed"] == 1
+        assert _lake_count(src) == 2
+
 
 class TestTenantIsolation:
     def test_shared_catalog_views_cannot_see_other_tenant_rows(self, tmp_path, monkeypatch):

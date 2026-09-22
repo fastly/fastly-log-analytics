@@ -33,6 +33,7 @@ from backend.models.provision import (
     ProvisionValidateRequest,
     ProvisionValidateResponse,
 )
+from backend.provision.fos_setup import _get_fos_s3_client
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal
 
 logger = logging.getLogger(__name__)
@@ -210,33 +211,56 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
 
 @router.post("/check-fos", response_model=ProvisionCheckFosResponse, response_model_exclude_unset=True)
 def provision_check_fos(req: CheckFosRequest):
-    """Validate FOS credentials by attempting to list objects."""
+    """Validate FOS credentials against the same raw prefixes ingest reads."""
     bucket = req.bucket
     region = req.region
     access_key = req.access_key
     secret_key = req.secret_key
     import botocore.exceptions
 
-    from backend.core.duckdb import _get_fos_client
-
-    src = {
-        "bucket": bucket,
-        "endpoint": f"{region}.object.fastlystorage.app",
-        "access_key_id": access_key,
-        "secret_access_key": secret_key,
-        "region": region,
-        "storage_mode": "cloud",
-    }
-
     from backend.utils.telemetry import get_tracked_calls
 
     try:
-        client = _get_fos_client(src)
-        # Attempt to list 1 object to verify read permissions
-        client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        # This endpoint receives credentials that are not yet persisted in a
+        # service config.  The telemetry-proxy client intentionally signs from
+        # persisted config, so using it here would silently send an unsigned
+        # request and report a false auth failure.
+        client = _get_fos_s3_client(
+            access_key,
+            secret_key,
+            region,
+            bucket_name=bucket,
+            context="provision:check-fos",
+        )
+        endpoint = f"{region}.object.fastlystorage.app"
+        representative: tuple[str, str] | None = None
+        for prefix in ("raw/request/", "raw/rum/"):
+            page = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+            contents = page.get("Contents") or []
+            if contents:
+                key = str(contents[0]["Key"])
+                client.get_object(Bucket=bucket, Key=key, Range="bytes=0-0")["Body"].close()
+                representative = (prefix, key)
+                break
+        prefix, key = representative or ("raw/request/", "")
+        logger.info(
+            "[provision] FOS credential probe succeeded bucket=%s region=%s endpoint=%s prefix=%s key=%s",
+            bucket,
+            region,
+            endpoint,
+            prefix,
+            key or "<none>",
+        )
         return {"ok": True, "_debug_calls": get_tracked_calls()}
     except Exception as e:
         err_msg = str(e)
+        logger.warning(
+            "[provision] FOS credential probe failed bucket=%s region=%s endpoint=%s: %s",
+            bucket,
+            region,
+            f"{region}.object.fastlystorage.app",
+            err_msg[:200],
+        )
         if isinstance(e, botocore.exceptions.ClientError):
             code = e.response.get("Error", {}).get("Code", "Unknown")
             if code in ("AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"):

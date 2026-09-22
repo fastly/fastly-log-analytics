@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 class CheckFosRequest(BaseModel):
     """Body for ``POST /api/provision/check-fos`` — FOS credentials to
-    validate by attempting a single list-objects call."""
+    validate against the raw request/RUM prefixes and a representative object."""
 
     bucket: str
     region: str

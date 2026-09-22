@@ -29410,7 +29410,7 @@
           "provision"
         ],
         "summary": "Provision Check Fos",
-        "description": "Validate FOS credentials by attempting to list objects.",
+        "description": "Validate FOS credentials against the same raw prefixes ingest reads.",
         "operationId": "provision_check_fos_api_provision_check_fos_post",
         "requestBody": {
           "content": {
@@ -43981,7 +43981,7 @@
           "secret_key"
         ],
         "title": "CheckFosRequest",
-        "description": "Body for ``POST /api/provision/check-fos`` \u2014 FOS credentials to\nvalidate by attempting a single list-objects call."
+        "description": "Body for ``POST /api/provision/check-fos`` \u2014 FOS credentials to\nvalidate against the raw request/RUM prefixes and a representative object."
       },
       "ClaimTokenResponse": {
         "properties": {

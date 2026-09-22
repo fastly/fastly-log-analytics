@@ -3386,7 +3386,7 @@ export interface paths {
         put?: never;
         /**
          * Provision Check Fos
-         * @description Validate FOS credentials by attempting to list objects.
+         * @description Validate FOS credentials against the same raw prefixes ingest reads.
          */
         post: operations["provision_check_fos_api_provision_check_fos_post"];
         delete?: never;
@@ -6429,7 +6429,7 @@ export interface components {
         /**
          * CheckFosRequest
          * @description Body for ``POST /api/provision/check-fos`` — FOS credentials to
-         *     validate by attempting a single list-objects call.
+         *     validate against the raw request/RUM prefixes and a representative object.
          */
         CheckFosRequest: {
             /** Bucket */
