@@ -103,6 +103,61 @@ def test_concurrent_get_connection_all_attach_successfully(tmp_path):
     assert not failures, f"lake catalog corrupted on {len(failures)}/{n_threads} racing connections: {failures}"
 
 
+def test_ducklake_attach_reuses_existing_matching_lake_alias(tmp_path):
+    """A pooled checkout may call _ducklake_attach on a connection whose
+    previous release failed to detach ``lake``. That path must verify and
+    reuse the existing alias instead of issuing a second ATTACH, which can
+    fatal the DuckDB connection."""
+    from backend.core.iceberg._ducklake import _ducklake_attach
+
+    name = f"reattach{uuid.uuid4().hex[:8]}"
+    src = _make_committed_source(tmp_path, name)
+
+    con = get_connection(source=src, read_only=True)
+    try:
+        first = con.execute(
+            "SELECT snapshot_id FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1"
+        ).fetchone()
+        assert first is not None
+
+        assert _ducklake_attach(con, src, read_only=True) is True
+
+        second = con.execute(
+            "SELECT snapshot_id FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1"
+        ).fetchone()
+        assert second == first
+    finally:
+        con.close()
+
+
+def test_pool_release_attempts_ducklake_internal_alias_detach():
+    """Returning a pooled connection must release both the public ``lake``
+    alias and DuckLake's internal metadata alias. Leaving the internal
+    alias/file handle pinned caused the next checkout's ATTACH on a sibling
+    connection to fail with a unique file-handle conflict."""
+    from backend.core.duckdb_pool import _Pool
+
+    class FakeConnection:
+        def __init__(self):
+            self.commands: list[str] = []
+
+        def execute(self, sql: str):
+            self.commands.append(sql)
+            if sql == "DETACH lake":
+                return self
+            if sql == "DETACH __ducklake_metadata_lake":
+                return self
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    pool = _Pool("fake", max_size=1)
+    pool._in_use = 1
+    con = FakeConnection()
+
+    pool.release(con)  # type: ignore[arg-type]
+
+    assert con.commands[:2] == ["DETACH lake", "DETACH __ducklake_metadata_lake"]
+
+
 def test_update_iceberg_view_locked_skips_reattach_when_lake_already_attached(tmp_path, monkeypatch):
     """A connection that already has ``lake`` attached must not be
     re-attached — a mode-mismatched re-attach (read_only=False on an

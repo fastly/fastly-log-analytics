@@ -69,6 +69,10 @@ def partial_hour_merge_enabled() -> bool:
     return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
+def dev_local_crons_enabled() -> bool:
+    return os.environ.get("FLA_DEV_LOCAL_CRONS", "true").lower() in ("1", "true", "yes")
+
+
 def _display_name(src: dict, fallback: str) -> str:
     """Return src['service_name'] or src['name'], falling back to ``fallback``.
     Used by every cron-log site that wants the human-friendly name with
@@ -628,6 +632,10 @@ class Scheduler:
         :meth:`reload` stays a no-op under the kill switch so a dev config
         save can't sneak the gated jobs back in.
         """
+        if not dev_local_crons_enabled():
+            logger.warning("🚫 [scheduler] FLA_DEV_LOCAL_CRONS=0 — no dev-local-safe jobs registered.")
+            return
+
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.cron.jobs.compaction import _run_local_compact, _run_rollup_compact_daily, _run_rollup_hour_heal

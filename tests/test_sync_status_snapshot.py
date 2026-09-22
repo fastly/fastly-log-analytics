@@ -87,7 +87,13 @@ def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
                 "rum_vitals": datetime(2026, 9, 15, 19, 1, tzinfo=UTC),
                 "rum_errors": datetime(2026, 9, 15, 19, 2, tzinfo=UTC),
             }
-            return [{"total_rows": totals[domain], "latest_log_at": latest[domain]}]
+            return [
+                {
+                    "total_rows": totals[domain],
+                    "earliest_log_at": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                    "latest_log_at": latest[domain],
+                }
+            ]
 
     service = HighScaleService(
         service_id="high-scale-svc",
@@ -123,7 +129,64 @@ def test_high_scale_snapshot_uses_clickhouse_header_metrics(monkeypatch):
     assert snapshot["request"]["total_rows"] == 12
     assert snapshot["rum"]["total_rows"] == 10
     assert snapshot["local_rows"] == 22
+    assert snapshot["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
     assert snapshot["latest_log_at"] == "2026-09-15T19:00:00+00:00"
+
+
+def test_high_scale_log_extents_uses_clickhouse_snapshot(monkeypatch):
+    from datetime import UTC, datetime
+
+    from backend.high_scale.archive_models import ServingWatermark
+    from backend.high_scale.registry import HighScaleService
+
+    class Client:
+        def execute(self, sql, params=None):
+            domain = (params or {}).get("domain")
+            if domain == "request":
+                return [
+                    {
+                        "total_rows": 12,
+                        "earliest_log_at": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "latest_log_at": datetime(2026, 9, 15, 19, 0, tzinfo=UTC),
+                    }
+                ]
+            return [{"total_rows": 0, "earliest_log_at": None, "latest_log_at": None}]
+
+    service = HighScaleService(
+        service_id="high-scale-svc",
+        client=Client(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="high-scale-svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        lambda _: {"name": "high-scale-svc", "access_level": "read_write"},
+    )
+    monkeypatch.setattr(
+        "backend.high_scale.registry.get_high_scale_service_registry",
+        lambda: type("Registry", (), {"resolve": lambda _, service_id: service})(),
+    )
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _: pytest.fail("high-scale log extents must not use stale config status"),
+    )
+
+    router = importlib.import_module("backend.routers.admin.sync_status")
+    extents = router.log_extents("high-scale-svc")
+
+    assert extents.configured is True
+    assert extents.earliest_log_at == "2026-09-15T18:00:00+00:00"
+    assert extents.latest_log_at == "2026-09-15T19:00:00+00:00"
 
 
 @pytest.mark.parametrize("request_latest", ["2026-09-07T19:31:22Z", "2026-09-04T01:00:00Z", None])

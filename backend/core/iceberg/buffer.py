@@ -517,8 +517,7 @@ def _ducklake_write_connection(source: dict):
       an ephemeral in-memory connection is used (`get_memory_connection`), avoiding file locks.
     - In local-file mode (`DEPLOYMENT_MODE=standard`), DuckDB restricts on-disk `.ducklake` files
       to the primary database handle, requiring a connection via `get_connection(source, read_only=True)`.
-      The connection is detached, re-attached as read-write for execution, and restored to read-only
-      in `finally` before closing.
+      The connection is detached, re-attached as read-write for execution, then detached and closed.
     """
     from backend import config
     from backend.core.duckdb import get_connection, get_memory_connection
@@ -552,10 +551,6 @@ def _ducklake_write_connection(source: dict):
                     con.execute("DETACH lake")
                 except Exception as e:
                     logger.warning("[ducklake] Failed to DETACH lake: %s", e)
-                try:
-                    _ducklake_attach(con, source, read_only=True)
-                except Exception as e:
-                    logger.warning("[ducklake] Failed to restore read-only lake: %s", e)
             try:
                 con.close()
             except Exception:

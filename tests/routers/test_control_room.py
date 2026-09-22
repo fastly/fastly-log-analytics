@@ -353,6 +353,24 @@ def test_openapi_has_control_room_endpoints():
     assert "/api/services/{service_id}/control-room/mitigations" in paths
 
 
+def test_realtime_seed_without_credentials_skips_network(monkeypatch):
+    """No Fastly credentials configured -> _fetch_seed_ticks must never hit rt.fastly.com."""
+    import backend.config as backend_config
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(backend_config, "get_fastly_api_key", lambda service_id: None)
+    monkeypatch.setattr(backend_config, "get_fastly_logging_service_id", lambda service_id: None)
+
+    def _fail_get(*args, **kwargs):
+        raise AssertionError("seed fetch with no credentials attempted network I/O")
+
+    monkeypatch.setattr("requests.get", _fail_get)
+
+    ticks = control_room._fetch_seed_ticks(MOCK_SERVICE_ID, count=5)
+
+    assert ticks == []
+
+
 # ── Seed, Correlate, & Wizard endpoints ──────────────────────────────────
 
 

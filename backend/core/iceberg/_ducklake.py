@@ -183,6 +183,59 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             logger.warning("[ducklake] %s: failed to INSTALL/LOAD ducklake extension: %s", service_id, e)
             return False
 
+        try:
+            attached = con.execute("SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'").fetchone()
+        except Exception as e:
+            logger.warning("[ducklake] %s: failed to inspect existing lake attachment: %s", service_id, e)
+            return False
+        if attached:
+            if bool(attached[0]) == read_only:
+                try:
+                    con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
+                except Exception as e:
+                    try:
+                        con.execute("DETACH lake")
+                    except Exception as detach_err:
+                        logger.warning(
+                            "[ducklake] %s: existing lake catalog is unusable (%s) and detach failed: %s",
+                            service_id,
+                            e,
+                            detach_err,
+                        )
+                        return False
+                else:
+                    if not read_only:
+                        _apply_target_file_size(con)
+                    return True
+            else:
+                try:
+                    con.execute("DETACH lake")
+                except Exception as detach_err:
+                    logger.warning(
+                        "[ducklake] %s: failed to detach mismatched lake catalog: %s",
+                        service_id,
+                        detach_err,
+                    )
+                    return False
+
+        try:
+            orphaned_metadata = con.execute(
+                "SELECT 1 FROM duckdb_databases() WHERE database_name = '__ducklake_metadata_lake'"
+            ).fetchone()
+        except Exception as e:
+            logger.warning("[ducklake] %s: failed to inspect DuckLake metadata attachment: %s", service_id, e)
+            return False
+        if orphaned_metadata:
+            try:
+                con.execute("DETACH __ducklake_metadata_lake")
+            except Exception as detach_err:
+                logger.warning(
+                    "[ducklake] %s: failed to detach orphaned DuckLake metadata catalog: %s",
+                    service_id,
+                    detach_err,
+                )
+                return False
+
         if read_only and (dsn.startswith("postgres:") or not os.path.exists(dsn)):
             # A read-only attach of a not-yet-initialized catalog fails ("does
             # not exist - and creating a new DuckLake is explicitly disabled") —
@@ -212,6 +265,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             except Exception as e:
                 msg = str(e).lower()
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
+                    for alias in ("lake", "__ducklake_metadata_lake"):
+                        try:
+                            con.execute(f"DETACH {alias}")
+                        except Exception:
+                            pass
                     if attempt < 4:
                         import time
 

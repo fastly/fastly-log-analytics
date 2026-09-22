@@ -148,7 +148,15 @@ def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsR
         empty2: LogExtentsResponse = LogExtentsResponse.with_telemetry(configured=False)
         return empty2
 
-    cached = svcconfig.get_status(src["name"]) or {}
+    try:
+        from backend.high_scale.registry import get_high_scale_service_registry
+
+        if get_high_scale_service_registry().resolve(service_id) is not None:
+            cached = compute_sync_status_cached(service_id) or {}
+        else:
+            cached = svcconfig.get_status(src["name"]) or {}
+    except Exception:
+        cached = svcconfig.get_status(src["name"]) or {}
     request_status = cached.get("request")
     latest = request_status.get("latest_log_at") if isinstance(request_status, dict) else cached.get("latest_log_at")
     resp: LogExtentsResponse = LogExtentsResponse.with_telemetry(

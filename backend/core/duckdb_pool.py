@@ -535,6 +535,10 @@ class _Pool:
             con.execute("DETACH lake")
         except Exception:
             pass
+        try:
+            con.execute("DETACH __ducklake_metadata_lake")
+        except Exception:
+            pass
 
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see

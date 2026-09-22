@@ -55,6 +55,18 @@ function _seedDefaultServiceConfig(configsDir: string): void {
   // Write one mock service config so /api/bootstrap surfaces a service
   // and the dashboard journeys have an active selection on first paint.
   // All fields use safe placeholder values — never any real Fastly IDs.
+  //
+  // `fastly_api_key` / `cdn_service_id` are deliberately left EMPTY rather
+  // than fabricated placeholder strings: they were previously truthy fakes
+  // ('mock-fastly-key' / 'mock-cdn-svc'), which passed `config.get_fastly_api_key`
+  // / `get_fastly_logging_service_id`'s truthiness checks and caused Control
+  // Room's RT poller (`backend/core/realtime/poller.py::_fetch_realtime`) to
+  // make real HTTPS calls to rt.fastly.com with garbage credentials — a
+  // 403-retry storm across every parallel WebKit worker. Leaving them empty
+  // hits the poller's existing honest `if not api_key or not fastly_service_id:
+  // return None` short-circuit, same as any real service with no Fastly
+  // credentials configured yet. No spec in this suite depends on these two
+  // fields being truthy for `svc-playwright-e2e`.
   const sid = 'svc-playwright-e2e'
   const config = {
     service_id: sid,
@@ -63,13 +75,53 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     fos_region: 'us-east-1',
     fos_access_key_id: 'AKIA_MOCK',
     fos_secret_access_key: 'SECRET_MOCK',
-    fastly_api_key: 'mock-fastly-key',
-    cdn_service_id: 'mock-cdn-svc',
+    fastly_api_key: '',
+    cdn_service_id: '',
     cdn_secret: 'mock-cdn-secret',
     access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
   }
   writeFileSync(join(configsDir, `${sid}.json`), JSON.stringify(config, null, 2))
+}
+
+/**
+ * Optional second service config that points Control Room's RT poller at a
+ * REAL Fastly service instead of synthesizing fake tick data. Opt-in only,
+ * via env vars the operator exports locally before `make e2e` — never
+ * committed, never a CI secret (E2E does not run in GitHub Actions).
+ *
+ * `get_fastly_api_key` / `get_fastly_logging_service_id` (backend/config.py)
+ * read the config's own `service_id` field as the Fastly service ID sent to
+ * rt.fastly.com, so this seeds a config file whose `service_id` IS the real
+ * Fastly service ID — separate from the shared `svc-playwright-e2e` fixture
+ * used by every other spec, so this stays purely additive and opt-in.
+ *
+ * When unset, `control-room.spec.ts` falls back to `svc-playwright-e2e`,
+ * whose fake credentials are absent from the poller's config lookup path —
+ * see `_fetch_realtime`'s `if not api_key or not fastly_service_id: return
+ * None` short-circuit — so it never calls rt.fastly.com with garbage
+ * credentials (the prior 403-retry-storm bug) and never fabricates data.
+ */
+function _seedRealRtServiceConfig(configsDir: string): void {
+  const apiKey = process.env.E2E_REAL_RT_FASTLY_API_KEY
+  const serviceId = process.env.E2E_REAL_RT_FASTLY_SERVICE_ID
+  if (!apiKey || !serviceId) return
+
+  const config = {
+    service_id: serviceId,
+    service_name: 'Playwright E2E Control Room (real RT)',
+    fos_bucket: 'mock-bucket',
+    fos_region: 'us-east-1',
+    fos_access_key_id: 'AKIA_MOCK',
+    fos_secret_access_key: 'SECRET_MOCK',
+    fastly_api_key: apiKey,
+    cdn_service_id: serviceId,
+    cdn_secret: 'mock-cdn-secret',
+    access_level: 'read_write',
+    provisioning: { endpoint_name: 'Mock Logger' },
+  }
+  writeFileSync(join(configsDir, `${serviceId}.json`), JSON.stringify(config, null, 2))
+  console.log(`[e2e] seeded real-RT service config for ${serviceId} (E2E_REAL_RT_FASTLY_* set)`)
 }
 
 async function globalSetup() {
@@ -85,6 +137,7 @@ async function globalSetup() {
   fs.mkdirSync(configsDir, { recursive: true })
   fs.mkdirSync(dataDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
+  _seedRealRtServiceConfig(configsDir)
 
   // Wire the analyst-OAuth feature against the in-process mock IdP (all on
   // 127.0.0.1, no network). The registry points discovery at the backend's own

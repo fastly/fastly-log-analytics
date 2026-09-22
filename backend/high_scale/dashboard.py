@@ -78,34 +78,43 @@ def _range_value(value: str | None) -> datetime | None:
 def header_metrics(service: HighScaleService) -> dict[str, Any]:
     """Return visible ClickHouse row counts and event-time extents for the header."""
     totals: dict[str, int] = {}
+    earliest: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
     for domain, table in _HEADER_TABLES.items():
         rows = service.client.execute(
-            f"SELECT count() AS total_rows, max(event_timestamp) AS latest_log_at "
+            f"SELECT count() AS total_rows, min(event_timestamp) AS earliest_log_at, max(event_timestamp) AS latest_log_at "
             f"FROM {table} "
             "WHERE service_id={service_id:String} "
-            "AND 1=1 "
+            "AND publication_state = 'visible' "
             "AND batch_id IN ("
             "SELECT batch_id FROM high_scale_batch_publications FINAL "
             "WHERE service_id={service_id:String} AND domain={domain:String} "
-            "AND 1=1"
+            "AND publication_state = 'visible'"
             ")",
             {"service_id": service.service_id, "domain": domain},
         )
         row = rows[0] if rows else {}
         total_rows = int(row.get("total_rows") or 0)
+        earliest_value: object = row.get("earliest_log_at")
         latest_value: object = row.get("latest_log_at")
         if total_rows == 0:
+            earliest_value = None
             latest_value = None
+        if isinstance(earliest_value, datetime):
+            earliest_value = earliest_value.isoformat()
         if isinstance(latest_value, datetime):
             latest_value = latest_value.isoformat()
         totals[domain] = total_rows
+        earliest[domain] = str(earliest_value) if earliest_value is not None else None
         latest[domain] = str(latest_value) if latest_value is not None else None
 
     rum_total = totals["rum_vitals"] + totals["rum_errors"]
+    rum_earliest_values = [earliest["rum_vitals"], earliest["rum_errors"]]
     rum_latest_values = [latest["rum_vitals"], latest["rum_errors"]]
+    rum_earliest = min((value for value in rum_earliest_values if value is not None), default=None)
     rum_latest = max((value for value in rum_latest_values if value is not None), default=None)
     request_total = totals["request"]
+    request_earliest = earliest["request"]
     request_latest = latest["request"]
 
     req_sync: str | None = None
@@ -129,15 +138,18 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
 
     return {
         "request": {
+            "earliest_log_at": request_earliest,
             "latest_log_at": request_latest,
             "total_rows": request_total,
             "last_sync_at": req_sync,
         },
         "rum": {
+            "earliest_log_at": rum_earliest,
             "latest_log_at": rum_latest,
             "total_rows": rum_total,
             "last_sync_at": rum_sync,
         },
+        "earliest_log_at": request_earliest,
         "latest_log_at": request_latest,
         "local_rows": request_total + rum_total,
     }

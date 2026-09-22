@@ -10,13 +10,16 @@ from backend.high_scale.registry_bootstrap import (
 
 
 class FakeClickHouse:
+    def __init__(self) -> None:
+        self.request_coverage_end = datetime(2026, 9, 12, tzinfo=UTC)
+
     def execute(self, sql: str, params: dict | None = None) -> list[dict]:
         assert params == {"service_id": "svc"}
         if "FROM request_facts" in sql:
             return [
                 {
                     "coverage_start": datetime(2026, 9, 1, tzinfo=UTC),
-                    "coverage_end": datetime(2026, 9, 12, tzinfo=UTC),
+                    "coverage_end": self.request_coverage_end,
                     "last_visible_event_id": "00000000-0000-0000-0000-000000000123",
                 }
             ]
@@ -60,6 +63,27 @@ def test_register_high_scale_services_exposes_clickhouse_watermark() -> None:
     assert watermark.coverage_start == datetime(2026, 9, 1, tzinfo=UTC)
     assert watermark.coverage_end == datetime(2026, 9, 12, tzinfo=UTC)
     assert watermark.last_visible_event_id == "00000000-0000-0000-0000-000000000123"
+
+
+def test_registered_watermark_reflects_new_clickhouse_visibility() -> None:
+    registry = HighScaleServiceRegistry()
+    client = FakeClickHouse()
+
+    register_high_scale_services(
+        registry,
+        client=client,
+        service_ids=("svc",),
+        cursor_secret=b"local-test-secret",
+        owner_epoch=7,
+    )
+
+    service = registry.resolve("svc")
+    assert service is not None
+    assert service.watermark().coverage_end == datetime(2026, 9, 12, tzinfo=UTC)
+
+    client.request_coverage_end = datetime(2026, 9, 22, 4, 20, tzinfo=UTC)
+
+    assert service.watermark().coverage_end == datetime(2026, 9, 22, 4, 20, tzinfo=UTC)
 
 
 def test_register_high_scale_services_parses_clickhouse_timestamp_strings() -> None:

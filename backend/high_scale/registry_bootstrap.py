@@ -46,9 +46,11 @@ def register_high_scale_services(
     for service_id in service_ids:
         if not service_id:
             raise ValueError("high-scale service id is required")
-        watermarks = {
-            domain: _watermark(client, service_id, domain, owner_epoch=owner_epoch) for domain in _WATERMARK_TABLES
-        }
+
+        def _watermark_for(domain: str, bound_service_id: str = service_id) -> Callable[[], ServingWatermark]:
+            return lambda: _watermark(client, bound_service_id, domain, owner_epoch=owner_epoch)
+
+        watermarks = {domain: _watermark_for(domain) for domain in _WATERMARK_TABLES}
         # Cold-tier raw queries require BOTH a manifest catalog and an
         # archive reader for this specific service; a service missing
         # either gets neither, so the /queries endpoint reports it as

@@ -18,16 +18,16 @@ import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 export function LiveTimer({ startedAt }: { startedAt: string }) {
   const elapsed = useElapsedTime(startedAt)
   const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium animate-pulse">{fmt}</span>
+  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium">{fmt}</span>
 }
 
 // Tile-sized variant: inline-styled for the cron schedule pill so the
 // 9px tile typography isn't blown out by LiveTimer's text-xs (12px).
-// Same pulse + tabular-nums so widths stay stable across digit counts.
+// Same tabular-nums so widths stay stable across digit counts.
 function TileLiveTimer({ startedAt }: { startedAt: string }) {
   const elapsed = useElapsedTime(startedAt)
   const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium animate-pulse">{fmt}</span>
+  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium">{fmt}</span>
 }
 
 function NextRunCountdown({ when }: { when: string | null | undefined }) {
@@ -36,18 +36,32 @@ function NextRunCountdown({ when }: { when: string | null | undefined }) {
   return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
 }
 
+type CronSchedule = {
+  task: string
+  disabled_reason?: string | null
+  last_run_time?: string | null
+  next_run_time?: string | null
+}
+
+type ActiveCronJob = {
+  id: number | string
+  started_at?: string | null
+}
+
 export function CronScheduleBox({
-  schedule,
+  schedule: _schedule,
   compact = false,
   activeJob = null,
   onOpenConsole
 }: {
-  schedule: any;
+  schedule: CronSchedule;
   compact?: boolean;
-  activeJob?: any;
+  activeJob?: ActiveCronJob | null;
   onOpenConsole?: (jobId: number | string) => void
 }) {
   const { full, abbr } = useDateFormat()
+  const schedule = _schedule
+  void compact
 
   if (schedule.disabled_reason === 'no_alerts_configured') {
     return (

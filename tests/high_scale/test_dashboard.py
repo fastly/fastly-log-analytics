@@ -19,6 +19,11 @@ class FakeClient:
             return [
                 {
                     "total_rows": {"request": 12, "rum_vitals": 8, "rum_errors": 2}[domain],
+                    "earliest_log_at": {
+                        "request": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "rum_vitals": datetime(2026, 9, 15, 18, 1, tzinfo=UTC),
+                        "rum_errors": datetime(2026, 9, 15, 18, 2, tzinfo=UTC),
+                    }[domain],
                     "latest_log_at": {
                         "request": datetime(2026, 9, 15, 19, 0, tzinfo=UTC),
                         "rum_vitals": datetime(2026, 9, 15, 19, 1, tzinfo=UTC),
@@ -142,13 +147,17 @@ def test_high_scale_header_metrics_use_visible_rows_and_latest_events():
     metrics = header_metrics(service)
 
     assert metrics["request"] == {
+        "earliest_log_at": "2026-09-15T18:00:00+00:00",
         "latest_log_at": "2026-09-15T19:00:00+00:00",
         "total_rows": 12,
         "last_sync_at": None,
     }
     assert metrics["rum"] == {
+        "earliest_log_at": "2026-09-15T18:01:00+00:00",
         "latest_log_at": "2026-09-15T19:02:00+00:00",
         "total_rows": 10,
         "last_sync_at": None,
     }
+    assert metrics["earliest_log_at"] == "2026-09-15T18:00:00+00:00"
+    assert metrics["latest_log_at"] == "2026-09-15T19:00:00+00:00"
     assert metrics["local_rows"] == 22

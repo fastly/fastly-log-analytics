@@ -126,12 +126,43 @@ Authoritative specifications:
 - [`docs/cron/jobs/rum-commit.md`](docs/cron/jobs/rum-commit.md)
 - [`docs/cron/jobs/ledger-rum-sweep.md`](docs/cron/jobs/ledger-rum-sweep.md)
 
+### Beta3 environment rebuild checkpoint
+
+The disposable test services for Local Standard, Local High-Scale, and remote
+High-Scale have been freshly reprovisioned with maximum real log-field
+collection, RUM enabled, full sampling, non-edge-only capture, and short log
+delivery periods. The production-like Standard demo service remains preserved.
+
+Local Standard serving is repaired after the rebuild: its stale local DuckLake
+catalog was reset so readers no longer chase pre-teardown FOS objects, and
+`/api/query` plus `/api/log-extents` now return fresh request rows/extents.
+
+High-Scale request-facts serving is working for fresh tagged traffic. The
+generic status/extents surface must be backed by ClickHouse-visible facts for
+High-Scale services, not by stale config status; this is now covered by focused
+regression tests and verified in Local High-Scale. Remote High-Scale still needs
+the same code deployed and rechecked.
+
 ## Phase 3: Pages
 
 After all cron jobs are implemented and verified, audit pages one at a time
 using the specifications under [`docs/pages/`](docs/pages/). Each page must
 preserve shared layout/filter/time-range behavior, Standard/High-Scale parity,
 role boundaries, telemetry completeness, and documented performance budgets.
+
+Known page-parity investigation after the environment rebuild:
+
+- Compare the **Traffic over Time** chart in Standard mode with both High-Scale
+  deployments. High-Scale currently renders bars too close together, without
+  the visual spacing present in Standard mode.
+- Hold the selected time range and bucket interval constant while comparing the
+  modes. Determine whether the difference comes from bucket density, omitted
+  zero-value buckets, timestamp/bucket alignment, response shape, or frontend
+  Plotly configuration.
+- Standard and High-Scale may load data differently, but they must produce the
+  same chart semantics and visual spacing for equivalent data. Fix the shared
+  contract or rendering path rather than accepting data-source differences as
+  the explanation.
 
 ## Completion gate
 

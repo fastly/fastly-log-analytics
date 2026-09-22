@@ -29,11 +29,13 @@ export function backendTestEnvironment(
     DEBUG_RESPONSES: 'true',
     FASTLY_MOCK_MODE: '1',
     FLA_DEV_NO_CRONS: '1',
+    FLA_DEV_LOCAL_CRONS: '0',
     // The external scheduler branch is selected before the no-crons guard.
     SCHEDULER_MODE: 'inprocess',
     DEPLOYMENT_MODE: 'standard',
     SSE_BACKPLANE: 'local',
     OTEL_EXPORTER: 'none',
+    DUCKDB_POOL_MAX_SIZE: '16',
     CONTRACT_CONFIGS_DIR: join(sandbox, 'configs'),
     CONTRACT_DATA_DIR: join(sandbox, 'data'),
   })
