@@ -157,6 +157,34 @@ def test_configure_fos_creates_proxy_secret_with_cdn(proxy_server):
         con.close()
 
 
+def test_configure_fos_uses_native_fos_when_edge_only_is_false(proxy_server):
+    """An explicitly disabled edge-only mode must keep DuckDB reads on native FOS."""
+    from backend.core import duckdb as _ddb
+
+    source = {
+        "name": "phase3a-native-reads",
+        "service_id": "phase3a-native-reads",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "cdn.example.com",
+        "cdn_url": "https://cdn.example.com",
+        "cdn_secret": "fastly-secret-abc",
+        "provisioning": {"edge_only": False},
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        _ddb._configure_fos(con, source)
+
+        secret_string = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
+        assert "X-Fos-Target=us-east-1.object.fastlystorage.app" in secret_string
+        assert "X-Fos-Target=cdn.example.com" not in secret_string
+        assert "x-fastly-key" not in secret_string.lower()
+    finally:
+        con.close()
+
+
 # ── Task 5: iceberg.configure_duckdb_s3 does not clobber proxy SECRET ───────
 
 

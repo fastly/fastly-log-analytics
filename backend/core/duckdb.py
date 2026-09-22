@@ -250,7 +250,10 @@ def _proxy_target_for(source: dict) -> str:
     to origin instead — uncached, and against FOS's own rate limits.
     """
     cdn_url = (source.get("cdn_url") or "").strip()
-    if cdn_url:
+    edge_only = source.get("provisioning", {}).get("edge_only")
+    if edge_only is None:
+        edge_only = source.get("edge_only")
+    if cdn_url and edge_only is not False:
         return cdn_url.replace("https://", "").replace("http://", "").split("/", 1)[0].lower()
     return source.get("fos_native_endpoint") or source.get("endpoint") or ""
 
@@ -282,7 +285,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     }
     if ctx:
         headers["X-Telemetry-Context"] = ctx
-    if source.get("cdn_secret"):
+    if target_host != source.get("fos_native_endpoint") and source.get("cdn_secret"):
         # CDN reads use x-fastly-key for auth; proxy passes it through.
         headers["x-fastly-key"] = source["cdn_secret"]
     # EXTRA_HTTP_HEADERS doesn't accept parameterized map literals when
