@@ -28,8 +28,8 @@
 // layer cache still serves the whole RUN layer when inputs are unchanged).
 // Check a recent build's console output for `--mount` warnings/no-ops
 // before assuming this is giving the speedup the Dockerfile comments claim.
-def backendImage = env.FLA_BACKEND_IMAGE
-def frontendImage = env.FLA_FRONTEND_IMAGE
+def backendImage = env.FLA_BACKEND_IMAGE ?: 'fastly/fastly-log-analytics-backend'
+def frontendImage = env.FLA_FRONTEND_IMAGE ?: 'fastly/fastly-log-analytics-frontend'
 
 def cache = true
 def buildContainers = false
