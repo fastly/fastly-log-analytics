@@ -346,7 +346,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         con.execute("SET http_keep_alive = false;")
 
 
-_fos_client_cache: dict[tuple[str, str], Any] = {}
+_fos_client_cache: dict[tuple[str, str, str, str], Any] = {}
 _fos_client_lock = threading.Lock()
 
 
@@ -413,13 +413,16 @@ def _get_fos_client(source: dict):
     logs every request, so callers must not wrap this client with anything
     that records its own usage rows.
     """
-    # Key on (name, access_key_id) so a credential rotation — teardown then
-    # re-provision of the same service mints a NEW FOS key — naturally MISSES
-    # the cache and rebuilds with the fresh creds, instead of serving the
-    # deleted key and 401ing every GET/HEAD. ``clear_fos_client`` handles
-    # explicit invalidation on the provision seams; this keying is the
-    # defense-in-depth that auto-heals any rotation a caller forgets to clear.
-    source_key = (source.get("name", "default"), source.get("access_key_id", ""))
+    # Key on all credentials captured by the proxy hook. Credential rotation
+    # naturally misses the cache and rebuilds with fresh values instead of
+    # serving stale auth on GET/HEAD. ``clear_fos_client`` handles explicit
+    # invalidation on the provision seams; this keying is defense in depth.
+    source_key = (
+        source.get("name", "default"),
+        source.get("access_key_id", ""),
+        source.get("cdn_url", ""),
+        source.get("cdn_secret", ""),
+    )
     with _fos_client_lock:
         if source_key in _fos_client_cache:
             return _fos_client_cache[source_key]
