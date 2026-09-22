@@ -734,12 +734,24 @@ def adaptive_stale_minutes(
 
 def reap_running_cron_runs(service_id: str, reason: str = "Process interrupted by server restart") -> int:
     con = get_con(service_id)
+    # ``con`` is already scoped to this service's own per-service SQLite
+    # file (get_con(service_id)), so every row in it belongs to this
+    # service regardless of what its `service_id` column holds. Some
+    # legacy rows (pre-dating the column's consistent population — seen
+    # in production as NULL-service_id 'sync'/'metadata_sync' rows) fail
+    # an exact `service_id = ?` match, which is NULL-unsafe in SQL (NULL
+    # = anything is NULL, never true) and left them permanently stuck in
+    # status='running' across every restart — the health probe's stuck-
+    # sync detector then degrades the service forever. Match NULL too so
+    # the reaper actually clears every orphan in this file.
     con.execute(
-        "UPDATE job_runs SET status = 'error', detail = ? WHERE service_id = ? AND status = 'running'",
+        "UPDATE job_runs SET status = 'error', detail = ? "
+        "WHERE (service_id = ? OR service_id IS NULL) AND status = 'running'",
         (reason, service_id),
     )
     cur = con.execute(
-        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) WHERE service_id = ? AND status = 'running'",
+        "UPDATE cron_runs SET status = 'error', error_message = COALESCE(error_message, ?) "
+        "WHERE (service_id = ? OR service_id IS NULL) AND status = 'running'",
         (reason, service_id),
     )
     con.commit()

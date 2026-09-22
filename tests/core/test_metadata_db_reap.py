@@ -78,6 +78,32 @@ def test_reap_ignores_age_unlike_start_cron_run():
     assert row["status"] == "error"
 
 
+def test_reap_clears_legacy_null_service_id_rows():
+    """Regression (GCE 2026-09-22): pre-migration 'sync'/'metadata_sync'
+    rows stored NULL in the service_id column. ``WHERE service_id = ?`` is
+    NULL-unsafe (NULL = 'x' is never true in SQL), so those rows survived
+    every restart forever and permanently degraded /api/health?deep=1 with
+    "sync stuck running since ...". Since get_con(service_id) already
+    scopes the connection to this service's own file, every row in it
+    belongs to this service regardless of its service_id column — the
+    reap must clear NULL rows too.
+    """
+    sid = "svc-reap-null-legacy"
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys) "
+        "VALUES (NULL, 'sync', datetime('now'), 0.0, 'running', '[]')"
+    )
+    con.commit()
+
+    n = metadata_db.reap_running_cron_runs(sid)
+
+    assert n == 1
+    row = con.execute("SELECT status, error_message FROM cron_runs WHERE task = 'sync'").fetchone()
+    assert row["status"] == "error"
+    assert "interrupted" in (row["error_message"] or "").lower()
+
+
 def test_reap_custom_reason_is_recorded():
     sid = "svc-reap-5"
     _seed_running(sid)
