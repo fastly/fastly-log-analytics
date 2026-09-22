@@ -62,6 +62,11 @@ RUN if [ -d "app" ]; then \
       chown -R nextjs:nodejs . ; \
     fi
 
+# Next.js may persist prerender results after startup. The standalone output
+# does not include the build-time filesystem cache, so create a writable
+# runtime cache directory explicitly before dropping privileges.
+RUN mkdir -p .next/cache && chown -R nextjs:nodejs .next
+
 USER nextjs
 
 EXPOSE 3000
