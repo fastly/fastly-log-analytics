@@ -29,6 +29,8 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
       'uv',
       [
         'run',
+        '--project',
+        repoRoot,
         'python',
         join(repoRoot, 'scripts', 'load_test', 'generate_synthetic_traffic.py'),
         '--target',
@@ -48,8 +50,10 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
     )
     console.log('[e2e] seeded 500 rows of synthetic traffic into sandbox buffer')
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.warn('[e2e] warning: could not seed synthetic traffic into sandbox buffer:', msg)
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string }
+    const out = e.stdout ? e.stdout.toString() : ''
+    const errOut = e.stderr ? e.stderr.toString() : ''
+    throw new Error(`[e2e] failed to seed synthetic traffic into sandbox buffer:\n${errOut || out || e.message || String(err)}`)
   }
 }
 
@@ -196,6 +200,8 @@ async function globalSetup() {
     'uv',
     [
       'run',
+      '--project',
+      repoRoot,
       'python',
       'scripts/run_contract_backend.py',
       '--host',

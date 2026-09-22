@@ -56,6 +56,8 @@ export async function startBackend(): Promise<void> {
     'uv',
     [
       'run',
+      '--project',
+      repoRoot,
       'python',
       'scripts/run_contract_backend.py',
       '--host',
