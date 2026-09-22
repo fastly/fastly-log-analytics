@@ -12,7 +12,7 @@
  * and the contract suite (13003) so all three can run side-by-side
  * during local iteration.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +21,37 @@ import { E2E_BACKEND_PORT, E2E_FRONTEND_PORT } from '../playwright.config'
 import { backendTestEnvironment } from '../tests/backend-environment'
 
 const HOST = '127.0.0.1'
+
+function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: string): void {
+  try {
+    const cfgPath = join(configsDir, 'svc-playwright-e2e.json')
+    execFileSync(
+      'uv',
+      [
+        'run',
+        'python',
+        join(repoRoot, 'scripts', 'load_test', 'generate_synthetic_traffic.py'),
+        '--target',
+        'local',
+        '--rows',
+        '500',
+        '--scenario',
+        'diurnal',
+        '--no-commit',
+        '--config',
+        cfgPath,
+      ],
+      {
+        cwd: sandbox,
+        stdio: 'pipe',
+      },
+    )
+    console.log('[e2e] seeded 500 rows of synthetic traffic into sandbox buffer')
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn('[e2e] warning: could not seed synthetic traffic into sandbox buffer:', msg)
+  }
+}
 
 async function poll(url: string, timeoutMs = 180_000): Promise<void> {
   // Default 180s: the playwright config webServer timeout is 120s for the
@@ -80,6 +111,11 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     cdn_secret: 'mock-cdn-secret',
     access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
+    log_fields: {
+      schema_version: 2,
+      preset: 'recommended',
+      groups: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'METRICS', 'VIRTUAL'],
+    },
   }
   writeFileSync(join(configsDir, `${sid}.json`), JSON.stringify(config, null, 2))
 }
@@ -138,6 +174,7 @@ async function globalSetup() {
   fs.mkdirSync(dataDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
   _seedRealRtServiceConfig(configsDir)
+  _seedSyntheticLogs(sandbox, configsDir, repoRoot)
 
   // Wire the analyst-OAuth feature against the in-process mock IdP (all on
   // 127.0.0.1, no network). The registry points discovery at the backend's own

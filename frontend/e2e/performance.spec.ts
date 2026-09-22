@@ -4,7 +4,8 @@ import * as path from 'path'
 import { E2E_BACKEND_PORT } from '../playwright.config'
 
 const SERVICE_ID = 'svc-playwright-e2e'
-const NUM_ITERATIONS = 5
+const IS_EXHAUSTIVE = process.env.PERF_EXHAUSTIVE === '1'
+const NUM_ITERATIONS = IS_EXHAUSTIVE ? 5 : 1
 
 interface MetricResult {
   lcp: number
@@ -24,7 +25,7 @@ interface TestResult {
   metrics: MetricResult
 }
 
-const PAGES = [
+const ALL_PAGES = [
   { name: 'Dashboard', path: '/dashboard', adminOnly: false },
   { name: 'Control Room', path: '/control-room', adminOnly: false },
   { name: 'Service Summary / Value', path: '/fastly-value', adminOnly: false },
@@ -53,6 +54,16 @@ const PAGES = [
   { name: 'System Trends', path: '/admin/trends', adminOnly: true },
   { name: 'FOS Usage Ledger', path: '/admin/usage-log', adminOnly: true }
 ]
+
+const CORE_PAGES = [
+  { name: 'Dashboard', path: '/dashboard', adminOnly: false },
+  { name: 'Control Room', path: '/control-room', adminOnly: false },
+  { name: 'Performance', path: '/performance', adminOnly: false },
+  { name: 'Security', path: '/security', adminOnly: false },
+  { name: 'SQL Query Pad', path: '/query', adminOnly: false },
+]
+
+const PAGES = IS_EXHAUSTIVE ? ALL_PAGES : CORE_PAGES
 
 const allResults: TestResult[] = []
 
@@ -297,14 +308,14 @@ test.describe('E2E Performance & Posture Harness', () => {
                   domInteractive: Math.round(domInteractive),
                   domContentLoaded: Math.round(domContentLoaded)
                 })
-              }, 1000)
+              }, 50)
             })
           })
 
           lcps.push(metrics.lcp)
           fcps.push(metrics.fcp)
           fps.push(metrics.fp)
-          durations.push(Date.now() - start - 1000) // subtract the 1000ms evaluate timeout
+          durations.push(Date.now() - start - 50)
           domInteractives.push(metrics.domInteractive)
           domContentLoadeds.push(metrics.domContentLoaded)
 
@@ -327,6 +338,12 @@ test.describe('E2E Performance & Posture Harness', () => {
         }
 
         console.log(`[PERF] Admin | ${pageInfo.name} | LCP: ${stats.lcp}ms | FCP: ${stats.fcp}ms | Load: ${stats.duration}ms | DomInt: ${stats.domInteractive}ms | Slowest API: ${stats.slowestApi}ms`)
+        expect(stats.duration).toBeLessThan(12_000)
+        expect(stats.slowestApi).toBeLessThan(6_000)
+        if (stats.lcp > 0) {
+          expect(stats.lcp).toBeLessThan(5_000)
+        }
+
         allResults.push({
           name: pageInfo.name,
           path: pageInfo.path,
@@ -471,14 +488,14 @@ test.describe('E2E Performance & Posture Harness', () => {
                   domInteractive: Math.round(domInteractive),
                   domContentLoaded: Math.round(domContentLoaded)
                 })
-              }, 1000)
+              }, 50)
             })
           })
 
           lcps.push(metrics.lcp)
           fcps.push(metrics.fcp)
           fps.push(metrics.fp)
-          durations.push(Date.now() - start - 1000) // subtract the 1000ms evaluate timeout
+          durations.push(Date.now() - start - 50)
           domInteractives.push(metrics.domInteractive)
           domContentLoadeds.push(metrics.domContentLoaded)
 
@@ -501,6 +518,12 @@ test.describe('E2E Performance & Posture Harness', () => {
         }
 
         console.log(`[PERF] Analyst | ${pageInfo.name} | LCP: ${stats.lcp}ms | FCP: ${stats.fcp}ms | Load: ${stats.duration}ms | DomInt: ${stats.domInteractive}ms | Slowest API: ${stats.slowestApi}ms`)
+        expect(stats.duration).toBeLessThan(12_000)
+        expect(stats.slowestApi).toBeLessThan(6_000)
+        if (stats.lcp > 0) {
+          expect(stats.lcp).toBeLessThan(5_000)
+        }
+
         allResults.push({
           name: pageInfo.name,
           path: pageInfo.path,

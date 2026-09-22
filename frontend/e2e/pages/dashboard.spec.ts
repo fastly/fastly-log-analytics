@@ -121,30 +121,30 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Find any top-N table cell inside CardGrid
-    const firstTableCell = page.locator('table tbody tr td').first()
-    if (await firstTableCell.isVisible({ timeout: 5000 }).catch(() => false)) {
-      const cellText = await firstTableCell.innerText()
-      if (cellText && cellText.trim().length > 0) {
-        await firstTableCell.click({ force: true })
-        // Verify filter pill appeared in FilterBar
-        const filterBar = page.locator('[data-testid="filter-bar"]')
-        if (await filterBar.isVisible({ timeout: 5000 }).catch(() => false)) {
-          await expect(filterBar).toContainText(cellText.trim())
-        }
-      }
-    }
+    // Scroll down so LazyMount triggers card mounting
+    await page.locator('button:has(h3)').first().scrollIntoViewIfNeeded()
+
+    // Find any top-N dimension button inside CardGrid
+    const filterBtn = page.locator('button[aria-label^="Filter to "]').first()
+    await expect(filterBtn).toBeVisible({ timeout: 15_000 })
+    const btnLabel = await filterBtn.getAttribute('aria-label')
+    const filterValue = btnLabel?.replace('Filter to ', '').trim() || ''
+    expect(filterValue.length).toBeGreaterThan(0)
+    await filterBtn.click()
+
+    // Verify filter pill appeared in FilterBar
+    const filterBar = page.locator('[data-testid="filter-bar"]')
+    await expect(filterBar).toBeVisible({ timeout: 10_000 })
+    await expect(filterBar).toContainText(filterValue)
   })
 
   test('7. GeoMap panel mounts properly', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Look for map container or SVG / canvas element
-    const mapSection = page.locator('section').filter({ hasText: /geographic|traffic by country|world map/i }).first()
-    if (await mapSection.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await expect(mapSection).toBeVisible()
-    }
+    // Look for map container or header "Requests by Country"
+    const mapHeading = page.locator('h3').filter({ hasText: /requests by country/i }).first()
+    await expect(mapHeading).toBeVisible({ timeout: 15_000 })
   })
 
   test('8. Compare mode triggers secondary aggregates query', async ({ page }) => {
@@ -153,34 +153,31 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
 
     // Compare switch in FilterBar
     const compareSwitch = page.getByRole('switch', { name: /compare/i })
-
-    if (await compareSwitch.isVisible({ timeout: 5000 }).catch(() => false)) {
-      const compareRequestPromise = page.waitForRequest(
-        (req) => req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST',
-        { timeout: 15_000 }
-      )
-      await compareSwitch.click({ force: true })
-      const req = await compareRequestPromise
-      expect(req).toBeTruthy()
-    }
+    await expect(compareSwitch).toBeVisible({ timeout: 15_000 })
+    const compareRequestPromise = page.waitForRequest(
+      (req) => req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST',
+      { timeout: 15_000 }
+    )
+    await compareSwitch.click({ force: true })
+    const req = await compareRequestPromise
+    expect(req).toBeTruthy()
   })
 
   test('9. Category collapse state persists in localStorage across reloads', async ({ page }) => {
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-    // Section headers have collapsible chevron buttons (e.g. Request, Cache, Geography)
-    const categoryHeader = page.locator('h3').filter({ hasText: /geography|cache|origin/i }).first()
-    if (await categoryHeader.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await categoryHeader.click()
+    // Section headers have collapsible chevron buttons (e.g. Request, Security, Cache, Geography)
+    const categoryButton = page.locator('section button:has(h3)').first()
+    await expect(categoryButton).toBeVisible({ timeout: 15_000 })
+    await categoryButton.click()
 
-      // Reload page and check localStorage key
-      await page.reload()
-      await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+    // Reload page and check localStorage key
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
 
-      const collapsedStorage = await page.evaluate(() => localStorage.getItem('dashboard_collapsed_sections'))
-      expect(collapsedStorage).toBeTruthy()
-    }
+    const collapsedStorage = await page.evaluate(() => localStorage.getItem('dashboard_collapsed_sections'))
+    expect(collapsedStorage).toBeTruthy()
   })
 
   test('10. Card customization popover visibility toggle', async ({ page }) => {
@@ -285,4 +282,18 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
+  test('13. Non-empty Plotly visualizations and zero error cards', async ({ page }) => {
+    await page.goto('/dashboard')
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+    // Must have rendered Plotly charts
+    const plotlyChart = page.locator('.js-plotly-plot, .plotly').first()
+    await expect(plotlyChart).toBeVisible({ timeout: 20_000 })
+
+    // Must have SVG elements inside the chart (.main-svg proves Plotly initialized and rendered)
+    await expect(plotlyChart.locator('.main-svg').first()).toBeVisible({ timeout: 10_000 })
+
+    // Zero error cards on dashboard
+    await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
+  })
 })

@@ -269,7 +269,7 @@ export const FilterBar = React.memo(function FilterBar() {
   // URL-hydrated filter pills / compare row — stay gated on `mounted` so they
   // appear only after hydration, within already-reserved fixed-height boxes.
   return (
-    <div className="flex flex-col gap-1.5 px-4 py-2 border-b bg-background sticky top-0 z-10 shrink-0">
+    <div data-testid="filter-bar" className="flex flex-col gap-1.5 px-4 py-2 border-b bg-background sticky top-0 z-10 shrink-0">
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-0.5 border rounded-md p-0.5 bg-muted/20 h-10 sm:h-8">
           {quickPresets.map((preset) => {

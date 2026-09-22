@@ -1,0 +1,79 @@
+name: E2E Nightly (Cross-Browser & Exhaustive Perf)
+
+# Exhaustive nightly E2E run:
+# - Matrix of Chromium, Firefox, WebKit
+# - PERF_EXHAUSTIVE=1 (full 27-route 5-iteration performance profiling)
+# Runs daily at 04:00 UTC and on manual dispatch.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  playwright-nightly:
+    name: Playwright Nightly (${{ matrix.browser }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install backend deps
+        run: uv sync
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: cd frontend && npm ci
+
+      - name: Clean Playwright cache
+        run: rm -rf ~/.cache/ms-playwright
+
+      - name: Install Playwright browser (${{ matrix.browser }}) + system deps
+        run: cd frontend && npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run Playwright Nightly (${{ matrix.browser }})
+        env:
+          CI: "1"
+          PLAYWRIGHT_WORKERS: "2"
+          PLAYWRIGHT_RETRIES: "1"
+          PERF_EXHAUSTIVE: "1"
+        run: cd frontend && npx playwright test --project=${{ matrix.browser }}
+
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-nightly-report-${{ matrix.browser }}
+          path: frontend/playwright-report
+          retention-days: 14
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-nightly-traces-${{ matrix.browser }}
+          path: frontend/test-results
+          retention-days: 14

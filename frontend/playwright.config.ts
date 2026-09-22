@@ -38,8 +38,8 @@ export default defineConfig({
   // code was fine — breaking the "green `make ci` == green CI" parity goal.
   // Matching CI here restores that parity. Retries only mask flakes, never a
   // deterministic failure (which fails both attempts).
-  retries: 1,
-  workers: 1,
+  retries: process.env.PLAYWRIGHT_RETRIES ? parseInt(process.env.PLAYWRIGHT_RETRIES, 10) : 0,
+  workers: process.env.PLAYWRIGHT_WORKERS ? parseInt(process.env.PLAYWRIGHT_WORKERS, 10) : 2,
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
     baseURL: `http://127.0.0.1:${FRONTEND_PORT}`,
@@ -77,12 +77,18 @@ export default defineConfig({
   globalSetup: require.resolve('./e2e/global-setup'),
   globalTeardown: require.resolve('./e2e/global-teardown'),
 
-  projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-    // Multi-browser matrix (audit Q1 optional): Firefox + WebKit run in
-    // addition to Chromium so any browser-specific regression surfaces
-    // in CI. Each project replays the same `e2e/*.spec.ts` files.
-    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
-  ],
+  projects:
+    process.env.PROJECTS === 'all'
+      ? [
+          { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+          { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+          { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+        ]
+      : process.env.PROJECTS
+      ? [
+          { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+          { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+          { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+        ].filter((p) => process.env.PROJECTS!.split(',').includes(p.name))
+      : [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 })

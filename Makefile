@@ -1,4 +1,4 @@
-.PHONY: test test-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard audit audit-watch
+.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -249,13 +249,23 @@ openapi-drift: gen-types
 perf-ci:
 	uv run python scripts/emit_perf_latest.py && bash scripts/perf_gate.sh
 
-# Playwright E2E — mirrors .github/workflows/e2e.yml. Kept SEPARATE from `ci`
-# (it boots the backend + frontend + a browser, ~minutes) exactly like the
-# split CI workflows. `npm run test:e2e` is chromium-only; this runs the full
-# chromium+firefox+webkit matrix CI runs. THE gap that hid the a11y/hydration
-# failures locally — run `make e2e` before pushing UI changes.
+# Fast local loop (~1-2m): contract drift, typechecks, linter, focused vitest, and focused unit tests
+fast-ci:
+	$(MAKE) openapi-drift
+	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
+	cd frontend && npx vitest run hooks/ lib/ stores/ tests/backend-contract.test.ts
+	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
+
+# Playwright E2E — runs fast Chromium smoke suite by default (2 workers, retries: 0).
+# Avoids re-installing node_modules / browsers unless missing.
 e2e:
-	cd frontend && npm ci && npx playwright install --with-deps && npx playwright test
+	@if [ ! -d frontend/node_modules ]; then (cd frontend && npm ci); fi
+	cd frontend && npx playwright test
+
+# Full cross-browser matrix (Chromium, Firefox, WebKit) for nightly/scheduled runs
+e2e-all:
+	@if [ ! -d frontend/node_modules ]; then (cd frontend && npm ci); fi
+	cd frontend && PROJECTS=all npx playwright test
 
 # Mirrors EVERY gating GitHub workflow (ci.yml AND e2e.yml) step-for-step, so a
 # green `make ci` == green CI — no separate command to forget. Runs the full
@@ -268,8 +278,7 @@ e2e:
 # before the multi-minute browser matrix.
 ci:
 	$(MAKE) gen-types
-	$(MAKE) test-ci
-	$(MAKE) test-frontend-ci
+	@$(MAKE) -j2 test-ci test-frontend-ci
 	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci deploy-validate stray-file-gate
 	$(MAKE) e2e
 

@@ -215,4 +215,13 @@ describe('frontend → backend HTTP contract', () => {
     expect(response.status).toBe(200)
     expect(Array.isArray((data as { data?: unknown[] } | undefined)?.data)).toBe(true)
   })
+
+  // ── Share / Auth config & OAuth ──────────────────────────────────
+  it('GET /api/share/auth-config returns {passcode_enabled, providers}', async () => {
+    const { data, error, response } = await client.GET('/api/share/auth-config')
+    expect(error).toBeUndefined()
+    expect(response.status).toBe(200)
+    expect(typeof (data as any)?.passcode_enabled).toBe('boolean')
+    expect(Array.isArray((data as any)?.providers)).toBe(true)
+  })
 })
