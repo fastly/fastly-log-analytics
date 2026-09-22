@@ -45,18 +45,72 @@ def check_cdn_requests(cdn_url: str) -> bool:
     if not cdn_url or "localhost" in cdn_url or "127.0.0.1" in cdn_url:
         return False
     try:
-        req = urllib.request.Request(cdn_url, method="HEAD")
+        req = urllib.request.Request(cdn_url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=5) as res:
             return True
+    except urllib.error.HTTPError as e:
+        # Any HTTP response (including 401, 403, 503, etc.) confirms the edge CDN host is online and routed!
+        return e.code in (200, 301, 302, 401, 403, 404, 503)
     except Exception:
-        return True
+        return False
 
-def run_remote_python_validation(command_prefix: list, service_id: str, bucket: str, cdn_url: str) -> dict:
-    """Run validation inside the remote container natively."""
+def run_inline_remote_validation(gcloud_or_kubectl: str, service_id: str, bucket: str, cdn_url: str) -> dict:
+    """Execute validation inside standard remote container using stdin pipes to avoid semicolon compression."""
+    python_snippet = f"""
+import json, urllib.request, boto3
+from botocore.config import Config
+
+def check_fastly_api(token, s_id):
+    if not token or token == 'unknown' or token.startswith('1Yhh'): return False
     try:
-        # Construct the exact flat command array to execute our preloaded backend module
-        full_cmd = command_prefix + ["python3", "-m", "backend.utils.validate_credentials", service_id, bucket, cdn_url]
-        out = subprocess.check_output(full_cmd, stderr=subprocess.DEVNULL, timeout=8)
+        req = urllib.request.Request(f'https://api.fastly.com/service/{{s_id}}', headers={{"Fastly-Key": token, "Accept": "application/json"}})
+        with urllib.request.urlopen(req, timeout=5) as res:
+            return res.status == 200
+    except Exception: return False
+
+def check_fos_bucket(access_key, secret_key, endpoint, bucket):
+    if not access_key or access_key == 'unknown' or not bucket: return False
+    try:
+        s3 = boto3.client('s3', endpoint_url=f'https://{{endpoint}}', aws_access_key_id=access_key, aws_secret_access_key=secret_key, config=Config(signature_version='s3v4'))
+        s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        return True
+    except Exception: return False
+
+def check_cdn_requests(cdn_url):
+    if not cdn_url or 'localhost' in cdn_url: return False
+    try:
+        req = urllib.request.Request(cdn_url, method='HEAD', headers={{"User-Agent": "Mozilla/5.0"}})
+        with urllib.request.urlopen(req, timeout=5) as res: return True
+    except urllib.error.HTTPError as e:
+        return e.code in (200, 301, 302, 401, 403, 404, 503)
+    except Exception: return False
+
+# Load configs
+cfg = {{}}
+try:
+    with open('configs/{service_id}.json') as f:
+        cfg = json.load(f)
+except Exception: pass
+
+token = cfg.get('fastly_api_key', '')
+access_key = cfg.get('fos_access_key_id', '')
+secret_key = cfg.get('fos_secret_access_key', '')
+endpoint = cfg.get('fos_endpoint', 'us-east-1.object.fastlystorage.app')
+
+res = {{
+    "fastly_api_ok": check_fastly_api(token, '{service_id}'),
+    "fos_bucket_ok": check_fos_bucket(access_key, secret_key, endpoint, '{bucket}'),
+    "cdn_requests_ok": check_cdn_requests('{cdn_url}')
+}}
+print(json.dumps(res))
+"""
+    try:
+        if gcloud_or_kubectl == "gcloud":
+            full_cmd = ["gcloud", "compute", "ssh", "fastly-log-analysis", "--project=se-development-9566", "--zone=us-central1-a", "--command", "cd ~/app && docker compose exec -T backend python3 -"]
+        else:
+            full_cmd = ["kubectl", "exec", "-i", "-n", "se-demo", "deployment/backend", "-c", "backend", "--", "python3", "-"]
+            
+        out = subprocess.check_output(full_cmd, input=python_snippet.encode(), stderr=subprocess.DEVNULL, timeout=8)
         return json.loads(out.decode().strip())
     except Exception:
         return {
@@ -73,26 +127,32 @@ def main():
         "local-std": {
             "config_path": "configs/ZU15BvY2LX7WcEp43T9VwU.json",
             "service_id": "ZU15BvY2LX7WcEp43T9VwU",
-            "name": "FLA Standard Test Local"
+            "name": "FLA Standard Test Local",
+            "bucket": "fos-zu15bvy2lx7wcep43t9vwu-logs",
+            "region": "us-east-1"
         },
         "local-hs": {
             "config_path": "configs-hs/qI4D8yXXFYOIpZEMrkJy65.json",
             "service_id": "qI4D8yXXFYOIpZEMrkJy65",
-            "name": "FLA High-Scale Test Local"
+            "name": "FLA High-Scale Test Local",
+            "bucket": "fos-zez4mcajosfdtg7tpkdkv2-logs",
+            "region": "us-east-1"
         },
         "remote-std": {
             "service_id": "cVnu9mYB3Cvmob3lsqjQU3",
             "name": "FLA Standard Test Remote",
-            "bucket": "fos-cvnu9myb3cvmob3lsqjqu3-logs",
+            "bucket": "fos-cvnu9myb3cvmob3lsqqu3-logs",
+            "region": "us-east-1",
             "cdn_url": "https://cVnu9mYB3Cvmob3lsqjQU3.global.ssl.fastly.net",
-            "cmd_prefix": ["gcloud", "compute", "ssh", "fastly-log-analysis", "--project=se-development-9566", "--zone=us-central1-a", "--command", "cd ~/app && docker compose exec -T backend"]
+            "type": "gcloud"
         },
         "remote-hs": {
             "service_id": "ZEZ4mcAjoSFDTg7tpkDKV2",
             "name": "FLA High-Scale Test Elevation",
             "bucket": "fos-zez4mcajosfdtg7tpkdkv2-logs",
+            "region": "us-east-1",
             "cdn_url": "https://ZEZ4mcAjoSFDTg7tpkDKV2.global.ssl.fastly.net",
-            "cmd_prefix": ["kubectl", "exec", "-n", "se-demo", "deployment/backend", "-c", "backend", "--"]
+            "type": "kubectl"
         }
     }
     
@@ -106,14 +166,16 @@ def main():
         results[env_id] = {
             "service_id": info["service_id"],
             "service_name": info["name"],
+            "bucket": info["bucket"],
+            "region": info["region"],
             "fastly_api_ok": False,
             "fos_bucket_ok": False,
             "cdn_requests_ok": False
         }
         
-        # If remote targets, execute standard distributed checks inside their actual remote networks!
-        if "cmd_prefix" in info:
-            rem = run_remote_python_validation(info["cmd_prefix"], info["service_id"], info["bucket"], info["cdn_url"])
+        # If remote targets, execute standard inline python checks inside their actual remote networks!
+        if "type" in info:
+            rem = run_inline_remote_validation(info["type"], info["service_id"], info["bucket"], info["cdn_url"])
             
             # GCE VM master key fallback over SSH
             if not rem["fastly_api_ok"] and master_fastly_key:
