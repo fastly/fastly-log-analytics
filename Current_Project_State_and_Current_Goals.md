@@ -83,6 +83,45 @@ This phase is a recurring gate, not a one-time step: re-run it at the start of
 each new cron/page work session, since environments can drift (credential
 rotation, container restarts, upstream Fastly changes) between sessions.
 
+### Phase 0 baseline result — 2026-09-22
+
+The canonical deployment run completed for commit `2fa7e4434583` and produced
+`reports/deploys/2026-09-22-12-37-03/`. All four ports responded, all four
+credential panels reported Fastly API/FOS/CDN checks as healthy, and all four
+dashboard endpoints exposed real non-zero rows. The gate nevertheless failed
+because the monitored logs and end-to-end checks found the following new
+correctness blockers:
+
+- **Standard-mode FOS/DuckLake reads are unauthorized or inconsistent.** Local
+  Standard and GCE Remote Standard emitted repeated FOS `401 Unauthorized`
+  downloads. Local High-Scale also emitted DuckLake `404 NoSuchKey` reads.
+  Local Standard and GCE Remote Standard logged buffer commits with schema
+  mismatches (`116 columns but 97 values were supplied`) and/or
+  `Catalog Error: Schema with name lake does not exist!`. These are not the
+  documented Local High-Scale ClickHouse memory follow-up and must be resolved
+  before cron/page work resumes.
+- **GCE Remote Standard dashboard verification is degraded.** Its 30-day
+  dashboard request returned `503`, and deep health repeatedly returned `503`
+  while the ingestion/commit errors were active.
+- **Local Standard freshness/RUM verification is incomplete.** The request
+  header remained `Never`, and the RUM page had no Web Vitals data during the
+  verification window; this is likely downstream of the FOS read failures but
+  needs confirmation after the storage issue is fixed.
+
+The following deployment-log entries were transient rollout noise rather than
+confirmed runtime blockers: frontend SSR `ECONNREFUSED`/remote frontend
+`ECONNRESET` while backends restarted, and the remote-standard SSH tunnel's
+`Address already in use` messages because an existing tunnel already owned
+ports 3001/8001. The existing tunnel made the endpoints reachable, but the
+deployment tooling should report reuse explicitly instead of treating the bind
+attempt as a clean new tunnel.
+
+The known Local High-Scale ClickHouse `MEMORY_LIMIT_EXCEEDED` follow-up remains
+unchanged and was not re-triaged here. The deployment also reported a
+temporary Elevation scheduler age of 56 seconds and Celery queue depth of 221;
+the subsequent dashboard/RUM checks passed, so this is a monitoring follow-up,
+not yet a correctness failure.
+
 ## Phase 2: Background Tasks and Cron Jobs
 
 The cron inventory contains 24 active logical jobs. Request and RUM discovery
