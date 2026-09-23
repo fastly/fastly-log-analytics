@@ -126,6 +126,7 @@ test.describe('Control Room', () => {
   test('Overview tab shows metric cards with live data', async ({ page }) => {
     await page.goto('/control-room')
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+    await page.locator('text=Loading app configuration…').waitFor({ state: 'detached', timeout: 30_000 })
 
     const reqCard = page.locator('text=Requests/s').filter({ visible: true }).first()
     await expect(reqCard).toBeVisible({ timeout: 10_000 })
