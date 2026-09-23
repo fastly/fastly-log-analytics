@@ -552,9 +552,99 @@ def _ducklake_write_connection(source: dict):
                 pass
 
 
+def _commit_one_chunk(source: dict, lake_ident: str, files: list[str], table_name: str) -> tuple[int, list[str], int]:
+    """Commit a single bounded chunk of buffer files under one DuckLake
+    write-attach. Returns (rows_committed, committed_paths, quarantined_files).
+
+    Split out of ``_commit_buffer_impl`` so each chunk opens + detaches its
+    own ``_ducklake_write_connection`` (see ``_BUFFER_COMMIT_CHUNK_SIZE``) —
+    the whole-backlog single-attach version held the process-wide exclusive
+    DuckLake write-attach for as long as the ENTIRE buffer took to drain
+    (unbounded — thousands of files after any commit/ingest imbalance),
+    starving every other connection that needs to (re)attach ``lake``
+    (pooled readers, RUM's aggregate recompute, other services' ticks) well
+    past the attach-conflict retry budget. Production incident 2026-09-23:
+    a ~40 minute GCE stall traced to exactly this — one commit tick holding
+    the write-attach long enough that concurrent readers/writers repeatedly
+    hit "Unique file handle conflict" and exhausted their 20-attempt/30s
+    retry budget.
+    """
+    from backend.utils.sql_validator import escape_sql_literal
+
+    rows_committed = 0
+    committed_paths: list[str] = []
+    quarantined_files = 0
+
+    with _ducklake_write_connection(source) as con:
+
+        def _commit_paths(paths: list[str]) -> int:
+            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
+            con.execute(
+                f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
+            )
+            table_cols: set[str] = set()
+            try:
+                table_cols = {r[0] for r in con.execute(f"DESCRIBE {lake_ident}").fetchall()}
+                parquet_cols_res = con.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
+                ).fetchall()
+                parquet_cols = {r[0] for r in parquet_cols_res}
+                for p_col, p_type, *_ in parquet_cols_res:
+                    if p_col not in table_cols:
+                        col_ident = '"{}"'.format(p_col.replace('"', '""'))
+                        con.execute(f"ALTER TABLE {lake_ident} ADD COLUMN {col_ident} {p_type}")
+                        table_cols.add(p_col)
+            except Exception as e:
+                logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
+                parquet_cols = set()
+
+            delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
+            con.execute("BEGIN TRANSACTION")
+            try:
+                if delete_by_source:
+                    con.execute(
+                        f"DELETE FROM {lake_ident} WHERE _source_file IN "
+                        f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
+                    )
+                con.execute(
+                    f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
+                )
+                con.execute("COMMIT")
+                return len(paths)
+            except Exception as e:
+                con.execute("ROLLBACK")
+                raise e
+
+        try:
+            _commit_paths(files)
+            rows_committed = sum(pq.read_metadata(p).num_rows for p in files)
+            committed_paths = list(files)
+        except Exception as batch_err:
+            logger.warning(
+                "%s Full-batch commit failed (%s) — falling back to per-file commits with quarantine",
+                _core_mod._ICE,
+                batch_err,
+            )
+            for f in files:
+                try:
+                    added = _commit_paths([f])
+                    rows_committed += added
+                    committed_paths.append(f)
+                except Exception as inner_err:
+                    logger.error("%s Commit buffer error on %s: %s", _core_mod._ICE, f, inner_err)
+                    if (
+                        "is not a valid Parquet file" in str(inner_err)
+                        or "No files found" in str(inner_err)
+                        or "Missing page" in str(inner_err)
+                    ):
+                        if _quarantine_buffer_file(source, f, inner_err, table_name):
+                            quarantined_files += 1
+
+    return rows_committed, committed_paths, quarantined_files
+
+
 def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
     from backend.core.iceberg._ducklake import ducklake_table_name
-    from backend.utils.sql_validator import escape_sql_literal
 
     # Sweep tombstones whose grace window elapsed — the sweep cadence is
     # tied to the commit cron on purpose (no separate cron registration).
@@ -570,75 +660,23 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     rows_committed = 0
     committed_paths: list[str] = []
     quarantined_files = 0
-    try:
-        with _ducklake_write_connection(source) as con:
 
-            def _commit_paths(paths: list[str]) -> int:
-                paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
-                con.execute(
-                    f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-                )
-                table_cols: set[str] = set()
-                try:
-                    table_cols = {r[0] for r in con.execute(f"DESCRIBE {lake_ident}").fetchall()}
-                    parquet_cols_res = con.execute(
-                        f"DESCRIBE SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
-                    ).fetchall()
-                    parquet_cols = {r[0] for r in parquet_cols_res}
-                    for p_col, p_type, *_ in parquet_cols_res:
-                        if p_col not in table_cols:
-                            col_ident = '"{}"'.format(p_col.replace('"', '""'))
-                            con.execute(f"ALTER TABLE {lake_ident} ADD COLUMN {col_ident} {p_type}")
-                            table_cols.add(p_col)
-                except Exception as e:
-                    logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
-                    parquet_cols = set()
-
-                delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
-                con.execute("BEGIN TRANSACTION")
-                try:
-                    if delete_by_source:
-                        con.execute(
-                            f"DELETE FROM {lake_ident} WHERE _source_file IN "
-                            f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
-                        )
-                    con.execute(
-                        f"INSERT INTO {lake_ident} BY NAME "
-                        f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
-                    )
-                    con.execute("COMMIT")
-                    return len(paths)
-                except Exception as e:
-                    con.execute("ROLLBACK")
-                    raise e
-
-            try:
-                _commit_paths(files)
-                rows_committed = sum(pq.read_metadata(p).num_rows for p in files)
-                committed_paths = list(files)
-            except Exception as batch_err:
-                logger.warning(
-                    "%s Full-batch commit failed (%s) — falling back to per-file commits with quarantine",
-                    _core_mod._ICE,
-                    batch_err,
-                )
-                for f in files:
-                    try:
-                        added = _commit_paths([f])
-                        rows_committed += added
-                        committed_paths.append(f)
-                    except Exception as inner_err:
-                        logger.error("%s Commit buffer error on %s: %s", _core_mod._ICE, f, inner_err)
-                        if (
-                            "is not a valid Parquet file" in str(inner_err)
-                            or "No files found" in str(inner_err)
-                            or "Missing page" in str(inner_err)
-                        ):
-                            if _quarantine_buffer_file(source, f, inner_err, table_name):
-                                quarantined_files += 1
-    except Exception as attach_err:
-        logger.error("%s Failed to attach DuckLake in read-write mode: %s", _core_mod._ICE, attach_err)
-        return {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
+    # Bounded chunks: each chunk opens its own DuckLake write-attach and
+    # detaches before the next, so a large backlog never monopolizes the
+    # process-wide exclusive write-attach for longer than one chunk's work.
+    for i in range(0, len(files), _BUFFER_COMMIT_CHUNK_SIZE):
+        chunk = files[i : i + _BUFFER_COMMIT_CHUNK_SIZE]
+        try:
+            chunk_rows, chunk_paths, chunk_quarantined = _commit_one_chunk(source, lake_ident, chunk, table_name)
+        except Exception as attach_err:
+            logger.error("%s Failed to attach DuckLake in read-write mode: %s", _core_mod._ICE, attach_err)
+            # Stop here rather than aborting everything committed so far —
+            # a transient attach conflict on a later chunk shouldn't discard
+            # rows already durably committed by earlier chunks this tick.
+            break
+        rows_committed += chunk_rows
+        committed_paths.extend(chunk_paths)
+        quarantined_files += chunk_quarantined
 
     # Tombstone (NOT unlink) the committed buffer parquets: views bound
     # BEFORE this commit still reference these paths, and a hard unlink

@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 from backend import config as svcconfig
 from backend.core.duckdb import _safe_table_name, get_connection
+from backend.core.iceberg import buffer as buffer_mod
 from backend.core.iceberg import manifest as manifest_mod
 from backend.core.iceberg import view as view_mod
 from backend.core.iceberg._ducklake import ducklake_table_name
@@ -466,3 +467,81 @@ class TestDuckLakeTableInfo:
         assert _commit_buffer_impl(src)["rows_committed"] == 1
         get_table_info(src)
         assert calls["n"] == 2, "a new commit must invalidate the cached scan"
+
+
+class TestCommitBufferChunking:
+    """A large backlog must not hold one exclusive DuckLake write-attach
+    for the whole commit — see AGENTS.md Trap #35 (fifth instance). Each
+    chunk of ``_BUFFER_COMMIT_CHUNK_SIZE`` files must open and detach its
+    own write-attach so concurrent readers/writers get a fair shot at the
+    process-wide attach lock between chunks, instead of starving for the
+    entire backlog-catchup duration."""
+
+    def test_large_backlog_commits_in_bounded_chunks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(buffer_mod, "_BUFFER_COMMIT_CHUNK_SIZE", 2)
+
+        attach_calls = {"n": 0}
+        orig_write_conn = buffer_mod._ducklake_write_connection
+
+        def counting_write_conn(source):
+            attach_calls["n"] += 1
+            return orig_write_conn(source)
+
+        monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", counting_write_conn)
+
+        src = _make_source(tmp_path, f"chunk{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        for i in range(5):
+            _write_buffer(
+                src,
+                f"batch_{i}.parquet",
+                ts=ts + timedelta(seconds=i),
+                source_file=f"s3://b/raw/{i}.gz",
+                n=1,
+            )
+
+        result = _commit_buffer_impl(src)
+
+        assert result["rows_committed"] == 5
+        assert result["files_committed"] == 5
+        assert result["quarantined_files"] == 0
+        # 5 files at chunk size 2 => 3 attach/detach cycles (2, 2, 1), never 1.
+        assert attach_calls["n"] == 3
+        assert _lake_count(src) == 5
+
+    def test_chunked_commit_preserves_rows_when_a_later_chunk_fails_to_attach(self, tmp_path, monkeypatch):
+        """If a later chunk's attach fails (transient contention), rows
+        already committed by earlier chunks must stay committed — the
+        function must not discard prior progress just because a
+        subsequent chunk couldn't get the write-attach."""
+        monkeypatch.setattr(buffer_mod, "_BUFFER_COMMIT_CHUNK_SIZE", 2)
+
+        orig_write_conn = buffer_mod._ducklake_write_connection
+        state = {"n": 0}
+
+        def failing_after_first_chunk(source):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise RuntimeError("Failed to attach DuckLake in read-write mode")
+            return orig_write_conn(source)
+
+        monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", failing_after_first_chunk)
+
+        src = _make_source(tmp_path, f"chunkfail{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        for i in range(4):
+            _write_buffer(
+                src,
+                f"batch_{i}.parquet",
+                ts=ts + timedelta(seconds=i),
+                source_file=f"s3://b/raw/{i}.gz",
+                n=1,
+            )
+
+        result = _commit_buffer_impl(src)
+
+        # First chunk (2 files) commits fine; second chunk's attach raises
+        # and processing stops there rather than aborting everything.
+        assert result["rows_committed"] == 2
+        assert result["files_committed"] == 2
+        assert _lake_count(src) == 2
