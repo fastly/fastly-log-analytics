@@ -366,7 +366,19 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                             # Mode mismatch. Detach and let the loop retry.
                             try:
                                 con.execute("DETACH lake")
-                                continue
+                                if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
+                                    _attach_lock.release()
+                                    lock_held = False
+                                    time.sleep(_ATTACH_CONFLICT_RETRY_SLEEP_S)
+                                    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+                                        logger.warning(
+                                            "[ducklake] %s: timed out re-acquiring the attach lock while retrying "
+                                            "after a mode mismatch",
+                                            service_id,
+                                        )
+                                        return False
+                                    lock_held = True
+                                    continue
                             except Exception as detach_err:
                                 logger.warning(
                                     "[ducklake] %s: failed to detach mismatched lake catalog: %s",
