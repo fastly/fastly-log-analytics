@@ -59,6 +59,10 @@ async def _request(
         req_id = f"req-{uuid.uuid4().hex[:16]}"
         headers["Fastly-Request-ID"] = req_id
 
+        # Generate a random IP and add X-Source-Ip header to spoof geography/ASNs via Fastly VCL
+        source_ip = f"{random.randint(12, 223)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        headers["X-Source-Ip"] = source_ip
+
         if "/rum-beacon" in url:
             # Parse metrics from URL to construct a real, randomized Faro payload body
             from urllib.parse import parse_qs, urlparse
