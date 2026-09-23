@@ -747,14 +747,18 @@ class TestExecuteTopNBatchPerFieldLimits:
         real per-field hourly parquet fixture (the actual writer), not
         hand-crafted, so this test can't drift from the real writer schema.
         """
-        from datetime import timedelta
+        import os
+        from datetime import UTC, datetime, timedelta
 
+        import time_machine
         import duckdb as _duckdb
 
         from backend.core.rollups import partial_hour as ph
 
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_hour = active_dt.strftime("%Y-%m-%d-%H")
+        # Freeze the clock to a specific deterministic time comfortably inside the hour
+        frozen_now = datetime(2026, 6, 20, 10, 20, 0, tzinfo=UTC)
+        active_dt = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
+        active_hour = "2026-06-20-10"
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
         monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
@@ -799,26 +803,31 @@ class TestExecuteTopNBatchPerFieldLimits:
         finally:
             con.close()
 
-        stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
-        assert stats["new_files"] == 1
+        # Set the modification time of the file deterministically to 10:15 UTC (before frozen_now of 10:20)
+        watermark_time = (active_dt + timedelta(minutes=15)).timestamp()
+        os.utime(hourly_dir / "batch1.parquet", (watermark_time, watermark_time))
 
-        # Live-hour scan table: rows placed comfortably after "now" (the
-        # merge's watermark, effectively real wall-clock time) so the
-        # narrowed live_start from Task 7's seam doesn't exclude them —
-        # this isolates "did the partial rows get merged in" from "did
-        # narrowing the live window drop legitimate live rows".
-        in_memory_duckdb.execute("CREATE TABLE logs_pht (timestamp TIMESTAMPTZ, country VARCHAR)")
-        now = datetime.now(UTC)
-        in_memory_duckdb.execute(
-            "INSERT INTO logs_pht VALUES (?, 'US'), (?, 'US')",
-            [now + timedelta(minutes=1), now + timedelta(minutes=1)],
-        )
+        with time_machine.travel(frozen_now, tick=False):
+            stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
+            assert stats["new_files"] == 1
 
-        runner = QueryRunner(in_memory_duckdb, test_service_source)
-        st = active_dt.isoformat()
-        et = (active_dt + timedelta(hours=1)).isoformat()
-        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
-        in_memory_duckdb.execute("DROP TABLE logs_pht")
+            # Live-hour scan table: rows placed comfortably after "now" (the
+            # merge's watermark, effectively real wall-clock time) so the
+            # narrowed live_start from Task 7's seam doesn't exclude them —
+            # this isolates "did the partial rows get merged in" from "did
+            # narrowing the live window drop legitimate live rows".
+            in_memory_duckdb.execute("CREATE TABLE logs_pht (timestamp TIMESTAMPTZ, country VARCHAR)")
+            now = datetime.now(UTC)
+            in_memory_duckdb.execute(
+                "INSERT INTO logs_pht VALUES (?, 'US'), (?, 'US')",
+                [now + timedelta(minutes=1), now + timedelta(minutes=1)],
+            )
+
+            runner = QueryRunner(in_memory_duckdb, test_service_source)
+            st = active_dt.isoformat()
+            et = (active_dt + timedelta(hours=1)).isoformat()
+            rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+            in_memory_duckdb.execute("DROP TABLE logs_pht")
 
         country_counts = {value: count for (field, value, count) in rows if field == "country"}
         assert country_counts.get("US") == 2, f"live-hour scan rows missing: {country_counts}"
@@ -845,14 +854,18 @@ class TestExecuteTopNBatchPerFieldLimits:
         ``[watermark, live_end)`` and these old-window rows are excluded —
         the field's total then comes ONLY from the partial rollup.
         """
-        from datetime import timedelta
+        import os
+        from datetime import UTC, datetime, timedelta
 
+        import time_machine
         import duckdb as _duckdb
 
         from backend.core.rollups import partial_hour as ph
 
-        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        active_hour = active_dt.strftime("%Y-%m-%d-%H")
+        # Freeze the clock to a specific deterministic time comfortably inside the hour
+        frozen_now = datetime(2026, 6, 20, 10, 20, 0, tzinfo=UTC)
+        active_dt = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
+        active_hour = "2026-06-20-10"
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(tmp_path))
         monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
@@ -892,35 +905,40 @@ class TestExecuteTopNBatchPerFieldLimits:
         finally:
             con.close()
 
-        stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
-        assert stats["new_files"] == 1
+        # Set the modification time of the file deterministically to 10:15 UTC (before frozen_now of 10:20)
+        watermark_time = (active_dt + timedelta(minutes=15)).timestamp()
+        os.utime(hourly_dir / "batch1.parquet", (watermark_time, watermark_time))
 
-        # Fallback-scan seed table: "DE" rows placed just after the hour
-        # boundary (definitely before the watermark, which is ~real "now" —
-        # by the time this line runs, real wall-clock time has advanced
-        # well past active_dt + 1 second) so they fall INSIDE
-        # [hour_start, watermark) — the window the partial rollup already
-        # covers. A correctly-narrowed fallback must exclude them. "US"
-        # rows placed comfortably after "now" stay outside that window and
-        # must still be counted, proving the fallback isn't narrowed into
-        # uselessness either.
-        in_memory_duckdb.execute("CREATE TABLE logs_pht_overlap (timestamp TIMESTAMPTZ, country VARCHAR)")
-        now = datetime.now(UTC)
-        in_memory_duckdb.execute(
-            "INSERT INTO logs_pht_overlap VALUES (?, 'DE'), (?, 'DE'), (?, 'US'), (?, 'US')",
-            [
-                active_dt + timedelta(seconds=1),
-                active_dt + timedelta(seconds=1),
-                now + timedelta(minutes=1),
-                now + timedelta(minutes=1),
-            ],
-        )
+        with time_machine.travel(frozen_now, tick=False):
+            stats = ph.merge_partial_hour("svc-a", test_service_source, ["country"])
+            assert stats["new_files"] == 1
 
-        runner = QueryRunner(in_memory_duckdb, test_service_source)
-        st = active_dt.isoformat()
-        et = (active_dt + timedelta(hours=1)).isoformat()
-        rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
-        in_memory_duckdb.execute("DROP TABLE logs_pht_overlap")
+            # Fallback-scan seed table: "DE" rows placed just after the hour
+            # boundary (definitely before the watermark, which is ~real "now" —
+            # by the time this line runs, real wall-clock time has advanced
+            # well past active_dt + 1 second) so they fall INSIDE
+            # [hour_start, watermark) — the window the partial rollup already
+            # covers. A correctly-narrowed fallback must exclude them. "US"
+            # rows placed comfortably after "now" stay outside that window and
+            # must still be counted, proving the fallback isn't narrowed into
+            # uselessness either.
+            in_memory_duckdb.execute("CREATE TABLE logs_pht_overlap (timestamp TIMESTAMPTZ, country VARCHAR)")
+            now = datetime.now(UTC)
+            in_memory_duckdb.execute(
+                "INSERT INTO logs_pht_overlap VALUES (?, 'DE'), (?, 'DE'), (?, 'US'), (?, 'US')",
+                [
+                    active_dt + timedelta(seconds=1),
+                    active_dt + timedelta(seconds=1),
+                    now + timedelta(minutes=1),
+                    now + timedelta(minutes=1),
+                ],
+            )
+
+            runner = QueryRunner(in_memory_duckdb, test_service_source)
+            st = active_dt.isoformat()
+            et = (active_dt + timedelta(hours=1)).isoformat()
+            rows, _ = runner.execute_top_n_rollups(["country"], st, et, limit=10)
+            in_memory_duckdb.execute("DROP TABLE logs_pht_overlap")
 
         country_counts = {value: count for (field, value, count) in rows if field == "country"}
         assert country_counts.get("US") == 2, f"post-watermark live rows must still be counted: {country_counts}"
