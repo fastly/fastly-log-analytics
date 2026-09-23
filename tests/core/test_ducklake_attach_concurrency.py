@@ -131,6 +131,67 @@ def test_ducklake_attach_reuses_existing_matching_lake_alias(tmp_path):
         con.close()
 
 
+def test_readonly_attach_reuses_live_readwrite_attach_without_detaching(tmp_path):
+    """A read-only caller must never evict a live read-write attach.
+
+    ``duckdb.connect()`` calls against the SAME service .duckdb file share
+    one underlying DuckDB instance/attach namespace — attaching ``lake``
+    on one "connection" makes it visible (and, pre-fix, contestable) on
+    every other connection to that same file. The pre-fix
+    ``_ducklake_attach`` unconditionally detached on ANY mode mismatch, so
+    a plain ``get_connection(read_only=True)`` racing a live writer
+    (ingest/buffer/commit, or the startup Iceberg-view pre-warm, which
+    both need ``read_only=False``) would rip the writer's in-flight attach
+    out from under it — reproducing DuckDB core's own
+    ``ResourceInUseException``: "Unique file handle conflict ... in the
+    process of being detached". Observed in production at GCE cold start,
+    surviving the process-wide ``_attach_lock`` and the retry-budget
+    extension because it isn't a transient timing race — it is the reader
+    itself destroying the writer's still-needed attach.
+
+    Fix: a read-only caller that finds ``lake`` already attached
+    read-write must reuse it as-is (a write-mode attach fully supports
+    SELECT) instead of downgrading it. Only a genuine write caller that
+    finds a read-only attach still needs to upgrade in place.
+    """
+    from backend.core.iceberg._ducklake import _ducklake_attach
+    from backend.core.iceberg.buffer import _ducklake_write_connection
+
+    name = f"rwreuse{uuid.uuid4().hex[:8]}"
+    src = _make_committed_source(tmp_path, name)
+
+    # Simulate the live writer via the SAME mechanism production uses
+    # (`_commit_buffer_impl`): a dedicated connection to the service
+    # .duckdb file with `lake` attached read-write, held open for the
+    # duration of the "commit".
+    with _ducklake_write_connection(src) as writer:
+        before = writer.execute("SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'").fetchone()
+        assert before == (False,), "writer must hold a read-write lake attach"
+
+        # A second connection to the SAME db_path (the reader) must be able
+        # to attach read-only WITHOUT detaching the writer's live attach.
+        reader = get_connection(source=src, read_only=True)
+        try:
+            after = writer.execute("SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'").fetchone()
+            assert after == (False,), "reader must not have downgraded/detached the writer's live read-write attach"
+
+            # The writer must still be fully usable after the reader raced it.
+            row = writer.execute(
+                "SELECT snapshot_id FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1"
+            ).fetchone()
+            assert row is not None
+
+            # The reader itself must also see a working (shared, read-write
+            # mode) catalog rather than erroring out.
+            assert _ducklake_attach(reader, src, read_only=True) is True
+            reader_row = reader.execute(
+                "SELECT snapshot_id FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1"
+            ).fetchone()
+            assert reader_row == row
+        finally:
+            reader.close()
+
+
 def test_pool_release_attempts_ducklake_internal_alias_detach():
     """Returning a pooled connection must release both the public ``lake``
     alias and DuckLake's internal metadata alias. Leaving the internal

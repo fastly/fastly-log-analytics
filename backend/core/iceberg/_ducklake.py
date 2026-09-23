@@ -211,34 +211,68 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             logger.warning("[ducklake] %s: failed to inspect existing lake attachment: %s", service_id, e)
             return False
         if attached:
-            if bool(attached[0]) == read_only:
-                try:
-                    con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
-                except Exception as e:
+            existing_read_only = bool(attached[0])
+            # A read-only CALLER never needs to force a downgrade: an
+            # existing READ-WRITE attach already supports SELECT queries
+            # just fine, and — critically — "lake" is a per-db-path shared
+            # attach, not a per-Python-connection one (duckdb.connect() to
+            # the SAME service .duckdb file reuses one underlying instance,
+            # so every connection to that file sees the SAME attached
+            # "lake"). Unconditionally detaching on a mode mismatch used to
+            # mean: any get_connection() reader that raced a live writer
+            # (ingest/buffer/commit, which needs read_only=False) would rip
+            # the writer's in-flight attach out from under it, mid-use, to
+            # re-attach its own read-only preference — which is exactly the
+            # DuckDB-core "Unique file handle conflict ... in the process of
+            # being detached" race observed at backend cold start, when the
+            # pool warm-up / view pre-warm / legacy-adoption sweep / first
+            # cron tick all open connections in the same narrow window.
+            # Only an actual write CALLER (read_only=False) still needs to
+            # force the upgrade below when it finds a read-only attach —
+            # DuckDB itself has no "upgrade in place" primitive.
+            if existing_read_only or not read_only:
+                if bool(attached[0]) == read_only:
+                    try:
+                        con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
+                    except Exception as e:
+                        try:
+                            con.execute("DETACH lake")
+                        except Exception as detach_err:
+                            logger.warning(
+                                "[ducklake] %s: existing lake catalog is unusable (%s) and detach failed: %s",
+                                service_id,
+                                e,
+                                detach_err,
+                            )
+                            return False
+                    else:
+                        if not read_only:
+                            _apply_target_file_size(con)
+                        return True
+                else:
                     try:
                         con.execute("DETACH lake")
                     except Exception as detach_err:
                         logger.warning(
-                            "[ducklake] %s: existing lake catalog is unusable (%s) and detach failed: %s",
+                            "[ducklake] %s: failed to detach mismatched lake catalog: %s",
                             service_id,
-                            e,
                             detach_err,
                         )
                         return False
-                else:
-                    if not read_only:
-                        _apply_target_file_size(con)
-                    return True
             else:
+                # existing is READ-WRITE, caller only wants READ-ONLY:
+                # reuse the existing (stronger) attach as-is rather than
+                # detaching it.
                 try:
-                    con.execute("DETACH lake")
-                except Exception as detach_err:
+                    con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
+                except Exception as e:
                     logger.warning(
-                        "[ducklake] %s: failed to detach mismatched lake catalog: %s",
+                        "[ducklake] %s: existing read-write lake catalog is unusable for read: %s",
                         service_id,
-                        detach_err,
+                        e,
                     )
                     return False
+                return True
 
         try:
             orphaned_metadata = con.execute(
