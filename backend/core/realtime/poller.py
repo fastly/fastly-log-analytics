@@ -182,7 +182,7 @@ class RealtimePoller:
         from backend import config
 
         api_key = config.get_fastly_api_key(service_id)
-        fastly_service_id = config.get_fastly_logging_service_id(service_id)
+        fastly_service_id = config.get_fastly_service_id(service_id)
         if not api_key or not fastly_service_id:
             return None
 

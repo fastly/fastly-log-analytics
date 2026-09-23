@@ -206,7 +206,7 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
     from backend.core.realtime.transform import transform_single_second
 
     api_key = config.get_fastly_api_key(service_id)
-    fastly_service_id = config.get_fastly_logging_service_id(service_id)
+    fastly_service_id = config.get_fastly_service_id(service_id)
     if not api_key or not fastly_service_id:
         return []
 
