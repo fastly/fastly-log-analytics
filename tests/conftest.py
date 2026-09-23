@@ -267,13 +267,73 @@ def reset_telemetry():
     start_call_tracking()
 
 
+@pytest.fixture(scope="session")
+def _pg_worker_schema(worker_id):
+    """Give this xdist worker its own Postgres schema for metadata storage.
+
+    ``worker_id`` (pytest-xdist) is ``"master"`` outside xdist, or
+    ``"gw0"``, ``"gw1"``, ... under ``-n auto`` — a unique, filesystem/SQL
+    -safe token per worker process. We create a schema named after it,
+    point ``METADATA_DSN`` at a DSN whose ``options=-c search_path=...``
+    pins every connection opened from this process to that schema (via
+    libpq's ``options`` keyword — the same DSN
+    ``backend.core.metadata.pg_connection.get_pg_pool()`` reads lazily on
+    first use), then run the real schema bootstrap
+    (:func:`backend.core.metadata.pg_schema.ensure_pg_schema`) against it.
+    Two workers therefore never see each other's rows, and share nothing
+    but the underlying database/server.
+
+    Runs once per worker process, before any test in that worker touches
+    metadata — the pool in ``pg_connection`` is a lazy module-level
+    singleton created on first ``get_pg_pool()`` call, so ``METADATA_DSN``
+    must be set before that first call happens anywhere in this process.
+    """
+    import psycopg
+
+    from backend.core.metadata import pg_connection, pg_schema
+
+    base_dsn = _os.environ.get(
+        "METADATA_DSN",
+        "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
+    )
+    schema = f"pytest_{worker_id}"
+
+    admin_conn = psycopg.connect(base_dsn, autocommit=True)
+    admin_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    admin_conn.execute(f'CREATE SCHEMA "{schema}"')
+    # Unqualified statements this fixture issues later (the TOS re-seed)
+    # must resolve against the worker's own schema, not the connection's
+    # default search_path (``"$user", public``).
+    admin_conn.execute(f'SET search_path TO "{schema}", public')
+
+    from urllib.parse import quote
+
+    options = quote(f"-c search_path={schema},public")
+    sep = "&" if "?" in base_dsn else "?"
+    worker_dsn = f"{base_dsn}{sep}options={options}"
+    _os.environ["METADATA_DSN"] = worker_dsn
+
+    pg_schema.ensure_pg_schema(force=True)
+
+    yield schema, admin_conn
+
+    pg_connection.close_all_pg_connections()
+    pg_connection.reset_pg_pool_for_tests()
+    admin_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    admin_conn.close()
+
+
 @pytest.fixture(autouse=True)
-def isolate_metadata_db(tmp_path, monkeypatch):
-    """Point metadata_db AND service-config data dirs at a per-test sandbox.
+def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
+    """Point metadata storage at this worker's isolated Postgres schema, and
+    service-config/DuckDB data dirs at a per-test sandbox.
 
     Operational metadata (alerts, views, audit, cron, sources, ingested_files,
-    asn_names, usage_log) all live in per-service SQLite at
-    ``data/services/{id}.metadata.db``.
+    asn_names, usage_log, share_db) lives in Postgres, scoped to this xdist
+    worker's own schema by :func:`_pg_worker_schema` — replacing the historical
+    per-service SQLite file at ``data/services/{id}.metadata.db`` (see ADR-15,
+    reversed by the SQLite -> Postgres metadata migration this fixture is
+    part of).
 
     The analytical DuckDB file lives at ``data/services/{id}.duckdb`` and is
     located via :func:`backend.config.duckdb_path` (which reads
@@ -304,9 +364,6 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(sandbox_services))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
     metadata_db._clear_ingested_filenames_cache()
 
     # Per-service usage_log lives in its own SQLite file post-2026-06-12;
@@ -381,10 +438,33 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     # spawns worker threads that open their own thread-local connections,
     # invisible to this fixture's ``_local``. Without this drain, those
     # connections live until GC and emit ResourceWarning at process exit.
+    # Postgres-aware: ``metadata_db.close_all_connections()`` (and the
+    # share_db one) dispatch to ``pg_connection.close_all_pg_connections()``
+    # under ``METADATA_DSN`` — same call, now returns pool connections
+    # instead of closing SQLite file handles.
     metadata_db.close_all_connections()
     _metric_snapshots.close_all_connections()
     _usage_log_db.close_all_connections()
     _share_db_connection.close_all_connections()
+
+    # Reset the shared Postgres schema state between tests. Every test in
+    # this worker reuses the SAME schema (created once in
+    # ``_pg_worker_schema``), so without this a row written by one test
+    # would leak into the next — the isolation the old per-test ``tmp_path``
+    # SQLite file gave us for free.
+    _pg_schema_name, _pg_admin_conn = _pg_worker_schema
+    _tables = [
+        r[0]
+        for r in _pg_admin_conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = %s", (_pg_schema_name,)
+        ).fetchall()
+    ]
+    if _tables:
+        _qualified = ", ".join(f'"{_pg_schema_name}"."{t}"' for t in _tables)
+        _pg_admin_conn.execute(f"TRUNCATE TABLE {_qualified} RESTART IDENTITY CASCADE")
+        from backend.core.metadata.pg_schema import _SEED_INITIAL_TOS_DDL
+
+        _pg_admin_conn.execute(_SEED_INITIAL_TOS_DDL)
 
 
 @pytest.fixture(autouse=True)

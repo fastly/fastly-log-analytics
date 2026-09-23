@@ -22,6 +22,33 @@ jobs:
     name: Backend (Python)
     runs-on: ubuntu-24.04
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Metadata storage (cron/ingest bookkeeping) and DuckLake's commit-path
+      # catalog both point at the postgres service container above — see
+      # docs/adr/15-multi-writer-topology.md. tests/conftest.py's
+      # _pg_worker_schema fixture layers a per-xdist-worker schema on top of
+      # this DSN via `options=-c search_path=...` for parallel-safe isolation.
+      # DUCKLAKE_CATALOG must be the bare DSN (no `postgres:` prefix) —
+      # backend/core/iceberg/_ducklake.py::_ducklake_attach adds that prefix
+      # itself before the ATTACH statement.
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+
     steps:
       - uses: actions/checkout@v7
 
