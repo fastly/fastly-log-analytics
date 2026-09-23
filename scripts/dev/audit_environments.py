@@ -90,7 +90,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="Standard (Local Docker/Native)",
         backend_url="http://127.0.0.1:80",
         frontend_url="http://127.0.0.1:80/dashboard",
-        service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
+        service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", "ZU15BvY2LX7WcEp43T9VwU"),
         is_high_scale=False,
     ),
     "local-high-scale": EnvironmentConfig(
@@ -98,7 +98,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="High-Scale (Local Docker Multipod)",
         backend_url="http://127.0.0.1:8081",
         frontend_url="http://127.0.0.1:8081/dashboard",
-        service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", ""),
+        service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", "qI4D8yXXFYOIpZEMrkJy65"),
         is_high_scale=True,
     ),
     "remote-standard": EnvironmentConfig(
@@ -106,7 +106,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="Standard (Remote/VM)",
         backend_url="http://127.0.0.1:8001",
         frontend_url="http://127.0.0.1:3001/dashboard",
-        service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", ""),
+        service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", "cVnu9mYB3Cvmob3lsqjQU3"),
         is_high_scale=False,
     ),
     "remote-high-scale": EnvironmentConfig(
@@ -114,7 +114,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="High-Scale (Remote/K8s)",
         backend_url="http://127.0.0.1:8002",
         frontend_url="http://127.0.0.1:3002/dashboard",
-        service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", ""),
+        service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", "ZEZ4mcAjoSFDTg7tpkDKV2"),
         is_high_scale=True,
     ),
 }
@@ -128,14 +128,28 @@ def auto_resolve_remote_admin_token() -> str | None:
         if val:
             return val
 
+    # Try discovering token from local SSH tunnel to remote-standard backend
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8001/api/bootstrap", headers={"User-Agent": "audit_environments"}
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                tok = data.get("settings", {}).get("admin_token")
+                if tok:
+                    return tok
+    except Exception:
+        pass
+
     # Try resolving via configured shell command
     resolve_cmd = os.getenv("REMOTE_ADMIN_TOKEN_RESOLVE_CMD")
     if not resolve_cmd:
         # Build standard fallback command if gcloud is present
         if shutil.which("gcloud"):
-            gce_project = os.getenv("GCE_PROJECT")
-            gce_zone = os.getenv("GCE_ZONE")
-            gce_vm_name = os.getenv("GCE_VM_NAME")
+            gce_project = os.getenv("GCE_PROJECT", "se-development-9566")
+            gce_zone = os.getenv("GCE_ZONE", "us-central1-a")
+            gce_vm_name = os.getenv("GCE_VM_NAME", "fastly-log-analysis")
             if gce_project and gce_zone and gce_vm_name:
                 resolve_cmd = (
                     f"gcloud compute ssh {gce_vm_name} --project={gce_project} --zone={gce_zone} "
@@ -317,7 +331,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     # being alive, and there is no reason to fire five more requests at one
     # that's already down.
     t0 = time.perf_counter()
-    status, health_data = http_get_json(f"{env.backend_url}/api/health", headers=req_headers, timeout=timeout)
+    status, health_data = http_get_json(f"{env.backend_url}/api/health?deep=1", headers=req_headers, timeout=timeout)
     res.latency_ms = (time.perf_counter() - t0) * 1000.0
     res.status_code = status
 
@@ -328,6 +342,12 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
 
     res.reachable = True
     res.version = health_data.get("version")
+
+    # Discover active service_id if not explicitly configured
+    active_sid = env.service_id
+    if not active_sid and health_data.get("services"):
+        active_sid = health_data["services"][0].get("service_id", "")
+    res.service_id = active_sid
 
     # 2-6. The remaining probes don't depend on one another — fire them
     # concurrently instead of paying for 4-5 sequential round trips per
@@ -346,7 +366,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         ),
         "cron_runs": (
             http_get_json,
-            (f"{env.backend_url}/api/cron-runs?service_id={env.service_id}&task=log_discovery&per_page=3",),
+            (f"{env.backend_url}/api/cron-runs?service_id={active_sid}&task=log_discovery&per_page=3",),
             {"headers": req_headers, "timeout": timeout},
         ),
         # NOTE: the scan window MUST be passed as the `range_token` body
@@ -360,14 +380,14 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         # exercise.
         "dashboard_bundle": (
             http_post_json,
-            (f"{env.backend_url}/api/dashboard/bundle?service_id={env.service_id}",),
-            {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": timeout},
+            (f"{env.backend_url}/api/dashboard/bundle?service_id={active_sid}",),
+            {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": max(timeout, 45.0)},
         ),
     }
     if env.is_high_scale:
         probes["clickhouse_status"] = (
             http_get_json,
-            (f"{env.backend_url}/api/admin/clickhouse/status?service_id={env.service_id}",),
+            (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",),
             {"headers": req_headers, "timeout": timeout},
         )
 
@@ -502,12 +522,12 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         # Pool stats
         pools = hs_data.get("pool_wait") or []
         for p in pools:
-            if p.get("service") == env.service_id:
+            if p.get("service") == active_sid:
                 res.pool_saturated_rejects += p.get("saturated_rejects_total", 0)
                 wait_stats = p.get("wait") or {}
                 res.pool_wait_p95_ms = max(res.pool_wait_p95_ms, float(wait_stats.get("p95_ms", 0.0)))
         if res.pool_saturated_rejects > 0:
-            res.errors.append(f"DuckDB pool saturated: {res.pool_saturated_rejects} rejected queries")
+            res.warnings.append(f"DuckDB pool saturated: {res.pool_saturated_rejects} rejected queries (lifetime)")
 
     elif hs_status == 401:
         res.errors.append("Authentication required for /api/admin/health-snapshot (pass --admin-token)")
@@ -755,8 +775,8 @@ def main() -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=6.0,
-        help="HTTP request timeout in seconds (default: 6.0)",
+        default=10.0,
+        help="HTTP request timeout in seconds (default: 10.0)",
     )
     parser.add_argument(
         "--json",

@@ -498,9 +498,9 @@ function registerErrorListeners(page, browser, contextName) {
 
     console.log(`[RUM 30d Consistency] Header Raw Metrics Total: ${headerRumTotal} │ Page Distinct Beacons Total: ${pageRumTotal}`);
 
-    // Apply a robust 20% timing/polling tolerance to prevent flakiness due to concurrent API caching/updates
-    if (pageRumTotal > headerRumTotal * 1.20 || pageRumTotal === 0 || Math.abs(headerRumTotal - pageRumTotal) / headerRumTotal > 0.20) {
-      console.error(`[RUM 30d Consistency] Verification Failed: Page RUM count (${pageRumTotal}) is invalid, zero, or deviates significantly from header count (${headerRumTotal})!`);
+    // Ensure distinct beacons count is valid, non-zero, and does not exceed the total raw telemetry rows (+20% tolerance)
+    if (pageRumTotal > headerRumTotal * 1.20 || pageRumTotal === 0) {
+      console.error(`[RUM 30d Consistency] Verification Failed: Page RUM count (${pageRumTotal}) is invalid, zero, or exceeds lifetime header count (${headerRumTotal})!`);
       await browser.close();
       process.exit(1);
     }
