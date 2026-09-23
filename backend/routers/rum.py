@@ -777,10 +777,31 @@ async def rum_analytics(
 
                         if raw_max and (not agg_max or raw_max > agg_max):
                             logger.info(
-                                "[rum_rollups] %s: RUM aggregates are stale compared to raw views. Forcing on-demand recomputation.",
+                                "[rum_rollups] %s: RUM aggregates are stale (raw_max=%s > agg_max=%s). Running fast on-demand recompute for active hours...",
                                 service_id,
+                                raw_max,
+                                agg_max,
                             )
-                            use_rollup = False
+                            try:
+                                from contextlib import closing
+
+                                from backend.core.duckdb import get_connection
+                                from backend.core.rollups.rum import recompute_rum_aggregates
+
+                                target_recompute_hours = [raw_max]
+                                if agg_max and agg_max.replace(minute=0, second=0, microsecond=0) != raw_max.replace(
+                                    minute=0, second=0, microsecond=0
+                                ):
+                                    target_recompute_hours.append(agg_max)
+                                with closing(get_connection(rum_source, read_only=False)) as write_con:
+                                    recompute_rum_aggregates(write_con, service_id, hours=target_recompute_hours)
+                                use_rollup = True
+                            except Exception as recompute_err:
+                                logger.warning(
+                                    "[rum_rollups] On-demand recompute failed: %s; falling back to raw query",
+                                    recompute_err,
+                                )
+                                use_rollup = False
                     except Exception as stale_check_err:
                         logger.warning("[rum_rollups] Failed to check liveness of RUM aggregates: %s", stale_check_err)
                 else:

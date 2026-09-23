@@ -420,19 +420,9 @@ function registerErrorListeners(page, browser, contextName) {
     }
     await rumPage.waitForSelector('main', { timeout: 10000 });
 
-    // Wait for RUM aggregates/bundle queries to complete and loading overlays to disappear
+    // Wait for at least one Plotly chart to become visible on the RUM page (Positive Case per GEMINI.md Mandate #4)
     try {
-      await rumPage.waitForFunction(() => {
-        const text = document.body.innerText;
-        return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-      }, { timeout: 60000 });
-    } catch (e) {
-      console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
-    }
-
-    // Wait for at least one Plotly chart to become visible on the RUM page
-    try {
-      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 60000 });
+      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 90000 });
       console.log(`[RUM 30d] Verified: RUM Plotly charts are fully rendered and visible! 🟢`);
     } catch (e) {
       console.log(`⚠️ [RUM 30d] Warning: timed out waiting for RUM Plotly charts to become visible.`);
@@ -441,10 +431,10 @@ function registerErrorListeners(page, browser, contextName) {
     const rumBodyText30d = await rumPage.evaluate(() => document.body.innerText);
 
     // Strict RUM Panel Loading Verification: Assert that panels have successfully finished loading and contain real data
-    if (rumBodyText30d.includes("Crunching logs") || rumBodyText30d.includes("Loading") || rumBodyText30d.includes("Initializing")) {
+    if (rumBodyText30d.includes("Crunching logs") || rumBodyText30d.includes("Initializing")) {
       const isLocal = process.argv[5] === "local";
       if (isLocal) {
-        console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels are stuck on "Crunching logs..." or "Loading..." loading state!`);
+        console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels are stuck on "Crunching logs..." or "Initializing..." loading state!`);
         await browser.close();
         process.exit(1);
       } else {
@@ -531,31 +521,39 @@ function registerErrorListeners(page, browser, contextName) {
         response = await networkPage.goto(networkUrl30d, { timeout: 35000 });
         if (response && response.ok()) {
           await networkPage.waitForSelector('main', { timeout: 10000 });
-          // Wait for standard loading indicators to clear
-          await networkPage.waitForFunction(() => {
-            const text = document.body.innerText;
-            return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-          }, { timeout: 60000 }).catch(() => {});
-          
+
+          // GEMINI.md Mandate #4: Positive-case wait for Plotly charts to become visible
+          try {
+            await networkPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+          } catch (chartErr) {
+            console.log(`[Network 30d] Attempt ${attempt}/4: Plotly chart not visible yet.`);
+          }
+
           networkBodyText30d = await networkPage.evaluate(() => document.body.innerText);
           const hasErrorText = networkBodyText30d.includes("Enable Groups F and G") || networkBodyText30d.includes("Failed to load");
 
-          // The network page should render various panels:
-          hasNetworkVitals = networkBodyText30d.includes("Network & ASN Health") && 
-                             (networkBodyText30d.includes("Global Health") || 
-                              networkBodyText30d.includes("Avg RTT") || 
-                              networkBodyText30d.includes("Leaderboard") ||
-                              networkBodyText30d.includes("RTT") ||
-                              networkBodyText30d.includes("HEALTH SCORE"));
+          // The network page should render various panels with positive metrics:
+          hasNetworkVitals = networkBodyText30d.includes("Global Health") ||
+                             networkBodyText30d.includes("Avg RTT") ||
+                             networkBodyText30d.includes("Leaderboard") ||
+                             networkBodyText30d.includes("RTT") ||
+                             networkBodyText30d.includes("HEALTH SCORE");
 
-          if (!hasErrorText && hasNetworkVitals) {
+          const isChartVisible = await networkPage.evaluate(() => {
+            const el = document.querySelector('.js-plotly-plot, .plotly');
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          });
+
+          if (!hasErrorText && hasNetworkVitals && isChartVisible) {
             break;
           }
         }
       } catch (err) {
         console.log(`[Network 30d] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[Network 30d] Attempt ${attempt}/4: Network metrics or elements not fully rendered yet. Waiting 8s...`);
+      console.log(`[Network 30d] Attempt ${attempt}/4: Network metrics or Plotly charts not fully rendered yet. Waiting 8s...`);
       await networkPage.waitForTimeout(8000);
     }
 

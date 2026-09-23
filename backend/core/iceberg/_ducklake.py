@@ -82,7 +82,7 @@ _ATTACH_LOCK_TIMEOUT_S = float(os.environ.get("DUCKLAKE_ATTACH_LOCK_TIMEOUT_S", 
 # tick even though the very next tick always succeeded. Each sleep releases
 # _attach_lock first (see the loop below) so an unrelated connection isn't
 # blocked queuing behind this one's wait for a THIRD, unrelated connection.
-_ATTACH_CONFLICT_RETRY_ATTEMPTS = int(os.environ.get("DUCKLAKE_ATTACH_CONFLICT_RETRY_ATTEMPTS", "20") or "20")
+_ATTACH_CONFLICT_RETRY_ATTEMPTS = int(os.environ.get("DUCKLAKE_ATTACH_CONFLICT_RETRY_ATTEMPTS", "45") or "45")
 _ATTACH_CONFLICT_RETRY_SLEEP_S = float(os.environ.get("DUCKLAKE_ATTACH_CONFLICT_RETRY_SLEEP_S", "1.5") or "1.5")
 
 # Same knob the local tiered compaction honors (backend/core/local_compaction.py
