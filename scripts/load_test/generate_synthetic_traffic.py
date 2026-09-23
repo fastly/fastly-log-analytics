@@ -593,7 +593,17 @@ def run_target_fos(
         endpoint_url=endpoint,
         aws_access_key_id=key_id,
         aws_secret_access_key=secret_key,
-        config=Config(signature_version="s3v4", max_pool_connections=max(25, upload_workers * 2)),
+        config=Config(
+            signature_version="s3v4",
+            max_pool_connections=max(25, upload_workers * 2),
+            # botocore >=1.36 defaults to sending a streaming trailer checksum
+            # (x-amz-checksum-crc32) on every PutObject. Real Fastly Object
+            # Storage's S3-compatible endpoint rejects that trailer with a bare
+            # "InvalidRequest" (no further detail in the response body), so
+            # every upload fails until this is forced back to the pre-1.36
+            # opt-in behavior.
+            request_checksum_calculation="when_required",
+        ),
     )
 
     start_ms = int(start_dt.timestamp() * 1000)
