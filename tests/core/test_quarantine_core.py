@@ -89,6 +89,39 @@ def test_delete_quarantined_rows_empty(svc_id):
     assert delete_quarantined_rows(svc_id, []) == 0
 
 
+def test_get_expired_quarantined_files_casts_timestamp_under_postgres(svc_id, monkeypatch):
+    """Regression test for a 2026-09-23 production incident (Elevation
+    Remote High-Scale, Postgres metadata backend): quarantined_at is stored
+    as TEXT on both backends, and SQLite happily compares TEXT to the
+    datetime('now', ...) expression, but Postgres rejects a bare
+    `text < timestamp` comparison with `operator does not exist`. The weekly
+    expire_{id} cron's quarantine-cleanup step failed on every run as a
+    result. Assert the CAST is present in the SQL sent to the connection
+    whenever the Postgres dialect is active, mirroring the fix already
+    applied to reconciliation.py's _retention_timestamp_expr.
+    """
+    from backend.core.metadata import pg_connection, quarantine
+
+    captured_sql = {}
+    real_con = quarantine.get_con(svc_id)
+
+    monkeypatch.setattr(pg_connection, "is_postgres", lambda: True)
+
+    class _CapturingCursor:
+        def execute(self, sql, params=None):
+            captured_sql["sql"] = sql
+            return real_con.execute(sql, params)
+
+        def fetchall(self):
+            return []
+
+    monkeypatch.setattr(quarantine, "get_con", lambda service_id: _CapturingCursor())
+
+    quarantine.get_expired_quarantined_files(svc_id, retention_days=14)
+
+    assert "CAST(quarantined_at AS TIMESTAMPTZ)" in captured_sql["sql"]
+
+
 def test_parse_json_col_edge_cases():
     assert _parse_json_col(None) == {}
     assert _parse_json_col("", default=[]) == []
