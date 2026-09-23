@@ -750,8 +750,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         import os
         from datetime import UTC, datetime, timedelta
 
-        import time_machine
         import duckdb as _duckdb
+        import time_machine
 
         from backend.core.rollups import partial_hour as ph
 
@@ -857,8 +857,8 @@ class TestExecuteTopNBatchPerFieldLimits:
         import os
         from datetime import UTC, datetime, timedelta
 
-        import time_machine
         import duckdb as _duckdb
+        import time_machine
 
         from backend.core.rollups import partial_hour as ph
 
