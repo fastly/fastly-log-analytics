@@ -181,11 +181,13 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     # RUM aggregates backfill
     n_rum = 0
     try:
+        from contextlib import closing
+
         from backend.core.duckdb import get_connection, rum_source_for
         from backend.core.rollups.rum import recompute_rum_aggregates, table_exists
 
         rum_src = rum_source_for(source)
-        with get_connection(rum_src, read_only=False) as rum_con:
+        with closing(get_connection(rum_src, read_only=False)) as rum_con:
             recompute_rum_aggregates(rum_con, sid)
             if table_exists(rum_con, "rum_vitals_aggregates"):
                 res_count = rum_con.execute(

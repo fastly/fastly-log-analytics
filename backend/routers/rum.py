@@ -798,9 +798,11 @@ async def rum_analytics(
                                         "[rum_rollups] %s: RUM aggregates tables do not exist. Triggering initial on-demand creation and recomputation...",
                                         service_id,
                                     )
+                                    from contextlib import closing
+
                                     from backend.core.duckdb import get_connection
 
-                                    with get_connection(rum_source, read_only=False) as write_con:
+                                    with closing(get_connection(rum_source, read_only=False)) as write_con:
                                         from backend.core.rollups.rum import recompute_rum_aggregates
 
                                         recompute_rum_aggregates(write_con, service_id)
@@ -842,10 +844,12 @@ async def rum_analytics(
                                     "[rum_rollups] %s: No rollup data in range but raw exists. Triggering on-demand RUM aggregates recomputation...",
                                     service_id,
                                 )
+                                from contextlib import closing
+
                                 from backend.core.duckdb import get_connection
 
                                 # Open a temporary read-write connection to the RUM source
-                                with get_connection(rum_source, read_only=False) as write_con:
+                                with closing(get_connection(rum_source, read_only=False)) as write_con:
                                     from backend.core.rollups.rum import recompute_rum_aggregates
 
                                     recompute_rum_aggregates(write_con, service_id, hours=target_hours)

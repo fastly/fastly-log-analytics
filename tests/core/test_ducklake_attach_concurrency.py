@@ -442,3 +442,21 @@ def test_update_iceberg_view_locked_attaches_matching_connection_mode(tmp_path, 
         assert row is not None
     finally:
         con.close()
+
+
+def test_get_connection_closing_context_manager_behavior(tmp_path):
+    """Verify that using contextlib.closing with get_connection closes the connection and releases its file handle."""
+    from contextlib import closing
+
+    import pytest
+
+    name = f"closing{uuid.uuid4().hex[:8]}"
+    src = _make_committed_source(tmp_path, name)
+
+    with closing(get_connection(source=src, read_only=True)) as con:
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+
+    import duckdb
+
+    with pytest.raises((duckdb.ConnectionException, duckdb.InvalidInputException, Exception)):
+        con.execute("SELECT 1")
