@@ -2067,8 +2067,8 @@ class QueryRunner:
                         # Deferred to scope-exit when the shared active-hour
                         # scope owns this temp (dashboard rollup path).
                         self.release_active_direct_temp(tmp_name)
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.exception("[top_n_rollups] live active hour query failed")
         _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
 
         # ── Missing-hour live heal ────────────────────────────────────────
