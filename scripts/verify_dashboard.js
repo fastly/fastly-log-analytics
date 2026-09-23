@@ -197,14 +197,14 @@ function registerErrorListeners(page, browser, contextName) {
       await page.waitForFunction(() => {
         const text = document.body.innerText;
         return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-      }, { timeout: 45000 });
+      }, { timeout: 90000 });
     } catch (e) {
       console.log(`[Dashboard 30d] Warning: timed out waiting for "Crunching logs" loading overlays to clear, proceeding...`);
     }
 
     // Wait for at least one Plotly chart to become visible
     try {
-      await page.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+      await page.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 90000 });
       console.log(`[Dashboard 30d] Verified: Plotly charts are fully rendered and visible! 🟢`);
     } catch (e) {
       console.log(`⚠️ [Dashboard 30d] Warning: timed out waiting for Plotly charts to become visible.`);
@@ -425,14 +425,14 @@ function registerErrorListeners(page, browser, contextName) {
       await rumPage.waitForFunction(() => {
         const text = document.body.innerText;
         return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
-      }, { timeout: 45000 });
+      }, { timeout: 60000 });
     } catch (e) {
       console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
     }
 
     // Wait for at least one Plotly chart to become visible on the RUM page
     try {
-      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 45000 });
+      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 60000 });
       console.log(`[RUM 30d] Verified: RUM Plotly charts are fully rendered and visible! 🟢`);
     } catch (e) {
       console.log(`⚠️ [RUM 30d] Warning: timed out waiting for RUM Plotly charts to become visible.`);

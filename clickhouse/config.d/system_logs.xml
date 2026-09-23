@@ -27,9 +27,10 @@
 
     <merge_tree>
         <!-- Limit the size of parts that can be merged in the background (default is ~150GB) to prevent huge memory spikes -->
-        <max_bytes_to_merge_at_max_space_in_pool>5368709120</max_bytes_to_merge_at_max_space_in_pool> <!-- 5 GB -->
+        <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool> <!-- 1 GB -->
+        <max_bytes_to_merge_at_min_space_in_pool>104857600</max_bytes_to_merge_at_min_space_in_pool> <!-- 100 MB -->
         <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192) -->
-        <merge_max_block_size>4096</merge_max_block_size>
+        <merge_max_block_size>2048</merge_max_block_size>
         <!-- Vertical merge algorithm (processes columns independently for wide tables) is
              enabled by default via `enable_vertical_merge_algorithm`; no override needed.
              A prior version of this file used the non-existent setting name
