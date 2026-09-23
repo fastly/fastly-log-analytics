@@ -420,6 +420,16 @@ function registerErrorListeners(page, browser, contextName) {
     }
     await rumPage.waitForSelector('main', { timeout: 10000 });
 
+    // Wait for standard loading indicators to clear
+    try {
+      await rumPage.waitForFunction(() => {
+        const text = document.body.innerText;
+        return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
+      }, { timeout: 90000 });
+    } catch (e) {
+      console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
+    }
+
     // Wait for at least one Plotly chart to become visible on the RUM page (Positive Case per GEMINI.md Mandate #4)
     try {
       await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 90000 });
