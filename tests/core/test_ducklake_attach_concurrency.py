@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -275,6 +276,65 @@ def test_ducklake_detach_is_serialized_by_the_attach_lock():
         assert fake_con.commands == ["DETACH lake"]
     finally:
         holder_thread.join(timeout=5)
+
+
+def test_attach_retry_releases_lock_during_backoff_and_succeeds(monkeypatch):
+    """After a 'unique file handle conflict' (a DIFFERENT, still-busy
+    connection holding the real attach open), the retry loop must:
+
+    1. Release ``_attach_lock`` during its backoff sleep — otherwise an
+       unrelated THIRD connection's attach attempt is forced to queue
+       behind this one's wait for a lock it isn't even contending for.
+    2. Eventually succeed once the conflict clears, using the extended
+       retry budget (previously 5 attempts/~7.5s total, which production
+       showed was too short for realistic ~10-20s cron-overlap windows).
+    """
+    from backend.core.iceberg import _ducklake as ducklake_mod
+
+    monkeypatch.setattr(ducklake_mod, "_ATTACH_CONFLICT_RETRY_SLEEP_S", 0.2)
+    monkeypatch.setattr(ducklake_mod, "_ATTACH_CONFLICT_RETRY_ATTEMPTS", 10)
+
+    class FakeConn:
+        def __init__(self):
+            self.commands: list[str] = []
+            self.attach_attempts = 0
+
+        def execute(self, sql: str):
+            self.commands.append(sql)
+            if sql.startswith("ATTACH 'ducklake:") and " AS lake " in sql:
+                self.attach_attempts += 1
+                if self.attach_attempts <= 3:
+                    raise RuntimeError("Unique file handle conflict: already attached by database xyz")
+            return self
+
+        def fetchone(self):
+            return None
+
+    fake_con = FakeConn()
+    lock_acquired_during_sleep = threading.Event()
+
+    def foreign_acquirer() -> None:
+        # Give the retry loop a moment to hit its first conflict + sleep.
+        time.sleep(0.05)
+        if ducklake_mod._attach_lock.acquire(timeout=1.0):
+            lock_acquired_during_sleep.set()
+            ducklake_mod._attach_lock.release()
+
+    foreign_thread = threading.Thread(target=foreign_acquirer)
+    foreign_thread.start()
+    try:
+        result = ducklake_mod._ducklake_attach(fake_con, {"service_id": "test"}, read_only=False)
+    finally:
+        foreign_thread.join(timeout=5)
+
+    assert result is True
+    assert fake_con.attach_attempts == 4, "expected 3 conflicts then a succeeding 4th ATTACH attempt"
+    assert lock_acquired_during_sleep.is_set(), (
+        "a foreign connection could not acquire _attach_lock while this call was sleeping in its "
+        "retry backoff — the lock is being held across the whole wait instead of released"
+    )
+    # Sanity: not held after return either.
+    assert not ducklake_mod._attach_lock.locked()
 
 
 def test_update_iceberg_view_locked_attaches_matching_connection_mode(tmp_path, monkeypatch):

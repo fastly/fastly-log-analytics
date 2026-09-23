@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 from backend import config
 from backend.utils.sql_validator import escape_sql_literal
@@ -68,6 +69,21 @@ _attach_lock = threading.Lock()
 # wait for the file lock — so without this bound a queued reader can wait
 # indefinitely, and pool exhaustion cascades from there.
 _ATTACH_LOCK_TIMEOUT_S = float(os.environ.get("DUCKLAKE_ATTACH_LOCK_TIMEOUT_S", "20") or "20")
+
+# Bounds how long a caller retries the ATTACH statement itself after hitting
+# a "unique file handle conflict" — a DIFFERENT connection in this process
+# still holds an open read-write attach on the same local .ducklake file
+# (the lock above only serializes the brief ATTACH *call*, not how long a
+# winner keeps its attach open while it does real work). Observed in
+# production under bursty concurrent cron activity (log_discovery + commit
+# + rum_commit + rollups overlapping): the conflict reliably clears within
+# one or two 10s cron ticks, so the previous 5-attempt/1.5s (~7.5s total)
+# budget was too short and surfaced as a logged error + a skipped ingest
+# tick even though the very next tick always succeeded. Each sleep releases
+# _attach_lock first (see the loop below) so an unrelated connection isn't
+# blocked queuing behind this one's wait for a THIRD, unrelated connection.
+_ATTACH_CONFLICT_RETRY_ATTEMPTS = int(os.environ.get("DUCKLAKE_ATTACH_CONFLICT_RETRY_ATTEMPTS", "20") or "20")
+_ATTACH_CONFLICT_RETRY_SLEEP_S = float(os.environ.get("DUCKLAKE_ATTACH_CONFLICT_RETRY_SLEEP_S", "1.5") or "1.5")
 
 # Same knob the local tiered compaction honors (backend/core/local_compaction.py
 # _MAX_PARTITION_BYTES). Keeping the two caps on one env var means DuckLake
@@ -168,6 +184,12 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             _ATTACH_LOCK_TIMEOUT_S,
         )
         return False
+    # Tracks whether THIS thread currently holds _attach_lock. The
+    # file-handle-conflict retry loop below releases the lock during its
+    # backoff sleep and re-acquires it afterward, so the single `finally`
+    # release at the bottom must only fire when we're actually still
+    # holding it (otherwise a timed-out re-acquire would double-release).
+    lock_held = True
     try:
         try:
             extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
@@ -258,7 +280,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
             f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE);"
         )
-        for attempt in range(5):
+        for attempt in range(_ATTACH_CONFLICT_RETRY_ATTEMPTS):
             try:
                 con.execute(attach_sql)
                 break
@@ -270,13 +292,32 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                             con.execute(f"DETACH {alias}")
                         except Exception:
                             pass
-                    if attempt < 4:
-                        import time
-
-                        time.sleep(1.5)
+                    if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
+                        # Release the process-wide lock while we wait: the
+                        # conflict is with a DIFFERENT connection's already
+                        # -completed (and thus already-unlocked) attach, so
+                        # holding _attach_lock here only forces an unrelated
+                        # third connection to needlessly queue behind our
+                        # wait. Re-acquire before the next attempt.
+                        _attach_lock.release()
+                        lock_held = False
+                        time.sleep(_ATTACH_CONFLICT_RETRY_SLEEP_S)
+                        if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+                            logger.warning(
+                                "[ducklake] %s: timed out re-acquiring the attach lock while retrying "
+                                "after a file-handle conflict",
+                                service_id,
+                            )
+                            return False
+                        lock_held = True
                         continue
                     logger.warning(
-                        "[ducklake] %s: failed to attach ducklake catalog (zombie lock timeout): %s", service_id, e
+                        "[ducklake] %s: failed to attach ducklake catalog after %d attempts over ~%.0fs "
+                        "(zombie lock timeout): %s",
+                        service_id,
+                        _ATTACH_CONFLICT_RETRY_ATTEMPTS,
+                        _ATTACH_CONFLICT_RETRY_ATTEMPTS * _ATTACH_CONFLICT_RETRY_SLEEP_S,
+                        e,
                     )
                     return False
                 if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
@@ -313,7 +354,8 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             _apply_target_file_size(con)
         return True
     finally:
-        _attach_lock.release()
+        if lock_held:
+            _attach_lock.release()
 
 
 def _ducklake_detach(con, aliases: tuple[str, ...] = ("lake",), service_id: str = "default") -> None:

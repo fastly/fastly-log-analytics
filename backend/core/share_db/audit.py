@@ -11,6 +11,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from backend.core.metadata.pg_connection import is_postgres
 from backend.core.share_db.connection import get_global_share_con
 from backend.utils.date_utils import iso_z, iso_z_now
 
@@ -139,11 +140,14 @@ def purge_stale_share_records(
 
     con.commit()
 
-    # 4. Checkpoint WAL
-    try:
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except Exception as e:
-        logger.warning("[share_db] wal_checkpoint failed: %s", e)
+    # 4. Checkpoint WAL — SQLite-only. Under a Postgres metadata backend this
+    # same connection is a Postgres connection (see get_global_share_con),
+    # which has no WAL-file concept and rejects SQLite's PRAGMA syntax outright.
+    if not is_postgres():
+        try:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            logger.warning("[share_db] wal_checkpoint failed: %s", e)
 
     return {
         "deleted_claim_tokens": deleted_tokens,
