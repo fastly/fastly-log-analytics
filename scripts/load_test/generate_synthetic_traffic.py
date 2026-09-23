@@ -119,6 +119,29 @@ _CW = [
 ]
 COUNTRY_WEIGHTS = [w / sum(_CW) for w in _CW]
 
+COUNTRY_GEO_MAP = {
+    "US": {"city": "New York", "metro": "501", "lat": 40.7128, "lon": -74.0060, "region": "NY"},
+    "GB": {"city": "London", "metro": "826", "lat": 51.5074, "lon": -0.1278, "region": "ENG"},
+    "DE": {"city": "Frankfurt", "metro": "276", "lat": 50.1109, "lon": 8.6821, "region": "HE"},
+    "JP": {"city": "Tokyo", "metro": "392", "lat": 35.6762, "lon": 139.6503, "region": "13"},
+    "BR": {"city": "Sao Paulo", "metro": "076", "lat": -23.5505, "lon": -46.6333, "region": "SP"},
+    "IN": {"city": "Mumbai", "metro": "356", "lat": 19.0760, "lon": 72.8777, "region": "MH"},
+    "AU": {"city": "Sydney", "metro": "036", "lat": -33.8688, "lon": 151.2093, "region": "NSW"},
+    "FR": {"city": "Paris", "metro": "250", "lat": 48.8566, "lon": 2.3522, "region": "IDF"},
+    "CA": {"city": "Toronto", "metro": "124", "lat": 43.6532, "lon": -79.3832, "region": "ON"},
+    "NL": {"city": "Amsterdam", "metro": "528", "lat": 52.3676, "lon": 4.9041, "region": "NH"},
+    "SG": {"city": "Singapore", "metro": "702", "lat": 1.3521, "lon": 103.8198, "region": "SG"},
+    "ES": {"city": "Madrid", "metro": "724", "lat": 40.4168, "lon": -3.7038, "region": "MD"},
+    "IT": {"city": "Milan", "metro": "380", "lat": 45.4642, "lon": 9.1900, "region": "25"},
+    "SE": {"city": "Stockholm", "metro": "752", "lat": 59.3293, "lon": 18.0686, "region": "AB"},
+    "KR": {"city": "Seoul", "metro": "410", "lat": 37.5665, "lon": 126.9780, "region": "11"},
+    "MX": {"city": "Mexico City", "metro": "484", "lat": 19.4326, "lon": -99.1332, "region": "DIF"},
+    "ZA": {"city": "Johannesburg", "metro": "710", "lat": -26.2041, "lon": 28.0473, "region": "GP"},
+    "CH": {"city": "Zurich", "metro": "756", "lat": 47.3769, "lon": 8.5417, "region": "ZH"},
+    "PL": {"city": "Warsaw", "metro": "616", "lat": 52.2297, "lon": 21.0122, "region": "MZ"},
+    "IE": {"city": "Dublin", "metro": "372", "lat": 53.3498, "lon": -6.2603, "region": "L"},
+}
+
 POPS = [
     "IAD",
     "LHR",
@@ -260,6 +283,28 @@ def _generate_batch_data(
     country = rng.choice(COUNTRIES, size=n, p=COUNTRY_WEIGHTS)
     pop = rng.choice(POPS, size=n)
 
+    # Generate realistic City, Metro, Region, and Coordinates based on chosen Country code
+    city_list = []
+    metro_list = []
+    lat_list = []
+    lon_list = []
+    region_list = []
+    for c in country:
+        geo = COUNTRY_GEO_MAP.get(c, {"city": "Unknown", "metro": "000", "lat": 0.0, "lon": 0.0, "region": "XX"})
+        jitter_lat = rng.uniform(-0.15, 0.15)
+        jitter_lon = rng.uniform(-0.15, 0.15)
+        city_list.append(geo["city"])
+        metro_list.append(geo["metro"])
+        lat_list.append(geo["lat"] + jitter_lat)
+        lon_list.append(geo["lon"] + jitter_lon)
+        region_list.append(geo["region"])
+
+    city = np.array(city_list, dtype=object)
+    metro = np.array(metro_list, dtype=object)
+    lat = np.array(lat_list, dtype=np.float64)
+    lon = np.array(lon_list, dtype=np.float64)
+    region = np.array(region_list, dtype=object)
+
     # 3. URLs, IPs, User Agents, ASNs
     url_idx = rng.integers(0, len(URL_PATHS), size=n)
     url = np.array([URL_PATHS[i] for i in url_idx], dtype=object)
@@ -323,6 +368,13 @@ def _generate_batch_data(
         ottlb = (ottfb + rng.lognormal(mean=np.log(50), sigma=0.8, size=n)).astype(np.int32)
         ttfb = (elapsed * rng.uniform(0.7, 0.95, size=n)).astype(np.int32)
         waf_ms = np.clip(rng.lognormal(mean=np.log(8), sigma=0.4, size=n), 1, 100).astype(np.int32)
+
+        # Slow network network quality metrics (elevated RTT in us and ploss)
+        tcp_rtt = rng.lognormal(mean=np.log(180000), sigma=0.6, size=n).astype(np.int32)
+        tcp_rtt = np.clip(tcp_rtt, 10000, 2000000)
+        rtt_min = np.clip((tcp_rtt * rng.uniform(0.5, 0.8, size=n)).astype(np.int32), 5000, None)
+        rtt_var = np.clip((tcp_rtt * rng.uniform(0.05, 0.25, size=n)).astype(np.int32), 1000, None)
+        ploss = rng.choice([0.0, 0.005, 0.01, 0.02, 0.05, 0.10], size=n, p=[0.60, 0.12, 0.10, 0.08, 0.06, 0.04])
     elif scenario == "origin-5xx-outage":
         elapsed = rng.lognormal(mean=np.log(25), sigma=1.0, size=n).astype(np.int32)
         ottfb = (elapsed * rng.uniform(0.1, 0.7, size=n)).astype(np.int32)
@@ -335,6 +387,13 @@ def _generate_batch_data(
         ttfb = (elapsed * 0.85).astype(np.int32)
         tls_time = np.clip(rng.lognormal(mean=np.log(35), sigma=0.4, size=n), 10, 500).astype(np.int32)
         waf_ms = np.clip(rng.lognormal(mean=np.log(4), sigma=0.3, size=n), 1, 50).astype(np.int32)
+
+        # Normal network health with minor loss during outage
+        tcp_rtt = rng.lognormal(mean=np.log(25000), sigma=0.5, size=n).astype(np.int32)
+        tcp_rtt = np.clip(tcp_rtt, 1000, 500000)
+        rtt_min = np.clip((tcp_rtt * rng.uniform(0.7, 0.9, size=n)).astype(np.int32), 500, None)
+        rtt_var = np.clip((tcp_rtt * rng.uniform(0.01, 0.12, size=n)).astype(np.int32), 100, None)
+        ploss = rng.choice([0.0, 0.001, 0.005, 0.01, 0.02], size=n, p=[0.92, 0.04, 0.02, 0.01, 0.01])
     else:
         elapsed = rng.lognormal(mean=np.log(25), sigma=1.0, size=n).astype(np.int32)
         elapsed = np.clip(elapsed, 1, 10_000)
@@ -345,6 +404,13 @@ def _generate_batch_data(
         )
         tls_time = np.clip(rng.lognormal(mean=np.log(35), sigma=0.4, size=n), 5, 500).astype(np.int32)
         waf_ms = np.clip(rng.lognormal(mean=np.log(3), sigma=0.4, size=n), 1, 50).astype(np.int32)
+
+        # Healthy networks (standard diurnal, bots, spikes)
+        tcp_rtt = rng.lognormal(mean=np.log(25000), sigma=0.5, size=n).astype(np.int32)
+        tcp_rtt = np.clip(tcp_rtt, 1000, 500000)
+        rtt_min = np.clip((tcp_rtt * rng.uniform(0.7, 0.9, size=n)).astype(np.int32), 500, None)
+        rtt_var = np.clip((tcp_rtt * rng.uniform(0.01, 0.12, size=n)).astype(np.int32), 100, None)
+        ploss = rng.choice([0.0, 0.001, 0.005, 0.01, 0.02], size=n, p=[0.95, 0.02, 0.01, 0.01, 0.01])
 
     # 6. Bytes, TTL, Security & Bot Signals
     resp_bytes = np.clip(
@@ -396,6 +462,15 @@ def _generate_batch_data(
         "ttl": ttl,
         "country": country,
         "asn": asn,
+        "city": city,
+        "metro": metro,
+        "lat": lat,
+        "lon": lon,
+        "region": region,
+        "tcp_rtt": tcp_rtt,
+        "rtt_min": rtt_min,
+        "rtt_var": rtt_var,
+        "ploss": ploss,
         "ja3": ja3,
         "ja4": ja4,
         "cookie_session": cookie_session,

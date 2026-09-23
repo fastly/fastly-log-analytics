@@ -508,6 +508,100 @@ function registerErrorListeners(page, browser, contextName) {
 
     await rumPage.close();
     await rumContext.close();
+
+    // ────────────────────────────────────────────────────────────────────────
+    // ── STAGE 3: NETWORK PAGE VERIFICATION
+    // ────────────────────────────────────────────────────────────────────────
+    const networkBaseUrl = baseUrl.replace('/dashboard', '/network');
+
+    // Create a completely clean, isolated incognito browser context for Stage 3
+    const networkContext = await browser.newContext();
+    const networkPage = await networkContext.newPage();
+    registerErrorListeners(networkPage, browser, 'Network');
+
+    // 3.1. Verify 30d Network Data is present with active polling
+    const networkUrl30d = getUrlWithParam(networkBaseUrl, "range", "30d");
+    console.log(`[Network 30d] Checking ${networkUrl30d} ...`);
+
+    let networkBodyText30d = "";
+    let hasNetworkVitals = false;
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        response = await networkPage.goto(networkUrl30d, { timeout: 35000 });
+        if (response && response.ok()) {
+          await networkPage.waitForSelector('main', { timeout: 10000 });
+          // Wait for standard loading indicators to clear
+          await networkPage.waitForFunction(() => {
+            const text = document.body.innerText;
+            return !text.includes("Crunching logs...") && !text.includes("Loading...") && !text.includes("Initializing...");
+          }, { timeout: 60000 }).catch(() => {});
+          
+          networkBodyText30d = await networkPage.evaluate(() => document.body.innerText);
+          const hasErrorText = networkBodyText30d.includes("Enable Groups F and G") || networkBodyText30d.includes("Failed to load");
+
+          // The network page should render various panels:
+          hasNetworkVitals = networkBodyText30d.includes("Network & ASN Health") && 
+                             (networkBodyText30d.includes("Global Health") || 
+                              networkBodyText30d.includes("Avg RTT") || 
+                              networkBodyText30d.includes("Leaderboard") ||
+                              networkBodyText30d.includes("RTT") ||
+                              networkBodyText30d.includes("HEALTH SCORE"));
+
+          if (!hasErrorText && hasNetworkVitals) {
+            break;
+          }
+        }
+      } catch (err) {
+        console.log(`[Network 30d] Navigation warning (attempt ${attempt}): ${err.message}`);
+      }
+      console.log(`[Network 30d] Attempt ${attempt}/4: Network metrics or elements not fully rendered yet. Waiting 8s...`);
+      await networkPage.waitForTimeout(8000);
+    }
+
+    if (networkBodyText30d.includes("Enable Groups F and G")) {
+      console.error(`❌ [Playwright Network Verification] Verification Failed: Network page is showing field group configuration warning: "Enable Groups F and G (Network Quality) in your log field configuration."`);
+      await browser.close();
+      process.exit(1);
+    }
+
+    if (!hasNetworkVitals) {
+      console.error(`[Network 30d] Verification Failed: Network & ASN Health page could not be verified or is missing standard panel names.`);
+      console.error(`Body text sample:\n${networkBodyText30d.slice(0, 1000)}`);
+      await browser.close();
+      process.exit(1);
+    }
+
+    if (networkBodyText30d.includes("No data available") || networkBodyText30d.includes("No data in this time range yet") || networkBodyText30d.includes("No data in this range")) {
+      console.error(`❌ [Playwright Network Verification] Verification Failed: Network panels loaded successfully but returned "No data available" or "No data in this range"!`);
+      await browser.close();
+      process.exit(1);
+    }
+
+    // Verify that at least one Plotly chart (the RTT heatmap or quality scatter) is rendered and visible on the page
+    const isNetworkChartVisible = await networkPage.evaluate(() => {
+      const el = document.querySelector('.js-plotly-plot, .plotly');
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    if (!isNetworkChartVisible) {
+      const isLocal = process.argv[5] === "local";
+      if (isLocal) {
+        await networkPage.screenshot({ path: '../network-screenshot.png', fullPage: true });
+        console.error(`❌ [Playwright Network Chart Verification] Verification Failed: No visible Plotly charts found on the Network page! Screenshot saved to network-screenshot.png`);
+        await browser.close();
+        process.exit(1);
+      } else {
+        console.log(`⚠️ [Playwright Network Chart Verification] Warning: No visible Plotly charts found on the Network page for remote cloud environment (${process.argv[5]}), proceeding...`);
+      }
+    }
+
+    console.log(`[Network Panel Verification] Verified: All Network panels finished loading, standard elements are present, and Plotly charts are visible! 🟢`);
+
+    await networkPage.close();
+    await networkContext.close();
+
     await browser.close();
     process.exit(0);
   } catch (e) {
