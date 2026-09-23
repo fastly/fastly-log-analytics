@@ -232,44 +232,6 @@ services:
     - multipod-data:/app/data
     - multipod-cache:/app/cache
 
-  beat:
-    profiles: ["donotstart"]
-    image: fastly-log-analytics-backend:latest
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    command: ["python", "-m", "celery", "-A", "backend.celery_app", "beat", "-S", "redbeat.RedBeatScheduler", "-l", "info"]
-    depends_on:
-      valkey:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
-    environment:
-    - PYTHONUNBUFFERED=1
-    - CELERY_BROKER_URL=redis://valkey:6379/0
-    - DEPLOYMENT_MODE=high_throughput
-    - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
-    # beat never calls validate_deployment_mode() (that fires in
-    # worker_process_init, and beat forks no worker children) and touches no
-    # metadata today — set here anyway so it can never quietly open a
-    # pod-local SQLite metadata file if that ever changes.
-    - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
-    healthcheck:
-      test:
-      - CMD-SHELL
-      - >-
-        python -c "from pathlib import Path; import sys; cmd = Path('/proc/1/cmdline').read_bytes();
-        sys.exit(0 if b'backend.celery_app' in cmd and b'beat' in cmd else 1)"
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    networks:
-    - app-network
-    restart: unless-stopped
-    volumes:
-    - ./configs:/app/configs
-
 volumes:
   multipod-data:
   multipod-cache:

@@ -30,7 +30,19 @@
         <max_bytes_to_merge_at_max_space_in_pool>5368709120</max_bytes_to_merge_at_max_space_in_pool> <!-- 5 GB -->
         <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192) -->
         <merge_max_block_size>4096</merge_max_block_size>
-        <!-- Enable vertical merge algorithm for wide tables to process columns independently -->
-        <enable_vertical_merge>1</enable_vertical_merge>
+        <!-- Vertical merge algorithm (processes columns independently for wide tables) is
+             enabled by default via `enable_vertical_merge_algorithm`; no override needed.
+             A prior version of this file used the non-existent setting name
+             `enable_vertical_merge`, which ClickHouse 25.8 rejects at startup with
+             "Code: 115. Unknown setting" and crash-loops the container. -->
+        <!-- ClickHouse's own startup sanity check requires every
+             number_of_free_entries_in_pool_to_* setting to stay below
+             background_pool_size * background_merges_mutations_concurrency_ratio (2
+             here). Their defaults (20 / 25 / 8) are all far above that, and each one
+             crash-loops the container in turn with "Code: 36. BAD_ARGUMENTS" if left
+             unset; set all three below the 2 threshold up front. -->
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
     </merge_tree>
 </clickhouse>
