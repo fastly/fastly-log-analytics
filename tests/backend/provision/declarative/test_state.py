@@ -118,8 +118,17 @@ class TestFeatureStateDependencyInjection:
             "log_fields": {"custom_fields": []},
         }
         state = FeatureState.from_config(cfg)
-        cmcd_fields = [f["name"] for f in state.log_fields.custom_fields if "cmcd" in f["name"]]
-        assert len(cmcd_fields) >= 10, f"Should inject at least 10 CMCD fields, got {cmcd_fields}"
+        cmcd_fields = {f["name"]: f for f in state.log_fields.custom_fields if "cmcd" in f["name"]}
+        assert len(cmcd_fields) == 14, f"Should inject 14 CMCD fields, got {len(cmcd_fields)}"
+        for name in ("cmcd_sid", "cmcd_cid", "cmcd_ot", "cmcd_sf", "cmcd_st"):
+            assert cmcd_fields[name]["value_type"] == "string", f"{name} should be string value_type"
+            assert cmcd_fields[name]["duckdb_type"] == "VARCHAR", f"{name} should be VARCHAR duckdb_type"
+        for name in ("cmcd_br", "cmcd_bl", "cmcd_d", "cmcd_dl", "cmcd_mtp", "cmcd_tb", "cmcd_rtp"):
+            assert cmcd_fields[name]["value_type"] == "numeric", f"{name} should be numeric value_type"
+            assert cmcd_fields[name]["duckdb_type"] == "INTEGER", f"{name} should be INTEGER duckdb_type"
+        for name in ("cmcd_bs", "cmcd_su"):
+            assert cmcd_fields[name]["value_type"] == "boolean", f"{name} should be boolean value_type"
+            assert cmcd_fields[name]["duckdb_type"] == "BOOLEAN", f"{name} should be BOOLEAN duckdb_type"
 
     def test_featurestate_from_config_does_not_duplicate_injected_fields(self):
         """Verify fields are not duplicated if already present."""

@@ -325,55 +325,12 @@ class FeatureState:
 
         # Auto-inject mandatory CMCD custom fields
         if cmcd_enabled:
-            cmcd_fields = [
-                ("cmcd_sid", "CMCD Session ID", "req.http.x-cmcd:sid"),
-                ("cmcd_cid", "CMCD Content ID", "req.http.x-cmcd:cid"),
-                ("cmcd_br", "Encoded Bitrate (kbps)", "req.http.x-cmcd:br"),
-                ("cmcd_bl", "Buffer Length (ms)", "req.http.x-cmcd:bl"),
-                ("cmcd_bs", "Buffer Starvation", "req.http.x-cmcd:bs"),
-                ("cmcd_d", "Object Duration (ms)", "req.http.x-cmcd:d"),
-                ("cmcd_dl", "Deadline (ms)", "req.http.x-cmcd:dl"),
-                ("cmcd_mtp", "Measured Throughput (kbps)", "req.http.x-cmcd:mtp"),
-                ("cmcd_ot", "Object Type", "req.http.x-cmcd:ot"),
-                ("cmcd_sf", "Streaming Format", "req.http.x-cmcd:sf"),
-                ("cmcd_st", "Stream Type", "req.http.x-cmcd:st"),
-                ("cmcd_su", "Startup", "req.http.x-cmcd:su"),
-                ("cmcd_tb", "Top Bitrate (kbps)", "req.http.x-cmcd:tb"),
-                ("cmcd_rtp", "Requested Max Throughput (kbps)", "req.http.x-cmcd:rtp"),
-            ]
+            from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 
             existing_names = {f.get("name") for f in injected_fields}
-            for field_name, label, vcl_expr in cmcd_fields:
-                if field_name not in existing_names:
-                    injected_fields.append(
-                        {
-                            "name": field_name,
-                            "label": label,
-                            "description": "Auto-injected by CMCD feature.",
-                            "vcl_log_expression": vcl_expr,
-                            "collection_stage": "edge",
-                            "duckdb_type": "BOOLEAN"
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                "INTEGER"
-                                if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"])
-                                else "VARCHAR"
-                            ),
-                            "value_type": "boolean"
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                "numeric"
-                                if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"])
-                                else "string"
-                            ),
-                            "bytes_estimate": 1
-                            if "bs" in field_name or "su" in field_name
-                            else (
-                                5 if any(x in field_name for x in ["br", "bl", "d", "dl", "mtp", "tb", "rtp"]) else 40
-                            ),
-                            "enabled": True,
-                        }
-                    )
+            for field in _CMCD_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
 
         # Construct nested LogFieldsConfig
         log_fields_config = LogFieldsConfig(
