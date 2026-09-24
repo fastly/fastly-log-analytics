@@ -42,12 +42,12 @@ def celery_env(monkeypatch):
     return monkeypatch
 
 
-def test_sync_mode_never_validates(monkeypatch):
-    """Sync mode is the single-pod default and requires none of the three."""
+def test_sync_mode_requires_postgres_dsns_but_no_broker(monkeypatch):
+    """Standard mode requires Postgres DSNs, but does not require CELERY_BROKER_URL."""
     monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
     monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
-    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "")
-    monkeypatch.delenv("METADATA_DSN", raising=False)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
+    monkeypatch.setenv("METADATA_DSN", _PG)
 
     assert svcconfig.validate_deployment_mode() is None
 

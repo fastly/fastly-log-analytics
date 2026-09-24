@@ -296,31 +296,31 @@ def _pg_worker_schema(worker_id):
         "METADATA_DSN",
         "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
     )
-    schema = f"pytest_{worker_id}"
+    worker_db = f"ducklake_test_{worker_id}"
 
-    admin_conn = psycopg.connect(base_dsn, autocommit=True)
-    admin_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-    admin_conn.execute(f'CREATE SCHEMA "{schema}"')
-    # Unqualified statements this fixture issues later (the TOS re-seed)
-    # must resolve against the worker's own schema, not the connection's
-    # default search_path (``"$user", public``).
-    admin_conn.execute(f'SET search_path TO "{schema}", public')
+    from urllib.parse import urlparse, urlunparse
 
-    from urllib.parse import quote
+    parsed = urlparse(base_dsn)
+    maint_parsed = parsed._replace(path="/postgres")
+    maint_dsn = urlunparse(maint_parsed)
 
-    options = quote(f"-c search_path={schema},public")
-    sep = "&" if "?" in base_dsn else "?"
-    worker_dsn = f"{base_dsn}{sep}options={options}"
+    admin_conn = psycopg.connect(maint_dsn, autocommit=True)
+    admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
+    admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+
+    worker_parsed = parsed._replace(path=f"/{worker_db}")
+    worker_dsn = urlunparse(worker_parsed)
+
     _os.environ["METADATA_DSN"] = worker_dsn
     _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
 
     pg_schema.ensure_pg_schema(force=True)
 
-    yield schema, admin_conn
+    yield worker_db, admin_conn
 
     pg_connection.close_all_pg_connections()
     pg_connection.reset_pg_pool_for_tests()
-    admin_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+    admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
     admin_conn.close()
 
 

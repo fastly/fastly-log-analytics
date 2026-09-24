@@ -836,13 +836,11 @@ def validate_deployment_mode() -> None:
     """
     if DEPLOYMENT_MODE not in {"standard", "high_throughput"}:
         raise RuntimeError("DEPLOYMENT_MODE must be either 'standard' or 'high_throughput'")
-    if DEPLOYMENT_MODE != "high_throughput":
-        return
-    if not CELERY_BROKER_URL:
+    if DEPLOYMENT_MODE == "high_throughput" and not CELERY_BROKER_URL:
         raise RuntimeError("DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL to be set")
     if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
-            "DEPLOYMENT_MODE=high_throughput requires DUCKLAKE_CATALOG to be a Postgres DSN — "
+            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires DUCKLAKE_CATALOG to be a Postgres DSN — "
             "a DuckDB-file catalog is single-process and cannot serve concurrent "
             "worker writers plus backend readers (torn merges corrupt the catalog). "
             f"Got: {DUCKLAKE_CATALOG!r}"
@@ -850,7 +848,7 @@ def validate_deployment_mode() -> None:
     metadata_dsn = os.getenv("METADATA_DSN", "")
     if not metadata_dsn.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
-            "DEPLOYMENT_MODE=high_throughput requires METADATA_DSN to be a Postgres DSN — "
+            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires METADATA_DSN to be a Postgres DSN — "
             "per-service SQLite metadata is a pod-local file, so the cron lease "
             "(job_runs), the ingest ledger, and the ingested-file manifest would "
             "each be private to one process: every worker would re-discover and "

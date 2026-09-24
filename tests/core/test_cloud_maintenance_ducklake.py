@@ -32,16 +32,8 @@ NOW = datetime.now(UTC)
 
 @pytest.fixture(autouse=True)
 def _isolated_local_catalog(monkeypatch):
-    """Force the per-service file catalog under the conftest sandbox.
-
-    ``_ducklake_attach`` reads ``config.DUCKLAKE_CATALOG``; a developer with
-    it set in their shell would otherwise have these tests write into a
-    shared (possibly Postgres) catalog. ``METADATA_DSN`` is cleared too so
-    the metadata layer stays on the sandbox's SQLite files.
-    """
-    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "")
-    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "")
-    monkeypatch.delenv("METADATA_DSN", raising=False)
+    """Use the isolated worker Postgres DuckLake catalog."""
+    pass
 
 
 def _make_source(tmp_path, name: str) -> dict:
@@ -116,24 +108,19 @@ def _catalog_path(src: dict) -> str:
 def _age_catalog(src: dict, days: int, *, schedule_too: bool = False) -> None:
     """Backdate the catalog's snapshot log so ``older_than`` has work to do.
 
-    ``keep_snapshot_days`` floors at 1, and every snapshot in a fresh test
-    catalog is seconds old. Attaching the catalog DB directly and rewriting
-    ``ducklake_snapshot.snapshot_time`` is the only way to exercise the real
+    Under Postgres, DuckLake catalog tables live in the isolated Postgres schema.
+    Updating ``ducklake_snapshot.snapshot_time`` directly exercises the real
     ``ducklake_expire_snapshots`` cutoff without sleeping for a day.
     """
-    import duckdb
+    from backend.core.metadata import pg_connection
 
-    con = duckdb.connect()
-    try:
-        con.execute(f"ATTACH '{_catalog_path(src)}' AS meta")
-        con.execute(f"UPDATE meta.ducklake_snapshot SET snapshot_time = snapshot_time - INTERVAL {int(days)} DAY")
-        if schedule_too:
-            con.execute(
-                "UPDATE meta.ducklake_files_scheduled_for_deletion "
-                f"SET schedule_start = schedule_start - INTERVAL {int(days)} DAY"
-            )
-    finally:
-        con.close()
+    con = pg_connection.get_pg_thread_connection()
+    con.execute(f"UPDATE ducklake_snapshot SET snapshot_time = snapshot_time - INTERVAL '{int(days)} days'")
+    if schedule_too:
+        con.execute(
+            f"UPDATE ducklake_files_scheduled_for_deletion SET schedule_start = schedule_start - INTERVAL '{int(days)} days'"
+        )
+    con.commit()
 
 
 def _parquet_files(src: dict) -> list[str]:

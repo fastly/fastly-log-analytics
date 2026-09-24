@@ -148,24 +148,26 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     attached"), False on failure. On a read-write attach the size-cap
     option is (re)asserted — see module docstring.
     """
-    # DUCKLAKE_CATALOG only — deliberately does NOT fall back to
-    # METADATA_DSN. The two are separate concerns (commit-path catalog vs.
-    # cron/ingest bookkeeping) and ADR-15 §2 states the code does not assume
-    # they coincide. A fallback made that false in the one configuration where
-    # it was reachable: DEPLOYMENT_MODE=standard with METADATA_DSN set (the documented
-    # halfway point of the SQLite→Postgres metadata migration), where it would
-    # silently plant DuckLake's catalog tables inside the metadata database
-    # AND abandon the per-service .ducklake file that held the real table
-    # state — a silent catalog swap, which fails empty rather than loud. In
-    # high-throughput mode it was already unreachable: validate_deployment_mode() requires
-    # a Postgres DUCKLAKE_CATALOG, so the left operand is never falsy there.
+    # DUCKLAKE_CATALOG must be a PostgreSQL DSN. Under the v3 unified Postgres
+    # architecture, all deployment modes require a PostgreSQL DuckLake catalog.
     dsn = config.DUCKLAKE_CATALOG
     service_id = source.get("service_id") or source.get("name", "default")
 
     if not dsn:
-        dsn = str(config.SERVICES_DATA_DIR / f"{service_id}.ducklake")
+        logger.error(
+            "[ducklake] %s: DUCKLAKE_CATALOG is unset; PostgreSQL DSN is required",
+            service_id,
+        )
+        return False
     elif dsn.startswith(("postgres://", "postgresql://")):
         dsn = f"postgres:{dsn}"
+    elif not dsn.startswith("postgres:"):
+        logger.error(
+            "[ducklake] %s: DUCKLAKE_CATALOG must be a postgres DSN, got: %s",
+            service_id,
+            dsn,
+        )
+        return False
 
     data_path = config.DUCKLAKE_DATA_PATH or _default_data_path(source)
 
@@ -303,18 +305,17 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 break
             except Exception as e:
                 msg = str(e).lower()
-                if read_only and ("does not exist" in msg or "explicitly disabled" in msg):
+                if read_only and attempt == 0 and ("does not exist" in msg or "explicitly disabled" in msg):
                     # A read-only attach of a not-yet-initialized catalog fails ("does
                     # not exist - and creating a new DuckLake is explicitly disabled") —
-                    # initialize it on-demand with a transient read-write attach, then retry.
+                    # initialize it on-demand with a transient read-write attach, then retry in the loop.
                     try:
                         con.execute(
                             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
                             f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
                         )
                         con.execute("DETACH __lake_init")
-                        con.execute(attach_sql)
-                        break
+                        continue
                     except Exception as init_err:
                         if "already attached" not in str(init_err) and "already exists" not in str(init_err):
                             logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, init_err)
