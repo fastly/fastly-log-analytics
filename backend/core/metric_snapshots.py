@@ -2,12 +2,8 @@
 
 Backs the trend lines on the admin System Health card / Trends tab. Each
 row is one numeric sample: ``(ts, metric, service_id?, task?, value)``.
-
-With Postgres metadata configured, snapshots live in the shared
-``metric_snapshots`` table. Otherwise they use the singleton SQLite file
-``data/system/system_metrics.db``: one writer (the sampler cron job), many
-readers (the admin endpoint), and WAL pragmas matching the other singleton
-caches (ngwaf_bot_cache, remote_share).
+All snapshots are stored in PostgreSQL standard mode in the ``metric_snapshots``
+table.
 
 Public surface
 --------------
@@ -17,19 +13,13 @@ Public surface
   :func:`get_batch`.
 - :func:`get_batch` — admin endpoint reads many series in one call.
 - :func:`purge_old` — daily cleanup cron drops rows past retention.
-- :func:`teardown` / :func:`close_all_connections` — pytest fixtures.
-
-Why the SQLite mode uses a singleton file (vs. per-service ``metadata.db``):
-- Global metrics (CPU, mem, disk) don't have a natural service scope.
-- One writer means no per-service WAL fragmentation under load.
-- Keeps per-service migration histories clean (no add-then-revert risk).
+- :func:`teardown` / :func:`close_all_connections` — test helpers.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import threading
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -40,36 +30,17 @@ logger = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join("data", "system")
 _DB_NAME = "system_metrics.db"
-
-_DDL = """
-CREATE TABLE IF NOT EXISTS metric_snapshots (
-    ts          TEXT NOT NULL,
-    metric      TEXT NOT NULL,
-    service_id  TEXT NOT NULL DEFAULT '',
-    task        TEXT NOT NULL DEFAULT '',
-    value       REAL NOT NULL,
-    PRIMARY KEY (metric, service_id, task, ts)
-);
-CREATE INDEX IF NOT EXISTS idx_metric_lookup ON metric_snapshots (metric, ts);
-"""
-
-# service_id and task use empty-string sentinels rather than NULL because
-# SQLite treats every NULL as distinct under composite PK uniqueness — so a
-# replay of the same (metric, NULL, NULL, ts) tuple would NOT collide and
-# the sampler would silently double-stamp on a same-second retry. Empty
-# strings collide cleanly so INSERT OR REPLACE actually dedupes.
 _EMPTY = ""
 
+# Module-level state retained for compatibility with test fixtures.
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized = False
 
 
 def _use_postgres() -> bool:
-    """Use shared storage whenever the process is on the multipod topology."""
-    from backend.core.metadata.pg_connection import is_postgres
-
-    return is_postgres()
+    """Always True in Postgres-only mode."""
+    return True
 
 
 def _pg_connection():
@@ -85,59 +56,11 @@ def _pg_write_connection():
 
 
 def _db_path() -> str:
-    os.makedirs(_DATA_DIR, exist_ok=True)
     return os.path.join(_DATA_DIR, _DB_NAME)
 
 
 def get_db_path() -> str:
     return _db_path()
-
-
-def _init(con: sqlite3.Connection) -> None:
-    cur = con.execute("PRAGMA journal_mode")
-    row = cur.fetchone()
-    if not row or row[0].lower() != "wal":
-        con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA busy_timeout=10000")
-    con.execute("PRAGMA cache_size=-8000")  # 8 MB — tiny table
-    con.executescript(_DDL)
-    con.commit()
-
-
-def _get_con() -> sqlite3.Connection:
-    """Thread-local read-write connection.
-
-    Lazily creates the file + applies the schema on the first call per
-    process. Subsequent calls reuse the connection (sqlite3 connections
-    are not safe to share across threads, so we cache per-thread).
-    """
-    global _initialized
-    con = getattr(_local, "con", None)
-    if con is not None:
-        return con
-    with _init_lock:
-        con = sqlite3.connect(_db_path(), timeout=10, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        if not _initialized:
-            _init(con)
-            _initialized = True
-        _local.con = con
-        return con
-
-
-def _open_readonly() -> sqlite3.Connection:
-    """Short-lived read-only connection.
-
-    URI ``mode=ro`` guarantees the open cannot acquire the writer lock,
-    so a slow paginated read can never block the sampler. Raises
-    ``OperationalError`` if the file doesn't exist yet — callers should
-    treat that as "no samples yet" and return an empty result.
-    """
-    uri = f"file:{_db_path()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True, timeout=5)
-    con.row_factory = sqlite3.Row
-    return con
 
 
 # ── Write path ───────────────────────────────────────────────────────────────
@@ -155,30 +78,19 @@ def record_snapshot(
     if not metric:
         raise ValueError("metric is required")
     ts_str = ts or iso_z_now()
-    if _use_postgres():
-        try:
-            con = _pg_write_connection()
-            con.execute(
-                """
-                INSERT INTO metric_snapshots (ts, metric, service_id, task, value)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (metric, service_id, task, ts)
-                DO UPDATE SET value = EXCLUDED.value
-                """,
-                (ts_str, metric, service_id or _EMPTY, task or _EMPTY, float(value)),
-            )
-        except Exception as e:
-            logger.warning("[metric_snapshots] Postgres insert failed for %s: %s", metric, e)
-        return
-    con = _get_con()
     try:
+        con = _pg_write_connection()
         con.execute(
-            "INSERT OR REPLACE INTO metric_snapshots (ts, metric, service_id, task, value) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO metric_snapshots (ts, metric, service_id, task, value)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (metric, service_id, task, ts)
+            DO UPDATE SET value = EXCLUDED.value
+            """,
             (ts_str, metric, service_id or _EMPTY, task or _EMPTY, float(value)),
         )
-        con.commit()
     except Exception as e:
-        logger.warning("[metric_snapshots] insert failed for %s: %s", metric, e)
+        logger.warning("[metric_snapshots] Postgres insert failed for %s: %s", metric, e)
 
 
 # ── Read path ────────────────────────────────────────────────────────────────
@@ -198,36 +110,20 @@ def get_history(
     """
     if isinstance(since, str):
         since = parse_relative_time_window(since)
-    if _use_postgres():
-        try:
-            with closing(_pg_connection()) as con:
-                rows = con.execute(
-                    """
-                    SELECT ts, value FROM metric_snapshots
-                    WHERE metric = %s AND service_id = %s AND task = %s AND ts >= %s
-                    ORDER BY ts ASC
-                    """,
-                    (metric, service_id or _EMPTY, task or _EMPTY, iso_z(since)),
-                ).fetchall()
-            return [{"ts": r["ts"], "value": r["value"]} for r in rows]
-        except Exception as e:
-            logger.warning("[metric_snapshots] Postgres history read failed: %s", e)
-            return []
     try:
-        con = _open_readonly()
-    except sqlite3.OperationalError:
-        return []
-    try:
-        cutoff = iso_z(since)
-        rows = con.execute(
-            "SELECT ts, value FROM metric_snapshots "
-            "WHERE metric = ? AND service_id = ? AND task = ? AND ts >= ? "
-            "ORDER BY ts ASC",
-            (metric, service_id or _EMPTY, task or _EMPTY, cutoff),
-        ).fetchall()
+        with closing(_pg_connection()) as con:
+            rows = con.execute(
+                """
+                SELECT ts, value FROM metric_snapshots
+                WHERE metric = %s AND service_id = %s AND task = %s AND ts >= %s
+                ORDER BY ts ASC
+                """,
+                (metric, service_id or _EMPTY, task or _EMPTY, iso_z(since)),
+            ).fetchall()
         return [{"ts": r["ts"], "value": r["value"]} for r in rows]
-    finally:
-        con.close()
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres history read failed: %s", e)
+        return []
 
 
 def get_batch(*, since: datetime | str) -> dict:
@@ -240,36 +136,21 @@ def get_batch(*, since: datetime | str) -> dict:
     """
     if isinstance(since, str):
         since = parse_relative_time_window(since)
-    if _use_postgres():
-        try:
-            with closing(_pg_connection()) as con:
-                rows = con.execute(
-                    """
-                    SELECT metric, service_id, task, ts, value
-                    FROM metric_snapshots
-                    WHERE ts >= %s
-                    ORDER BY metric, service_id, task, ts ASC
-                    """,
-                    (iso_z(since),),
-                ).fetchall()
-            return _group_batch_rows(rows)
-        except Exception as e:
-            logger.warning("[metric_snapshots] Postgres batch read failed: %s", e)
-            return {}
     try:
-        con = _open_readonly()
-    except sqlite3.OperationalError:
-        return {}
-    try:
-        cutoff = iso_z(since)
-        rows = con.execute(
-            "SELECT metric, service_id, task, ts, value FROM metric_snapshots "
-            "WHERE ts >= ? ORDER BY metric, service_id, task, ts ASC",
-            (cutoff,),
-        ).fetchall()
+        with closing(_pg_connection()) as con:
+            rows = con.execute(
+                """
+                SELECT metric, service_id, task, ts, value
+                FROM metric_snapshots
+                WHERE ts >= %s
+                ORDER BY metric, service_id, task, ts ASC
+                """,
+                (iso_z(since),),
+            ).fetchall()
         return _group_batch_rows(rows)
-    finally:
-        con.close()
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres batch read failed: %s", e)
+        return {}
 
 
 # ── Liveness ─────────────────────────────────────────────────────────────────
@@ -280,40 +161,14 @@ def last_snapshot_age_s() -> float | None:
 
     SRE-06: the minute-cadence sampler (:mod:`backend.cron.jobs.metric_snapshot`)
     is a *global* APScheduler interval job, so a stale ``max(ts)`` is a direct
-    witness that the scheduler thread has stopped ticking — the one signal that
-    distinguishes a dead scheduler (``list_active_runs() == []`` AND nothing
-    advancing) from a healthy-idle one. Returns ``None`` when no samples exist
-    yet (fresh boot) so the caller renders "unknown" rather than a false alarm.
-
-    Doubles as the SRE-21 snapshot-integrity probe: if the sampler dies or its
-    writes start failing, this age climbs without bound.
+    witness that the scheduler thread has stopped ticking.
     """
-    if _use_postgres():
-        try:
-            with closing(_pg_connection()) as con:
-                row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
-        except Exception as e:
-            logger.warning("[metric_snapshots] Postgres liveness read failed: %s", e)
-            return None
-        latest = row["latest"] if row else None
-        if not latest:
-            return None
-        from backend.utils.date_utils import parse_iso_utc
-
-        dt = parse_iso_utc(latest)
-        if dt is None:
-            return None
-        return max(0.0, (datetime.now(UTC) - dt).total_seconds())
     try:
-        con = _open_readonly()
-    except sqlite3.OperationalError:
+        with closing(_pg_connection()) as con:
+            row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
+    except Exception as e:
+        logger.warning("[metric_snapshots] Postgres liveness read failed: %s", e)
         return None
-    try:
-        row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
-    except sqlite3.OperationalError:
-        return None
-    finally:
-        con.close()
     latest = row["latest"] if row else None
     if not latest:
         return None
@@ -332,23 +187,13 @@ def purge_old(retention_days: int = 30) -> int:
     """Delete rows older than ``retention_days``. Returns the row count."""
     if retention_days <= 0:
         return 0
-    if _use_postgres():
-        cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
-        try:
-            con = _pg_write_connection()
-            cur = con.execute("DELETE FROM metric_snapshots WHERE ts < %s", (cutoff,))
-            return cur.rowcount or 0
-        except Exception as e:
-            logger.warning("[metric_snapshots] Postgres purge failed: %s", e)
-            return 0
-    con = _get_con()
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     try:
-        cur = con.execute("DELETE FROM metric_snapshots WHERE ts < ?", (cutoff,))
-        con.commit()
+        con = _pg_write_connection()
+        cur = con.execute("DELETE FROM metric_snapshots WHERE ts < %s", (cutoff,))
         return cur.rowcount or 0
     except Exception as e:
-        logger.warning("[metric_snapshots] purge failed: %s", e)
+        logger.warning("[metric_snapshots] Postgres purge failed: %s", e)
         return 0
 
 
@@ -356,14 +201,8 @@ def purge_old(retention_days: int = 30) -> int:
 
 
 def close_all_connections() -> None:
-    """Close any thread-local connection. Used by pytest fixtures."""
-    con = getattr(_local, "con", None)
-    if con is not None:
-        try:
-            con.close()
-        except Exception:
-            pass
-        _local.con = None
+    """Close any thread-local connection (no-op under Postgres)."""
+    pass
 
 
 def _group_batch_rows(rows) -> dict[str, list[dict]]:
@@ -381,11 +220,9 @@ def _group_batch_rows(rows) -> dict[str, list[dict]]:
 
 
 def teardown() -> None:
-    """Close the connection and delete the DB file + WAL/SHM siblings."""
-    global _initialized
-    close_all_connections()
-
-    from backend.core.sqlite_pool import remove_sqlite_db_files
-
-    remove_sqlite_db_files(_db_path(), name="metric_snapshots")
-    _initialized = False
+    """Clean up snapshots for test isolation."""
+    try:
+        con = _pg_write_connection()
+        con.execute("TRUNCATE TABLE metric_snapshots")
+    except Exception:
+        pass
