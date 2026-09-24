@@ -1,43 +1,22 @@
-"""SQLite cache for NGWAF verified-bot requests.
+"""NGWAF verified-bot requests cache against PostgreSQL.
 
-WAL mode lets multiple sqlite3 writers (per-service ``_run_ngwaf_bot_sync``
-ticks) touch this file concurrently without blocking each other.
-
-Readers (``backend.repositories._base.ensure_ngwaf_bots_materialized`` and
-``backend.core.rollups.ngwaf_bots``) deliberately do NOT let DuckDB open
-this file directly (no ``ATTACH ... TYPE SQLITE``, no ``sqlite_scan``) —
-DuckDB's SQLite reader doesn't reliably coordinate with SQLite's own
-WAL/locking protocol, and reading this globally-shared, frequently-written
-file that way corrupted it in production (2026-07-30). They read it via
-plain ``sqlite3`` instead and hand DuckDB the already-fetched rows.
+In PostgreSQL standard mode, ngwaf_bots and ngwaf_sync_state live in the
+PostgreSQL metadata database.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from backend.core.metadata.pg_connection import (
+    get_pg_readonly_connection,
+    get_pg_thread_connection,
+)
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 _CACHE_DIR = Path("data")
 _DB_NAME = "ngwaf_bot_cache.db"
-
-_DDL = """
-CREATE TABLE IF NOT EXISTS ngwaf_bots (
-    waf_req_id         TEXT PRIMARY KEY,
-    bot_name           TEXT,
-    category           TEXT,
-    wellknown_bot_id   TEXT,
-    wellknown_bot_name TEXT,
-    synced_at          TEXT
-);
-
-CREATE TABLE IF NOT EXISTS ngwaf_sync_state (
-    workspace_id          TEXT PRIMARY KEY,
-    last_timestamp_synced TEXT
-);
-"""
 
 
 def _db_path() -> Path:
@@ -49,57 +28,45 @@ def get_db_path() -> str:
     return str(_db_path())
 
 
-def _get_conn() -> sqlite3.Connection:
-    from backend.core.sqlite_pool import open_small_cache_db
+def _get_conn():
+    return get_pg_thread_connection()
 
-    return open_small_cache_db(_db_path(), ddl=_DDL)
+
+def _get_readonly_conn():
+    return get_pg_readonly_connection()
 
 
 def ensure_schema() -> None:
-    """Create the cache file and tables if they don't exist yet.
-
-    Callers that only *read* the cache (e.g. the sync planner that decides
-    whether to fetch new bot data) need the tables to exist before attaching,
-    even if no bot has been written yet. This is a chicken-and-egg fix: without
-    it, the planner sees an empty file, the LEFT JOIN throws, the planner
-    returns None, and the sync exits before upsert_bots ever runs to create
-    the tables.
-    """
-    con = _get_conn()
-    con.close()
+    """No-op under Postgres — schema is bootstrapped by pg_schema.py."""
+    pass
 
 
 def get_last_timestamp(workspace_id: str) -> str | None:
     """Return last_timestamp_synced for workspace, or None if no sync has run yet."""
-    con = _get_conn()
+    con = _get_readonly_conn()
     try:
         row = con.execute(
             "SELECT last_timestamp_synced FROM ngwaf_sync_state WHERE workspace_id = ?",
             (workspace_id,),
         ).fetchone()
-        if row and row[0]:
-            return row[0]
+        if row and row["last_timestamp_synced"]:
+            return row["last_timestamp_synced"]
         return None
     finally:
         con.close()
 
 
 def update_sync_watermark(workspace_id: str, until_ts: str) -> None:
-    """Advance the high-water mark to until_ts after a completed scan.
-
-    Called at the end of every successful (non-budget-exceeded) sync so the
-    next run starts from the end of the last scan instead of rescanning from
-    oldest_unenriched_timestamp forever.
-    """
+    """Advance the high-water mark to until_ts after a completed scan."""
     con = _get_conn()
-    try:
-        with con:
-            con.execute(
-                "INSERT OR REPLACE INTO ngwaf_sync_state (workspace_id, last_timestamp_synced) VALUES (?, ?)",
-                (workspace_id, until_ts),
-            )
-    finally:
-        con.close()
+    con.execute(
+        """
+        INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+        VALUES (?, ?)
+        ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+        """,
+        (workspace_id, until_ts),
+    )
 
 
 def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | None) -> None:
@@ -118,63 +85,61 @@ def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | 
         for r in records
         if r.get("waf_req_id")
     ]
-    try:
-        with con:
-            if rows:
-                con.executemany(
-                    """
-                    INSERT OR REPLACE INTO ngwaf_bots
-                        (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
-            if latest_timestamp:
-                # Advance by 1 second so the next sync uses an exclusive lower bound
-                # and doesn't re-fetch the last event we already stored.
-                try:
-                    _pts = parse_iso_utc(latest_timestamp)
-                    next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
-                except ValueError:
-                    next_ts = latest_timestamp
-                con.execute(
-                    "INSERT OR REPLACE INTO ngwaf_sync_state (workspace_id, last_timestamp_synced) VALUES (?, ?)",
-                    (workspace_id, next_ts),
-                )
-    finally:
-        con.close()
+    if rows:
+        con.executemany(
+            """
+            INSERT INTO ngwaf_bots
+                (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (waf_req_id) DO UPDATE SET
+                bot_name = EXCLUDED.bot_name,
+                category = EXCLUDED.category,
+                wellknown_bot_id = EXCLUDED.wellknown_bot_id,
+                wellknown_bot_name = EXCLUDED.wellknown_bot_name,
+                synced_at = EXCLUDED.synced_at
+            """,
+            rows,
+        )
+    if latest_timestamp:
+        try:
+            _pts = parse_iso_utc(latest_timestamp)
+            next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
+        except ValueError:
+            next_ts = latest_timestamp
+        con.execute(
+            """
+            INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+            VALUES (?, ?)
+            ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+            """,
+            (workspace_id, next_ts),
+        )
 
 
 def cleanup_old_bots(retention_days: int) -> int:
     """Delete rows with synced_at older than retention_days. Returns deleted row count."""
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con = _get_conn()
-    try:
-        with con:
-            cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
-            return cur.rowcount
-    finally:
-        con.close()
+    cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
+    return cur.rowcount or 0
 
 
 def get_cache_stats() -> dict:
     """Return summary statistics of cached NGWAF bot records."""
-    ensure_schema()
-    con = _get_conn()
+    con = _get_readonly_conn()
     try:
         cur = con.execute("SELECT count(*) FROM ngwaf_bots")
         total_bots = cur.fetchone()[0]
 
         workspaces: dict[str, str | None] = {}
         cur = con.execute("SELECT workspace_id, last_timestamp_synced FROM ngwaf_sync_state")
-        for wid, ts in cur.fetchall():
-            workspaces[wid] = ts
+        for r in cur.fetchall():
+            workspaces[r["workspace_id"]] = r["last_timestamp_synced"]
 
-        # Top bot names
         cur = con.execute(
-            "SELECT bot_name, count(*) FROM ngwaf_bots WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count(*) DESC LIMIT 10"
+            "SELECT bot_name, count(*) AS cnt FROM ngwaf_bots WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count(*) DESC LIMIT 10"
         )
-        top_bots = {name: count for name, count in cur.fetchall()}
+        top_bots = {r["bot_name"]: r["cnt"] for r in cur.fetchall()}
 
         return {
             "total_cached_bots": total_bots,

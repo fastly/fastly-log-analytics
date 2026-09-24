@@ -294,6 +294,22 @@ _REPLACE_ON_CONFLICT_UPDATE = {
             "page",
         ],
     ),
+    "ngwaf_bots": (
+        "waf_req_id",
+        [
+            "bot_name",
+            "category",
+            "wellknown_bot_id",
+            "wellknown_bot_name",
+            "synced_at",
+        ],
+    ),
+    "ngwaf_sync_state": (
+        "workspace_id",
+        [
+            "last_timestamp_synced",
+        ],
+    ),
 }
 
 _IGNORE_TABLES = (

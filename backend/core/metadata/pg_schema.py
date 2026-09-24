@@ -117,6 +117,38 @@ VALUES (
 ON CONFLICT (version) DO NOTHING
 """
 
+_NGWAF_BOTS_DDL = """
+CREATE TABLE IF NOT EXISTS ngwaf_bots (
+    waf_req_id         TEXT PRIMARY KEY,
+    bot_name           TEXT,
+    category           TEXT,
+    wellknown_bot_id   TEXT,
+    wellknown_bot_name TEXT,
+    synced_at          TEXT
+)
+"""
+
+_NGWAF_SYNC_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS ngwaf_sync_state (
+    workspace_id          TEXT PRIMARY KEY,
+    last_timestamp_synced TEXT
+)
+"""
+
+_RDNS_DDL = """
+CREATE TABLE IF NOT EXISTS rdns (
+    ip              TEXT PRIMARY KEY,
+    hostname        TEXT,
+    status          TEXT,
+    fcrdns_verified INTEGER DEFAULT 0,
+    looked_up_at    TEXT
+)
+"""
+
+_RDNS_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at)
+"""
+
 # Existing Postgres installations were bootstrapped before the distributed
 # ledger columns landed in the shared SQLite schema. ``CREATE TABLE IF NOT
 # EXISTS`` does not evolve those installations, so keep additive, rerunnable
@@ -212,6 +244,10 @@ def pg_schema_statements() -> list[str]:
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
     statements.append(_SEED_INITIAL_TOS_DDL)
+    statements.append(_NGWAF_BOTS_DDL)
+    statements.append(_NGWAF_SYNC_STATE_DDL)
+    statements.append(_RDNS_DDL)
+    statements.append(_RDNS_INDEX_DDL)
     return statements
 
 

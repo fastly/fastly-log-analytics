@@ -33,7 +33,6 @@ import asyncio
 import ipaddress
 import logging
 import socket
-import sqlite3
 import sys
 import threading
 import time
@@ -41,8 +40,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiodns
-import aiosqlite
-import tenacity
 
 from backend.utils.date_utils import iso_z_now
 
@@ -109,39 +106,20 @@ CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_
 """
 
 
-def _write_con() -> sqlite3.Connection:
-    """Open a write connection (creates DB + schema on first call)."""
-    from backend.core.sqlite_pool import open_small_cache_db
+def _write_con():
+    from backend.core.metadata.pg_connection import get_pg_thread_connection
 
-    return open_small_cache_db(_DB_PATH, ddl=_RDNS_DDL, check_same_thread=False)
-
-
-def _read_con() -> sqlite3.Connection:
-    """Open a read-only connection; does not create the DB."""
-    if not _DB_PATH.exists():
-        return None  # type: ignore[return-value]
-    con = sqlite3.connect(
-        f"file:{_DB_PATH}?mode=ro",
-        uri=True,
-        check_same_thread=False,
-    )
-    con.row_factory = sqlite3.Row
-    return con
+    return get_pg_thread_connection()
 
 
-# Ensure schema exists. Kept as the explicit entrypoint tests call
-# (tests/utils/test_rdns_async.py monkeypatches _DB_PATH then invokes
-# _init()). NOT called at import time: doing so wrote to the shared
-# real-disk data/cache/rdns_cache.db during pytest collection, and under
-# `pytest -n auto` the concurrent cross-process WAL-mode switch raced →
-# sqlite3.OperationalError "database is locked" mid-collection → xdist
-# "Different tests were collected" abort → partial coverage → cov-fail.
-# Schema is created lazily on first _write_con() (CREATE TABLE IF NOT
-# EXISTS), exactly like backend/utils/ngwaf_bot_cache.py.
+def _read_con():
+    from backend.core.metadata.pg_connection import get_pg_readonly_connection
+
+    return get_pg_readonly_connection()
+
+
 def _init() -> None:
-    with _write_lock:
-        con = _write_con()
-        con.close()
+    pass
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -228,13 +206,14 @@ def enqueue(ips: list[str]) -> int:
                     len(ips),
                 )
                 return 0
-            before = con.total_changes
+            before = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
             con.executemany(
                 "INSERT OR IGNORE INTO rdns (ip, status, fcrdns_verified) VALUES (?, 'pending', 0)",
                 [(ip,) for ip in ips],
             )
             con.commit()
-            return con.total_changes - before
+            after = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
+            return after - before
         finally:
             con.close()
 
@@ -346,34 +325,25 @@ async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, st
     return out
 
 
-@tenacity.retry(
-    retry=tenacity.retry_if_exception_type((sqlite3.OperationalError, aiosqlite.OperationalError)),
-    stop=tenacity.stop_after_attempt(5),
-    wait=tenacity.wait_exponential(multiplier=0.1, min=0.1, max=1.0),
-    reraise=True,
-)
-async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]]) -> None:
-    """Bulk UPDATE rdns rows with new lookup results.
-
-    ``records``: list of ``(hostname, status, fcrdns_int, looked_up_at, ip)``
-    suitable for the parameterised UPDATE. Single transaction +
-    ``executemany`` keeps WAL contention low. Tenacity retries on
-    ``OperationalError`` so a transient busy collision with a concurrent
-    ``enqueue`` writer doesn't fail the whole enrich tick.
-    """
+def _bulk_update_sync(records: list[tuple[str | None, str, int, str, str]]) -> None:
     if not records:
         return
-    async with aiosqlite.connect(str(_DB_PATH), timeout=10) as con:
-        async with con.execute("PRAGMA journal_mode") as cur:
-            row = await cur.fetchone()
-            if not row or row[0].lower() != "wal":
-                await con.execute("PRAGMA journal_mode=WAL")
-        await con.execute("PRAGMA busy_timeout=10000")
-        await con.executemany(
+    con = _write_con()
+    try:
+        con.executemany(
             "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?",
             records,
         )
-        await con.commit()
+        con.commit()
+    finally:
+        con.close()
+
+
+async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]]) -> None:
+    """Bulk UPDATE rdns rows with new lookup results."""
+    if not records:
+        return
+    await asyncio.to_thread(_bulk_update_sync, records)
 
 
 def _run_async_resolve(ips: list[str]) -> dict[str, int]:

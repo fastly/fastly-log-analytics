@@ -10,7 +10,6 @@ actually hit the network.
 from __future__ import annotations
 
 import socket
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,11 +18,14 @@ from backend.utils import rdns_cache
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    """Point ``_DB_PATH`` at a fresh per-test SQLite file."""
-    db = tmp_path / "rdns_cache.db"
-    monkeypatch.setattr(rdns_cache, "_DB_PATH", Path(db))
-    yield db
+def isolated_db():
+    con = rdns_cache._write_con()
+    try:
+        con.execute("DELETE FROM rdns")
+        con.commit()
+    except Exception:
+        con.rollback()
+    yield
 
 
 # ── _is_ip_in_cidrs (pure) ────────────────────────────────────────────────────
@@ -613,12 +615,9 @@ def test_enrich_batch_refreshes_stale_entries():
     Pinned because forgetting the refresh pass would freeze the cache
     against rDNS records that legitimately change (cloud providers
     rotate IPs)."""
-    import sqlite3
-
     # Seed a resolved row with a stale looked_up_at timestamp
     rdns_cache.enqueue(["8.8.4.4"])
-    db_path = str(rdns_cache._DB_PATH)
-    con = sqlite3.connect(db_path)
+    con = rdns_cache._write_con()
     try:
         con.execute(
             "UPDATE rdns SET hostname=?, status='resolved', fcrdns_verified=1, looked_up_at=datetime('now', '-3 days') WHERE ip=?",
