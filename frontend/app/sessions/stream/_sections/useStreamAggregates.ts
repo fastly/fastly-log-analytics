@@ -102,7 +102,13 @@ function computeAggregates(rows: Row[]): StreamAggregates {
     return ta < tb ? -1 : ta > tb ? 1 : 0
   })
 
-  const videoRows = sorted.filter(r => str(r.cmcd_ot) === 'v')
+  const explicitVideo = sorted.filter(r => {
+    const ot = str(r.cmcd_ot)
+    return ot === 'v' || ot === 'av'
+  })
+  const videoRows = explicitVideo.length > 0
+    ? explicitVideo
+    : sorted.filter(r => num(r.cmcd_br) !== null || num(r.cmcd_bl) !== null)
 
   // Summary KPIs
   const timestamps = sorted.map(r => str(r.timestamp)).filter(Boolean) as string[]
@@ -117,7 +123,9 @@ function computeAggregates(rows: Row[]): StreamAggregates {
   const avgBitrate = videoBitrates.length ? videoBitrates.reduce((a, b) => a + b, 0) / videoBitrates.length : null
 
   const videoTopBitrates = videoRows.map(r => num(r.cmcd_tb)).filter((v): v is number => v !== null)
-  const topBitrate = videoTopBitrates.length ? Math.max(...videoTopBitrates) : null
+  const topBitrate = videoTopBitrates.length
+    ? Math.max(...videoTopBitrates)
+    : (videoBitrates.length ? Math.max(...videoBitrates) : null)
 
   const utilization = avgBitrate != null && topBitrate != null && topBitrate > 0
     ? avgBitrate / topBitrate
@@ -128,7 +136,7 @@ function computeAggregates(rows: Row[]): StreamAggregates {
   let startupTimeMs: number | null = null
   if (sorted.length > 0) {
     const firstTs = new Date(str(sorted[0].timestamp) ?? '').getTime()
-    const firstNonStartup = sorted.find(r => !bool(r.cmcd_su) && str(r.cmcd_ot) === 'v')
+    const firstNonStartup = sorted.find(r => !bool(r.cmcd_su) && (str(r.cmcd_ot) === 'v' || str(r.cmcd_ot) === 'av' || num(r.cmcd_br) !== null))
     if (firstNonStartup) {
       const nsTs = new Date(str(firstNonStartup.timestamp) ?? '').getTime()
       startupTimeMs = nsTs - firstTs

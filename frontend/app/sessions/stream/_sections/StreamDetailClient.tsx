@@ -136,6 +136,16 @@ export function StreamDetailClient() {
         </Alert>
       )}
 
+      {aggregates && aggregates.summary.videoRequests === 0 && (
+        <Alert>
+          <Film className="h-4 w-4" />
+          <AlertTitle>No video segment requests</AlertTitle>
+          <AlertDescription>
+            This session only contains {aggregates.summary.totalRequests} request(s) without video segments (e.g. manifests or playlists). Video-specific streaming metrics require media segment requests.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Summary KPIs */}
       {isLoading ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4">
