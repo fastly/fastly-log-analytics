@@ -7,25 +7,12 @@ PostgreSQL metadata database.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from backend.core.metadata.pg_connection import (
     get_pg_readonly_connection,
     get_pg_thread_connection,
 )
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
-
-_CACHE_DIR = Path("data")
-_DB_NAME = "ngwaf_bot_cache.db"
-
-
-def _db_path() -> Path:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / _DB_NAME
-
-
-def get_db_path() -> str:
-    return str(_db_path())
 
 
 def _get_conn():
@@ -59,14 +46,18 @@ def get_last_timestamp(workspace_id: str) -> str | None:
 def update_sync_watermark(workspace_id: str, until_ts: str) -> None:
     """Advance the high-water mark to until_ts after a completed scan."""
     con = _get_conn()
-    con.execute(
-        """
-        INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
-        VALUES (?, ?)
-        ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
-        """,
-        (workspace_id, until_ts),
-    )
+    try:
+        con.execute(
+            """
+            INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+            VALUES (?, ?)
+            ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+            """,
+            (workspace_id, until_ts),
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | None) -> None:
@@ -85,43 +76,51 @@ def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | 
         for r in records
         if r.get("waf_req_id")
     ]
-    if rows:
-        con.executemany(
-            """
-            INSERT INTO ngwaf_bots
-                (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (waf_req_id) DO UPDATE SET
-                bot_name = EXCLUDED.bot_name,
-                category = EXCLUDED.category,
-                wellknown_bot_id = EXCLUDED.wellknown_bot_id,
-                wellknown_bot_name = EXCLUDED.wellknown_bot_name,
-                synced_at = EXCLUDED.synced_at
-            """,
-            rows,
-        )
-    if latest_timestamp:
-        try:
-            _pts = parse_iso_utc(latest_timestamp)
-            next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
-        except ValueError:
-            next_ts = latest_timestamp
-        con.execute(
-            """
-            INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
-            VALUES (?, ?)
-            ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
-            """,
-            (workspace_id, next_ts),
-        )
+    try:
+        if rows:
+            con.executemany(
+                """
+                INSERT INTO ngwaf_bots
+                    (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (waf_req_id) DO UPDATE SET
+                    bot_name = EXCLUDED.bot_name,
+                    category = EXCLUDED.category,
+                    wellknown_bot_id = EXCLUDED.wellknown_bot_id,
+                    wellknown_bot_name = EXCLUDED.wellknown_bot_name,
+                    synced_at = EXCLUDED.synced_at
+                """,
+                rows,
+            )
+        if latest_timestamp:
+            try:
+                _pts = parse_iso_utc(latest_timestamp)
+                next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
+            except ValueError:
+                next_ts = latest_timestamp
+            con.execute(
+                """
+                INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+                VALUES (?, ?)
+                ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+                """,
+                (workspace_id, next_ts),
+            )
+        con.commit()
+    finally:
+        con.close()
 
 
 def cleanup_old_bots(retention_days: int) -> int:
     """Delete rows with synced_at older than retention_days. Returns deleted row count."""
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
     con = _get_conn()
-    cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
-    return cur.rowcount or 0
+    try:
+        cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
+        con.commit()
+        return cur.rowcount or 0
+    finally:
+        con.close()
 
 
 def get_cache_stats() -> dict:

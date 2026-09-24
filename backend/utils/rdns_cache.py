@@ -206,14 +206,12 @@ def enqueue(ips: list[str]) -> int:
                     len(ips),
                 )
                 return 0
-            before = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
-            con.executemany(
+            cur = con.executemany(
                 "INSERT OR IGNORE INTO rdns (ip, status, fcrdns_verified) VALUES (?, 'pending', 0)",
                 [(ip,) for ip in ips],
             )
             con.commit()
-            after = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
-            return after - before
+            return cur.rowcount or 0
         finally:
             con.close()
 
