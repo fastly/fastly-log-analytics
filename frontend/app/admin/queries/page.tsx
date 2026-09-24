@@ -465,7 +465,7 @@ export default function QueryMonitorPage() {
     <div className="space-y-6">
       <PageHeader
         title="Live Query Monitor"
-        description="Real-time view of every executing DuckDB and SQLite query. Click a row to see the full SQL."
+        description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
       >
         <BackToAdminLink variant="secondary" prefetch={false} />
       </PageHeader>

@@ -182,12 +182,9 @@ class BaseResponse(BaseModel):
     debug_queries: list[DebugQuery] = Field(default_factory=list, serialization_alias="_debug_queries")
     debug_calls: list[DebugCall] = Field(default_factory=list, serialization_alias="_debug_calls")
     # SQLite statements executed while serving THIS request (page-scoped
-    # sibling of debug_queries). Plain dicts — the wire shape is pinned by
-    # backend/models/debug.py::SqliteProfilerEntry, which the ring-buffer
-    # endpoint already exposes; duplicating the model here as a typed field
-    # would force common.py → debug.py imports for zero runtime validation
-    # gain on a debug-only envelope.
+    # Postgres/metadata SQL statements captured for this request.
     debug_sqlite: list[dict] = Field(default_factory=list, serialization_alias="_debug_sqlite")
+    debug_postgres: list[dict] = Field(default_factory=list, serialization_alias="_debug_postgres")
     is_cached: bool = Field(default=False, serialization_alias="_is_cached")
     # Per-phase wall-clock timing for the handler. Always emitted as
     # _section_timings under serialization. Default empty so endpoints
@@ -203,9 +200,11 @@ class BaseResponse(BaseModel):
             data.pop("_debug_queries", None)
             data.pop("_debug_calls", None)
             data.pop("_debug_sqlite", None)
+            data.pop("_debug_postgres", None)
             data.pop("debug_queries", None)
             data.pop("debug_calls", None)
             data.pop("debug_sqlite", None)
+            data.pop("debug_postgres", None)
         return data
 
     @classmethod
@@ -214,14 +213,10 @@ class BaseResponse(BaseModel):
         from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
 
         dq = data.pop("debug_queries", None) or get_queries()
-        # Snapshot-copy: get_tracked_calls() below may itself run a SQLite
-        # SELECT (the usage_log iothread augmentation), and the collector
-        # returns a live list — copying first keeps that debug-induced
-        # statement out of the page's view.
-        ds = data.pop("debug_sqlite", None) or list(get_sqlite_queries())
+        ds = data.pop("debug_postgres", None) or data.pop("debug_sqlite", None) or list(get_sqlite_queries())
         dc = data.pop("debug_calls", None) or get_tracked_calls()
 
-        return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds)
+        return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds, debug_postgres=ds)
 
 
 class BootstrapService(BaseModel):

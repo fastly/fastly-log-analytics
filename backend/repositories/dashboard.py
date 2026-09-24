@@ -467,6 +467,8 @@ def get_aggregates(
                         _where,
                         _params,
                         unfiltered_window=True,
+                        projected_fields=fields if include_top_n else None,
+                        actual_cols=actual_cols if include_top_n else None,
                     )
                     if rollup_count is not None:
                         return rollup_count

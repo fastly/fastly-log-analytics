@@ -1348,6 +1348,13 @@ class QueryRunner:
             # their physical column layouts can differ (e.g. lake catalog columns vs raw).
             union_sql = " UNION ALL BY NAME ".join(branches)
 
+            # Probe physical columns present in union_sql so that EXCLUDE clauses
+            # in _finalize_view_sql and projection lists only reference columns that
+            # actually exist in the underlying raw data (avoiding BinderExceptions on
+            # computed/view-only columns like timestamp_hour or dt).
+            desc = self.con.execute(f"SELECT * FROM ({union_sql}) LIMIT 0").description or []
+            physical_cols = {d[0] for d in desc}
+
             from backend.core.iceberg.view import _finalize_view_sql
 
             target_table = "logs"  # QueryRunner active hour direct is only used for logs path right now
@@ -1358,10 +1365,18 @@ class QueryRunner:
                 self.src,
                 target_table=target_table,
                 dynamic_schema_field_names=set(),
-                existing_cols=set(actual_cols),
+                existing_cols=physical_cols,
             )
 
-            return f"SELECT {cols_sql} FROM ({finalized})"
+            available_cols = physical_cols | {"timestamp_hour", "dt"}
+            valid_projected = [c for c in projected if c in available_cols]
+            valid_cols_sql = (
+                ", ".join('"{}"'.format(c.replace('"', '""')) for c in valid_projected)
+                if valid_projected
+                else "*"
+            )
+
+            return f"SELECT {valid_cols_sql} FROM ({finalized})"
 
         temp_name = f"t_active_direct_{_uuid.uuid4().hex}"
         # union_by_name=false first: with =true DuckDB reconciles every
@@ -2055,11 +2070,12 @@ class QueryRunner:
                         # Diagnostic row count (in-memory temp, ~free): tells
                         # the perf harness whether a slow live merge is data
                         # volume (busy active hour) or per-field batch cost.
+                        _n_live = 0
                         try:
                             _n_live = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
                             _phase("live_active_hour:n_rows", float(_n_live))
                         except Exception:
-                            pass
+                            _n_live = 1
                         # Filter to columns present in the temp's projection.
                         # Virtual fields (waf_sig_ind, edge_score_reason_ind)
                         # have rollup parquets but no live column — including
@@ -2067,18 +2083,22 @@ class QueryRunner:
                         # column and BinderException out the entire UNION
                         # ALL, silently dropping the live-hour merge for
                         # the real fields too.
-                        live_fields = [f for f in live_topn_fields if f in actual_cols]
-                        if live_fields:
-                            _t_lb = time.perf_counter()
-                            live_res, _ = self.execute_top_n_batch(
-                                live_fields,
-                                tmp_name,
-                                actual_cols,
-                                schema_types,
-                                limit=limit,
-                                per_field_limits=per_field_limits,
-                            )
-                            _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
+                        # When _n_live == 0, the active hour has zero rows; skipping
+                        # the 50+ UNION ALL grouping branches saves ~130ms of DuckDB
+                        # query planning, parsing, and pipeline setup.
+                        if _n_live > 0:
+                            live_fields = [f for f in live_topn_fields if f in actual_cols]
+                            if live_fields:
+                                _t_lb = time.perf_counter()
+                                live_res, _ = self.execute_top_n_batch(
+                                    live_fields,
+                                    tmp_name,
+                                    actual_cols,
+                                    schema_types,
+                                    limit=limit,
+                                    per_field_limits=per_field_limits,
+                                )
+                                _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
                     finally:
                         # Deferred to scope-exit when the shared active-hour
                         # scope owns this temp (dashboard rollup path).
@@ -2696,6 +2716,8 @@ class QueryRunner:
         where_clause: str,
         params: list,
         unfiltered_window: bool = False,
+        projected_fields: list[str] | None = None,
+        actual_cols: list[str] | set[str] | None = None,
     ) -> int | None:
         """Serve the total requests count from per-hour rollup parquets when eligible.
 
@@ -2804,7 +2826,12 @@ class QueryRunner:
 
             if unfiltered_window:
                 try:
-                    direct_live_tmp = self._create_active_hour_temp_direct([], [], live_start, live_end)
+                    direct_live_tmp = self._create_active_hour_temp_direct(
+                        projected_fields or [],
+                        actual_cols or [],
+                        live_start,
+                        live_end,
+                    )
                 except Exception:
                     direct_live_tmp = None
             if direct_live_tmp == "__empty__":

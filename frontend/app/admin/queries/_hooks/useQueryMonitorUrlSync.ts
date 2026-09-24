@@ -64,7 +64,7 @@ export function useQueryMonitorUrlSync(
       const n = parseInt(slow, 10)
       if (Number.isFinite(n) && n > 0) setters.setSlowThresholdMs(n)
     }
-    if (db === 'DuckDB' || db === 'SQLite') setters.setDbFilter(db)
+    if (db === 'DuckDB' || db === 'Postgres' || db === 'SQLite') setters.setDbFilter(db as DbFilter)
     // ``nogroup=1`` turns off cron-grouping (default is on). Stored as the
     // negative so the default URL stays clean.
     if (p.get('nogroup') === '1') setters.setGroupCrons(false)

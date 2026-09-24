@@ -18,14 +18,15 @@ from backend.utils import sqlite_profiler
 router = APIRouter(prefix="/api/debug", tags=["debug"], responses=DEFAULT_ERROR_RESPONSES)
 
 
+@router.get("/recent-postgres", response_model=RecentSqliteResponse)
 @router.get("/recent-sqlite", response_model=RecentSqliteResponse)
 def recent_sqlite(
     request: Request,
     limit: int = Query(200, ge=1, le=1000),
     since_seq: int = Query(0, ge=0),
 ):
-    """Return up to ``limit`` most-recent SQLite statements captured since
-    ``since_seq``. The Debug Panel polls this every 2s when SQL debug is on.
+    """Return up to ``limit`` most-recent Postgres statements captured since
+    ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
     """
     is_remote = getattr(request.state, "is_remote", False)
     if is_remote:
@@ -42,9 +43,10 @@ def recent_sqlite(
     return sqlite_profiler.get_recent(limit=limit, since_seq=since_seq)
 
 
+@router.post("/clear-postgres", response_model=ClearSqliteResponse)
 @router.post("/clear-sqlite", response_model=ClearSqliteResponse)
 def clear_sqlite(request: Request):
-    """Drain the SQLite ring buffer. Manual reset for the Debug Panel."""
+    """Drain the Postgres ring buffer. Manual reset for the Debug Panel."""
     is_remote = getattr(request.state, "is_remote", False)
     if is_remote:
         from backend.utils.router_utils import make_error

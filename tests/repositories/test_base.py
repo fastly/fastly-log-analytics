@@ -626,6 +626,159 @@ class TestExecuteTopNBatchPerFieldLimits:
             f"active-hour buffer row must be merged into top-N; got {country_rows}"
         )
 
+    def test_execute_top_n_rollups_direct_fast_path_with_computed_partition_columns(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Verify direct active-hour fast path succeeds when schema cols include
+        computed partition columns (timestamp_hour, dt) without throwing a BinderException."""
+        from datetime import UTC, datetime, timedelta
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from backend.repositories._base import QueryRunner
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        cache_root = tmp_path / "cache"
+        (cache_root / "buffer").mkdir(parents=True)
+
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([active_dt + timedelta(minutes=5)], type=pa.timestamp("us", tz="UTC")),
+                    "country": pa.array(["US"]),
+                }
+            ),
+            str(cache_root / "buffer" / "batch_test.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        # In real production, get_schema_cols returns view columns including computed timestamp_hour and dt
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "timestamp_hour", "dt"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "timestamp_hour", "type": "VARCHAR"},
+                {"name": "dt", "type": "VARCHAR"},
+            ],
+        )
+        (cache_root / "rollups" / "hour").mkdir(parents=True)
+
+        view_fallback_calls = {"n": 0}
+        orig_view = QueryRunner.create_filtered_temp_table
+
+        def spy_view_fallback(self, *a, **kw):
+            view_fallback_calls["n"] += 1
+            return orig_view(self, *a, **kw)
+
+        monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", spy_view_fallback)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        active_end = active_dt + timedelta(hours=1)
+        rows, _ = runner.execute_top_n_rollups(["country"], active_dt.isoformat(), active_end.isoformat(), limit=10)
+
+        assert view_fallback_calls["n"] == 0, (
+            f"view-based fallback must NOT fire when computed columns (timestamp_hour, dt) are present in schema; "
+            f"got {view_fallback_calls['n']} fallback calls."
+        )
+        country_rows = [r for r in rows if r[0] == "country"]
+        assert ("country", "US", 1) in country_rows, f"buffer row must be merged; got {country_rows}"
+
+    def test_shared_active_hour_temps_reused_between_count_and_top_n(
+        self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
+    ):
+        """Verify that pre-allocating the wide active-hour temp in try_count_from_rollup
+        allows execute_top_n_rollups to reuse the temp table with zero extra table creations."""
+        from datetime import UTC, datetime, timedelta
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from backend.repositories._base import QueryRunner
+
+        active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        cache_root = tmp_path / "cache"
+        (cache_root / "buffer").mkdir(parents=True)
+
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([active_dt + timedelta(minutes=5)], type=pa.timestamp("us", tz="UTC")),
+                    "country": pa.array(["US"]),
+                    "status": pa.array([200]),
+                }
+            ),
+            str(cache_root / "buffer" / "batch_test.parquet"),
+        )
+
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
+        monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
+        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "status", "timestamp_hour", "dt"])
+        monkeypatch.setattr(
+            "backend.repositories._base._get_schema",
+            lambda _con, _src: [
+                {"name": "timestamp", "type": "TIMESTAMP WITH TIME ZONE"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "status", "type": "INTEGER"},
+                {"name": "timestamp_hour", "type": "VARCHAR"},
+                {"name": "dt", "type": "VARCHAR"},
+            ],
+        )
+        (cache_root / "rollups" / "hour").mkdir(parents=True)
+        (cache_root / "rollups" / "hour_bundled").mkdir(parents=True)
+
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        active_end = active_dt + timedelta(hours=1)
+
+        runner.begin_shared_active_hour_temps()
+        try:
+            # 1. try_count_from_rollup runs with projected fields
+            cnt = runner.try_count_from_rollup(
+                active_dt.isoformat(),
+                active_end.isoformat(),
+                "dummy",
+                "1=1",
+                [],
+                unfiltered_window=True,
+                projected_fields=["country", "status"],
+                actual_cols=["timestamp", "country", "status", "timestamp_hour", "dt"],
+            )
+            assert cnt == 1
+            assert runner._shared_active_temps is not None
+            assert len(runner._shared_active_temps) == 1
+            shared_table_name = runner._shared_active_temps[0][3]
+
+            view_fallback_calls = {"n": 0}
+            orig_view = QueryRunner.create_filtered_temp_table
+
+            def spy_view_fallback(self, *a, **kw):
+                view_fallback_calls["n"] += 1
+                return orig_view(self, *a, **kw)
+
+            monkeypatch.setattr(QueryRunner, "create_filtered_temp_table", spy_view_fallback)
+
+            # 2. execute_top_n_rollups runs
+            rows, _ = runner.execute_top_n_rollups(
+                ["country"],
+                active_dt.isoformat(),
+                active_end.isoformat(),
+                limit=10,
+                actual_cols=["timestamp", "country", "status", "timestamp_hour", "dt"],
+            )
+            # execute_top_n_rollups should have REUSED the temp table:
+            # - No new entries added to _shared_active_temps (still exactly 1)
+            # - _last_active_direct_n_files reset to 0 (cache hit indicator)
+            # - Zero view fallbacks
+            assert len(runner._shared_active_temps) == 1, (
+                f"Expected exactly 1 shared temp table, but found {len(runner._shared_active_temps)}"
+            )
+            assert runner._shared_active_temps[0][3] == shared_table_name
+            assert runner._last_active_direct_n_files == 0
+            assert view_fallback_calls["n"] == 0
+            country_rows = [r for r in rows if r[0] == "country"]
+            assert ("country", "US", 1) in country_rows
+        finally:
+            runner.end_shared_active_hour_temps()
+
     def test_execute_top_n_rollups_falls_back_to_view_when_direct_finds_nothing(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):

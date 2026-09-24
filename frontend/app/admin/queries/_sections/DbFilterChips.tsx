@@ -17,7 +17,7 @@ export function DbFilterChips({
   const opts: { value: DbFilter; label: string }[] = [
     { value: 'all', label: 'All DBs' },
     { value: 'DuckDB', label: 'DuckDB' },
-    { value: 'SQLite', label: 'SQLite' },
+    { value: 'Postgres', label: 'Postgres' },
   ]
   return <FilterChipRow value={value} onChange={onChange} options={opts} />
 }

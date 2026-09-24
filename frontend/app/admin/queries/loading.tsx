@@ -20,7 +20,7 @@ export default function Loading() {
       {/* Titled PageHeader with the BackToAdmin action placeholder. */}
       <PageHeader
         title="Live Query Monitor"
-        description="Real-time view of every executing DuckDB and SQLite query. Click a row to see the full SQL."
+        description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
       >
         <Skeleton className="h-9 w-28" />
       </PageHeader>

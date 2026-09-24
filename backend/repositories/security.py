@@ -442,6 +442,7 @@ def get_top_bots(
                 end_time,
                 limit=_BOT_UA_CLASSIFY_LIMIT,
                 per_field_limits={"ua": _BOT_UA_CLASSIFY_LIMIT},
+                actual_cols=actual_cols,
             )
             timer.mark("top_bots:ua_rollup_query", _t)
             ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
