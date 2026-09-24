@@ -25,6 +25,7 @@ success; everything else is a genuine error and propagates. The pool runs
 from __future__ import annotations
 
 import logging
+import re
 import threading
 
 from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
@@ -35,15 +36,22 @@ logger = logging.getLogger(__name__)
 # slow_queries is created by a SQLite migration, not _SCHEMA, so it needs an
 # explicit PG definition. CREATE IF NOT EXISTS — never DROP: re-running setup
 # against a populated database must be non-destructive.
+# started_at_utc/ended_at_utc/duration_ms/peak_memory_mb are DOUBLE
+# PRECISION, not Postgres's REAL (a narrower 4-byte float4 than SQLite's
+# always-8-byte REAL) — a naive REAL here silently truncates unix-epoch
+# timestamps past float4's ~7 significant digits. See ``_to_postgres``'s
+# REAL -> DOUBLE PRECISION rewrite for the full rationale; this DDL is
+# hand-written (not run through that translator) so it needs the same fix
+# spelled out directly.
 _SLOW_QUERIES_DDL = """
 CREATE TABLE IF NOT EXISTS slow_queries (
     id SERIAL PRIMARY KEY,
-    query_id TEXT NOT NULL,
+    query_id INTEGER NOT NULL,
     db_type TEXT NOT NULL,
     service_id TEXT,
-    started_at_utc REAL NOT NULL,
-    ended_at_utc REAL NOT NULL,
-    duration_ms REAL NOT NULL,
+    started_at_utc DOUBLE PRECISION NOT NULL,
+    ended_at_utc DOUBLE PRECISION NOT NULL,
+    duration_ms DOUBLE PRECISION NOT NULL,
     outcome TEXT NOT NULL,
     sql_preview TEXT NOT NULL,
     sql_full TEXT,
@@ -60,7 +68,7 @@ CREATE TABLE IF NOT EXISTS slow_queries (
     attr_pool_slot TEXT,
     error_type TEXT,
     error_message TEXT,
-    peak_memory_mb REAL
+    peak_memory_mb DOUBLE PRECISION
 )
 """
 
@@ -134,6 +142,16 @@ _INGEST_LEDGER_INDEX_NAMES = (
     "idx_ingest_ledger_retry_scan",
 )
 
+# ``reason_counts`` (JSON dict mapping corruption reason -> count per file)
+# was added to ``quarantined_files`` by SQLite migration 008
+# (``sqlite_migrations._migration_008_quarantined_reason_counts``), after
+# ``_SCHEMA``'s own ``quarantined_files`` CREATE TABLE was last edited — so
+# it never made it into the base schema definition itself, only into the
+# ALTER TABLE that migration runs (SQLite-only; Postgres bootstrap goes
+# through this module, never through ``sqlite_migrations``). Same additive,
+# rerunnable pattern as ``_INGEST_LEDGER_ALTERS`` above.
+_QUARANTINED_FILES_ALTERS = ("ALTER TABLE quarantined_files ADD COLUMN IF NOT EXISTS reason_counts TEXT DEFAULT '{}'",)
+
 # SQLSTATEs that mean "a concurrently-booting pod created this first".
 # 42P07 duplicate_table (covers indexes too), 42710 duplicate_object,
 # 23505 unique_violation (the pg_type/pg_class catalog race).
@@ -148,6 +166,17 @@ def _to_postgres(sql: str) -> str:
     pg_sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     pg_sql = pg_sql.replace("INTEGER PRIMARY KEY", "SERIAL PRIMARY KEY")
     pg_sql = pg_sql.replace("SERIAL PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    # SQLite's REAL is always 8-byte IEEE double precision. Postgres's REAL
+    # is a DISTINCT, narrower 4-byte float4 (~6-7 significant decimal
+    # digits) — naively passing "REAL" through silently truncates every
+    # unix-epoch timestamp column that uses it (job_runs.heartbeat_at,
+    # ingest_ledger.claimed_at/committed_at/published_at/next_attempt_at,
+    # slow_queries' *_utc columns, etc.), which lose sub-second precision
+    # once epoch seconds exceed float4's mantissa — silent data corruption,
+    # not a raised error. DOUBLE PRECISION is Postgres's true 8-byte
+    # equivalent. Word-boundaried so it doesn't touch a column literally
+    # named e.g. "real_ip" or similar.
+    pg_sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", pg_sql)
     pg_sql = pg_sql.replace("DEFAULT (datetime('now'))", "DEFAULT (current_timestamp AT TIME ZONE 'UTC')")
     pg_sql = pg_sql.replace(
         "DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
@@ -179,6 +208,7 @@ def pg_schema_statements() -> list[str]:
     statements.append(_METRIC_SNAPSHOTS_DDL)
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
     statements.extend(_INGEST_LEDGER_ALTERS)
+    statements.extend(_QUARANTINED_FILES_ALTERS)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
     statements.append(_SEED_INITIAL_TOS_DDL)

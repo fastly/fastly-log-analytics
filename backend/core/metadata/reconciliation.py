@@ -118,21 +118,35 @@ def invalidate_storage_stats_cache(service_id: str) -> None:
 
 
 def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
-    """Per-table row count + estimated bytes for this service's metadata.db.
+    """Per-table row count + estimated bytes for this service's metadata store.
 
-    Per-table bytes come from SQLite's ``dbstat`` virtual table. Total
-    ``db_bytes`` is the file size from the OS (``os.path.getsize``) rather than
-    summing all ``dbstat`` pages — the full-file dbstat scan was 600ms–3s on a
-    large DB and fires on every system-metrics tick.
+    Under Postgres, per-table bytes come from ``pg_total_relation_size``
+    (includes indexes/TOAST, same "on-disk footprint" intent as SQLite's
+    ``dbstat`` sum below) and ``db_bytes``/``db_path`` are reported as
+    ``None``/the (nonexistent) legacy SQLite path respectively — there is no
+    single "this service's metadata file" under a shared Postgres database,
+    since every service's rows live in the same tables. Historically (and
+    still for the separate ``usage_log`` file below, which stays SQLite —
+    see :mod:`backend.core.metadata.usage_log_db`) per-table bytes came from
+    SQLite's ``dbstat`` virtual table, with the file's total size read via
+    ``os.path.getsize`` rather than summing all ``dbstat`` pages (the
+    full-file dbstat scan was 600ms–3s on a large DB and fires on every
+    system-metrics tick).
     """
+    from backend.core.metadata.pg_connection import is_postgres
+
     now = _t.monotonic()
     if not force:
         cached = _storage_stats_cache.get(service_id)
         if cached is not None and now - cached[0] < _STORAGE_STATS_CACHE_TTL:
             return cached[1]
 
-    # Ensure the DB file exists and schemas are initialized
-    if not os.path.exists(db_path(service_id)):
+    postgres = is_postgres()
+
+    # Ensure the DB file exists and schemas are initialized — meaningless
+    # under Postgres (schema bootstrap happens once at process startup via
+    # ``pg_schema.ensure_pg_schema``, not lazily per service).
+    if not postgres and not os.path.exists(db_path(service_id)):
         get_con(service_id)
 
     import contextlib
@@ -161,13 +175,20 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                 continue
             try:
                 rows = con.execute(f"SELECT count(*) FROM {sql_table}").fetchone()[0]
-            except sqlite3.OperationalError:
+            except Exception:
                 continue
-            try:
-                row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
-                bytes_ = int(row[0]) if row and row[0] is not None else 0
-            except sqlite3.OperationalError:
-                bytes_ = None
+            if postgres:
+                try:
+                    row = con.execute(f"SELECT pg_total_relation_size('{sql_table}')").fetchone()
+                    bytes_ = int(row[0]) if row and row[0] is not None else 0
+                except Exception:
+                    bytes_ = None
+            else:
+                try:
+                    row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
+                    bytes_ = int(row[0]) if row and row[0] is not None else 0
+                except sqlite3.OperationalError:
+                    bytes_ = None
             out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
     db_bytes: int | None

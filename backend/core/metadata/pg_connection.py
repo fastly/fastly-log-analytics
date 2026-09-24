@@ -90,6 +90,17 @@ class _CompatRow(dict):
             return self._values[key]
         return super().__getitem__(key)
 
+    def __iter__(self):
+        # ``sqlite3.Row.__iter__`` yields VALUES in column order (so
+        # ``tuple(row)`` / ``dict([row1, row2, ...])`` on a two-column
+        # result set works the same way a plain tuple cursor would). A
+        # plain ``dict`` subclass's default ``__iter__`` yields KEYS
+        # instead — silently wrong here: it would make ``dict(cur.
+        # fetchall())`` on a 2-column query build ``{col_name: col_name}``
+        # from the column names themselves rather than ``{value0: value1}``
+        # per row. Override so this row is a true sqlite3.Row drop-in.
+        return iter(self._values)
+
 
 def _compat_row_factory(cursor):
     """psycopg row factory producing :class:`_CompatRow`."""
@@ -291,6 +302,7 @@ _IGNORE_TABLES = (
     "sources",
     "invite_services",
     "rdns",
+    "ingested_files",
 )
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -362,6 +374,13 @@ def _rewrite_sql(sql: str) -> str:
     sql = re.sub(r"\binstr\(", "strpos(", sql)
     sql = re.sub(r"\bsubstr\(", "substring(", sql)
     sql = re.sub(r",\s*rowid\s+(ASC|DESC)", "", sql, flags=re.IGNORECASE)
+
+    # SQLite's ``LIKE ... COLLATE NOCASE`` (case-insensitive LIKE) has no
+    # Postgres COLLATE equivalent — ``COLLATE "NOCASE"`` isn't a real
+    # Postgres collation (``UndefinedObject``). Postgres's own
+    # case-insensitive LIKE variant is the ``ILIKE`` operator; rewrite the
+    # whole ``LIKE <param> COLLATE NOCASE`` shape to ``ILIKE <param>``.
+    sql = re.sub(r"\bLIKE\s+(%s|\$\d+)\s+COLLATE\s+NOCASE\b", r"ILIKE \1", sql, flags=re.IGNORECASE)
 
     return sql
 
