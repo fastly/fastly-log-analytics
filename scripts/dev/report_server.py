@@ -45,6 +45,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +84,10 @@ _LOG_SOURCES: list[tuple[str, str]] = [
 ]
 _SIGNAL_RE = re.compile(r"error|exception|traceback|failed|unauthorized|warning", re.IGNORECASE)
 _TAIL_LINES = 400
+
+_CRED_LOCK = threading.Lock()
+_CRED_CACHE: tuple[float, bytes, int] | None = None
+_CRED_TTL_SECONDS = 10.0
 
 
 class ReportRequestHandler(SimpleHTTPRequestHandler):
@@ -144,13 +150,24 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
         self._send_json(status, body)
 
     def _serve_live_credentials_status(self) -> None:
-        try:
-            body = json.dumps(vc.compute_all(), indent=2).encode("utf-8")
-            status = 200
-        except Exception as exc:  # pragma: no cover - defensive, keep the report alive
-            body = json.dumps({"error": str(exc)}).encode("utf-8")
-            status = 500
-        self._send_json(status, body)
+        global _CRED_CACHE
+        now = time.time()
+        if _CRED_CACHE is not None and (now - _CRED_CACHE[0]) < _CRED_TTL_SECONDS:
+            self._send_json(_CRED_CACHE[2], _CRED_CACHE[1])
+            return
+
+        with _CRED_LOCK:
+            if _CRED_CACHE is not None and (time.time() - _CRED_CACHE[0]) < _CRED_TTL_SECONDS:
+                self._send_json(_CRED_CACHE[2], _CRED_CACHE[1])
+                return
+            try:
+                body = json.dumps(vc.compute_all(), indent=2).encode("utf-8")
+                status = 200
+            except Exception as exc:  # pragma: no cover - defensive, keep the report alive
+                body = json.dumps({"error": str(exc)}).encode("utf-8")
+                status = 500
+            _CRED_CACHE = (time.time(), body, status)
+            self._send_json(status, body)
 
     def _serve_live_bootstrap_status(self, env_id: str) -> None:
         base_url = ENV_BASE_URLS.get(env_id)

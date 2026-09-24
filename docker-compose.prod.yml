@@ -236,9 +236,9 @@ services:
       # SSO-exclusive deployments only: set to 0 to disable passcode login.
       - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
       # PostgreSQL standard metadata + DuckLake catalog (unified v3 storage).
-      # Points to the local Postgres container on loopback with no fallback password.
-      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake
-      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake
+      # Points to the local Postgres container on loopback with fallback password.
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
     depends_on:
       - postgres
     volumes: !override
@@ -343,7 +343,7 @@ services:
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     environment:
       - POSTGRES_USER=fla
-      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD}
+      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
       - POSTGRES_DB=ducklake
     volumes: !override
       - /mnt/app-data/postgres:/var/lib/postgresql/data
