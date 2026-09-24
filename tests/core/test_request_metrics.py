@@ -28,9 +28,8 @@ def durable_metrics(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "configs")
     monkeypatch.setattr(config, "SERVICES_DATA_DIR", tmp_path / "services")
     config.SERVICES_DATA_DIR.mkdir()
-    monkeypatch.setattr(config, "DUCKLAKE_CATALOG", str(tmp_path / "catalog.ducklake"))
-    # Use a real isolated file catalog for the engine test, while selecting
-    # the production durable-only serving branch (production requires PG).
+    # Use the isolated worker Postgres DuckLake catalog while selecting
+    # the production durable-only serving branch.
     monkeypatch.setattr(config, "is_durable_serving_mode", lambda source=None: True)
     monkeypatch.setattr(config, "config_to_source", lambda cfg: source)
     config.save_config(

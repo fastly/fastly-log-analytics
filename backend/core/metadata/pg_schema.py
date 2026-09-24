@@ -209,7 +209,10 @@ def _to_postgres(sql: str) -> str:
     # equivalent. Word-boundaried so it doesn't touch a column literally
     # named e.g. "real_ip" or similar.
     pg_sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", pg_sql)
-    pg_sql = pg_sql.replace("DEFAULT (datetime('now'))", "DEFAULT (current_timestamp AT TIME ZONE 'UTC')")
+    pg_sql = pg_sql.replace(
+        "DEFAULT (datetime('now'))",
+        "DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))",
+    )
     pg_sql = pg_sql.replace(
         "DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
         "DEFAULT (to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))",

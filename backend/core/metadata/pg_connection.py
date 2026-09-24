@@ -156,11 +156,15 @@ def get_pg_pool() -> ConnectionPool:
 
 
 def reset_pg_pool_for_tests() -> None:
-    """Drop the cached pool so a test using a different (fake) DSN/pool
-    doesn't reuse a stale one. Does not touch checked-out connections —
-    call :func:`close_all_pg_connections` first if any are outstanding."""
+    """Drop and close the cached pool so a test using a different (fake) DSN/pool
+    doesn't reuse a stale one."""
     global _pool
-    _pool = None
+    if _pool is not None:
+        try:
+            _pool.close(timeout=1.0)
+        except Exception:
+            pass
+        _pool = None
 
 
 # ── Thread-local long-lived connection (metadata.base.get_con) ──────────────
@@ -390,7 +394,11 @@ def _rewrite_sql(sql: str) -> str:
         r"to_char(current_timestamp AT TIME ZONE 'UTC' + (\1)::interval, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
         sql,
     )
-    sql = re.sub(r"\bdatetime\('now'\)", "current_timestamp AT TIME ZONE 'UTC'", sql)
+    sql = re.sub(
+        r"\bdatetime\('now'\)",
+        "to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+        sql,
+    )
     sql = sql.replace(
         "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         "to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
@@ -531,19 +539,24 @@ class PgConnectionWrapper:
         self._finalizer = weakref.finalize(self, _return_to_pool_once, conn, self._returned, pool)
 
     def execute(self, sql: str, params: Any = None):
-        from backend.utils.sqlite_profiler import _live_deregister, _live_register
+        import time
+
+        from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
         cur = self._conn.cursor()
-        sql = _rewrite_sql(sql)
-        sql, id_col = _maybe_add_returning(sql)
+        rewritten_sql = _rewrite_sql(sql)
+        rewritten_sql, id_col = _maybe_add_returning(rewritten_sql)
 
-        qid = _live_register("Postgres", sql, self)
+        qid = _live_register("Postgres", rewritten_sql, self)
+        t0 = time.perf_counter()
         try:
-            cur.execute(sql, params if params is not None else ())
+            cur.execute(rewritten_sql, params if params is not None else ())
         except Exception as e:
             _live_deregister(qid, e)
             raise
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         _live_deregister(qid, None)
+        _record(sql, params, dur_ms, cur.rowcount or 0, "execute")
 
         wrap = PgCursorWrapper(cur)
         if id_col is not None:
@@ -552,17 +565,22 @@ class PgConnectionWrapper:
         return wrap
 
     def executemany(self, sql: str, seq_of_params: list[Any]):
-        from backend.utils.sqlite_profiler import _live_deregister, _live_register
+        import time
+
+        from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
         cur = self._conn.cursor()
-        sql = _rewrite_sql(sql)
-        qid = _live_register("Postgres", sql, self)
+        rewritten_sql = _rewrite_sql(sql)
+        qid = _live_register("Postgres", rewritten_sql, self)
+        t0 = time.perf_counter()
         try:
-            cur.executemany(sql, seq_of_params)
+            cur.executemany(rewritten_sql, seq_of_params)
         except Exception as e:
             _live_deregister(qid, e)
             raise
+        dur_ms = (time.perf_counter() - t0) * 1000.0
         _live_deregister(qid, None)
+        _record(sql, seq_of_params, dur_ms, cur.rowcount or 0, "executemany")
         return PgCursorWrapper(cur)
 
     def cursor(self):

@@ -27,6 +27,7 @@ def isolate_share_db(tmp_path, monkeypatch):
         con.execute("DELETE FROM invite_services")
         con.execute("DELETE FROM remote_invites")
         con.execute("DELETE FROM remote_share_audit_logs")
+        con.execute("DELETE FROM share_tos_versions WHERE version != 'v1'")
         con.commit()
     except Exception:
         con.rollback()
