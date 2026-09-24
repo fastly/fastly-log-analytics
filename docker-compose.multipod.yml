@@ -68,10 +68,10 @@ services:
     # separate table namespaces, one container to run locally. They are
     # separate concerns and nothing in the code assumes they coincide.
     - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
-    # Pass through DEBUG_RESPONSES from the host env (export it or set it in
-    # your gitignored .env) — without it the backend redacts the
-    # _debug_queries envelopes and the dashboard Debug Panel shows 0 queries.
-    - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
+    # Pass through DEBUG_RESPONSES from the host env (defaults to true) —
+    # without it the backend redacts the _debug_queries envelopes and the
+    # dashboard Debug Panel shows 0 queries.
+    - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
       interval: 30s

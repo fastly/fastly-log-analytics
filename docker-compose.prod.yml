@@ -124,14 +124,8 @@ services:
       # startup assertion in backend/main.py still has a signal to detect
       # the unsafe state via this companion variable.
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
-      # Pass through DEBUG_RESPONSES from the host environment (typically
-      # set via the .env file next to this compose file, which Compose
-      # auto-loads for variable substitution). When unset it expands to
-      # the literal empty string and the gate in backend/models/common.py
-      # (`_debug_responses_enabled`) returns False — same as if the var
-      # were never set. Plain `- DEBUG_RESPONSES` (no value) would also
-      # work but the explicit substitution makes the source obvious.
-      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
+      # Pass through DEBUG_RESPONSES from the host environment (defaults to true).
+      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
       # Pre-warm our upgraded 4-connection pool at startup to eliminate cold-start paint delays.
       - DUCKDB_POOL_WARM_AT_BOOT=true
       # Bound request concurrency to the memory envelope of this 4-core,
