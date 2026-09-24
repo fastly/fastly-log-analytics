@@ -84,7 +84,19 @@ def test_list_since_filter_excludes_older_rows():
     con = metadata_db.get_con(SVC)
     con.execute("UPDATE scoring_audit SET timestamp = datetime('now', '-10 seconds') WHERE action = 'older_action'")
     con.commit()
-    cutoff = con.execute("SELECT datetime('now', '-5 seconds') AS now").fetchone()["now"]
+    # ``scoring_audit.timestamp`` is TEXT (an ISO-like string on both
+    # backends — see ``list_scoring_audit``'s ``timestamp >= ?`` string
+    # comparison). Under Postgres, a bare ``SELECT datetime(...)``
+    # expression round-trips as a real ``datetime.datetime`` object
+    # (psycopg auto-converts), not a string — comparing that object
+    # against the TEXT column raises ``UndefinedFunction: operator does
+    # not exist: text >= timestamp`` (silently swallowed by
+    # ``list_scoring_audit``'s best-effort except, which is what actually
+    # produced the empty-list failure here rather than a traceback).
+    # ``str()`` normalizes it to the same space-separated ISO format
+    # Postgres already used to populate the column via assignment cast,
+    # so the text comparison is well-formed under both backends.
+    cutoff = str(con.execute("SELECT datetime('now', '-5 seconds') AS now").fetchone()["now"])
     metadata_db.record_scoring_audit(SVC, "newer_action")
 
     rows = metadata_db.list_scoring_audit(SVC, since=cutoff)
@@ -116,8 +128,14 @@ def test_prune_keeps_last_n_rows():
     for i in range(5):
         metadata_db.record_scoring_audit(SVC, f"old_{i}")
 
+    # The LIKE pattern is bound as a parameter — psycopg's ``%s`` param
+    # substitution treats a literal ``%`` in the SQL text itself as the
+    # start of a placeholder (``only '%s', '%b', '%t' are allowed``).
     con = metadata_db.get_con(SVC)
-    con.execute("UPDATE scoring_audit SET timestamp = datetime('now', '-10 seconds') WHERE action LIKE 'old_%'")
+    con.execute(
+        "UPDATE scoring_audit SET timestamp = datetime('now', '-10 seconds') WHERE action LIKE ?",
+        ("old_%",),
+    )
     con.commit()
 
     # Second batch — newer

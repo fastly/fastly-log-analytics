@@ -4,13 +4,11 @@ Coverage rationale: the module was at 10% (covers stats, age-based
 cleanup, and rollup-cleanup coordination). The two functions exercised
 here — ``get_metadata_storage_stats`` and ``cleanup_metadata`` — are
 the operational surface admins see in the storage stats endpoint and
-the cleanup-now SSE. Both call into per-service SQLite via the
-``isolate_metadata_db`` fixture (autouse, see ``tests/conftest.py``).
+the cleanup-now SSE. Both call into the shared Postgres metadata store via
+the ``isolate_metadata_db`` fixture (autouse, see ``tests/conftest.py``).
 """
 
 from __future__ import annotations
-
-from unittest.mock import patch
 
 from backend.core import metadata as metadata_db
 from backend.core.metadata import reconciliation
@@ -99,7 +97,9 @@ def test_stats_tables_sql_names_all_exist_in_schema():
     """
     sid = "svc-stats-schema"
     con = _con(sid)  # initialises base schema + pending migrations
-    existing = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    existing = {
+        r[0] for r in con.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()").fetchall()
+    }
     for sql_table, _out_key in reconciliation._STATS_TABLES:
         if sql_table == "usage_log":
             continue
@@ -180,7 +180,10 @@ def test_cleanup_deletes_aged_usage_log_rows():
 
     assert result["deleted"]["usage_log"] == 5
     assert result["after"]["usage_log"] == 3
-    assert result["vacuumed"] is True  # Anything deleted → VACUUM runs
+    # Vacuum is a SQLite-file concept skipped entirely under Postgres (see
+    # test_cleanup_skips_vacuum_under_postgres) — Postgres reclaims space via
+    # its own autovacuum daemon, outside application control.
+    assert result["vacuumed"] is False
     assert result["duration_s"] >= 0
 
 
@@ -301,99 +304,30 @@ def test_cleanup_rollups_skipped_when_rollups_days_zero():
 def test_cleanup_skips_vacuum_under_postgres():
     """auto_vacuum/incremental_vacuum/freelist_count are SQLite-file
     concepts with no Postgres equivalent (Postgres reclaims space via its
-    own autovacuum daemon). Under a Postgres metadata backend the DELETE
-    trim must still run, but the vacuum branch must be skipped rather than
-    executing PRAGMA statements a Postgres connection can't run.
-
-    Patches ``pg_connection.is_postgres`` (the guard's own check) to
-    simulate Postgres mode, but forces ``reconciliation.get_con`` to still
-    hand back the real sandboxed SQLite connection (bypassing
-    ``base.get_con``'s OWN ``is_postgres()`` routing, which would otherwise
-    also flip and try to build a real Postgres pool). This isolates the
-    vacuum guard as a pure unit test with no network dependency on an
-    actual Postgres server.
+    own autovacuum daemon). Under the (now sole) Postgres metadata backend
+    the DELETE trim must still run, but the vacuum branch must be skipped
+    rather than executing PRAGMA statements a Postgres connection can't run.
     """
-    from backend.core.metadata import base as _base
-    from backend.core.metadata import pg_connection
-
     sid = "svc-cleanup-pg-skip"
     _seed_usage_log(sid, 5, days_ago=10)
-    real_con = _base._pool.get(sid)
 
-    with patch.object(pg_connection, "is_postgres", return_value=True):
-        with patch.object(reconciliation, "get_con", return_value=real_con):
-            result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
+    result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
 
     assert result["deleted"]["usage_log"] == 5
     assert result["vacuumed"] is False
 
 
-def test_cleanup_first_run_switches_db_to_incremental_vacuum_mode():
-    """First-ever cleanup on a fresh DB (auto_vacuum defaults to NONE) must
-    flip the file into INCREMENTAL mode via the one-time full VACUUM —
-    every subsequent cleanup then takes the cheap chunked path instead of
-    repeating a full-file exclusive-lock rewrite."""
-    sid = "svc-cleanup-vacuum-mode"
-    _seed_usage_log(sid, 5, days_ago=10)
-
-    result = reconciliation.cleanup_metadata(sid, retention={"usage_log_days": 7})
-    assert result["vacuumed"] is True
-
-    con = _con(sid)
-    mode = con.execute("PRAGMA auto_vacuum").fetchone()[0]
-    assert mode == 2  # INCREMENTAL
-
-
-def _seed_padded_cron_runs(service_id: str, rows: int, days_ago: int) -> None:
-    """Like ``_seed_cron_run`` but with a large ``log_output`` blob so the
-    rows span multiple SQLite pages — deleting them must free enough pages
-    for ``PRAGMA freelist_count`` to register nonzero, which a handful of
-    tiny rows (as in ``_seed_cron_run``) would not reliably do."""
-    con = _con(service_id)
-    blob = "x" * 2000
-    con.executemany(
-        "INSERT INTO cron_runs (task, started_at, duration_s, status, parquet_keys, log_output) "
-        f"VALUES ('sync', datetime('now', '-{days_ago} days'), 1.0, 'success', '[]', ?)",
-        [(blob,) for _ in range(rows)],
-    )
-    con.commit()
-
-
-def test_cleanup_second_run_uses_chunked_incremental_vacuum_not_full_vacuum():
-    """Once a DB is already in INCREMENTAL mode, cleanup must reclaim space
-    via ``PRAGMA incremental_vacuum(N)`` chunks — NOT another bare VACUUM,
-    which holds an exclusive lock for the whole file rewrite and starves
-    concurrent writers (slow_queries insert, ingested_files upsert) even
-    past the 30s busy_timeout.
-
-    Seeds ``cron_runs`` (lives in metadata.db, the file the vacuum step
-    actually operates on) rather than ``usage_log`` (a separate per-service
-    file) so the DELETE genuinely frees pages in metadata.db and exercises
-    the incremental_vacuum loop rather than short-circuiting on
-    ``freelist_count == 0``.
-    """
-    sid = "svc-cleanup-vacuum-chunked"
-    _seed_padded_cron_runs(sid, 200, days_ago=400)
-    reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})  # pays the one-time mode switch
-
-    con = _con(sid)
-    assert con.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
-
-    _seed_padded_cron_runs(sid, 200, days_ago=400)
-    executed: list[str] = []
-    con.set_trace_callback(lambda sql: executed.append(sql))
-    try:
-        result = reconciliation.cleanup_metadata(sid, retention={"cron_runs_days": 7})
-    finally:
-        con.set_trace_callback(None)
-
-    assert result["vacuumed"] is True
-    assert not any(sql.strip().upper() == "VACUUM" for sql in executed), (
-        f"second cleanup re-ran a full VACUUM instead of incremental_vacuum: {executed}"
-    )
-    assert any("incremental_vacuum" in sql.lower() for sql in executed), (
-        f"expected PRAGMA incremental_vacuum to run on steady-state cleanup: {executed}"
-    )
+# Note: the historical ``test_cleanup_first_run_switches_db_to_incremental_
+# vacuum_mode`` and ``test_cleanup_second_run_uses_chunked_incremental_
+# vacuum_not_full_vacuum`` tests pinned SQLite-only file mechanics
+# (``PRAGMA auto_vacuum``, ``PRAGMA incremental_vacuum``, ``PRAGMA
+# freelist_count``, ``sqlite3.Connection.set_trace_callback``) that have no
+# Postgres equivalent and no longer run under any backend — deleted rather
+# than given a strained Postgres analog. The invariant they guarded
+# ("cleanup reclaims space without holding a long exclusive lock") is
+# Postgres's own autovacuum's job now, outside application control; see
+# ``test_cleanup_skips_vacuum_under_postgres`` above for the behavior this
+# module is actually responsible for under Postgres.
 
 
 def test_cleanup_rollups_skipped_when_source_missing(monkeypatch):

@@ -166,11 +166,15 @@ def test_readers_scope_by_service_id_not_source_name(svc_id):
     # ``datetime('now', '-N days')``, and a negative N yields the invalid
     # modifier ``'--1 days'``, which SQLite resolves to NULL — the query
     # would return nothing regardless of the scoping fix.
+    # The LIKE pattern is bound as a parameter (rather than inlined literally)
+    # because psycopg's ``%s``-style substitution treats a bare ``%`` in the
+    # SQL TEXT itself as the start of a placeholder — inlining ``'mismatch-%'``
+    # raises ``only '%s', '%b', '%t' are allowed as placeholders``. Passing it
+    # as a bound value sidesteps that entirely (works under both backends).
     con = get_con(svc_id)
     con.execute(
-        "UPDATE quarantined_files SET quarantined_at = '2020-01-01 00:00:00' "
-        "WHERE service_id = ? AND file_name LIKE 'mismatch-%'",
-        (svc_id,),
+        "UPDATE quarantined_files SET quarantined_at = '2020-01-01 00:00:00' WHERE service_id = ? AND file_name LIKE ?",
+        (svc_id, "mismatch-%"),
     )
     con.commit()
     expired = get_expired_quarantined_files(svc_id, retention_days=1)

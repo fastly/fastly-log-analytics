@@ -76,15 +76,29 @@ class IngestMetadataStateMachine(RuleBasedStateMachine):
     @initialize()
     def setup(self):
         # One service per state-machine instance. The autouse
-        # ``isolate_metadata_db`` fixture sandboxes _DATA_DIR per pytest
-        # function — but Hypothesis runs MANY state-machine instances
-        # within a single pytest function, so the per-test SQLite file
-        # is shared across instances. Tear down the service so each
-        # instance starts from an empty DB; otherwise the second
-        # instance's shadow is empty while the DB still carries rows
-        # from the first instance → invariant violation → Hypothesis
-        # raises FlakyStrategyDefinition.
+        # ``isolate_metadata_db`` fixture sandboxes this worker's Postgres
+        # schema per pytest function — but Hypothesis runs MANY
+        # state-machine instances within a single pytest function, and
+        # every instance shares the SAME (service-scoped) rows in that
+        # schema. Reset this service's own rows in every table the
+        # invariants below check so each instance starts from an empty
+        # slate; otherwise the second instance's shadow is empty while the
+        # DB still carries rows from the first instance → invariant
+        # violation → Hypothesis raises FlakyStrategyDefinition.
+        #
+        # ``metadata_db.teardown()`` used to do this (it deleted the whole
+        # per-service SQLite file); under the shared Postgres metadata store
+        # every service's rows live in the same tables as every other
+        # service, so teardown() is a no-op there (by design — see
+        # backend/core/metadata/base.py's teardown() docstring) and this
+        # reset is done directly, scoped by service_id/source_name so it
+        # can never touch another service's rows.
         self.service_id = "svc-hypothesis-ingest"
+        con = metadata_db.get_con(self.service_id)
+        con.execute("DELETE FROM ingest_in_flight WHERE source_name = ?", (self.service_id,))
+        con.execute("DELETE FROM ingested_files WHERE source_name = ?", (self.service_id,))
+        con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (self.service_id,))
+        con.commit()
         metadata_db.teardown(self.service_id)
         self.shadow_in_flight: dict[str, list[tuple[str, int, int | None]]] = {}
         self.shadow_ingested: set[str] = set()

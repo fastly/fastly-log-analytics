@@ -338,15 +338,25 @@ def test_finalize_noop_when_run_id_missing():
     assert metadata_db.finalize_cron_run_if_running(sid, "sync", 999999) is False
 
 
-# ── _retry_on_locked: transient "database is locked" must not crash a tick ───
+# ── _retry_on_locked: now a pure passthrough under Postgres ──────────────────
 #
 # Cron jobs (sync/commit/local-compact/metadata_sync) converge on the same
-# minute boundary and write one per-service metadata.db. busy_timeout absorbs
-# ordinary queueing, but an immediate SQLITE_BUSY (WAL snapshot conflict, or a
-# checkpoint that couldn't drain on a full disk — the 2026-06-23 incident)
-# surfaces as "database is locked" and used to crash the whole cron tick with a
-# traceback. The bookkeeping writes now roll back and retry. (svc names here
-# don't matter — these exercise the helper, not real DBs.)
+# minute boundary and used to write one per-service metadata.db; an immediate
+# SQLITE_BUSY (WAL snapshot conflict, or a checkpoint that couldn't drain on a
+# full disk — the 2026-06-23 incident) surfaced as "database is locked" and
+# used to crash the whole cron tick with a traceback, so the bookkeeping
+# writes rolled back and retried. Under the shared Postgres metadata store
+# (autocommit=True — see pg_connection.py's module docstring) there is no
+# multi-statement lock window for a converging writer to contend on, so
+# ``_retry_on_locked`` is now a passthrough: call ``fn()`` once, propagate
+# whatever it raises. Two tests that pinned the retry-loop mechanism itself
+# (``test_retry_on_locked_retries_then_succeeds``,
+# ``test_retry_on_locked_reraises_after_exhausting_attempts``) and one that
+# pinned "a transient lock error mid-``start_cron_run`` doesn't double-insert
+# after a retry" (``test_start_cron_run_survives_a_transient_lock_without_double_insert``)
+# were deleted along with that mechanism — there is nothing left to retry, so
+# nothing left to pin. (svc names here don't matter — these exercise the
+# helper, not real DBs.)
 
 
 def test_retry_on_locked_returns_value_on_first_success():
@@ -357,58 +367,6 @@ def test_retry_on_locked_returns_value_on_first_success():
             raise AssertionError("rollback must not run when fn succeeds")
 
     assert _retry_on_locked(_FakeCon(), lambda: 42) == 42
-
-
-def test_retry_on_locked_retries_then_succeeds(monkeypatch):
-    import sqlite3
-
-    from backend.core.metadata import cron_log
-
-    monkeypatch.setattr(cron_log.time, "sleep", lambda *_a, **_k: None)
-
-    class _FakeCon:
-        def __init__(self):
-            self.rollbacks = 0
-
-        def rollback(self):
-            self.rollbacks += 1
-
-    con = _FakeCon()
-    state = {"n": 0}
-
-    def fn():
-        state["n"] += 1
-        if state["n"] < 3:
-            raise sqlite3.OperationalError("database is locked")
-        return "ok"
-
-    assert cron_log._retry_on_locked(con, fn) == "ok"
-    assert state["n"] == 3
-    assert con.rollbacks == 2  # one rollback before each of the two retries
-
-
-def test_retry_on_locked_reraises_after_exhausting_attempts(monkeypatch):
-    import sqlite3
-
-    import pytest
-
-    from backend.core.metadata import cron_log
-
-    monkeypatch.setattr(cron_log.time, "sleep", lambda *_a, **_k: None)
-
-    class _FakeCon:
-        def rollback(self):
-            pass
-
-    attempts = {"n": 0}
-
-    def always_locked():
-        attempts["n"] += 1
-        raise sqlite3.OperationalError("database is locked")
-
-    with pytest.raises(sqlite3.OperationalError, match="locked"):
-        cron_log._retry_on_locked(_FakeCon(), always_locked)
-    assert attempts["n"] == cron_log._LOCKED_RETRY_ATTEMPTS
 
 
 def test_retry_on_locked_does_not_retry_other_operational_errors():
@@ -436,38 +394,3 @@ def test_retry_on_locked_does_not_retry_other_operational_errors():
         cron_log._retry_on_locked(con, fn)
     assert calls["n"] == 1  # immediate re-raise, no retry/backoff
     assert con.rollbacks == 0
-
-
-def test_start_cron_run_survives_a_transient_lock_without_double_insert(monkeypatch):
-    """The exact failure from the incident: the orphan-reap UPDATE at the top
-    of start_cron_run raises "database is locked" once. It must retry and still
-    insert EXACTLY ONE running row (the rollback means the redo can't duplicate).
-    """
-    import sqlite3
-
-    from backend.core.metadata import cron_log
-
-    sid = "svc-retry-start"
-    con = metadata_db.get_con(sid)  # init schema
-    monkeypatch.setattr(cron_log.time, "sleep", lambda *_a, **_k: None)
-
-    orig_execute = con.execute
-    calls = {"n": 0}
-
-    def flaky_execute(sql, *args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:  # the reap UPDATE — first statement of the unit
-            raise sqlite3.OperationalError("database is locked")
-        return orig_execute(sql, *args, **kwargs)
-
-    monkeypatch.setattr(con, "execute", flaky_execute, raising=False)
-
-    rid = metadata_db.start_cron_run(sid, "sync")
-
-    assert rid
-    assert calls["n"] > 3, "expected reap(raises)→reap→count→insert; got a different statement sequence"
-    # Read back through the captured real execute (pytest restores the shadow at
-    # teardown). Exactly one row proves the rollback+redo didn't double-insert.
-    rows = orig_execute("SELECT id, status FROM cron_runs WHERE task = 'sync'").fetchall()
-    assert len(rows) == 1, f"transient-lock retry must not double-insert; got {len(rows)} rows"
-    assert rows[0]["status"] == "running"

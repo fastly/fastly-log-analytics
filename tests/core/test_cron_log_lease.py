@@ -12,12 +12,11 @@ job_name) WHERE status='running' DO NOTHING — using the partial unique
 index idx_job_runs_running_lease (migration 019 / base.py _SCHEMA), and
 reads rowcount to learn whether it won.
 
-These tests run against real SQLite (the isolate_metadata_db fixture is
-autouse), so they pin the CURRENT single-writer backend's behavior
-directly and prove the new statement shape is at least as tight as the
-old one. They also drive genuinely concurrent threads at the same lease to
-prove the unique index — not application-level locking — is what enforces
-mutual exclusion; that guarantee carries over unchanged to Postgres.
+These tests run against a real Postgres metadata backend (the
+isolate_metadata_db fixture is autouse), scoped to this xdist worker's own
+schema. They drive genuinely concurrent threads at the same lease to prove
+the unique index — not application-level locking — is what enforces mutual
+exclusion.
 """
 
 from __future__ import annotations
@@ -56,15 +55,21 @@ def test_lease_index_exists_and_is_unique_partial():
     """Pin the schema contract the atomic INSERT depends on — if a future
     schema edit drops or weakens this index, the ON CONFLICT target in
     start_cron_run silently stops matching and every call falls through to
-    a plain INSERT (no mutual exclusion, no error)."""
+    a plain INSERT (no mutual exclusion, no error).
+
+    Queries ``pg_indexes`` (schema-qualified by ``current_schema()`` — this
+    worker's isolated Postgres schema, see ``tests/conftest.py``'s
+    ``_pg_worker_schema``) rather than SQLite's ``sqlite_master``.
+    """
     con = get_con("svc-lease-index-check")
     row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_job_runs_running_lease'"
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+        "AND indexname = 'idx_job_runs_running_lease'"
     ).fetchone()
     assert row is not None, "idx_job_runs_running_lease is missing"
-    sql = row["sql"] if hasattr(row, "keys") else row[0]
-    assert "UNIQUE" in sql.upper()
-    assert "STATUS" in sql.upper() and "RUNNING" in sql.upper()
+    indexdef = row["indexdef"] if hasattr(row, "keys") else row[0]
+    assert "UNIQUE" in indexdef.upper()
+    assert "STATUS" in indexdef.upper() and "RUNNING" in indexdef.upper()
 
 
 def test_start_cron_run_exactly_one_of_two_concurrent_callers_wins():

@@ -384,7 +384,11 @@ def test_get_log_accounting_counts_uses_file_date_fast_arm_when_populated(sid):
         "SELECT file_name, file_date FROM ingested_files WHERE source_name = ?",
         (sid,),
     ).fetchall()
-    assert all(r["file_date"] == "2026-05-15" for r in fd_rows), (
+    # Postgres's ``file_date DATE`` column round-trips as a real
+    # ``datetime.date`` object (psycopg auto-converts), not the plain ISO
+    # string SQLite returns for the same column — compare via ``str()`` so
+    # this assertion holds under both backends.
+    assert all(str(r["file_date"]) == "2026-05-15" for r in fd_rows), (
         f"insert_ingested_files should populate file_date; got {[dict(r) for r in fd_rows]}"
     )
 

@@ -11,7 +11,6 @@ breaking the upgrade path for production services with existing
 
 from __future__ import annotations
 
-import os
 import sqlite3
 
 import pytest
@@ -296,15 +295,11 @@ def test_migration_002_backfills_file_date_from_filename(tmp_path):
         con.close()
 
 
-def test_insert_ingested_files_populates_file_date(tmp_path, monkeypatch):
-    """End-to-end: a fresh DB + insert_ingested_files should land rows
-    with file_date already populated (Python-side parse at insert time —
-    no need to wait for the next migration to backfill new data).
+def test_insert_ingested_files_populates_file_date():
+    """End-to-end: insert_ingested_files should land rows with file_date
+    already populated (Python-side parse at insert time — no need to wait
+    for the next migration to backfill new data).
     """
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
     metadata_db.insert_ingested_files(
         "newsvc",
         [
@@ -314,103 +309,38 @@ def test_insert_ingested_files_populates_file_date(tmp_path, monkeypatch):
     )
 
     con = metadata_db.get_con("newsvc")
-    try:
-        rows = {r[0]: r[1] for r in con.execute("SELECT file_name, file_date FROM ingested_files").fetchall()}
-        assert rows["s3://bucket/raw/2026-06-03/14/2026-06-03T14-30-00.svc.gz"] == "2026-06-03"
-        assert rows["legacy_no_iso.log.gz"] is None
-    finally:
-        metadata_db.close_all_connections()
+    rows = {r[0]: r[1] for r in con.execute("SELECT file_name, file_date FROM ingested_files").fetchall()}
+    # Postgres's ``file_date DATE`` column round-trips as a real
+    # ``datetime.date`` (psycopg auto-converts) rather than the plain ISO
+    # string SQLite returns for the same column.
+    assert str(rows["s3://bucket/raw/2026-06-03/14/2026-06-03T14-30-00.svc.gz"]) == "2026-06-03"
+    assert rows["legacy_no_iso.log.gz"] is None
 
 
-# ── Integration with metadata_db._init_schema ────────────────────────────────
-
-
-def test_init_schema_on_fresh_db_jumps_to_latest_version(tmp_path, monkeypatch):
-    """A brand-new DB opened via ``metadata_db.get_con`` should land at
-    LATEST_VERSION without applying any migrations (the latest ``_SCHEMA``
-    already has the v1 columns)."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    con = metadata_db.get_con("fresh-svc")
-    try:
-        assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
-        assert "error_count" in _columns(con, "ingested_files")
-    finally:
-        metadata_db.close_all_connections()
-
-
-def test_init_schema_on_legacy_db_upgrades_in_place(tmp_path, monkeypatch):
-    """A DB created before the framework existed — i.e. ``user_version=0``
-    and no ``error_count`` column — gets upgraded the first time
-    ``metadata_db.get_con`` opens it.
-
-    The data inserted under the old schema must round-trip through the
-    upgrade without loss."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    # Lay down the legacy file at the path get_con would resolve to.
-    os.makedirs(str(tmp_path / "services"), exist_ok=True)
-    legacy_path = str(tmp_path / "services" / "legacy-svc.metadata.db")
-    _seed_pre_migration_db(legacy_path)
-
-    con = metadata_db.get_con("legacy-svc")
-    try:
-        assert sqlite_migrations.get_current_version(con) == sqlite_migrations.LATEST_VERSION
-        assert "error_count" in _columns(con, "ingested_files")
-
-        # The seed rows from the legacy schema must survive
-        n = con.execute("SELECT COUNT(*) FROM ingested_files WHERE source_name = 'svc'").fetchone()[0]
-        assert n == 2, f"legacy data was lost during upgrade: count={n}"
-    finally:
-        metadata_db.close_all_connections()
-
-
-# The legacy metadata.db.usage_log table + its INSERT/DELETE/UPDATE
-# triggers + the _migration_003 rebuilder were all retired alongside
-# the v2.0 cutover to the per-service usage_log SQLite. The trigger
-# behavior tests + the migration_003 corruption-fix test had no
-# remaining production behavior to pin and were removed with the DDL.
-
-
-def test_legacy_db_with_active_writer_pattern_still_inserts(tmp_path, monkeypatch):
-    """End-to-end: legacy DB → upgrade → metadata_db.insert_ingested_files
-    still works against the upgraded schema (the new column is nullable
-    with a default, so existing INSERT statements remain valid)."""
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(tmp_path / "services"))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
-
-    os.makedirs(str(tmp_path / "services"), exist_ok=True)
-    legacy_path = str(tmp_path / "services" / "legacy-writer.metadata.db")
-    _seed_pre_migration_db(legacy_path)
-
-    # Note: _seed_pre_migration_db wrote rows under source_name='svc'; the
-    # writer test below uses the same source_name so insert_ingested_files
-    # also exercises the upsert path against pre-existing rows.
-    metadata_db.insert_ingested_files(
-        "legacy-writer",
-        [
-            ("s3://bucket/raw/2026-05-01/11/2026-05-01T11-00-00.svc.gz", 999, 12345),
-        ],
-    )
-
-    con = metadata_db.get_con("legacy-writer")
-    try:
-        rows = con.execute(
-            "SELECT row_count, file_size_bytes, error_count FROM ingested_files "
-            "WHERE file_name = 's3://bucket/raw/2026-05-01/11/2026-05-01T11-00-00.svc.gz'"
-        ).fetchall()
-        assert len(rows) == 1
-        rc, sz, ec = rows[0]
-        assert rc == 999
-        assert sz == 12345
-        assert ec == 0  # default value applied to insert that didn't specify it
-    finally:
-        metadata_db.close_all_connections()
+# Note: this file's other tests (test_apply_pending_*, test_migration_0*,
+# test_failed_migration_*, test_middle_failure_*, test_retry_after_failure_*,
+# test_user_version_ahead_*) exercise ``sqlite_migrations.py`` directly
+# against a raw sqlite3 connection they open themselves (never through
+# ``metadata_db.get_con``) — that module is untouched by this migration and
+# keeps working exactly as before; those tests are unaffected and still
+# pass.
+#
+# The three tests that used to live here —
+# ``test_init_schema_on_fresh_db_jumps_to_latest_version``,
+# ``test_init_schema_on_legacy_db_upgrades_in_place``, and
+# ``test_legacy_db_with_active_writer_pattern_still_inserts`` — pinned
+# ``metadata_db.get_con``'s SQLite-only lazy-bootstrap behavior: opening a
+# legacy pre-framework ``.metadata.db`` FILE and having ``_init_schema`` (now
+# deleted — see backend/core/metadata/base.py) upgrade it in place via
+# ``sqlite_migrations.apply_pending``. There is no Postgres equivalent of "a
+# legacy per-service file that predates the schema framework" — every
+# service shares the one already-bootstrapped Postgres database (see
+# ``pg_schema.ensure_pg_schema``), so this scenario cannot occur under the
+# only backend that now exists. Deleted rather than given a strained
+# Postgres analog; the real invariant they also incidentally covered —
+# ``insert_ingested_files`` still writes valid rows against the current
+# schema — is pinned above by ``test_insert_ingested_files_populates_file_date``
+# and by the broader ``test_metadata_db_crud.py`` suite.
 
 
 # ── Crash-recovery semantics ─────────────────────────────────────────────────
