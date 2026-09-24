@@ -58,6 +58,11 @@ services:
       # backend over loopback here (operator traffic lands as the docker
       # gateway IP), so the isolated compose subnet is declared admin-trusted.
       - LOCAL_ADMIN_CIDRS=172.29.0.0/16
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -99,6 +104,23 @@ services:
     depends_on:
       - frontend
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=fla
+      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
+      - POSTGRES_DB=ducklake
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
@@ -109,3 +131,4 @@ networks:
 volumes:
   backend-data:
   backend-cache:
+  postgres-data:

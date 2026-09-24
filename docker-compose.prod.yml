@@ -235,6 +235,12 @@ services:
       - OAUTH_REDIRECT_BASE=${OAUTH_REDIRECT_BASE:-}
       # SSO-exclusive deployments only: set to 0 to disable passcode login.
       - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
+      # PostgreSQL standard metadata + DuckLake catalog (unified v3 storage).
+      # Points to the local Postgres container on loopback with no fallback password.
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD}@127.0.0.1:5432/ducklake
+    depends_on:
+      - postgres
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
@@ -325,6 +331,27 @@ services:
       - caddy_config:/config
     depends_on:
       - frontend
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    logging: *prod-logging
+    # Security: bind to loopback ONLY — not reachable on public or VPC interfaces.
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    environment:
+      - POSTGRES_USER=fla
+      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD}
+      - POSTGRES_DB=ducklake
+    volumes: !override
+      - /mnt/app-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fla -d ducklake"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   caddy_data:
