@@ -74,9 +74,12 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
     error_count = 0
     try:
         err_query = "SELECT sum(error_count) as c FROM rum_error_aggregates WHERE service_id={service_id:String} AND dimension='error_message' AND publication_state='visible'"
+        params: dict[str, Any] = {"service_id": service.service_id}
         if start and end:
             err_query += " AND bucket_start >= {start:DateTime} AND bucket_start <= {end:DateTime}"
-        err_res = service.client.execute(err_query, {"service_id": service.service_id, "start": start, "end": end})
+            params["start"] = start.strftime("%Y-%m-%d %H:%M:%S")
+            params["end"] = end.strftime("%Y-%m-%d %H:%M:%S")
+        err_res = service.client.execute(err_query, params)
         error_count = err_res[0].get("c", 0) if err_res and err_res[0].get("c") is not None else 0
     except Exception:
         try:

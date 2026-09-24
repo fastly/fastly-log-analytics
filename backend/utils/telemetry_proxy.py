@@ -697,7 +697,14 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
             # Warn loudly so the regression class (the iceberg_scan vs
             # read_parquet incident) is visible. Do not block — visibility
             # over enforcement until Phase 3 wires clients to the proxy.
-            if service == "FOS" and request.method in ("GET", "HEAD") and (process_context or "").startswith("api:"):
+            # Health check probes (e.g. /api/admin/health-snapshot) intentionally test
+            # bucket reachability and are exempt from dashboard cost guardrails.
+            if (
+                service == "FOS"
+                and request.method in ("GET", "HEAD")
+                and (process_context or "").startswith("api:")
+                and not any(h in (process_context or "") for h in ("/api/admin/health", "/api/health"))
+            ):
                 logger.warning(
                     "[telemetry-proxy] dashboard context hitting FOS: %s %s ctx=%s",
                     request.method,

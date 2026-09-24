@@ -582,7 +582,7 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     )
     try:
         con.register(f"temp_arrow_{alias}", tbl)
-        con.execute(f"CREATE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
     except Exception as e:
         _logger.warning("[ngwaf_bots] materializing %s_ngwaf_bots failed: %s", alias, e)
         return False
