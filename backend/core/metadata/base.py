@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sqlite3
 import threading
 
 from backend.core.metadata import pg_connection
@@ -169,7 +168,7 @@ def db_path(service_id: str) -> str:
     return os.path.join(_DATA_DIR, f"{service_id}.metadata.db")
 
 
-def get_con(service_id: str) -> sqlite3.Connection:
+def get_con(service_id: str) -> pg_connection.PgConnectionWrapper:
     """Return this thread's shared Postgres connection, tagged for ``service_id``.
 
     ``service_id`` is validated but otherwise unused for connection
@@ -185,10 +184,10 @@ def get_con(service_id: str) -> sqlite3.Connection:
     # PgConnectionWrapper.__init__'s docstring on why this is safe for
     # a connection shared across services on one thread.
     wrapper._service_id = service_id
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
-def get_con_readonly(service_id: str) -> sqlite3.Connection:
+def get_con_readonly(service_id: str) -> pg_connection.PgConnectionWrapper:
     """Return a short-lived read-only connection for the given service.
 
     This connection is not pooled and should be closed immediately (callers
@@ -198,7 +197,7 @@ def get_con_readonly(service_id: str) -> sqlite3.Connection:
     _validate_service_id_or_raise(service_id)
     wrapper = pg_connection.get_pg_readonly_connection()
     wrapper._service_id = service_id
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
 def release_thread_connection() -> None:

@@ -50,13 +50,6 @@ def test_latest_ingest_timestamp_uses_postgres_compatible_aggregate(postgres_mod
     assert result == "2026-09-08T21:34:32Z"
 
 
-def test_get_con_uses_sqlite_pool_when_dsn_unset(monkeypatch):
-    monkeypatch.delenv("METADATA_DSN", raising=False)
-    with patch.object(base.pg_connection, "get_pg_thread_connection") as mock_get:
-        base.get_con("svc-1")
-    mock_get.assert_not_called()
-
-
 def test_get_con_readonly_routes_to_postgres(postgres_mode):
     sentinel = MagicMock()
     with patch.object(base.pg_connection, "get_pg_readonly_connection", return_value=sentinel) as mock_get:
@@ -71,41 +64,13 @@ def test_release_thread_connection_routes_to_postgres(postgres_mode):
     mock_release.assert_called_once_with()
 
 
-def test_release_thread_connection_noop_when_dsn_unset(monkeypatch):
-    monkeypatch.delenv("METADATA_DSN", raising=False)
-    with patch.object(base.pg_connection, "release_pg_thread_connection") as mock_release:
-        base.release_thread_connection()
-    mock_release.assert_not_called()
-
-
 def test_close_all_connections_routes_to_postgres(postgres_mode):
     with patch.object(base.pg_connection, "close_all_pg_connections") as mock_close:
-        with patch.object(base._pool, "close_all") as mock_sqlite_close:
-            base.close_all_connections()
+        base.close_all_connections()
     mock_close.assert_called_once()
-    mock_sqlite_close.assert_not_called()
-
-
-def test_close_all_connections_uses_sqlite_when_dsn_unset(monkeypatch):
-    monkeypatch.delenv("METADATA_DSN", raising=False)
-    with patch.object(base.pg_connection, "close_all_pg_connections") as mock_close:
-        with patch.object(base._pool, "close_all") as mock_sqlite_close:
-            base.close_all_connections()
-    mock_close.assert_not_called()
-    mock_sqlite_close.assert_called_once()
 
 
 def test_teardown_is_noop_under_postgres(postgres_mode):
-    """No per-service file exists under Postgres — teardown must not touch
-    the SQLite pool's teardown path (which would try to delete a file that
-    was never created)."""
-    with patch.object(base._pool, "teardown") as mock_teardown:
-        base.teardown("svc-1")
-    mock_teardown.assert_not_called()
+    """No per-service file exists under Postgres — teardown clears the cache without error."""
+    base.teardown("svc-1")
 
-
-def test_teardown_deletes_sqlite_file_when_dsn_unset(monkeypatch):
-    monkeypatch.delenv("METADATA_DSN", raising=False)
-    with patch.object(base._pool, "teardown") as mock_teardown:
-        base.teardown("svc-1")
-    mock_teardown.assert_called_once_with("svc-1")
