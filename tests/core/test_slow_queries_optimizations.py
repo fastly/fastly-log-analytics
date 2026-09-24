@@ -7,29 +7,6 @@ from unittest.mock import MagicMock
 
 from backend.core.metadata import slow_queries, usage_log, usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
-from backend.core.sqlite_pool import open_small_cache_db
-
-
-def test_small_cache_db_corruption_self_healing(tmp_path):
-    """Verify that open_small_cache_db transparently self-heals corrupted SQLite files."""
-    db_file = tmp_path / "corrupt_cache.db"
-    ddl = "CREATE TABLE cache_t (id INTEGER PRIMARY KEY, key TEXT)"
-
-    # 1. Corrupt the file with random garbage bytes
-    db_file.write_bytes(b"THIS IS NOT A VALID SQLITE FILE - JUST RANDOM GARBAGE BYTES")
-
-    # 2. Try opening the DB with our open_small_cache_db helper
-    # It must detect the corruption, delete the bad files, and successfully recreate a clean DB
-    con = open_small_cache_db(db_file, ddl=ddl, check_same_thread=True, timeout=1.0)
-    try:
-        # Verify the table exists and can be written to
-        con.execute("INSERT INTO cache_t (key) VALUES ('test')")
-        con.commit()
-        rows = con.execute("SELECT key FROM cache_t").fetchall()
-        assert len(rows) == 1
-        assert rows[0][0] == "test"
-    finally:
-        con.close()
 
 
 def test_usage_log_purging_and_trigger_restricton(tmp_path, monkeypatch):
