@@ -472,3 +472,37 @@ class TestTryNetworkGeoFromRollup:
             con.close()
 
         assert result is None
+
+    def test_returns_tuple_when_window_includes_active_hour(self, geo_rollup_layout):
+        """When end_time reaches the current active hour, unions rollup bundles with live base table."""
+        bundled, src, _, _, _ = geo_rollup_layout
+        now = datetime.now(UTC)
+        start_iso = (now - timedelta(hours=48)).isoformat()
+        end_iso = now.isoformat()
+
+        cur = (now - timedelta(hours=48)).replace(minute=0, second=0, microsecond=0)
+        active_start = now.replace(minute=0, second=0, microsecond=0)
+        while cur < active_start:
+            h_str = cur.strftime("%Y-%m-%d-%H")
+            _write_geo_bundle(bundled, h_str)
+            _write_all_fields_marker(bundled, h_str)
+            cur += timedelta(hours=1)
+
+        con = duckdb.connect()
+        try:
+            con.execute(
+                "CREATE TABLE logs_test (country VARCHAR, city VARCHAR, lat DOUBLE, lon DOUBLE, metro VARCHAR, tcp_rtt BIGINT, status INT, timestamp TIMESTAMPTZ)"
+            )
+            con.execute(
+                "INSERT INTO logs_test VALUES ('US', 'Denver', 39.7, -104.9, '751', 25000, 200, now())"
+            )
+            runner = QueryRunner(con, src)
+            result = runner.try_network_geo_from_rollup(start_iso, end_iso, has_filters=False)
+        finally:
+            con.close()
+
+        assert result is not None
+        map_rows, metro_rows = result
+        assert len(map_rows) > 0
+        assert len(metro_rows) > 0
+

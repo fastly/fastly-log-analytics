@@ -491,9 +491,6 @@ def get_health(
         _leader_temp_name: list[str | None] = [None]
 
         def _build_temp_results() -> tuple[list[str], list[Any], list[Any], list[Any]]:
-            if not filters and not svcconfig.is_durable_serving_mode(src):
-                timer.mark("network:temp_skipped_unfiltered", _time.perf_counter())
-                return [], [], [], []
             _t0 = _time.perf_counter()
             temp_name = get_runner().create_filtered_temp_table(
                 all_net_cols, list(actual_cols), table_name, where_clause, params
@@ -517,96 +514,104 @@ def get_health(
 
             heatmap_rows_b: list[Any] = []
             if _want_heatmap_query:
-                heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
-                    bucket_ms=bucket_ms,
-                    rtt_min_expr=rtt_min_expr,
-                    congestion_expr=congestion_expr,
-                    ploss_expr=ploss_expr,
-                    rtt_var_expr=rtt_var_expr,
-                    table=temp_name,
-                    where="1=1",
-                    row_limit=top_n * 200,
-                )
-                _t1 = _time.perf_counter()
-                heatmap_rows_b = get_runner().execute(heatmap_sql, []).fetchall()
-                timer.mark("heatmap_query", _t1)
+                if "heatmap" in _net_rolled:
+                    heatmap_rows_b = _net_rolled["heatmap"]
+                else:
+                    heatmap_sql = SQL.HEATMAP_BY_ASN_BUCKET.format(
+                        bucket_ms=bucket_ms,
+                        rtt_min_expr=rtt_min_expr,
+                        congestion_expr=congestion_expr,
+                        ploss_expr=ploss_expr,
+                        rtt_var_expr=rtt_var_expr,
+                        table=temp_name,
+                        where="1=1",
+                        row_limit=top_n * 200,
+                    )
+                    _t1 = _time.perf_counter()
+                    heatmap_rows_b = get_runner().execute(heatmap_sql, []).fetchall()
+                    timer.mark("heatmap_query", _t1)
 
             map_rows_b: list[Any] = []
-            if _want_map_query and has_country:
-                lat_col = "lat" if has_lat else "NULL"
-                lon_col = "lon" if has_lat else "NULL"
-                metro_col = "metro" if has_metro else "NULL"
-                city_col = "city" if "city" in actual_cols else "''"
-                # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
-                # references the same columns by name on both sides, so
-                # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
-                # binder. Prefix with the temp-table name when the column
-                # really exists; keep the NULL / '' literal otherwise.
-                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
-                join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
-                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
-
-                map_where = "1=1"
-                map_params: list[Any] = []
-                if map_asn != "all":
-                    map_where += " AND asn = ?"
-                    map_params.append(int(map_asn))
-
-                # Cap to top 5000 (country, city, bucket) cells by request
-                # volume — the map UI renders dots, and the long tail beyond a
-                # few thousand points is invisible. Without the cap the
-                # response body grew to 5.8MB on busy windows, dominating
-                # /network cold-load wall time via transfer + JSON parse.
-                # Re-sorted by (bucket, reqs DESC) after the cap to preserve
-                # the downstream chronological ordering the map expects.
-                map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
-                    city_col=city_col,
-                    lat_col=lat_col,
-                    lon_col=lon_col,
-                    metro_col=metro_col,
-                    join_city_col=join_city_col,
-                    join_lat_col=join_lat_col,
-                    join_lon_col=join_lon_col,
-                    join_metro_col=join_metro_col,
-                    bucket_ms=bucket_ms,
-                    ploss_expr=ploss_expr,
-                    table=temp_name,
-                    where=map_where,
-                )
-                _t2 = _time.perf_counter()
-                # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
-                # outer WHERE), so the asn filter placeholder must be bound
-                # twice. ``map_params`` is at most one element (the asn int)
-                # when ``map_asn != "all"``, empty otherwise.
-                map_rows_b = get_runner().execute(map_sql, map_params + map_params).fetchall()
-                timer.mark("map_query", _t2)
-
             metro_rows_b: list[Any] = []
-            if has_country:
-                metro_col_m = "metro" if has_metro else "NULL"
-                city_col = "city" if "city" in actual_cols else "''"
-                region_col = "region" if "region" in actual_cols else "''"
-                # Qualified-for-JOIN variants — same disambiguation pattern
-                # as map_query. The 2-pass CTE re-aliases these names on the
-                # top_cells side, so the JOIN ON needs table-qualified refs.
-                join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
-                join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
-                join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
-                metro_sql = SQL.METRO_LEADERBOARD.format(
-                    city_col=city_col,
-                    region_col=region_col,
-                    metro_col=metro_col_m,
-                    join_city_col=join_city_col,
-                    join_region_col=join_region_col,
-                    join_metro_col=join_metro_col,
-                    ploss_expr=ploss_expr,
-                    table=temp_name,
-                    where="1=1",
-                )
-                _t3 = _time.perf_counter()
-                metro_rows_b = get_runner().execute(metro_sql, []).fetchall()
-                timer.mark("metro_query", _t3)
+            if "map_geo" in _net_rolled and map_asn == "all":
+                _geo = _net_rolled["map_geo"]
+                map_rows_b = _geo[0] if _geo else []
+                metro_rows_b = _geo[1] if _geo else []
+            else:
+                if _want_map_query and has_country:
+                    lat_col = "lat" if has_lat else "NULL"
+                    lon_col = "lon" if has_lat else "NULL"
+                    metro_col = "metro" if has_metro else "NULL"
+                    city_col = "city" if "city" in actual_cols else "''"
+                    # Qualified-for-JOIN variants. The 2-pass CTE's ON clause
+                    # references the same columns by name on both sides, so
+                    # bare ``city`` / ``lat`` etc. are ambiguous to DuckDB's
+                    # binder. Prefix with the temp-table name when the column
+                    # really exists; keep the NULL / '' literal otherwise.
+                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                    join_lat_col = f"{temp_name}.lat" if has_lat else "NULL"
+                    join_lon_col = f"{temp_name}.lon" if has_lat else "NULL"
+                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+
+                    map_where = "1=1"
+                    map_params: list[Any] = []
+                    if map_asn != "all":
+                        map_where += " AND asn = ?"
+                        map_params.append(int(map_asn))
+
+                    # Cap to top 5000 (country, city, bucket) cells by request
+                    # volume — the map UI renders dots, and the long tail beyond a
+                    # few thousand points is invisible. Without the cap the
+                    # response body grew to 5.8MB on busy windows, dominating
+                    # /network cold-load wall time via transfer + JSON parse.
+                    # Re-sorted by (bucket, reqs DESC) after the cap to preserve
+                    # the downstream chronological ordering the map expects.
+                    map_sql = SQL.MAP_BY_COUNTRY_BUCKET.format(
+                        city_col=city_col,
+                        lat_col=lat_col,
+                        lon_col=lon_col,
+                        metro_col=metro_col,
+                        join_city_col=join_city_col,
+                        join_lat_col=join_lat_col,
+                        join_lon_col=join_lon_col,
+                        join_metro_col=join_metro_col,
+                        bucket_ms=bucket_ms,
+                        ploss_expr=ploss_expr,
+                        table=temp_name,
+                        where=map_where,
+                    )
+                    _t2 = _time.perf_counter()
+                    # {where} appears twice in the 2-pass CTE shape (CTE WHERE +
+                    # outer WHERE), so the asn filter placeholder must be bound
+                    # twice. ``map_params`` is at most one element (the asn int)
+                    # when ``map_asn != "all"``, empty otherwise.
+                    map_rows_b = get_runner().execute(map_sql, map_params + map_params).fetchall()
+                    timer.mark("map_query", _t2)
+
+                if has_country:
+                    metro_col_m = "metro" if has_metro else "NULL"
+                    city_col = "city" if "city" in actual_cols else "''"
+                    region_col = "region" if "region" in actual_cols else "''"
+                    # Qualified-for-JOIN variants — same disambiguation pattern
+                    # as map_query. The 2-pass CTE re-aliases these names on the
+                    # top_cells side, so the JOIN ON needs table-qualified refs.
+                    join_metro_col = f"{temp_name}.metro" if has_metro else "NULL"
+                    join_city_col = f"{temp_name}.city" if "city" in actual_cols else "''"
+                    join_region_col = f"{temp_name}.region" if "region" in actual_cols else "''"
+                    metro_sql = SQL.METRO_LEADERBOARD.format(
+                        city_col=city_col,
+                        region_col=region_col,
+                        metro_col=metro_col_m,
+                        join_city_col=join_city_col,
+                        join_region_col=join_region_col,
+                        join_metro_col=join_metro_col,
+                        ploss_expr=ploss_expr,
+                        table=temp_name,
+                        where="1=1",
+                    )
+                    _t3 = _time.perf_counter()
+                    metro_rows_b = get_runner().execute(metro_sql, []).fetchall()
+                    timer.mark("metro_query", _t3)
 
             return countries_b, heatmap_rows_b, map_rows_b, metro_rows_b
 
@@ -1020,21 +1025,17 @@ def get_health(
 
         worst_country = None
         if has_country and map_buckets:
-            latest_cities = map_buckets[-1]["cities"]
-            # M-4: the prior ``reqs > 10`` floor frequently left worst_country
-            # blank on low-traffic 24h windows, rendering "Worst Region: --"
-            # alongside a populated Worst ASN. Drop to 1 so the panel
-            # surfaces something whenever the data has any city signal at
-            # all — operators reading "--" assumed the page was broken.
-            sig_countries = [c for c in latest_cities if c["reqs"] >= 1]
-            if sig_countries:
-                wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
-                # Resolve the interned city name for the worst-country label.
-                idx = wc.get("city_idx", -1)
-                city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
-                city_name = city_entry["name"] if city_entry else ""
-                label = format_city_label(city_name, wc["country"])
-                worst_country = {"label": label, "score": wc["health_score"]}
+            for b in reversed(map_buckets):
+                cities_in_b = b.get("cities") or []
+                sig_countries = [c for c in cities_in_b if c.get("reqs", 0) >= 1]
+                if sig_countries:
+                    wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
+                    idx = wc.get("city_idx", -1)
+                    city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
+                    city_name = city_entry["name"] if city_entry else ""
+                    label = format_city_label(city_name, wc["country"])
+                    worst_country = {"label": label, "score": wc["health_score"]}
+                    break
 
         payload: dict[str, Any] = {
             "available": True,

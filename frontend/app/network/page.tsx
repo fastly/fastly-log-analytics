@@ -534,7 +534,7 @@ export default function NetworkPage() {
                       <TooltipTrigger
                         render={
                           <span
-                            className="inline-flex items-center text-muted-foreground hover:text-foreground transition-colors cursor-help"
+                            className="relative inline-flex items-center text-muted-foreground hover:text-foreground transition-colors cursor-help"
                           />
                         }
                       >

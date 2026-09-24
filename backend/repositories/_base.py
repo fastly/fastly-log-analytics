@@ -542,6 +542,7 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         if not os.path.exists(db_path):
             return False
         import sqlite3
+
         try:
             sconn = sqlite3.connect(db_path, timeout=5)
             try:
@@ -4161,6 +4162,21 @@ class QueryRunner:
 
         base_table = _safe_table_for(self.src)
 
+        cols = set(self.get_schema_cols())
+        if "country" not in cols:
+            return None
+        has_city = "city" in cols
+        has_lat = "lat" in cols and "lon" in cols
+        has_metro = "metro" in cols
+        city_col = "city" if has_city else "CAST('' AS VARCHAR)"
+        lat_col = "CAST(lat AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
+        lon_col = "CAST(lon AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
+        metro_col = "metro" if has_metro else "CAST(NULL AS VARCHAR)"
+        city_grp = "city" if has_city else "''"
+        lat_grp = "lat" if has_lat else "NULL"
+        lon_grp = "lon" if has_lat else "NULL"
+        metro_grp = "metro" if has_metro else "NULL"
+
         if et > active_hour_start:
             ah_iso = active_hour_start.isoformat()
             map_sql = (
@@ -4175,11 +4191,11 @@ class QueryRunner:
                 f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f"  UNION ALL "
                 f"  SELECT"
-                f"    client_geo_country_code AS country,"
-                f"    client_geo_city AS city,"
-                f"    CAST(client_geo_latitude AS DOUBLE) AS lat,"
-                f"    CAST(client_geo_longitude AS DOUBLE) AS lon,"
-                f"    client_geo_metro_code AS metro,"
+                f"    country,"
+                f"    {city_col} AS city,"
+                f"    {lat_col} AS lat,"
+                f"    {lon_col} AS lon,"
+                f"    {metro_col} AS metro,"
                 f"    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
                 f"    0::DOUBLE AS avg_ploss,"
@@ -4187,8 +4203,8 @@ class QueryRunner:
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
                 f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
-                f"    AND client_geo_country_code IS NOT NULL AND client_geo_country_code != ''"
-                f"  GROUP BY country, city, lat, lon, metro"
+                f"    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {lat_grp}, {lon_grp}, {metro_grp}"
                 f") ORDER BY bucket_ts, reqs DESC LIMIT 5000"
             )
             metro_sql = (
@@ -4207,15 +4223,15 @@ class QueryRunner:
                 f"  WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
                 f"  GROUP BY country, city, metro"
                 f"  UNION ALL "
-                f"  SELECT client_geo_country_code AS country, client_geo_city AS city, client_geo_metro_code AS metro,"
+                f"  SELECT country, {city_col} AS city, {metro_col} AS metro,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,"
                 f"    0::DOUBLE AS avg_ploss,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs"
                 f"  FROM {base_table} "
                 f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'"
-                f"    AND client_geo_country_code IS NOT NULL AND client_geo_country_code != ''"
-                f"  GROUP BY country, city, metro"
+                f"    AND country IS NOT NULL AND country != ''"
+                f"  GROUP BY country, {city_grp}, {metro_grp}"
                 f") GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100"
             )
         else:
