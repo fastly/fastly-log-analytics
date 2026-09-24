@@ -29,7 +29,7 @@ def isolate_share_db(tmp_path, monkeypatch):
         con.execute("DELETE FROM remote_share_audit_logs")
         con.commit()
     except Exception:
-        pass
+        con.rollback()
     yield
     share_db.close_all_connections()
     tunnel.reset_for_tests()

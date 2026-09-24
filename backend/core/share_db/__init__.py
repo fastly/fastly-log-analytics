@@ -11,7 +11,7 @@ contention pattern, different audit scope (security material).
 This module is the back-compat surface for the carved-up share_db package.
 The implementation lives in per-concern submodules:
 
-- ``connection`` — thread-local pool, PRAGMA setup, corruption self-heal
+- ``connection`` — thread-local Postgres connection routing
 - ``schema`` — _SCHEMA tables + MIGRATIONS dict + apply_pending
 - ``passcode`` — argon2id hashing + verify + cost-upgrade rehash + timing eq.
 - ``validation`` — name/email/PII/IP-whitelist parsing

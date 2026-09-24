@@ -117,10 +117,7 @@ def purge_stale_share_records(
     *,
     con: Any = None,
 ) -> dict[str, int]:
-    """Purge expired claim tokens, expired invites, and stale sessions.
-
-    Also executes PRAGMA wal_checkpoint(TRUNCATE).
-    """
+    """Purge expired claim tokens, expired invites, and stale sessions."""
     con = con or get_global_share_con()
     now_iso = iso_z_now()
     session_cutoff = iso_z(datetime.now(UTC) - timedelta(days=int(max_idle_session_days)))
