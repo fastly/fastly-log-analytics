@@ -1,7 +1,9 @@
 # ADR-15 — Multi-Writer Topology: Postgres Metadata + Split Scheduling
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-22](22-postgres-only-metadata.md)
 **Decided by:** v3.0.0-beta1 scalability rework, `release/v3.0.0` commits `3c3df695` (Postgres metadata seam), `4487be3f` (scheduler split), `debfaba3`/`8fa0dfd1` (Postgres DuckLake catalog requirement)
+
+> **Superseded by [ADR-22](22-postgres-only-metadata.md) (2026-09):** In v3.0.0, the dual-mode metadata and catalog split was eliminated. PostgreSQL 16 is now mandatory across all deployment topologies, including standard/single-pod and local dev. SQLite files, dialect toggles, and SQLite connection pools have been completely removed from the codebase.
 
 ## Context
 
