@@ -320,7 +320,6 @@ def _pg_worker_schema(worker_id):
 
     pg_connection.close_all_pg_connections()
     pg_connection.reset_pg_pool_for_tests()
-    admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
     admin_conn.close()
 
 
