@@ -292,23 +292,6 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 )
                 return False
 
-        if read_only and (dsn.startswith("postgres:") or not os.path.exists(dsn)):
-            # A read-only attach of a not-yet-initialized catalog fails ("does
-            # not exist - and creating a new DuckLake is explicitly disabled") —
-            # for a local file we can cheaply detect that via os.path.exists;
-            # for a Postgres DSN we can't, so always pre-create idempotently.
-            # Create with a transient read-write attach so fresh services get a
-            # queryable (empty) lake immediately.
-            try:
-                con.execute(
-                    f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
-                    f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
-                )
-                con.execute("DETACH __lake_init")
-            except Exception as e:
-                if "already attached" not in str(e) and "already exists" not in str(e):
-                    logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, e)
-
         ro = ", READ_ONLY" if read_only else ""
         attach_sql = (
             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
@@ -320,6 +303,21 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 break
             except Exception as e:
                 msg = str(e).lower()
+                if read_only and ("does not exist" in msg or "explicitly disabled" in msg):
+                    # A read-only attach of a not-yet-initialized catalog fails ("does
+                    # not exist - and creating a new DuckLake is explicitly disabled") —
+                    # initialize it on-demand with a transient read-write attach, then retry.
+                    try:
+                        con.execute(
+                            f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
+                            f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
+                        )
+                        con.execute("DETACH __lake_init")
+                        con.execute(attach_sql)
+                        break
+                    except Exception as init_err:
+                        if "already attached" not in str(init_err) and "already exists" not in str(init_err):
+                            logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, init_err)
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
                     for alias in ("lake", "__ducklake_metadata_lake"):
                         try:

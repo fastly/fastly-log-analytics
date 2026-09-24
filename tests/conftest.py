@@ -312,6 +312,7 @@ def _pg_worker_schema(worker_id):
     sep = "&" if "?" in base_dsn else "?"
     worker_dsn = f"{base_dsn}{sep}options={options}"
     _os.environ["METADATA_DSN"] = worker_dsn
+    _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
 
     pg_schema.ensure_pg_schema(force=True)
 
@@ -344,6 +345,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     ``test-service-id.duckdb``, etc. Patch the four config-level DATA paths
     in parallel so the whole tree is sandboxed.
     """
+    import os
     from pathlib import Path
 
     from backend import config as svcconfig
@@ -408,6 +410,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", sandbox_configs)
     monkeypatch.setattr(svcconfig, "NGWAF_DATA_DIR", sandbox_ngwaf)
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", sandbox_cache)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", os.environ["DUCKLAKE_CATALOG"])
     monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", sandbox_system)
     # ``_ensured_dirs`` is a per-path memo for the mkdir storm — must be
     # cleared so _ensure_dirs() actually creates the new sandbox dirs.
@@ -419,8 +422,6 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     # ``my-bucket``, ``test-bucket`` directories into the repo root.
     # Redirect to the per-test sandbox while preserving the
     # ``_cache_dir_override`` escape hatch and the ``bucket`` shape.
-    import os as _os
-
     from backend.core import duckdb as _bk_duckdb
 
     sandbox_cache_root = sandbox_data / "cache"
@@ -429,7 +430,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
         if "_cache_dir_override" in source:
             return source["_cache_dir_override"]
         bucket = (source.get("bucket") or source.get("fos_bucket") or "default").strip()
-        return _os.path.join(str(sandbox_cache_root), bucket)
+        return os.path.join(str(sandbox_cache_root), bucket)
 
     monkeypatch.setattr(_bk_duckdb, "_cache_dir", _sandboxed_cache_dir)
 

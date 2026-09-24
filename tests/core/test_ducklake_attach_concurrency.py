@@ -27,6 +27,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -57,6 +58,7 @@ def _make_committed_source(tmp_path, name: str) -> dict:
     }
     path = os.path.join(str(cache), "buffer", "batch_a.parquet")
     pq.write_table(pa.table(cols), path)
+    duckdb.connect(src["duckdb_path"]).close()
     assert _commit_buffer_impl(src)["rows_committed"] == 1
     return src
 
