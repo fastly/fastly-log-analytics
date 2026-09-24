@@ -18,7 +18,12 @@ from backend.core import share_db
 
 def test_init_creates_all_tables_and_seeds_settings(fresh_share_con):
     con = fresh_share_con
-    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0]
+        for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema()"
+        ).fetchall()
+    }
     expected = {
         "remote_invites",
         "invite_services",
@@ -75,35 +80,6 @@ def test_share_setting_constants_have_reader_defaults(fresh_share_con):
     )
     # The reader is the source of truth — must default sensibly.
     assert share_db.get_max_concurrent_sessions(con=fresh_share_con) == 10
-
-
-# ── Corruption self-heal ────────────────────────────────────────────────────
-
-
-@pytest.mark.security_regression
-def test_quarantines_corrupt_file_and_rebuilds(tmp_path, monkeypatch):
-    """A garbage file at the DB path is moved aside and a fresh DB is created."""
-    path = tmp_path / "system"
-    path.mkdir(parents=True)
-    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(path))
-    share_db.reset_for_tests()
-
-    db_file = path / "remote_share.db"
-    db_file.write_bytes(b"this is not a sqlite database, just garbage bytes")
-    assert db_file.exists()
-
-    # Should NOT raise — it quarantines the file and starts over.
-    con = share_db.get_global_share_con()
-    assert con is not None
-    # Quarantine file exists.
-    quarantined = list(path.glob("remote_share.db.corrupt-*"))
-    assert len(quarantined) == 1
-    # New DB has the schema.
-    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    assert "remote_invites" in tables
-    # Recovery audit row exists.
-    audits = share_db.get_share_audit_logs()
-    assert any(a["event_type"] == "SHARE_DB_RECOVERED" for a in audits)
 
 
 # ── Passcode hashing ────────────────────────────────────────────────────────
@@ -451,49 +427,6 @@ def test_migration_003_adds_allow_concurrent_sessions_column():
     schema._migration_003_add_allow_concurrent_sessions(con)
 
 
-def test_init_reconciles_column_when_user_version_ahead(tmp_path, monkeypatch):
-    """Field-observed drift: a DB stamped user_version=3 but MISSING the column
-    (migration skipped by the version gate). _init_db must self-heal it via the
-    additive-column reconcile so create_remote_invite doesn't 500."""
-    import sqlite3
-
-    from backend.core.share_db import connection as conn
-    from backend.core.share_db.schema import _init_db
-
-    db_dir = tmp_path / "drift"
-    db_dir.mkdir()
-    db_file = db_dir / "remote_share.db"
-
-    # Pre-seed a "migrated but column-missing" DB: version already at LATEST,
-    # remote_invites without allow_concurrent_sessions.
-    raw = sqlite3.connect(str(db_file))
-    raw.executescript(
-        """
-        CREATE TABLE remote_invites (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL,
-            passcode TEXT NOT NULL, created_at TEXT NOT NULL,
-            revoked INTEGER NOT NULL DEFAULT 0
-        );
-        PRAGMA user_version = 3;
-        """
-    )
-    raw.commit()
-    raw.close()
-
-    # Run the real init path against this file.
-    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(db_dir))
-    conn.reset_for_tests()
-    try:
-        con = conn.get_global_share_con()
-        cols = {r[1] for r in con.execute("PRAGMA table_info(remote_invites)")}
-        assert "allow_concurrent_sessions" in cols
-        # Reconcile is idempotent on a second open.
-        _init_db(con)
-    finally:
-        conn.close_all_connections()
-        conn.reset_for_tests()
-
-
 def test_create_invite_weak_passcode_raises():
     with pytest.raises(share_db.WeakPasscodeError):
         share_db.create_remote_invite(
@@ -614,7 +547,13 @@ def test_migration_004_adds_oauth_columns():
 def test_fresh_db_has_oauth_columns(fresh_share_con):
     """The _SCHEMA snapshot (fresh DB) carries the OAuth columns without needing
     the ALTER migration to run."""
-    cols = {r[1] for r in fresh_share_con.execute("PRAGMA table_info(remote_invites)").fetchall()}
+    cols = {
+        r[0]
+        for r in fresh_share_con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='remote_invites' AND table_schema=current_schema()"
+        ).fetchall()
+    }
     assert {"auth_method", "oauth_provider", "oauth_subject"}.issubset(cols)
 
 
@@ -790,8 +729,9 @@ def test_backup_round_trip_preserves_oauth_invite(monkeypatch, tmp_path):
     share_db.bind_invite_oauth_subject(inv["id"], "google-sub-abc")
     blob = share_db.export_backup("very-long-strong-passphrase")
 
-    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "wipe"))
-    share_db.reset_for_tests()
+    con = share_db.get_global_share_con()
+    con.execute("DELETE FROM remote_invites")
+    con.commit()
     out = share_db.import_backup(blob, "very-long-strong-passphrase")
     assert out["inserted"] == 1
     restored = share_db.get_remote_invite_oauth("restore@corp.com", "google")
@@ -816,8 +756,9 @@ def test_backup_round_trip_preserves_allow_concurrent_sessions(monkeypatch, tmp_
     )
     blob = share_db.export_backup("very-long-strong-passphrase")
 
-    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "wipe"))
-    share_db.reset_for_tests()
+    con = share_db.get_global_share_con()
+    con.execute("DELETE FROM remote_invites")
+    con.commit()
     share_db.import_backup(blob, "very-long-strong-passphrase")
     restored = [r for r in share_db.get_remote_invites() if r["email"] == "shared@corp.com"]
     assert restored and restored[0]["allow_concurrent_sessions"] is True
@@ -941,8 +882,9 @@ def test_backup_round_trip(monkeypatch, tmp_path):
     assert blob.startswith(b"FOSBACKUP\x01")
 
     # Wipe the DB and re-import.
-    monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "wipe"))
-    share_db.reset_for_tests()
+    con = share_db.get_global_share_con()
+    con.execute("DELETE FROM remote_invites")
+    con.commit()
     out = share_db.import_backup(blob, "very-long-strong-passphrase")
     assert out["inserted"] == 1
     invs = share_db.get_remote_invites()

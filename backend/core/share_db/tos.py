@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
+from typing import Any
 
 from backend.core.share_db.connection import get_global_share_con
 from backend.utils.date_utils import iso_z_now
 
 
-def get_latest_tos(*, con: sqlite3.Connection | None = None) -> dict | None:
+def get_latest_tos(*, con: Any = None) -> dict | None:
     con = con or get_global_share_con()
     # version DESC breaks ties for rows published in the same second
     # (iso_z_now() is second-resolution).
@@ -18,7 +18,7 @@ def get_latest_tos(*, con: sqlite3.Connection | None = None) -> dict | None:
     return dict(row) if row else None
 
 
-def publish_tos_version(version: str, text: str, *, con: sqlite3.Connection | None = None) -> None:
+def publish_tos_version(version: str, text: str, *, con: Any = None) -> None:
     """Insert a new TOS row. Idempotent on (version): re-publishing the
     same version is a no-op so callers can run this from migrations or
     admin paths without guarding for duplicates."""

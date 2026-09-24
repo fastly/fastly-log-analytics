@@ -8,10 +8,9 @@ and it's gated on a retention window (default 90 days) driven by the
 from __future__ import annotations
 
 import logging
-import sqlite3
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from backend.core.metadata.pg_connection import is_postgres
 from backend.core.share_db.connection import get_global_share_con
 from backend.utils.date_utils import iso_z, iso_z_now
 
@@ -24,7 +23,7 @@ def log_share_audit_event(
     email: str | None,
     ip_address: str,
     details: str,
-    con: sqlite3.Connection | None = None,
+    con: Any = None,
 ) -> None:
     con = con or get_global_share_con()
     con.execute(
@@ -42,7 +41,7 @@ def get_share_audit_logs(
     email_substr: str | None = None,
     since: str | None = None,
     until: str | None = None,
-    con: sqlite3.Connection | None = None,
+    con: Any = None,
 ) -> list[dict]:
     """Return audit log rows ordered newest-first.
 
@@ -78,7 +77,7 @@ def get_share_audit_logs(
 _LOGIN_SUCCESS_EVENTS = ("LOGIN_SUCCESS", "LOGIN_SUCCESS_OAUTH")
 
 
-def get_last_login_by_email(*, con: sqlite3.Connection | None = None) -> dict[str, str]:
+def get_last_login_by_email(*, con: Any = None) -> dict[str, str]:
     """Per-analyst most-recent successful-login timestamp, keyed by lowercased email.
 
     Derived from successful-login audit events (``LOGIN_SUCCESS`` +
@@ -104,7 +103,7 @@ def get_last_login_by_email(*, con: sqlite3.Connection | None = None) -> dict[st
     return {r["email_lc"]: r["last_login_at"] for r in rows if r["email_lc"]}
 
 
-def purge_old_audit_logs(retention_days: int = 90, *, con: sqlite3.Connection | None = None) -> int:
+def purge_old_audit_logs(retention_days: int = 90, *, con: Any = None) -> int:
     """Delete audit rows older than the retention window. Returns row count."""
     con = con or get_global_share_con()
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=int(retention_days)))
@@ -116,7 +115,7 @@ def purge_old_audit_logs(retention_days: int = 90, *, con: sqlite3.Connection | 
 def purge_stale_share_records(
     max_idle_session_days: int = 30,
     *,
-    con: sqlite3.Connection | None = None,
+    con: Any = None,
 ) -> dict[str, int]:
     """Purge expired claim tokens, expired invites, and stale sessions.
 
@@ -140,15 +139,6 @@ def purge_stale_share_records(
 
     con.commit()
 
-    # 4. Checkpoint WAL — SQLite-only. Under a Postgres metadata backend this
-    # same connection is a Postgres connection (see get_global_share_con),
-    # which has no WAL-file concept and rejects SQLite's PRAGMA syntax outright.
-    if not is_postgres():
-        try:
-            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception as e:
-            logger.warning("[share_db] wal_checkpoint failed: %s", e)
-
     return {
         "deleted_claim_tokens": deleted_tokens,
         "deleted_expired_invites": deleted_invites,
@@ -160,7 +150,7 @@ def purge_all_share_records(
     audit_retention_days: int = 90,
     max_idle_session_days: int = 30,
     *,
-    con: sqlite3.Connection | None = None,
+    con: Any = None,
 ) -> dict[str, int]:
     """Purge old audit logs, expired invites, stale sessions, and expired tokens."""
     con = con or get_global_share_con()

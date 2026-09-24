@@ -10,7 +10,6 @@ Covers:
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -24,17 +23,16 @@ from backend.utils.date_utils import iso_z
 
 
 @pytest.fixture
-def test_share_db(tmp_path, monkeypatch):
-    """Isolated temporary SQLite share DB for purge testing."""
-    db_file = tmp_path / "remote_share.db"
-    con = sqlite3.connect(str(db_file))
-    con.row_factory = sqlite3.Row
-    from backend.core.share_db.schema import _init_db
-
-    _init_db(con)
-
-    monkeypatch.setattr(share_db, "get_global_share_con", lambda: con)
-    return con
+def test_share_db():
+    """Isolated share DB connection for purge testing."""
+    con = share_db.get_global_share_con()
+    con.execute("DELETE FROM remote_sessions")
+    con.execute("DELETE FROM remote_invite_claim_tokens")
+    con.execute("DELETE FROM invite_services")
+    con.execute("DELETE FROM remote_invites")
+    con.execute("DELETE FROM remote_share_audit_logs")
+    con.commit()
+    yield con
 
 
 def test_purge_old_audit_logs(test_share_db):

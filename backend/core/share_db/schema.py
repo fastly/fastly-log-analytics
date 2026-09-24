@@ -13,10 +13,7 @@ an already-initialized DB is a no-op.
 from __future__ import annotations
 
 import logging
-import sqlite3
-from collections.abc import Callable
-
-from backend.utils.date_utils import iso_z_now
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +94,11 @@ _SCHEMA = [
 ]
 
 
-def _migration_002_seed_initial_tos(con: sqlite3.Connection) -> None:
+def _migration_002_seed_initial_tos(con: Any) -> None:
     """Seed the initial TOS text used by the acknowledgment gate."""
     row = con.execute("SELECT 1 FROM share_tos_versions WHERE version=?", ("v1",)).fetchone()
     if row is None:
+        from backend.utils.date_utils import iso_z_now
         con.execute(
             "INSERT INTO share_tos_versions(version, text, published_at) VALUES(?, ?, ?)",
             (
@@ -115,15 +113,8 @@ def _migration_002_seed_initial_tos(con: sqlite3.Connection) -> None:
         )
 
 
-def _migration_003_add_allow_concurrent_sessions(con: sqlite3.Connection) -> None:
-    """Add ``remote_invites.allow_concurrent_sessions`` (per-invite opt-in for
-    shared logins).
-
-    Default 0 preserves the historical single-seat behavior: without this flag
-    each login boots any existing session for the same invite. When set, the
-    tunnel manager lets multiple sessions coexist under one invite (bounded only
-    by the global ``max_concurrent_analyst_sessions`` cap).
-    """
+def _migration_003_add_allow_concurrent_sessions(con: Any) -> None:
+    """Add ``remote_invites.allow_concurrent_sessions``."""
     from backend.core.sqlite_migrations import _has_column
 
     if _has_column(con, "remote_invites", "allow_concurrent_sessions"):
@@ -131,19 +122,8 @@ def _migration_003_add_allow_concurrent_sessions(con: sqlite3.Connection) -> Non
     con.execute("ALTER TABLE remote_invites ADD COLUMN allow_concurrent_sessions INTEGER NOT NULL DEFAULT 0")
 
 
-def _migration_004_add_oauth_columns(con: sqlite3.Connection) -> None:
-    """Add the OAuth/OIDC invite columns (``auth_method`` / ``oauth_provider``
-    / ``oauth_subject``).
-
-    Forward-only ``ALTER TABLE ADD COLUMN`` (O(1), non-rewriting). Existing rows
-    backfill to ``auth_method='passcode'`` via the DEFAULT, so every legacy
-    invite stays a passcode invite. ``oauth_provider`` names the registry key an
-    OAuth invite authenticates against; ``oauth_subject`` is NULL until the
-    invite's first successful OAuth login, at which point the id_token ``sub`` is
-    pinned into it and required to match thereafter (identity binds on
-    provider+sub, not the mutable email). Each ``ADD`` is guarded by
-    ``_has_column`` so a partially-applied migration is safe to re-run.
-    """
+def _migration_004_add_oauth_columns(con: Any) -> None:
+    """Add the OAuth/OIDC invite columns."""
     from backend.core.sqlite_migrations import _has_column
 
     if not _has_column(con, "remote_invites", "auth_method"):
@@ -154,91 +134,24 @@ def _migration_004_add_oauth_columns(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE remote_invites ADD COLUMN oauth_subject TEXT")
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+MIGRATIONS: dict[int, Any] = {
     2: _migration_002_seed_initial_tos,
     3: _migration_003_add_allow_concurrent_sessions,
     4: _migration_004_add_oauth_columns,
 }
-
-LATEST_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
-
-
-# Additive columns that MUST exist on the current schema, reconciled on every
-# open regardless of ``user_version``. This is a safety net for schema drift
-# the forward-only migration framework can't repair on its own: if a DB's
-# ``user_version`` is advanced past a column's migration WITHOUT the ``ALTER``
-# landing, the version gate means that migration never runs again and the
-# column stays missing forever. Observed in the field — a prod share DB stamped
-# ``user_version=3`` out-of-band but missing ``allow_concurrent_sessions``,
-# which then 500s ``create_remote_invite`` (it INSERTs that column). Purely
-# additive + idempotent (guarded by ``_has_column``); never drops or rewrites.
-_EXPECTED_COLUMNS: list[tuple[str, str, str]] = [
-    ("remote_invites", "allow_concurrent_sessions", "INTEGER NOT NULL DEFAULT 0"),
-    ("remote_invites", "auth_method", "TEXT NOT NULL DEFAULT 'passcode'"),
-    ("remote_invites", "oauth_provider", "TEXT"),
-    ("remote_invites", "oauth_subject", "TEXT"),
-]
+LATEST_VERSION = 4
 
 
-def _reconcile_additive_columns(con: sqlite3.Connection) -> None:
-    """Add any expected column missing from an existing table. Idempotent."""
-    from backend.core.sqlite_migrations import _has_column
-
-    changed = False
-    for table, column, ddl in _EXPECTED_COLUMNS:
-        if not _has_column(con, table, column):
-            logger.warning("[share_db] reconcile: adding missing column %s.%s", table, column)
-            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-            changed = True
-    if changed:
-        con.commit()
+def get_current_version(con: Any = None) -> int:
+    """Return latest schema version (Postgres standard schema is always at latest)."""
+    return LATEST_VERSION
 
 
-# Single-source: get_current_version is identical across all SQLite
-# migration runners — import from sqlite_migrations rather than duplicate.
-from backend.core.sqlite_migrations import get_current_version  # noqa: E402,F401
+def apply_pending(con: Any = None) -> int:
+    """No-op under Postgres — schema is managed by pg_schema.py."""
+    return 0
 
 
-def apply_pending(con: sqlite3.Connection) -> int:
-    """Apply every share-DB migration past ``user_version``.
-
-    Delegates to :func:`backend.core.sqlite_migrations.run_pending_migrations`
-    — same forward-only framework the per-service metadata DBs use, just
-    with this module's ``MIGRATIONS`` registry and the ``share_db`` log
-    prefix so messages stay distinguishable in the log stream.
-    """
-    from backend.core.sqlite_migrations import run_pending_migrations
-
-    return run_pending_migrations(con, MIGRATIONS, log_prefix="share_db")
-
-
-def _init_db(con: sqlite3.Connection) -> None:
-    """Create schema from the latest snapshot, then apply migrations forward.
-
-    Idempotent: ``CREATE ... IF NOT EXISTS`` on every statement plus
-    ``apply_pending`` which is itself idempotent.
-    """
-    for stmt in _SCHEMA:
-        con.execute(stmt)
-    con.commit()
-    apply_pending(con)
-    # Safety net for user_version drift (see _EXPECTED_COLUMNS): re-assert
-    # additive columns even when the migration that adds them was skipped
-    # because the version was already advanced.
-    _reconcile_additive_columns(con)
-
-    # If the connection was rebuilt by ``get_safe_share_db_connection`` after
-    # quarantining a corrupt file, write a single recovery audit row.
-    # Local import to break the schema <-> audit/connection cycle.
-    from backend.core.share_db.audit import log_share_audit_event
-    from backend.core.share_db.connection import _recovery_marker
-
-    corrupt_from = _recovery_marker.pop(id(con), None)
-    if corrupt_from:
-        log_share_audit_event(
-            event_type="SHARE_DB_RECOVERED",
-            email=None,
-            ip_address="127.0.0.1",
-            details=f"previous file quarantined to {corrupt_from}",
-            con=con,
-        )
+def _init_db(con: Any = None) -> None:
+    """No-op under Postgres — schema is managed by pg_schema.py."""
+    pass

@@ -14,9 +14,9 @@ import hmac
 import json
 import logging
 import secrets
-import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from backend.core.share_db.connection import get_global_share_con
 from backend.core.share_db.passcode import (
@@ -64,7 +64,7 @@ def create_remote_invite(
     allow_concurrent_sessions: bool = False,
     auth_method: str = "passcode",
     oauth_provider: str | None = None,
-    con: sqlite3.Connection | None = None,
+    con: Any = None,
 ) -> dict:
     """Insert a new invite with its service scope and return the row dict.
 
@@ -143,7 +143,7 @@ def create_remote_invite(
     return created
 
 
-def get_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+def get_remote_invite(invite_id: str, *, con: Any = None) -> dict | None:
     con = con or get_global_share_con()
     row = con.execute("SELECT * FROM remote_invites WHERE id=?", (invite_id,)).fetchone()
     if row is None:
@@ -155,7 +155,7 @@ def get_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) 
     return out
 
 
-def get_remote_invite_services(invite_id: str, *, con: sqlite3.Connection | None = None) -> list[str]:
+def get_remote_invite_services(invite_id: str, *, con: Any = None) -> list[str]:
     con = con or get_global_share_con()
     rows = con.execute(
         "SELECT service_id FROM invite_services WHERE invite_id=? ORDER BY service_id",
@@ -164,7 +164,7 @@ def get_remote_invite_services(invite_id: str, *, con: sqlite3.Connection | None
     return [r["service_id"] for r in rows]
 
 
-def get_remote_invites(*, con: sqlite3.Connection | None = None) -> list[dict]:
+def get_remote_invites(*, con: Any = None) -> list[dict]:
     con = con or get_global_share_con()
     rows = con.execute("SELECT * FROM remote_invites ORDER BY created_at DESC").fetchall()
     # Bulk-fetch all invite_services in one query (was: per-invite SELECT in
@@ -193,7 +193,7 @@ def get_remote_invites(*, con: sqlite3.Connection | None = None) -> list[dict]:
 
 
 def get_remote_invite_by_email_passcode(
-    email: str, passcode: str, *, con: sqlite3.Connection | None = None
+    email: str, passcode: str, *, con: Any = None
 ) -> dict | None:
     """Constant-time lookup. Returns the invite dict on success, else None.
 
@@ -271,7 +271,7 @@ def get_remote_invite_by_email_passcode(
     return match
 
 
-def get_remote_invite_oauth(email: str, provider: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+def get_remote_invite_oauth(email: str, provider: str, *, con: Any = None) -> dict | None:
     """Look up a live OAuth invite by ``(email, provider)`` — NO passcode check.
 
     Deliberately NOT ``get_remote_invite_by_email_passcode``: for the OAuth path
@@ -309,7 +309,7 @@ def get_remote_invite_oauth(email: str, provider: str, *, con: sqlite3.Connectio
     return None
 
 
-def bind_invite_oauth_subject(invite_id: str, subject: str, *, con: sqlite3.Connection | None = None) -> bool:
+def bind_invite_oauth_subject(invite_id: str, subject: str, *, con: Any = None) -> bool:
     """Pin the id_token ``sub`` on first OAuth login; enforce it thereafter.
 
     Google's own guidance warns ``email`` can change over time, so identity is
@@ -339,7 +339,7 @@ def bind_invite_oauth_subject(invite_id: str, subject: str, *, con: sqlite3.Conn
 
 
 def update_remote_invite_services(
-    invite_id: str, service_ids: list[str], *, con: sqlite3.Connection | None = None
+    invite_id: str, service_ids: list[str], *, con: Any = None
 ) -> None:
     con = con or get_global_share_con()
     with con:
@@ -351,7 +351,7 @@ def update_remote_invite_services(
             )
 
 
-def update_remote_invite_passcode(invite_id: str, passcode: str, *, con: sqlite3.Connection | None = None) -> bool:
+def update_remote_invite_passcode(invite_id: str, passcode: str, *, con: Any = None) -> bool:
     """Rotate the passcode on an existing invite without changing anything else.
 
     Validates strength via the same rules as create. Returns True on success,
@@ -368,7 +368,7 @@ def update_remote_invite_passcode(invite_id: str, passcode: str, *, con: sqlite3
     return cur.rowcount > 0
 
 
-def update_remote_invite_pii(invite_id: str, pii_policy: dict | None, *, con: sqlite3.Connection | None = None) -> bool:
+def update_remote_invite_pii(invite_id: str, pii_policy: dict | None, *, con: Any = None) -> bool:
     """Update the PII policy (e.g. ``mask_ips``) on an existing invite.
 
     Lets an admin toggle IP masking after the invite was created. Validates
@@ -388,7 +388,7 @@ def update_remote_invite_pii(invite_id: str, pii_policy: dict | None, *, con: sq
     return cur.rowcount > 0
 
 
-def set_invite_concurrent_sessions(invite_id: str, allow: bool, *, con: sqlite3.Connection | None = None) -> bool:
+def set_invite_concurrent_sessions(invite_id: str, allow: bool, *, con: Any = None) -> bool:
     """Toggle the invite's shared-login (concurrent-session) opt-in.
 
     When ``allow`` is True, later logins under this invite no longer boot the
@@ -407,14 +407,14 @@ def set_invite_concurrent_sessions(invite_id: str, allow: bool, *, con: sqlite3.
     return cur.rowcount > 0
 
 
-def revoke_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) -> bool:
+def revoke_remote_invite(invite_id: str, *, con: Any = None) -> bool:
     con = con or get_global_share_con()
     cur = con.execute("UPDATE remote_invites SET revoked=1 WHERE id=?", (invite_id,))
     con.commit()
     return cur.rowcount > 0
 
 
-def delete_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = None) -> bool:
+def delete_remote_invite(invite_id: str, *, con: Any = None) -> bool:
     """Hard-delete an invite. Cascades to invite_services, remote_sessions, and
     remote_invite_claim_tokens via ON DELETE CASCADE. Audit log rows are
     preserved (no FK to remote_invites), so the deletion trail survives.
@@ -427,7 +427,7 @@ def delete_remote_invite(invite_id: str, *, con: sqlite3.Connection | None = Non
     return cur.rowcount > 0
 
 
-def mark_tos_accepted(invite_id: str, version: str, *, con: sqlite3.Connection | None = None) -> None:
+def mark_tos_accepted(invite_id: str, version: str, *, con: Any = None) -> None:
     con = con or get_global_share_con()
     with con:
         con.execute(
@@ -439,7 +439,7 @@ def mark_tos_accepted(invite_id: str, version: str, *, con: sqlite3.Connection |
 # ── Claim tokens (one-time-view invite credential URL) ──────────────────────
 
 
-def create_claim_token(invite_id: str, *, ttl_hours: int = 24, con: sqlite3.Connection | None = None) -> str:
+def create_claim_token(invite_id: str, *, ttl_hours: int = 24, con: Any = None) -> str:
     con = con or get_global_share_con()
     token = secrets.token_urlsafe(24)
     expires_at = iso_z(datetime.now(UTC) + timedelta(hours=int(ttl_hours)))
@@ -451,7 +451,7 @@ def create_claim_token(invite_id: str, *, ttl_hours: int = 24, con: sqlite3.Conn
     return token
 
 
-def claim_token(token: str, ip: str, *, con: sqlite3.Connection | None = None) -> dict | None:
+def claim_token(token: str, ip: str, *, con: Any = None) -> dict | None:
     """Mark a claim token as claimed (one-shot) and return its invite_id.
 
     Returns the row dict on success; ``None`` if the token does not exist, is
@@ -493,7 +493,7 @@ def claim_token(token: str, ip: str, *, con: sqlite3.Connection | None = None) -
 # ── Backup / restore (AES-256-GCM with scrypt-derived key) ──────────────────
 
 
-def export_backup(passphrase: str, *, con: sqlite3.Connection | None = None) -> bytes:
+def export_backup(passphrase: str, *, con: Any = None) -> bytes:
     """Encrypted JSON envelope of invites + service scopes + share settings.
 
     Audit logs and active sessions are intentionally excluded (logs are
@@ -535,7 +535,7 @@ def export_backup(passphrase: str, *, con: sqlite3.Connection | None = None) -> 
 
 
 def import_backup(
-    blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: sqlite3.Connection | None = None
+    blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: Any = None
 ) -> dict:
     """Decrypt + validate + apply a backup envelope.
 
@@ -661,7 +661,7 @@ def import_backup(
 # ── GDPR right-to-be-forgotten ──────────────────────────────────────────────
 
 
-def gdpr_erase(email: str, reason: str, *, admin_actor: str = "admin", con: sqlite3.Connection | None = None) -> dict:
+def gdpr_erase(email: str, reason: str, *, admin_actor: str = "admin", con: Any = None) -> dict:
     """Delete the analyst's invite row + cascade, redact older audit logs.
 
     Returns ``{deleted_invites, redacted_log_rows, retained_recent_rows}``.

@@ -7,7 +7,7 @@ audit-log purge cron).
 
 from __future__ import annotations
 
-import sqlite3
+from typing import Any
 
 from backend.core.share_db.connection import get_global_share_con
 
@@ -17,13 +17,13 @@ MAX_CONCURRENT_ANALYST_SESSIONS_KEY = "max_concurrent_analyst_sessions"
 SHARE_AUDIT_RETENTION_DAYS_KEY = "share_audit_retention_days"
 
 
-def get_setting(key: str, default: str | None = None, *, con: sqlite3.Connection | None = None) -> str | None:
+def get_setting(key: str, default: str | None = None, *, con: Any = None) -> str | None:
     con = con or get_global_share_con()
     row = con.execute("SELECT value FROM share_settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
 
 
-def set_setting(key: str, value: str, *, con: sqlite3.Connection | None = None) -> None:
+def set_setting(key: str, value: str, *, con: Any = None) -> None:
     con = con or get_global_share_con()
     con.execute(
         "INSERT INTO share_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -32,7 +32,7 @@ def set_setting(key: str, value: str, *, con: sqlite3.Connection | None = None) 
     con.commit()
 
 
-def get_max_concurrent_sessions(*, con: sqlite3.Connection | None = None) -> int:
+def get_max_concurrent_sessions(*, con: Any = None) -> int:
     raw = get_setting(MAX_CONCURRENT_ANALYST_SESSIONS_KEY, "10", con=con)
     try:
         return max(1, int(raw or "10"))
