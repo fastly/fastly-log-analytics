@@ -1,10 +1,15 @@
-"""Shared connection management + schema for the per-service metadata SQLite store.
+"""Shared connection management + schema for the per-service metadata store.
 
-This module owns the process-wide thread-local pool, the init lock, the dedup
-filename cache, and the schema bootstrap. Every concern-specific module in
-``backend.core.metadata`` (alerts, views, ingest_log, cron_log, asn_cache,
-usage_log, reconciliation, state) imports ``get_con`` from here and writes
-through it.
+Postgres (via ``METADATA_DSN``) is the only connection backend: every
+concern-specific module in ``backend.core.metadata`` (alerts, views,
+ingest_log, cron_log, asn_cache, usage_log, reconciliation, state) imports
+``get_con`` from here and writes through it, and every call lands on the
+shared Postgres pool in :mod:`backend.core.metadata.pg_connection`. Schema
+bootstrap for that pool goes through
+:func:`backend.core.metadata.pg_schema.ensure_pg_schema`, wired at API/Celery
+process startup — NOT through this module, which only holds ``_SCHEMA`` (the
+schema-of-record, translated to Postgres DDL by ``pg_schema._to_postgres``)
+and the dedup filename cache.
 
 Carved out of the historical ``backend.core.metadata`` monolith — callers
 should import from ``backend.core.metadata`` (or its concern-specific
@@ -19,29 +24,21 @@ import logging
 import os
 import re
 import sqlite3
-import sys
 import threading
 
 from backend.core.metadata import pg_connection
-from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
 
-# These four module globals are part of the long-standing test surface.
-# - ``_DATA_DIR`` is read by ``db_path`` (below) on every call so the
-#   ``tests/conftest.py:isolate_metadata_db`` monkeypatch keeps taking
-#   effect after the ThreadLocalPool extraction.
-# - ``_init_lock`` / ``_initialized`` / ``_local`` are surfaced to the
-#   pool through providers (see ``_pool`` further down) so the same
-#   conftest patches plus ``tests/core/test_metadata_db_concurrency.py``
-#   continue to swap them in fresh per-test.
-# - ``_all_connections`` is owned by the pool itself; the module-level
-#   name is retained as a passthrough alias used only by retrospective
-#   helpers that walked it directly.
+# ``_DATA_DIR`` is retained (rather than deleted outright) because
+# ``backend.core.metadata.usage_log_db`` — still SQLite-backed, owned by a
+# separate migration task — imports it directly from this module, and
+# ``db_path()`` (below) is still called by out-of-scope callers
+# (``alerts.list_alerts_cross_service``, ``reconciliation``,
+# ``repositories._base.attach_metadata_db``) that build a per-service SQLite
+# path for their own (still-SQLite) purposes. Nothing in THIS module's
+# connection path (``get_con`` et al., all Postgres-only below) reads it.
 _DATA_DIR = "data/services"
-_local = threading.local()
-_init_lock = threading.Lock()
-_initialized: set[str] = set()
 
 # Process-wide cache of {service_id: set[file_name]} for ingest dedup.
 # ``get_ingested_filenames`` populates lazily on the first bounded read
@@ -116,18 +113,21 @@ _TASK_ORPHAN_THRESHOLD_MINS = {"sync": 10, "log_discovery": 10}
 
 
 class InvalidServiceIdError(ValueError):
-    """Raised by ``db_path`` when ``service_id`` fails format validation.
+    """Raised by ``_validate_service_id_or_raise`` when ``service_id`` fails
+    format validation. Every ``get_con`` / ``get_con_readonly`` call
+    validates through this, Postgres included — a malformed ``service_id``
+    still must not reach a WHERE/INSERT predicate unvalidated.
 
     Fastly service IDs are 22-character lowercase alphanumeric strings, but
     legacy fixtures and Admin-provisioned identifiers also use hyphens and
     mixed case, so we accept the union (``[A-Za-z0-9_-]{1,64}``). Anything
-    outside that — non-ASCII characters, path separators, null bytes — would
-    either traverse the data directory or hit macOS APFS / strict Linux
-    filesystems with ``OSError(Errno 92): Illegal byte sequence`` and bubble
-    up as an opaque ``sqlite3.OperationalError: unable to open database
-    file``. Reject at the data-layer chokepoint so every caller is safe.
-    The shared FastAPI exception handler in ``backend.main`` converts this
-    into a 422 instead of a 500.
+    outside that — non-ASCII characters, path separators, null bytes — is
+    rejected at this chokepoint so every caller is safe (historically this
+    also guarded the per-service SQLite file path from traversal; that
+    file no longer exists, but the same input can still reach ``db_path()``,
+    used by a handful of SQLite-flavored callers that predate this
+    migration). The shared FastAPI exception handler in ``backend.main``
+    converts this into a 422 instead of a 500.
     """
 
 
@@ -148,11 +148,19 @@ def _validate_service_id_or_raise(service_id: str) -> None:
 
 
 def db_path(service_id: str) -> str:
-    """Absolute path to the per-service metadata SQLite file.
+    """Absolute path to where the per-service metadata SQLite file USED to
+    live, before this module moved onto Postgres.
 
-    A non-string ``service_id`` would silently produce a junk path
-    containing the object's repr (e.g. ``<...0x...>.metadata.db``) and
-    leak files on disk. Reject at the boundary so the bad caller is
+    Retained — not used by anything in this module's own connection path —
+    because a handful of callers that predate the Postgres migration still
+    build this path for their own (still-SQLite-shaped) purposes:
+    ``alerts.list_alerts_cross_service`` (ATTACHes each service's file to a
+    scratch in-memory SQLite DB) and ``repositories._base.attach_metadata_db``
+    (ATTACHes it into a DuckDB query). Those call sites are unowned by this
+    task; removing this function out from under them would break both at
+    import time or first call. A non-string ``service_id`` would silently
+    produce a junk path containing the object's repr (e.g.
+    ``<...0x...>.metadata.db``); reject at the boundary so the bad caller is
     pinpointed immediately. A malformed-string ``service_id`` raises
     :class:`InvalidServiceIdError` for the same reason — see that class's
     docstring for the threat model.
@@ -161,93 +169,48 @@ def db_path(service_id: str) -> str:
     return os.path.join(_DATA_DIR, f"{service_id}.metadata.db")
 
 
-# Resolve through ``sys.modules`` so a ``monkeypatch.setattr(metadata_db,
-# "_initialized", set())`` (used by conftest ``isolate_metadata_db``)
-# takes effect on every subsequent call — the providers re-read the module
-# attribute each time. init_lock_provider is NOT supplied: the pool uses
-# per-key locking internally so cold-opens for different service IDs don't
-# serialize against each other (the single-lock contention was the root
-# cause of "metadata_db._init_lock contended >10s" production errors).
-_module = sys.modules[__name__]
-_pool = ThreadLocalPool(
-    name="metadata_db",
-    path_fn=lambda sid: db_path(sid),
-    schema_fn=lambda con: _init_schema(con),
-    initialized_provider=lambda: _module._initialized,
-    local_provider=lambda: _module._local,
-    local_attr="conns",
-)
-
-# Exposed for the small handful of legacy spots (and the metadata_db shim's
-# _MIRRORED_TO_BASE list) that walked the connection registry directly.
-_all_connections = _pool._all_connections
-_all_connections_lock = _pool._all_connections_lock
-
-
 def get_con(service_id: str) -> sqlite3.Connection:
-    """Return a thread-local connection scoped to the given service.
+    """Return this thread's shared Postgres connection, tagged for ``service_id``.
 
-    SQLite (default): lazily initialises the per-service file (creating
-    ``data/services/`` and the schema) on first use per (thread,
-    service_id) pair.
-
-    Concurrency: ``PRAGMA journal_mode=WAL`` requires an exclusive writer
-    lock to switch from the default (delete) journal mode. If N threads
-    open a brand-new service file simultaneously, they collide on that
-    PRAGMA and one raises ``OperationalError: database is locked`` despite
-    the connection's 30s timeout. The pool holds ``_init_lock`` across the
-    connect+PRAGMA window so cold-start is serialised once per process;
-    subsequent calls hit the thread-local pool early and pay nothing.
-
-    Postgres (``METADATA_DSN`` set — the multi-writer/multi-pod backend):
     ``service_id`` is validated but otherwise unused for connection
-    selection — every service shares ONE connection per thread, since rows
-    are scoped by the ``service_id`` column migration 015 added, not by
-    which physical database they live in. See
+    selection — every service shares ONE connection per thread (checked out
+    once via :func:`pg_connection.get_pg_thread_connection` and held for the
+    life of the thread), since rows are scoped by the ``service_id`` column
+    migration 015 added, not by which physical database they live in. See
     :mod:`backend.core.metadata.pg_connection` for the full rationale.
     """
-    if pg_connection.is_postgres():
-        _validate_service_id_or_raise(service_id)
-        wrapper = pg_connection.get_pg_thread_connection()
-        # Retag for the Live Query Monitor on every call — see
-        # PgConnectionWrapper.__init__'s docstring on why this is safe for
-        # a connection shared across services on one thread.
-        wrapper._service_id = service_id
-        return wrapper  # type: ignore[return-value]
-    return _pool.get(service_id)
+    _validate_service_id_or_raise(service_id)
+    wrapper = pg_connection.get_pg_thread_connection()
+    # Retag for the Live Query Monitor on every call — see
+    # PgConnectionWrapper.__init__'s docstring on why this is safe for
+    # a connection shared across services on one thread.
+    wrapper._service_id = service_id
+    return wrapper  # type: ignore[return-value]
 
 
 def get_con_readonly(service_id: str) -> sqlite3.Connection:
     """Return a short-lived read-only connection for the given service.
 
     This connection is not pooled and should be closed immediately (callers
-    use ``contextlib.closing(...)``). Under Postgres, ``.close()`` returns
-    the connection to the pool rather than severing a socket.
+    use ``contextlib.closing(...)``). ``.close()`` returns the connection to
+    the pool rather than severing a socket.
     """
-    if pg_connection.is_postgres():
-        _validate_service_id_or_raise(service_id)
-        wrapper = pg_connection.get_pg_readonly_connection()
-        wrapper._service_id = service_id
-        return wrapper  # type: ignore[return-value]
-    if not os.path.exists(db_path(service_id)):
-        get_con(service_id)
-    return _pool.open_readonly(service_id)
+    _validate_service_id_or_raise(service_id)
+    wrapper = pg_connection.get_pg_readonly_connection()
+    wrapper._service_id = service_id
+    return wrapper  # type: ignore[return-value]
 
 
 def release_thread_connection() -> None:
     """Return the CALLING thread's ``get_con()`` connection, if any, so a
-    thread that will never be reused doesn't permanently pin capacity.
+    thread that will never be reused doesn't permanently pin pool capacity.
 
-    Under Postgres this returns the connection to the bounded
-    ``METADATA_PG_POOL_MAX``-sized pool (see
-    :func:`pg_connection.release_pg_thread_connection` for the full
-    rationale — this is what a per-cron-tick heartbeat thread must call
-    before exiting). No-op under SQLite: each thread's connection is a
-    private file handle with no shared pool capacity to leak, reclaimed by
-    the interpreter when the thread-local entry is garbage collected.
+    Returns the connection to the bounded ``METADATA_PG_POOL_MAX``-sized
+    pool (see :func:`pg_connection.release_pg_thread_connection` for the
+    full rationale — this is what a per-cron-tick heartbeat thread must call
+    before exiting).
     """
-    if pg_connection.is_postgres():
-        pg_connection.release_pg_thread_connection()
+    pg_connection.release_pg_thread_connection()
 
 
 def close_all_connections() -> None:
@@ -255,34 +218,24 @@ def close_all_connections() -> None:
 
     Used by the pytest fixture in tests/conftest.py to drain connections
     opened on FastAPI TestClient worker threads — the fixture only has
-    access to its own thread's ``_local`` and would otherwise leak those.
+    access to its own thread's state and would otherwise leak those.
     """
-    if pg_connection.is_postgres():
-        pg_connection.close_all_pg_connections()
-        return
-    _pool.close_all()
+    pg_connection.close_all_pg_connections()
 
 
 def teardown(service_id: str) -> None:
-    """Close any thread-local connection and delete the SQLite file.
+    """Clear this service's dedup cache. No-op otherwise.
 
-    Called from ``backend/provision.py`` during service teardown. Safe to call
-    even if the file does not exist or other threads still hold connections —
-    other threads will reopen lazily and re-init schema if the file is missing.
-
-    Under Postgres this is a no-op: there is no per-service file to delete,
-    and row-level deletion for a torn-down service is a data-retention
-    decision the provisioning teardown flow does not currently make for any
-    backend. Scope it there if/when that's needed.
+    Called from ``backend/provision.py`` during service teardown. There is
+    no per-service file to delete under Postgres (rows for every service
+    share one database), and row-level deletion for a torn-down service is
+    a data-retention decision the provisioning teardown flow does not
+    currently make — this matches the no-op behavior Postgres mode already
+    had before SQLite was removed. See this task's report for why a
+    destructive row-deletion semantic was NOT added here without an
+    explicit product decision to do so.
     """
-    if pg_connection.is_postgres():
-        return
-    _pool.teardown(service_id)
     _clear_ingested_filenames_cache(service_id)
-
-    from backend.core.sqlite_pool import remove_sqlite_db_files
-
-    remove_sqlite_db_files(db_path(service_id), name="metadata_db")
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -563,11 +516,11 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(service_id, quarantined_at)",
 ]
 
-
-def _init_schema(con: sqlite3.Connection) -> None:
-    from backend.core import sqlite_migrations
-
-    for stmt in _SCHEMA:
-        con.execute(stmt)
-    con.commit()
-    sqlite_migrations.apply_pending(con)
+# No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw
+# SQLite connection needing bootstrap, so the old SQLite-pool ``schema_fn``
+# has no caller left. Postgres schema bootstrap goes through
+# ``backend.core.metadata.pg_schema.ensure_pg_schema()`` (wired at API/Celery
+# startup — see that module's docstring), which imports ``_SCHEMA`` above and
+# runs it through ``pg_schema._to_postgres()``. ``_SCHEMA`` itself MUST stay
+# SQLite-flavored and MUST NOT be deleted — it is the schema-of-record for
+# both backends, not a SQLite-only artifact.

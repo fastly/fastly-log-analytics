@@ -1,28 +1,26 @@
-"""Per-service operational metadata store, backed by SQLite.
+"""Per-service operational metadata store, backed by Postgres.
 
 DuckDB is reserved for analytical queries over Iceberg log data. Everything
 else — alerts, saved views, audit logs, ingested-file dedup tracking, cron run
 history, ASN name cache, source registration, FOS/CDN usage telemetry — lives
-here, in a per-service SQLite file at ``data/services/{service_id}.metadata.db``.
+here, in a single shared Postgres database (``METADATA_DSN``), with every
+service-scoped table carrying a ``service_id`` column.
 
-Why per-service: SQLite's writer lock is per-file even in WAL mode. With many
-services ingesting concurrently, a single global file would serialise every
-ingest's `ingested_files` write. Per-file isolation also makes service
-teardown a single ``rm`` and bounds blast radius on corruption.
-
-Concurrency model: thread-local connections (sqlite3 connections are not
-thread-safe) keyed by ``(thread, service_id)``. WAL + ``synchronous=NORMAL``
-gives readers freedom from writer locks within a single file.
+Concurrency model: one pooled connection per thread (``pg_connection``'s
+autocommit=True pool), shared across every service that thread touches — see
+:mod:`backend.core.metadata.pg_connection` for the full rationale (superseding
+the historical per-service-SQLite-file model this package used before the
+SQLite -> Postgres metadata migration).
 
 This package is the carved successor to the historical
 ``backend.core.metadata_db`` monolith. The functions are split across
 concern-specific submodules (``base``, ``alerts``, ``views``, ``state``,
 ``ingest_log``, ``cron_log``, ``asn_cache``, ``usage_log``,
 ``reconciliation``) and re-exported here. Writes to shared state attributes
-(``_DATA_DIR``, ``_initialized``, ``_local``, etc.) are mirrored onto
-``metadata.base`` via the ``_ShimModule`` proxy installed below — required
-because tests and ``state_sync`` use ``monkeypatch.setattr(metadata, "X", ...)``
-and expect the live ``get_con`` bindings to swap.
+(``_DATA_DIR``, ``_SCHEMA``, etc.) are mirrored onto ``metadata.base`` via the
+``_ShimModule`` proxy installed below — required because tests and
+``state_sync`` use ``monkeypatch.setattr(metadata, "X", ...)`` and expect the
+live ``get_con`` bindings to swap.
 """
 
 from __future__ import annotations
@@ -57,15 +55,9 @@ from backend.core.metadata.base import (
     _ORPHAN_THRESHOLD_MINS,
     _SCHEMA,
     _TASK_ORPHAN_THRESHOLD_MINS,
-    _all_connections,
-    _all_connections_lock,
     _clear_ingested_filenames_cache,
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
-    _init_lock,
-    _init_schema,
-    _initialized,
-    _local,
     _parse_file_date,
     close_all_connections,
     db_path,
@@ -193,7 +185,7 @@ from backend.core.metadata.views import (
 class _ShimModule(ModuleType):
     """Mirror writes for shared state into ``metadata.base``.
 
-    ``_DATA_DIR`` / ``_initialized`` / ``_local`` etc. are owned by
+    ``_DATA_DIR`` / ``_SCHEMA`` etc. are owned by
     ``metadata.base``. Tests and ``state_sync`` use
     ``setattr(metadata, "_DATA_DIR", ...)`` (directly or via
     ``monkeypatch.setattr``) and expect the live ``get_con`` bindings to
@@ -204,13 +196,7 @@ class _ShimModule(ModuleType):
     _MIRRORED_TO_BASE = frozenset(
         {
             "_DATA_DIR",
-            "_initialized",
-            "_local",
-            "_init_lock",
-            "_init_schema",
             "_SCHEMA",
-            "_all_connections",
-            "_all_connections_lock",
             "_ingested_filenames_cache",
             "_ingested_filenames_cache_lock",
             "_FILE_DATE_RE",
@@ -328,13 +314,7 @@ __all__ = [
     # Module-level state hooks used by tests + state_sync
     "_clear_ingested_filenames_cache",
     "_DATA_DIR",
-    "_initialized",
-    "_local",
-    "_init_lock",
-    "_init_schema",
     "_SCHEMA",
-    "_all_connections",
-    "_all_connections_lock",
     "_ingested_filenames_cache",
     "_ingested_filenames_cache_lock",
     "_parse_file_date",

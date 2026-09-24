@@ -1,4 +1,4 @@
-"""Cron-run history + scoring audit in metadata SQLite.
+"""Cron-run history + scoring audit in shared Postgres metadata store.
 
 Backs the ``cron_runs`` and ``scoring_audit`` tables. Provides the start /
 update / log / purge / reap surface used by the scheduler and the per-task
@@ -11,61 +11,36 @@ import json
 import logging
 import sqlite3
 import statistics
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+
+import psycopg
 
 from backend.core.metadata.base import get_con, get_con_readonly
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
-# Cron bookkeeping writes converge: sync / commit / local-compact / metadata_sync
-# all fire on the same minute boundary and write the one per-service metadata.db.
-# ``PRAGMA busy_timeout=30000`` (see sqlite_pool.DEFAULT_PRAGMAS) absorbs ordinary
-# lock-queueing, but an *immediate* SQLITE_BUSY bypasses the busy handler — a WAL
-# snapshot conflict, or a checkpoint that couldn't drain while the disk was full
-# (the 2026-06-23 incident bloated the WAL to 4 MB). Those surface as
-# "database is locked" and used to crash the whole cron tick with a traceback.
-# They are transient: roll back and retry the whole write unit a few times with
-# short backoff. A lock that survives every attempt re-raises (a real problem,
-# not contention). See [[colima-disk-full-stalls-ingestion]].
-_LOCKED_RETRY_ATTEMPTS = 20
-_LOCKED_RETRY_BASE_SLEEP_S = 0.05
-
 
 def _retry_on_locked[T](con: sqlite3.Connection, fn: Callable[[], T]) -> T:
-    """Run ``fn`` (a complete, idempotent write+commit unit), retrying on a
-    transient ``OperationalError: database is locked``.
+    """Run ``fn`` (a complete, idempotent write+commit unit).
 
-    Each attempt rolls back first so a half-open transaction never leaves a
-    stale WAL snapshot pinned for the retry. ``fn`` must be safe to re-run after
-    a rollback — the cron writers acquire the write lock on their first
-    statement, so a lock failure means nothing was committed and the redo can't
-    double-write. Non-lock errors (e.g. the ``RuntimeError`` start_cron_run
-    raises when a run is already in progress) propagate immediately.
+    Historically retried on SQLite's transient ``OperationalError: database
+    is locked`` (converging cron writes — sync / commit / local-compact /
+    metadata_sync firing on the same minute boundary all hit the one
+    per-service ``metadata.db`` file). That failure mode has no Postgres
+    analogue: the pool runs ``autocommit=True`` (see
+    :mod:`backend.core.metadata.pg_connection`'s module docstring), so every
+    statement here is already its own committed unit with no multi-statement
+    lock window for a converging writer to contend on — there is no
+    Postgres ``SQLITE_BUSY`` equivalent for this codebase's write shape.
+    Kept as a passthrough (rather than deleted) so every call site below
+    doesn't need touching, and so a retry policy can be reinstated here in
+    one place if a real transient-Postgres-error case (e.g.
+    ``psycopg.errors.SerializationFailure`` under pool exhaustion) turns up
+    in practice — none has yet.
     """
-    for attempt in range(_LOCKED_RETRY_ATTEMPTS):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            if (
-                "locked" not in str(e).lower()
-                and "disk i/o error" not in str(e).lower()
-                or attempt == _LOCKED_RETRY_ATTEMPTS - 1
-            ):
-                raise
-            try:
-                con.rollback()
-            except sqlite3.Error:
-                pass
-            logger.debug(
-                "[cron_log] transient DB lock (attempt %d/%d), retrying: %s", attempt + 1, _LOCKED_RETRY_ATTEMPTS, e
-            )
-            time.sleep(min(1.0, _LOCKED_RETRY_BASE_SLEEP_S * (2**attempt)))
-    # Unreachable: the loop either returns fn()'s value or re-raises on the
-    # final attempt. Present so type-checkers see a terminal path.
-    raise AssertionError("unreachable")  # pragma: no cover
+    return fn()
 
 
 def start_cron_run(service_id: str, task: str) -> int:
@@ -422,8 +397,8 @@ def record_scoring_audit(
 
     Called from every scoring-config-mutating endpoint (enable, disable,
     threshold commit + enforce, retrain, rotate-key, matrix-rollback).
-    Best-effort: any SQLite failure is logged at DEBUG and swallowed so
-    a busy WAL doesn't block the actual operator action.
+    Best-effort: any DB failure is logged at DEBUG and swallowed so a
+    transient Postgres blip doesn't block the actual operator action.
     """
     try:
         con = get_con(service_id)
@@ -432,7 +407,7 @@ def record_scoring_audit(
             (service_id, action, actor, json.dumps(details) if details else None),
         )
         con.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] record_scoring_audit(%s, %s) failed: %s", service_id, action, e)
 
 
@@ -467,7 +442,7 @@ def list_scoring_audit(
                     pass
             out.append(row)
         return out
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] list_scoring_audit(%s) failed: %s", service_id, e)
         return []
 
@@ -477,23 +452,24 @@ def prune_scoring_audit(service_id: str, *, keep_last: int = 10000) -> None:
 
     Cheap unbounded growth guard — every scoring-config mutation appends
     one row, and the table is only ever read by the admin UI / state_sync
-    export which already caps its own page size. Best-effort: any SQLite
+    export which already caps its own page size. Best-effort: any DB
     failure is logged at DEBUG and swallowed so trimming never blocks the
     caller (typically a maintenance cron, not the operator hot path).
     """
     try:
         con = get_con(service_id)
         # Tiebreak on id DESC so concurrent inserts that landed in the same
-        # `datetime('now')` second are deterministically ordered (otherwise
-        # SQLite is free to pick any row from the tied group, which makes
-        # prune flaky under burst workloads and breaks reproducibility tests).
+        # `current_timestamp` instant are deterministically ordered
+        # (otherwise the DB is free to pick any row from the tied group,
+        # which makes prune flaky under burst workloads and breaks
+        # reproducibility tests).
         con.execute(
             "DELETE FROM scoring_audit WHERE service_id = ? AND id NOT IN ("
             "SELECT id FROM scoring_audit WHERE service_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?)",
             (service_id, service_id, keep_last),
         )
         con.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] prune_scoring_audit(%s) failed: %s", service_id, e)
 
 
@@ -504,9 +480,9 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
     abandoned-worker-thread zombies that completed log_cron_run but
     never fired end_progress).
 
-    Narrowed exception scope: catches sqlite3.Error (DB unreachable,
-    table missing, locked) and logs at DEBUG so the next 'why isn't
-    the cross-check firing?' triage isn't flying blind. Returns None
+    Narrowed exception scope: catches psycopg.Error (DB unreachable,
+    table missing, connection lost) and logs at DEBUG so the next 'why
+    isn't the cross-check firing?' triage isn't flying blind. Returns None
     on any DB failure so list_active_runs falls back to the in-memory
     signal (we'd rather show a false in-flight than miss a real one).
     """
@@ -518,7 +494,7 @@ def get_cron_run_status(service_id: str, run_id: int) -> str | None:
                 "SELECT status FROM cron_runs WHERE id = ? AND service_id = ?", (run_id, service_id)
             ).fetchone()
             return row["status"] if row else None
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] get_cron_run_status(%s, %s) failed: %s", service_id, run_id, e)
         return None
 
@@ -541,7 +517,7 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
             if row is None:
                 return None
             return {"status": row["status"], "log_output": row["log_output"]}
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.debug("[metadata_db] get_cron_run_result(%s, %s) failed: %s", service_id, run_id, e)
         return None
 
