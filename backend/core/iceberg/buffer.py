@@ -729,6 +729,8 @@ def optimize_table(
 def _optimize_table_impl(
     source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
 ) -> dict:
+    from backend.core.iceberg._ducklake import ducklake_table_name
+
     try:
         with _ducklake_write_connection(source) as con:
             # DURABILITY, not an optimization: DuckLake "inlines" small commits
@@ -740,12 +742,13 @@ def _optimize_table_impl(
             # catalog DB (the raw .gz is deleted after ingest). flush first so the
             # rewrite below has real files to compact.
             con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
+            tbl = ducklake_table_name(source)
 
             # Merge adjacent small files into larger ones (bin-packing)
-            merge_rows = con.execute("CALL ducklake_merge_adjacent_files('lake')").fetchall()
+            merge_rows = con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{tbl}')").fetchall()
 
             # DuckLake rewrites data files with deleted rows / expired data
-            rewrite_rows = con.execute("CALL ducklake_rewrite_data_files('lake')").fetchall()
+            rewrite_rows = con.execute(f"CALL ducklake_rewrite_data_files('lake', '{tbl}')").fetchall()
 
             files_rewritten = sum(int(r[2]) for r in merge_rows if len(r) >= 4) + sum(
                 int(r[2]) for r in rewrite_rows if len(r) >= 4
