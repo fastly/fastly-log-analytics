@@ -129,17 +129,19 @@ def get_quarantine_summary(service_id: str) -> dict:
 
 def get_expired_quarantined_files(service_id: str, retention_days: int = 14) -> list[dict]:
     con = get_con(service_id)
-    # quarantined_at is stored as TEXT on both backends. SQLite compares TEXT
-    # to the datetime('now', ...) expression fine, but Postgres rejects a bare
-    # `text < timestamp` comparison — CAST the column when running against
-    # Postgres, mirroring reconciliation.py's _retention_timestamp_expr.
     from backend.core.metadata import pg_connection
 
-    ts_col = "CAST(quarantined_at AS TIMESTAMPTZ)" if pg_connection.is_postgres() else "quarantined_at"
-    rows = con.execute(
-        f"SELECT id, error_key, meta_key FROM quarantined_files WHERE service_id = ? AND {ts_col} < datetime('now', '-{retention_days} days')",
-        (service_id,),
-    ).fetchall()
+    if pg_connection.is_postgres():
+        rows = con.execute(
+            "SELECT id, error_key, meta_key FROM quarantined_files "
+            "WHERE service_id = ? AND CAST(quarantined_at AS TIMESTAMPTZ) < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')",
+            (service_id, retention_days),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            f"SELECT id, error_key, meta_key FROM quarantined_files WHERE service_id = ? AND quarantined_at < datetime('now', '-{retention_days} days')",
+            (service_id,),
+        ).fetchall()
     return [{"id": r[0], "error_key": r[1], "meta_key": r[2]} for r in rows]
 
 

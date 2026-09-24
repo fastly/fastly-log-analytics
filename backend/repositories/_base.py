@@ -537,22 +537,38 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     from backend import config as svcconfig
 
     db_path = svcconfig.ngwaf_db_path()
-    if not db_path or not os.path.exists(db_path):
-        return False
-
-    import sqlite3
-
-    try:
-        sconn = sqlite3.connect(db_path, timeout=5)
+    rows = []
+    if db_path:
+        if not os.path.exists(db_path):
+            return False
+        import sqlite3
         try:
-            rows = sconn.execute(
-                "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-            ).fetchall()
-        finally:
-            sconn.close()
-    except sqlite3.Error as e:
-        _logger.warning("[ngwaf_bots] cache read failed for %s: %s", alias, e)
-        return False
+            sconn = sqlite3.connect(db_path, timeout=5)
+            try:
+                cur = sconn.execute(
+                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = cur.fetchall()
+            finally:
+                sconn.close()
+        except Exception as e:
+            _logger.warning("[ngwaf_bots] sqlite cache read failed for %s: %s", alias, e)
+            return False
+    else:
+        try:
+            from backend.core.metadata import pg_connection
+
+            pconn = pg_connection.get_pg_readonly_connection()
+            try:
+                cur = pconn.execute(
+                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = [(r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"]) for r in cur.fetchall()]
+            finally:
+                pconn.close()
+        except Exception as e:
+            _logger.warning("[ngwaf_bots] postgres cache read failed for %s: %s", alias, e)
+            return False
 
     import pyarrow as pa
 

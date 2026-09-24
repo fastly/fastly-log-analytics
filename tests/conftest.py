@@ -366,6 +366,45 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
+    try:
+        from backend.core.metadata import pg_connection
+        _pg_con = pg_connection.get_pg_thread_connection()
+        _pg_con.execute(
+            """
+            TRUNCATE TABLE
+                ingest_ledger,
+                ingested_files,
+                ingested_files_summary,
+                quarantined_files,
+                job_runs,
+                cron_runs,
+                audit_logs,
+                views,
+                alerts,
+                usage_log,
+                usage_log_hourly_summary,
+                metric_snapshots,
+                slow_queries,
+                committed_buffers,
+                ngwaf_bots,
+                ngwaf_sync_state,
+                rdns,
+                sources,
+                remote_sessions,
+                remote_invite_claim_tokens,
+                invite_services,
+                remote_invites,
+                remote_share_audit_logs
+            CASCADE
+            """
+        )
+        _pg_con.commit()
+    except Exception:
+        try:
+            _pg_con.rollback()
+        except Exception:
+            pass
+
     metadata_db._clear_ingested_filenames_cache()
 
     # Per-service usage_log lives in its own SQLite file post-2026-06-12;
