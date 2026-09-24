@@ -163,11 +163,15 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                     continue
                 try:
                     rows = usage_log_con.execute("SELECT sum(count) FROM usage_log_hourly_summary").fetchone()[0] or 0
-                    row = usage_log_con.execute(
-                        "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
-                    ).fetchone()
-                    bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
-                except sqlite3.OperationalError:
+                    if postgres:
+                        row = usage_log_con.execute("SELECT pg_total_relation_size('usage_log')").fetchone()
+                        bytes_: int | None = int(row[0]) if row and row[0] is not None else 0
+                    else:
+                        row = usage_log_con.execute(
+                            "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
+                        ).fetchone()
+                        bytes_ = int(row[0]) if row and row[0] is not None else 0
+                except (sqlite3.OperationalError, Exception):
                     rows, bytes_ = 0, None
                 finally:
                     usage_log_con.close()

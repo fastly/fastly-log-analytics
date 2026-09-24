@@ -9,9 +9,10 @@ re-scanning the full table on every request.
 from __future__ import annotations
 
 import logging
-import sqlite3
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from backend.core.metadata import pg_connection
 from backend.core.metadata import usage_log_db as _usage_log_db
 from backend.core.metadata.base import get_con
 from backend.utils.date_utils import iso_z, iso_z_now
@@ -19,19 +20,8 @@ from backend.utils.date_utils import iso_z, iso_z_now
 logger = logging.getLogger(__name__)
 
 
-def _ul(service_id: str) -> sqlite3.Connection:
-    """Thread-local RW connection to the per-service usage_log.db.
-
-    Carved out of metadata.db on 2026-06-12 per the perf audit — keeps
-    the cron writer's WAL lock isolated from the admin endpoints that
-    read audit_logs / views / scoring_labels off metadata.db. See
-    :mod:`backend.core.metadata.usage_log_db` for the rationale.
-
-    Code that reads/writes the ``sources`` table (only consumers
-    register_source / get_source_by_name below) continues to use
-    :func:`backend.core.metadata.base.get_con` — sources lives in
-    metadata.db, not usage_log.db.
-    """
+def _ul(service_id: str) -> pg_connection.PgConnectionWrapper:
+    """Thread-local RW connection to the per-service usage_log database."""
     return _usage_log_db.get_con(service_id)
 
 
@@ -68,6 +58,7 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
     con = _ul(service_id)
     now = iso_z_now()
     rows = []
+    summary_map: dict[tuple[str, str, str, str], list[int]] = {}
     for c in calls:
         op_type = (c.get("method") or "").upper()
         details = c.get("details") or ""
@@ -81,15 +72,18 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         # Note: single-object DELETE (`DELETE /key`) is Class B in Fastly billing;
         # the DeleteObjects batch endpoint arrives as POST and is therefore A.
         op_class = "B"
-        if svc == "FOS" and op_type in (
-            "PUT_OBJECT",
-            "POST_OBJECT",
-            "COPY_OBJECT",
-            "LIST_OBJECTS_V2",
-            "DELETE_OBJECTS",
-            "PUT",
-            "POST",
-            "COPY",
+        normalized_op = op_type.replace("_", "")
+        if svc == "FOS" and (
+            normalized_op in (
+                "PUTOBJECT",
+                "POSTOBJECT",
+                "COPYOBJECT",
+                "LISTOBJECTSV2",
+                "DELETEOBJECTS",
+                "PUT",
+                "POST",
+                "COPY",
+            )
         ):
             op_class = "A"
         elif svc == "CDN":
@@ -110,12 +104,13 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
             if len(parts) > 1 and parts[-1] in ("MISS", "PASS"):
                 op_bytes = op_bytes * 2
 
+        method = c.get("method")
         rows.append(
             (
                 now,
                 service_id,
                 op_class,
-                c.get("method"),
+                method,
                 c.get("path"),
                 str(c.get("status", "OK")),
                 c.get("time_ms"),
@@ -124,6 +119,14 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
                 op_bytes,
             )
         )
+        if len(now) >= 13 and service_id:
+            hour = now[:13]
+            key = (service_id, hour, op_class or "", method or "")
+            if key not in summary_map:
+                summary_map[key] = [0, 0]
+            summary_map[key][0] += 1
+            summary_map[key][1] += op_bytes or 0
+
     try:
         con.executemany(
             "INSERT INTO usage_log "
@@ -132,6 +135,21 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
+        if summary_map:
+            summary_rows = [
+                (sid, hr, oc, ot, counts[0], counts[1], now)
+                for (sid, hr, oc, ot), counts in summary_map.items()
+            ]
+            con.executemany(
+                "INSERT INTO usage_log_hourly_summary "
+                "(service_id, hour, operation_class, operation_type, count, bytes, last_updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (service_id, hour, operation_class, operation_type) "
+                "DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, "
+                "              bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes, "
+                "              last_updated = EXCLUDED.last_updated",
+                summary_rows,
+            )
         con.commit()
     except Exception as e:
         logger.error("[metadata_db] Failed to log usage calls: %s", e)
@@ -163,25 +181,35 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
 
     new_rows = []
     now_iso = iso_z_now()
+    summary_map: dict[tuple[str, str, str, str], list[int]] = {}
     for c in calls:
         url = c.get("path")
         if not url or url in existing:
             continue
         ts = c.get("_timestamp_override") or now_iso
+        op_type = c.get("method", "PUT_OBJECT")
+        op_bytes = c.get("bytes")
         new_rows.append(
             (
                 ts,
                 service_id,
                 "A",
-                c.get("method", "PUT_OBJECT"),
+                op_type,
                 url,
                 str(c.get("status", "OK")),
                 0.0,
                 c.get("caller", "fastly.edge"),
                 c.get("process_context", "fastly:log_write"),
-                c.get("bytes"),
+                op_bytes,
             )
         )
+        if len(ts) >= 13 and service_id:
+            hour = ts[:13]
+            key = (service_id, hour, "A", op_type or "")
+            if key not in summary_map:
+                summary_map[key] = [0, 0]
+            summary_map[key][0] += 1
+            summary_map[key][1] += op_bytes or 0
 
     if not new_rows:
         return 0
@@ -193,6 +221,21 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             new_rows,
         )
+        if summary_map:
+            summary_rows = [
+                (sid, hr, oc, ot, counts[0], counts[1], now_iso)
+                for (sid, hr, oc, ot), counts in summary_map.items()
+            ]
+            con.executemany(
+                "INSERT INTO usage_log_hourly_summary "
+                "(service_id, hour, operation_class, operation_type, count, bytes, last_updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (service_id, hour, operation_class, operation_type) "
+                "DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, "
+                "              bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes, "
+                "              last_updated = EXCLUDED.last_updated",
+                summary_rows,
+            )
         con.commit()
         return len(new_rows)
     except Exception as e:
@@ -271,12 +314,27 @@ def reconcile_fastly_stats(
         FROM usage_log_hourly_summary
         WHERE service_id = ? AND operation_class IN ('A', 'B')
           AND hour >= substr(?, 1, 13) AND hour < substr(?, 1, 13)
-          AND operation_type NOT LIKE 'RECONCILE_%'
+          AND operation_type NOT LIKE ?
         GROUP BY operation_class, hour
         """,
-        (service_id, window_start, window_end),
+        (service_id, window_start, window_end, "RECONCILE_%"),
     ):
         local_sums[(r[0], r[1])] = int(r[2] or 0)
+
+    # Find previous reconciliation rows before deleting to adjust the hourly summary
+    cur = con.execute(
+        """
+        SELECT substring(timestamp, 1, 13) AS hour, operation_class, operation_type,
+               SUM(count) AS c, SUM(COALESCE(bytes, 0)) AS b
+        FROM usage_log
+        WHERE service_id = ? AND operation_class IN ('A', 'B')
+          AND timestamp >= ? AND timestamp < ?
+          AND function_name = 'fastly.reconciliation'
+        GROUP BY substring(timestamp, 1, 13), operation_class, operation_type
+        """,
+        (service_id, window_start, window_end),
+    )
+    deletes_to_adjust = cur.fetchall()
 
     # Wipe prior reconciliation rows in the window in a single range delete
     # spanning both classes, then insert one row per (hour, class) gap > 0.
@@ -289,6 +347,27 @@ def reconcile_fastly_stats(
         """,
         (service_id, window_start, window_end),
     )
+
+    now_iso = iso_z_now()
+    for r in deletes_to_adjust:
+        hr = r["hour"]
+        op_class = r["operation_class"]
+        op_type = r["operation_type"]
+        cnt = int(r["c"] or 0)
+        bts = int(r["b"] or 0)
+        con.execute(
+            """
+            UPDATE usage_log_hourly_summary
+            SET count = count - ?,
+                bytes = bytes - ?,
+                last_updated = ?
+            WHERE service_id = ?
+              AND hour = ?
+              AND operation_class = ?
+              AND operation_type = ?
+            """,
+            (cnt, bts, now_iso, service_id, hr, op_class, op_type),
+        )
 
     written = 0
     insert_rows: list[tuple] = []
@@ -325,6 +404,34 @@ def reconcile_fastly_stats(
             """,
             insert_rows,
         )
+        summary_map: dict[tuple[str, str, str, str], list[int]] = {}
+        for r in insert_rows:
+            ts = r[0]
+            hr = ts[:13]
+            op_class = r[2]
+            op_type = r[3]
+            gap_count = r[10]
+            key = (service_id, hr, op_class, op_type)
+            if key not in summary_map:
+                summary_map[key] = [0, 0]
+            summary_map[key][0] += gap_count
+
+        summary_rows = [
+            (sid, hr, oc, ot, counts[0], counts[1], now_iso)
+            for (sid, hr, oc, ot), counts in summary_map.items()
+        ]
+        con.executemany(
+            """
+            INSERT INTO usage_log_hourly_summary
+                (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (service_id, hour, operation_class, operation_type)
+            DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count,
+                          bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
+                          last_updated = EXCLUDED.last_updated
+            """,
+            summary_rows,
+        )
     con.commit()
     return written
 
@@ -338,10 +445,6 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
     con.execute("DELETE FROM telemetry_queries WHERE timestamp < ?", (cutoff,))
     con.execute("DELETE FROM telemetry_sections WHERE timestamp < ?", (cutoff,))
     con.commit()
-    try:
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except Exception:
-        pass
 
 
 def clear_usage_log(service_id: str) -> None:
@@ -349,10 +452,6 @@ def clear_usage_log(service_id: str) -> None:
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
     con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
     con.commit()
-    try:
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except Exception:
-        pass
 
 
 def _usage_class_predicate(usage_type: str) -> tuple[str, list]:
@@ -378,12 +477,12 @@ def _usage_class_predicate(usage_type: str) -> tuple[str, list]:
 
 
 def _query_usage_log_aggregate_rollup(
-    con: sqlite3.Connection,
+    con: Any,
     service_id: str,
     start: str,
     end: str,
     usage_type: str,
-) -> list[sqlite3.Row]:
+) -> list[Any]:
     """Compute the (operation_class, operation_type) totals exactly using the
     hourly rollup for fully-contained hours plus raw usage_log for the two
     boundary hours (which usually aren't hour-aligned).
@@ -510,7 +609,7 @@ def get_usage_logs(
 
     try:
         con = _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
+    except Exception:
         # File doesn't exist yet (first run before any log_usage_calls).
         return (
             [],
@@ -650,7 +749,7 @@ def iter_usage_logs_chunks(
 
     try:
         con = _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
+    except Exception:
         # File doesn't exist (first run before any log_usage_calls).
         return
 

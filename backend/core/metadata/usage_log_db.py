@@ -42,111 +42,54 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
-import sys
 import threading
 
+from backend.core.metadata import pg_connection
 from backend.core.metadata.base import _DATA_DIR, _validate_service_id_or_raise
-from backend.core.sqlite_pool import ThreadLocalPool
 
 logger = logging.getLogger(__name__)
 
-# Kept as module-level attributes for the pytest fixture in
-# ``tests/conftest.py`` (and the migration-shape tests under
-# ``tests/core/test_metadata_db_migrations.py``) that monkeypatch them
-# between cases. The pool reads through ``_module_*`` lookups on every
-# call so the swaps take effect — see the ``initialized_provider`` /
-# ``local_provider`` arguments to :class:`ThreadLocalPool`.
+# Kept as module-level attributes for backward compatibility with tests/conftest.py
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized: set[str] = set()
 
 
 def db_path(service_id: str) -> str:
-    """Absolute path to the per-service usage_log SQLite file.
-
-    Same validation as :func:`backend.core.metadata.base.db_path` —
-    rejects non-string / out-of-charset service_ids at the boundary so a
-    bad caller can't silently spawn `<...0x...>.usage_log.db`.
-    """
+    """Absolute path to the per-service usage_log SQLite file (legacy helper)."""
     _validate_service_id_or_raise(service_id)
     return os.path.join(_DATA_DIR, f"{service_id}.usage_log.db")
 
 
-def _init_schema(con: sqlite3.Connection) -> None:
-    # SRE-22: Self-heal/upgrade existing index to covering version if needed
-    try:
-        cols = [row[2] for row in con.execute("PRAGMA index_info('idx_usage_reconcile')").fetchall()]
-        if cols and "function_name" not in cols:
-            con.execute("DROP INDEX IF EXISTS idx_usage_reconcile")
-    except Exception:
-        pass
-
-    # Self-heal/upgrade existing trigger to only run on reconciliation deletes
-    try:
-        row = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_usage_log_summary_delete'"
-        ).fetchone()
-        if row and row[0] and "fastly.reconciliation" not in row[0]:
-            con.execute("DROP TRIGGER IF EXISTS trg_usage_log_summary_delete")
-    except Exception:
-        pass
-
-    for stmt in _SCHEMA:
-        con.execute(stmt)
-    con.commit()
+def get_con(service_id: str) -> pg_connection.PgConnectionWrapper:
+    """Read-write thread-local connection to the metadata Postgres database."""
+    _validate_service_id_or_raise(service_id)
+    wrapper = pg_connection.get_pg_thread_connection()
+    wrapper._service_id = service_id
+    return wrapper
 
 
-_module = sys.modules[__name__]
-_pool = ThreadLocalPool(
-    name="usage_log_db",
-    path_fn=db_path,
-    schema_fn=_init_schema,
-    initialized_provider=lambda: _module._initialized,
-    local_provider=lambda: _module._local,
-    local_attr="usage_log_conns",
-)
+def open_readonly(service_id: str) -> pg_connection.PgConnectionWrapper:
+    """Open a short-lived read-only connection to the metadata Postgres database."""
+    _validate_service_id_or_raise(service_id)
+    wrapper = pg_connection.get_pg_readonly_connection()
+    wrapper._service_id = service_id
+    return wrapper
 
 
-def get_con(service_id: str) -> sqlite3.Connection:
-    """Read-write thread-local connection to the per-service usage_log.db.
-
-    Lazily creates the file + applies the schema on first use per
-    (thread, service_id). Mirrors the lock/init pattern in
-    :func:`backend.core.metadata.base.get_con` — :data:`_init_lock` is
-    held across connect+PRAGMA so concurrent first-opens don't collide
-    on ``PRAGMA journal_mode=WAL``.
-    """
-    return _pool.get(service_id)
-
-
-def open_readonly(service_id: str) -> sqlite3.Connection:
-    """Open a short-lived read-only connection.
-
-    The ``mode=ro`` URI guarantees the open call cannot acquire the
-    writer lock — readers on this path can never block the cron writer
-    even if they hold the connection for a long time. Caller is
-    responsible for closing.
-
-    File-must-exist semantics: ``mode=ro`` raises ``OperationalError``
-    when the file isn't there yet. Callers should treat that as "no
-    rows yet" and return an empty result (the writer creates the file
-    on first ``log_usage_calls`` call).
-    """
-    return _pool.open_readonly(service_id, timeout=5.0)
+def release_thread_connection() -> None:
+    """Release the thread connection back to the pool."""
+    pg_connection.release_pg_thread_connection()
 
 
 def close_all_connections() -> None:
-    _pool.close_all()
+    """Close all open Postgres connections in the pool."""
+    pg_connection.close_all_pg_connections()
 
 
 def teardown(service_id: str) -> None:
-    """Close any thread-local connection and delete the file + WAL siblings."""
-    _pool.teardown(service_id)
-
-    from backend.core.sqlite_pool import remove_sqlite_db_files
-
-    remove_sqlite_db_files(db_path(service_id), name="usage_log_db")
+    """No-op under Postgres — rows are scoped by service_id."""
+    _validate_service_id_or_raise(service_id)
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────

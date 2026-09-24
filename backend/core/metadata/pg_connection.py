@@ -364,8 +364,17 @@ def _rewrite_sql(sql: str) -> str:
     if "excluded." in sql and "ON CONFLICT" in sql:
         sql = sql.replace("excluded.", "EXCLUDED.")
 
-    sql = sql.replace("datetime('now')", "current_timestamp AT TIME ZONE 'UTC'")
-    sql = re.sub(r"datetime\('now',\s*'(.*?)'\)", r"current_timestamp AT TIME ZONE 'UTC' + INTERVAL '\1'", sql)
+    sql = re.sub(
+        r"datetime\('now',\s*'(.*?)'\)",
+        r"to_char(current_timestamp AT TIME ZONE 'UTC' + INTERVAL '\1', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+        sql,
+    )
+    sql = re.sub(
+        r"datetime\('now',\s*(%s|\$\d+|\?)\)",
+        r"to_char(current_timestamp AT TIME ZONE 'UTC' + (\1)::interval, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+        sql,
+    )
+    sql = re.sub(r"\bdatetime\('now'\)", "current_timestamp AT TIME ZONE 'UTC'", sql)
     sql = sql.replace(
         "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         "to_char(current_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
@@ -374,6 +383,7 @@ def _rewrite_sql(sql: str) -> str:
     sql = re.sub(r"\binstr\(", "strpos(", sql)
     sql = re.sub(r"\bsubstr\(", "substring(", sql)
     sql = re.sub(r",\s*rowid\s+(ASC|DESC)", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\browid\b", "id", sql, flags=re.IGNORECASE)
 
     # SQLite's ``LIKE ... COLLATE NOCASE`` (case-insensitive LIKE) has no
     # Postgres COLLATE equivalent — ``COLLATE "NOCASE"`` isn't a real
@@ -428,6 +438,9 @@ class PgCursorWrapper:
 
     def fetchall(self):
         return self._cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self._cursor)
 
     @property
     def rowcount(self):

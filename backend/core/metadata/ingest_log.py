@@ -897,7 +897,7 @@ def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> 
         rows = con.execute(
             """
             SELECT bucket, sum(rc) AS rc, sum(bs) AS bs FROM (
-                SELECT file_date AS bucket,
+                SELECT CAST(file_date AS text) AS bucket,
                        sum(row_count) AS rc,
                        sum(file_size_bytes) AS bs
                 FROM ingested_files

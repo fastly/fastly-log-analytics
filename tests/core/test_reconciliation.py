@@ -10,9 +10,12 @@ the ``isolate_metadata_db`` fixture (autouse, see ``tests/conftest.py``).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from backend.core import metadata as metadata_db
 from backend.core.metadata import reconciliation
 from backend.core.metadata import usage_log_db as _usage_log_db
+from backend.utils.date_utils import iso_z
 
 
 def _con(service_id: str):
@@ -22,15 +25,25 @@ def _con(service_id: str):
 def _seed_usage_log(service_id: str, rows: int, days_ago: int = 0) -> None:
     """Insert ``rows`` usage_log entries dated ``days_ago`` in the past.
 
-    ``usage_log`` lives in its own per-service SQLite (v2.0 cutover); seed
+    ``usage_log`` lives in its own per-service database; seed
     via :func:`backend.core.metadata.usage_log_db.get_con` so the row
     counts/cleanup paths see them.
     """
     con = _usage_log_db.get_con(service_id)
+    now_dt = datetime.now(UTC) - timedelta(days=days_ago)
+    now_ts = iso_z(now_dt)
+    hour = now_ts[:13]
     con.executemany(
         "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, bytes, count) "
-        f"VALUES (datetime('now', '-{days_ago} days'), ?, 'A', 'PUT_OBJECT', 0, 1)",
-        [(service_id,) for _ in range(rows)],
+        "VALUES (?, ?, 'A', 'PUT_OBJECT', 0, 1)",
+        [(now_ts, service_id) for _ in range(rows)],
+    )
+    con.execute(
+        """INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+           VALUES (?, ?, 'A', 'PUT_OBJECT', ?, 0, ?)
+           ON CONFLICT (service_id, hour, operation_class, operation_type)
+           DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count, last_updated = EXCLUDED.last_updated""",
+        (service_id, hour, rows, now_ts),
     )
     con.commit()
 

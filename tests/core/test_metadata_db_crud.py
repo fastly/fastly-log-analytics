@@ -672,6 +672,22 @@ def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
+    summary_rows = [
+        (sid, "2026-05-25T10", "A", "PUT_OBJECT", 5, 300, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "A", "POST", 1, 50, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "B", "GET_OBJECT", 5, 500, "2026-05-25T10:00:00Z"),
+        (sid, "2026-05-25T10", "CDN", "GET", 11, 3000, "2026-05-25T10:00:00Z"),
+    ]
+    con.executemany(
+        """INSERT INTO usage_log_hourly_summary
+           (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (service_id, hour, operation_class, operation_type)
+           DO UPDATE SET count = usage_log_hourly_summary.count + EXCLUDED.count,
+                         bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
+                         last_updated = EXCLUDED.last_updated""",
+        summary_rows,
+    )
     con.commit()
 
     _entries, total, agg = metadata_db.get_usage_logs(sid, "2026-05-25T00:00:00Z", "2026-05-25T23:59:59Z")
@@ -959,6 +975,17 @@ def _seed_usage_log_row(
             process_context,
             "OK",
         ],
+    )
+    hour = timestamp[:13]
+    con.execute(
+        """INSERT INTO usage_log_hourly_summary
+            (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT (service_id, hour, operation_class, operation_type)
+            DO UPDATE SET count = usage_log_hourly_summary.count + 1,
+                          bytes = usage_log_hourly_summary.bytes + EXCLUDED.bytes,
+                          last_updated = EXCLUDED.last_updated""",
+        [sid, hour, operation_class, operation_type, bytes_count, timestamp],
     )
     # ``get_usage_logs`` now opens a separate ``mode=ro`` connection per
     # call (decoupled from the cron writer), so the writer's uncommitted

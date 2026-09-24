@@ -2,94 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from unittest.mock import MagicMock
 
-from backend.core.metadata import slow_queries, usage_log_db
+from backend.core.metadata import slow_queries, usage_log, usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
 from backend.core.sqlite_pool import open_small_cache_db
-
-
-def test_usage_log_trigger_migration(tmp_path, monkeypatch):
-    """Verify that an outdated trigger definition is dropped and recreated during _init_schema."""
-    monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
-    sid = "test_migrate_svc"
-    db_file = usage_log_db.db_path(sid)
-
-    # 1. Seed the database with the tables and the OLD version of the trigger (lacking reconciliation condition)
-    con = sqlite3.connect(db_file)
-    try:
-        con.execute(
-            """CREATE TABLE usage_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                service_id TEXT,
-                operation_class TEXT,
-                operation_type TEXT,
-                url TEXT,
-                status TEXT,
-                duration_ms REAL,
-                function_name TEXT,
-                process_context TEXT,
-                bytes INTEGER,
-                count INTEGER NOT NULL DEFAULT 1
-            )"""
-        )
-        con.execute(
-            """CREATE TABLE usage_log_hourly_summary (
-                service_id TEXT NOT NULL,
-                hour TEXT NOT NULL,
-                operation_class TEXT NOT NULL DEFAULT '',
-                operation_type TEXT NOT NULL DEFAULT '',
-                count INTEGER NOT NULL DEFAULT 0,
-                bytes INTEGER NOT NULL DEFAULT 0,
-                last_updated TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (service_id, hour, operation_class, operation_type)
-            )"""
-        )
-        # Create old, unconditional trigger
-        con.execute(
-            """CREATE TRIGGER trg_usage_log_summary_delete
-            AFTER DELETE ON usage_log
-            WHEN OLD.timestamp IS NOT NULL AND length(OLD.timestamp) >= 13 AND OLD.service_id IS NOT NULL
-            BEGIN
-                UPDATE usage_log_hourly_summary
-                SET count = count - COALESCE(OLD.count, 1),
-                    bytes = bytes - COALESCE(OLD.bytes, 0),
-                    last_updated = datetime('now')
-                WHERE service_id = OLD.service_id
-                  AND hour = substr(OLD.timestamp, 1, 13)
-                  AND operation_class = COALESCE(OLD.operation_class, '')
-                  AND operation_type = COALESCE(OLD.operation_type, '');
-            END"""
-        )
-        con.commit()
-    finally:
-        con.close()
-
-    # Verify seed state
-    con = sqlite3.connect(db_file)
-    try:
-        sql = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trg_usage_log_summary_delete'"
-        ).fetchone()[0]
-        assert "fastly.reconciliation" not in sql
-    finally:
-        con.close()
-
-    # 2. Trigger pool initialization/schema-init
-    # We clear _initialized so our schema-init callback is guaranteed to run
-    usage_log_db._initialized.clear()
-    con = usage_log_db.get_con(sid)
-    try:
-        # Verify that the trigger was dropped and recreated with the new condition
-        sql = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trg_usage_log_summary_delete'"
-        ).fetchone()[0]
-        assert "fastly.reconciliation" in sql
-    finally:
-        usage_log_db.close_all_connections()
 
 
 def test_small_cache_db_corruption_self_healing(tmp_path):
@@ -116,44 +34,59 @@ def test_small_cache_db_corruption_self_healing(tmp_path):
 
 def test_usage_log_purging_and_trigger_restricton(tmp_path, monkeypatch):
     """Verify raw log deletes do not decrement hourly summary, but reconciliation deletes do."""
-    monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
-    sid = "test_purge_svc"
+    from datetime import UTC, datetime, timedelta
 
-    # Init DB
-    usage_log_db._initialized.clear()
+    from backend.utils.date_utils import iso_z
+    sid = "test_purge_svc"
+    usage_log.clear_usage_log(sid)
+
+    old_ts = "2020-05-01T10:00:00Z"
+    now_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    now_hour = now_dt.strftime("%Y-%m-%dT%H")
+    now_ts_1 = iso_z(now_dt)
+    now_ts_2 = iso_z(now_dt + timedelta(minutes=15))
+
     con = usage_log_db.get_con(sid)
     try:
-        # 1. Insert raw logs (function_name = 'api.sync' or NULL) and a reconciliation log row
+        # 1. Insert raw logs and reconciliation rows with matching summary records
         con.execute(
             """INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, function_name)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            ("2026-05-01T10:00:00Z", sid, "A", "CDN", 100, "api.sync"),
+            (old_ts, sid, "A", "CDN", 100, "api.sync"),
         )
         con.execute(
             """INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, function_name)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            ("2026-05-01T10:15:00Z", sid, "A", "CDN", 50, "fastly.reconciliation"),
+            (now_ts_2, sid, "A", "RECONCILE_A", 50, "fastly.reconciliation"),
+        )
+        con.execute(
+            """INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (sid, "2020-05-01T10", "A", "CDN", 100, 0, old_ts),
+        )
+        con.execute(
+            """INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (sid, now_hour, "A", "RECONCILE_A", 50, 0, now_ts_1),
         )
         con.commit()
 
         # Check summaries aggregated both (150 total)
-        row = con.execute("SELECT count FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
+        row = con.execute("SELECT sum(count) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
         assert row and row[0] == 150
 
-        # 2. Delete raw log row (simulating retention purging)
-        con.execute("DELETE FROM usage_log WHERE function_name = 'api.sync'")
-        con.commit()
+        # 2. Delete raw log row (simulating retention purging of old rows)
+        usage_log.purge_usage_log(sid, retention_days=30)
 
         # The summary MUST remain untouched (still 150)
-        row = con.execute("SELECT count FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
+        row = con.execute("SELECT sum(count) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
         assert row and row[0] == 150
 
-        # 3. Delete the reconciliation row (simulating gap recompute)
-        con.execute("DELETE FROM usage_log WHERE function_name = 'fastly.reconciliation'")
-        con.commit()
+        # 3. Reconcile fastly stats (simulating gap recompute where Fastly reports 0 -> gap 0, so old 50 removed)
+        usage_log.reconcile_fastly_stats(sid, [{"hour_iso": now_ts_1, "class_a": 0, "class_b": 0}])
 
-        # The summary MUST be decremented by the reconciliation row count (150 - 50 = 100)
-        row = con.execute("SELECT count FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
+        # The summary MUST reflect the reconciliation adjustment (the old 50 reconciliation row is gone -> total 100)
+        row = con.execute("SELECT sum(count) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
         assert row and row[0] == 100
     finally:
         usage_log_db.close_all_connections()
@@ -161,16 +94,18 @@ def test_usage_log_purging_and_trigger_restricton(tmp_path, monkeypatch):
 
 def test_clear_usage_log_wipes_both_tables(tmp_path, monkeypatch):
     """Verify that clear_usage_log explicitly truncates both usage_log and usage_log_hourly_summary."""
-    monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
     sid = "test_clear_svc"
-
-    usage_log_db._initialized.clear()
     con = usage_log_db.get_con(sid)
     try:
         con.execute(
             """INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, count, function_name)
                VALUES (?, ?, ?, ?, ?, ?)""",
             ("2026-05-01T10:00:00Z", sid, "A", "CDN", 100, "api.sync"),
+        )
+        con.execute(
+            """INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (sid, "2026-05-01T10", "A", "CDN", 100, 0, "2026-05-01T10:00:00Z"),
         )
         con.commit()
 
@@ -186,8 +121,8 @@ def test_clear_usage_log_wipes_both_tables(tmp_path, monkeypatch):
     # Connect again and verify both are empty
     con = usage_log_db.get_con(sid)
     try:
-        assert con.execute("SELECT count(*) FROM usage_log").fetchone()[0] == 0
-        assert con.execute("SELECT count(*) FROM usage_log_hourly_summary").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM usage_log WHERE service_id = ?", (sid,)).fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()[0] == 0
     finally:
         usage_log_db.close_all_connections()
 
