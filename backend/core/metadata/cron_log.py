@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import statistics
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import psycopg
 
@@ -22,7 +22,7 @@ from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 logger = logging.getLogger(__name__)
 
 
-def _retry_on_locked[T](con: sqlite3.Connection, fn: Callable[[], T]) -> T:
+def _retry_on_locked[T](con: Any, fn: Callable[[], T]) -> T:
     """Run ``fn`` (a complete, idempotent write+commit unit).
 
     Historically retried on SQLite's transient ``OperationalError: database
@@ -660,7 +660,7 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
 
 
 def adaptive_stale_minutes(
-    con: sqlite3.Connection,
+    con: Any,
     *,
     default_minutes: int,
     min_samples: int = 10,

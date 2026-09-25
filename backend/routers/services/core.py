@@ -255,10 +255,8 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
             evs = get_progress(run_id, last_idx, service_id=service_id)
             if evs is None:
                 if last_idx == 0:
-                    # Fall back to SQLite database if progress cache doesn't have it (completed / historical)
+                    # Fall back to metadata database if progress cache doesn't have it (completed / historical)
                     try:
-                        import sqlite3
-
                         from backend.core import metadata as metadata_db
 
                         if service_id:
@@ -317,17 +315,7 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                             )
                                     else:
                                         # No log output — generate a helpful message based on task type and status
-                                        task_name = "unknown task"
-                                        try:
-                                            with sqlite3.connect(f"data/services/{service_id}.metadata.db") as con:
-                                                con.row_factory = sqlite3.Row
-                                                t_row = con.execute(
-                                                    "SELECT task FROM cron_runs WHERE id = ?", (run_id,)
-                                                ).fetchone()
-                                                if t_row:
-                                                    task_name = t_row["task"] or "unknown task"
-                                        except Exception:
-                                            pass
+                                        task_name = (row.get("task") if isinstance(row, dict) else (row["task"] if row else None)) or "unknown task"
 
                                         msg = f"Run completed with status {status}."
                                         if normalized_status == "done" and task_name == "rum_sync":

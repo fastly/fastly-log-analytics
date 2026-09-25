@@ -624,38 +624,36 @@ def enrich_bot_metadata(df: Any) -> None:
 
     # 2. NG-WAF Verified Bot Enrichment
     if "waf_req_id" in df.columns:
-        import os
-        import sqlite3
+        from backend.core.metadata import pg_connection
 
-        from backend import config as svcconfig
-
-        ngwaf_db = svcconfig.ngwaf_db_path()
-        if not os.path.exists(ngwaf_db):
+        # Normalize each waf_req_id once: None for missing/sentinel
+        # values, str(x) otherwise. Both the IN-list and the per-row
+        # output then read from this single pass.
+        norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
+        waf_ids = [n for n in norm if n]
+        if not waf_ids:
             df["_ngwaf_bot_name"] = None
         else:
-            # Normalize each waf_req_id once: None for missing/sentinel
-            # values, str(x) otherwise. Both the IN-list and the per-row
-            # output then read from this single pass.
-            norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
-            waf_ids = [n for n in norm if n]
-            if not waf_ids:
-                df["_ngwaf_bot_name"] = None
-            else:
+            try:
+                pconn = pg_connection.get_pg_readonly_connection()
                 try:
-                    placeholders = ",".join("?" * len(waf_ids))
-                    # mode=ro: pure SELECT, no schema or row writes — opening
-                    # read-only skips SQLite's shared-lock acquisition entirely
-                    # and lets concurrent NGWAF sync writers proceed unimpeded.
-                    sq = sqlite3.connect(f"file:{ngwaf_db}?mode=ro", uri=True)
-                    rows = sq.execute(
+                    placeholders = ",".join("?" for _ in waf_ids)
+                    cur = pconn.execute(
                         f"SELECT waf_req_id, bot_name FROM ngwaf_bots WHERE waf_req_id IN ({placeholders})",
                         waf_ids,
-                    ).fetchall()
-                    sq.close()
-                    bot_map = {r[0]: r[1] for r in rows}
-                    df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]
-                except Exception:
-                    df["_ngwaf_bot_name"] = None
+                    )
+                    rows = cur.fetchall()
+                finally:
+                    pconn.close()
+                bot_map = {
+                    (r["waf_req_id"] if isinstance(r, dict) else r[0]): (
+                        r["bot_name"] if isinstance(r, dict) else r[1]
+                    )
+                    for r in rows
+                }
+                df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]
+            except Exception:
+                df["_ngwaf_bot_name"] = None
 
 
 # R-1: drain the matcher + source caches between tests. Both are

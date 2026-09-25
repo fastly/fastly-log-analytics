@@ -9,7 +9,7 @@ join against ``usage_log`` (for the unbackfilled-edge-files sweep).
 from __future__ import annotations
 
 import json
-import sqlite3
+from typing import Any
 
 from backend.core.metadata.base import (
     _ingested_filenames_cache,
@@ -138,7 +138,7 @@ def list_ingested_files_for_status(service_id: str) -> list[tuple[str, str, int 
     return [(r["file_name"], r["ingested_at"], r["row_count"], r["file_size_bytes"]) for r in rows]
 
 
-def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) -> dict:
+def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
     """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
 
     Pays the full ~4 s scan ONCE per service per app lifetime so subsequent
@@ -198,7 +198,7 @@ def _bootstrap_ingested_files_summary(con: sqlite3.Connection, service_id: str) 
     return summary
 
 
-def recompute_ingested_files_summary(con: sqlite3.Connection, service_id: str) -> dict:
+def recompute_ingested_files_summary(con: Any, service_id: str) -> dict:
     """Recompute the ``ingested_files_summary`` rollup from the current table.
 
     Public entry point for callers that mutate ``ingested_files`` *outside* of
@@ -539,8 +539,8 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
 
     try:
         con = _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
-        # Fresh service before the writer has created the file — no rows.
+    except Exception:
+        # Fresh service before the writer has created the table — no rows.
         return None
     try:
         row = con.execute(

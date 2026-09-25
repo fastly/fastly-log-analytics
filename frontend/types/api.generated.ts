@@ -4683,10 +4683,31 @@ export interface paths {
         };
         /**
          * Recent Sqlite
-         * @description Return up to ``limit`` most-recent SQLite statements captured since
-         *     ``since_seq``. The Debug Panel polls this every 2s when SQL debug is on.
+         * @description Return up to ``limit`` most-recent Postgres statements captured since
+         *     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
          */
         get: operations["recent_sqlite_api_debug_recent_sqlite_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/debug/recent-postgres": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recent Sqlite
+         * @description Return up to ``limit`` most-recent Postgres statements captured since
+         *     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
+         */
+        get: operations["recent_sqlite_api_debug_recent_postgres_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4706,9 +4727,29 @@ export interface paths {
         put?: never;
         /**
          * Clear Sqlite
-         * @description Drain the SQLite ring buffer. Manual reset for the Debug Panel.
+         * @description Drain the Postgres ring buffer. Manual reset for the Debug Panel.
          */
         post: operations["clear_sqlite_api_debug_clear_sqlite_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/debug/clear-postgres": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear Sqlite
+         * @description Drain the Postgres ring buffer. Manual reset for the Debug Panel.
+         */
+        post: operations["clear_sqlite_api_debug_clear_postgres_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5521,6 +5562,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5646,6 +5691,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5760,6 +5809,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5782,6 +5835,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5810,6 +5867,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -5832,6 +5893,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -5892,6 +5957,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6077,6 +6146,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6234,6 +6307,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6270,6 +6347,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6318,6 +6399,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6491,6 +6576,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6529,6 +6618,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -6585,6 +6678,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -6625,6 +6722,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7064,6 +7165,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7253,6 +7358,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7337,6 +7446,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7476,6 +7589,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7716,6 +7833,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7759,6 +7880,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7818,6 +7943,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7853,6 +7982,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -7875,6 +8008,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -7963,6 +8100,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8011,6 +8152,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8036,6 +8181,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8159,6 +8308,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8206,6 +8359,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8333,6 +8490,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8574,6 +8735,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8637,6 +8802,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -8673,6 +8842,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8733,6 +8906,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -8932,6 +9109,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9061,6 +9242,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9307,6 +9492,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9405,6 +9594,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9440,6 +9633,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9501,6 +9698,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9578,6 +9779,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9660,6 +9865,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9697,6 +9906,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9732,6 +9945,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -9822,6 +10039,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -9883,6 +10104,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -10019,6 +10244,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -10060,6 +10289,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -10085,6 +10318,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -10158,6 +10395,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -10644,6 +10885,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12036,6 +12281,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12207,6 +12456,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -12383,6 +12636,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12482,6 +12739,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -12554,6 +12815,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -13105,6 +13370,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -13142,6 +13411,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -13177,6 +13450,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -13240,6 +13517,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -13269,6 +13550,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -13310,6 +13595,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -13436,6 +13725,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -13524,6 +13817,10 @@ export interface components {
             _debug_sqlite?: {
                 [key: string]: unknown;
             }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
             /**
              * Is Cached
              * @default false
@@ -13554,6 +13851,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -13644,6 +13945,10 @@ export interface components {
             _debug_calls?: components["schemas"]["DebugCall"][];
             /** Debug Sqlite */
             _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
                 [key: string]: unknown;
             }[];
             /**
@@ -38219,7 +38524,212 @@ export interface operations {
             };
         };
     };
+    recent_sqlite_api_debug_recent_postgres_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                since_seq?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecentSqliteResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     clear_sqlite_api_debug_clear_sqlite_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClearSqliteResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    clear_sqlite_api_debug_clear_postgres_post: {
         parameters: {
             query?: never;
             header?: never;

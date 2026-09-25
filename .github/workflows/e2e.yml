@@ -51,6 +51,25 @@ jobs:
       matrix:
         browser: [chromium]
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+
     steps:
       - uses: actions/checkout@v7
 

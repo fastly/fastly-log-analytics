@@ -13,32 +13,54 @@ _SAFE_COL_RE = re.compile(r"[^\w]")
 from backend.utils.date_utils import parse_iso_utc
 
 
-def _lookup_ngwaf_waf_req_ids(db_path: str, bot_names: list[str]) -> list[str]:
+def _lookup_ngwaf_waf_req_ids(bot_names: list[str], db_path: str | None = None) -> list[str]:
     """Return cached ``waf_req_id``s whose ``bot_name`` is in ``bot_names``.
 
-    Reads ``ngwaf_bot_cache.db`` via plain ``sqlite3`` instead of DuckDB's
-    ``sqlite_scan`` — see the ``_ngwaf_bot_name`` branch of
-    :func:`build_where_clause` for why. Best-effort: returns ``[]`` on any
-    sqlite error so a cache hiccup degrades the filter to "no matches"
-    rather than failing the whole query.
+    Reads ``ngwaf_bots`` from PostgreSQL (or test SQLite file if present).
+    Best-effort: returns ``[]`` on any error so a cache hiccup degrades the
+    filter to "no matches" rather than failing the whole query.
     """
     import logging
-    import sqlite3
+    import os
+
+    if not bot_names:
+        return []
+
+    if db_path and os.path.exists(db_path):
+        import sqlite3
+
+        try:
+            con = sqlite3.connect(db_path, timeout=5)
+            try:
+                placeholders = ", ".join("?" for _ in bot_names)
+                rows = con.execute(
+                    f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({placeholders})",
+                    bot_names,
+                ).fetchall()
+            finally:
+                con.close()
+            return [r[0] for r in rows]
+        except Exception as e:
+            logging.getLogger(__name__).warning("[build_where_clause] ngwaf_bots test cache lookup failed: %s", e)
+            return []
+
+    from backend.core.metadata import pg_connection
 
     try:
-        con = sqlite3.connect(db_path, timeout=5)
+        pconn = pg_connection.get_pg_readonly_connection()
         try:
             placeholders = ", ".join("?" for _ in bot_names)
-            rows = con.execute(
+            cur = pconn.execute(
                 f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({placeholders})",
                 bot_names,
-            ).fetchall()
+            )
+            rows = cur.fetchall()
         finally:
-            con.close()
-    except sqlite3.Error as e:
+            pconn.close()
+    except Exception as e:
         logging.getLogger(__name__).warning("[build_where_clause] ngwaf_bots cache lookup failed: %s", e)
         return []
-    return [r[0] for r in rows]
+    return [r["waf_req_id"] if isinstance(r, dict) else r[0] for r in rows]
 
 
 def filter_spec_attr(spec: Any, attr: str) -> Any:
@@ -302,25 +324,21 @@ def build_where_clause(
                 )
                 continue
 
-            import os
+            bot_names = [str(v) for v in non_none if v]
+            if bot_names:
+                from backend import config as svcconfig
 
-            from backend import config as svcconfig
-
-            ngwaf_db = svcconfig.ngwaf_db_path()
-            if ngwaf_db and os.path.exists(ngwaf_db):
-                bot_names = [str(v) for v in non_none if v]
-                if bot_names:
-                    waf_req_ids = _lookup_ngwaf_waf_req_ids(ngwaf_db, bot_names)
-                    op = "NOT IN" if mode == "exclude" else "IN"
-                    if waf_req_ids:
-                        placeholders = ", ".join(_add_param(v) for v in waf_req_ids)
-                        parts.append(f"waf_req_id {op} ({placeholders})")
-                    elif mode != "exclude":
-                        # No cached rows match these bot names — an include
-                        # filter must match nothing (mirrors the empty-subquery
-                        # IN-clause behavior this replaces). An exclude filter
-                        # over an empty set is vacuously true, so no condition.
-                        parts.append("FALSE")
+                waf_req_ids = _lookup_ngwaf_waf_req_ids(bot_names, db_path=svcconfig.ngwaf_db_path())
+                op = "NOT IN" if mode == "exclude" else "IN"
+                if waf_req_ids:
+                    placeholders = ", ".join(_add_param(v) for v in waf_req_ids)
+                    parts.append(f"waf_req_id {op} ({placeholders})")
+                elif mode != "exclude":
+                    # No cached rows match these bot names — an include
+                    # filter must match nothing (mirrors the empty-subquery
+                    # IN-clause behavior this replaces). An exclude filter
+                    # over an empty set is vacuously true, so no condition.
+                    parts.append("FALSE")
         elif is_tunnel_requests:
             if actual_cols is not None and not all(
                 c in actual_cols for c in ["pop", "lat", "lon", "rtt_min", "tcp_rtt"]

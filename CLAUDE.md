@@ -29,7 +29,7 @@ Single test: `uv run pytest tests/path/to/test_file.py::test_name -v`
 
 ## Architecture
 
-FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust Compute@Edge scorer in `compute/scorer/`. Data plane: Fastly logs land in FOS (Fastly Object Storage), the backend ingests .gz files into DuckDB via Iceberg-like local tables with parquet storage, pre-computed rollups for performance, and per-service SQLite metadata DBs for state tracking. The frontend talks to the backend API; types are generated from the OpenAPI spec.
+FastAPI backend in `backend/`, Next.js App Router frontend in `frontend/`, Rust Compute@Edge scorer in `compute/scorer/`. Data plane: Fastly logs land in FOS (Fastly Object Storage), the backend ingests .gz files into DuckDB via DuckLake tables with parquet storage, pre-computed rollups for performance, and PostgreSQL 16 for unified operational metadata, state tracking, and DuckLake catalogs (ADR-22). The frontend talks to the backend API; types are generated from the OpenAPI spec.
 
 Major feature areas: interactive analytics (dashboard, origin, security, network, performance), Insights (45 anomaly detections), Control Room (real-time RT API at 1 s cadence), Streaming (CMCD analytics), Service Summary (Fastly value executive view), Session Scoring (Rust/Wasm edge scorer), live analyst sharing with OAuth/OIDC, and ingest error quarantine.
 

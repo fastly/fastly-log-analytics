@@ -36449,8 +36449,145 @@
           "debug"
         ],
         "summary": "Recent Sqlite",
-        "description": "Return up to ``limit`` most-recent SQLite statements captured since\n``since_seq``. The Debug Panel polls this every 2s when SQL debug is on.",
+        "description": "Return up to ``limit`` most-recent Postgres statements captured since\n``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.",
         "operationId": "recent_sqlite_api_debug_recent_sqlite_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "since_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Since Seq"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentSqliteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/recent-postgres": {
+      "get": {
+        "tags": [
+          "debug"
+        ],
+        "summary": "Recent Sqlite",
+        "description": "Return up to ``limit`` most-recent Postgres statements captured since\n``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.",
+        "operationId": "recent_sqlite_api_debug_recent_postgres_get",
         "parameters": [
           {
             "name": "limit",
@@ -36586,8 +36723,120 @@
           "debug"
         ],
         "summary": "Clear Sqlite",
-        "description": "Drain the SQLite ring buffer. Manual reset for the Debug Panel.",
+        "description": "Drain the Postgres ring buffer. Manual reset for the Debug Panel.",
         "operationId": "clear_sqlite_api_debug_clear_sqlite_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearSqliteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/clear-postgres": {
+      "post": {
+        "tags": [
+          "debug"
+        ],
+        "summary": "Clear Sqlite",
+        "description": "Drain the Postgres ring buffer. Manual reset for the Debug Panel.",
+        "operationId": "clear_sqlite_api_debug_clear_postgres_post",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -41290,6 +41539,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -41765,6 +42022,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -42091,6 +42356,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -42146,6 +42419,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -42211,6 +42492,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -42259,6 +42548,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -42419,6 +42716,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -42963,6 +43268,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -43466,6 +43779,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -43520,6 +43841,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -43637,6 +43966,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -44101,6 +44438,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -44203,6 +44548,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -44312,6 +44665,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -44443,6 +44804,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -45541,6 +45910,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -45846,6 +46223,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -46118,6 +46503,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -46469,6 +46862,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -47104,6 +47505,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -47219,6 +47628,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -47370,6 +47787,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -47458,6 +47883,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -47510,6 +47943,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -47731,6 +48172,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -47885,6 +48334,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -47952,6 +48409,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -48291,6 +48756,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -48421,6 +48894,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -48815,6 +49296,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -49564,6 +50053,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -49730,6 +50227,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -49813,6 +50318,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -49958,6 +50471,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -50463,6 +50984,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -50786,6 +51315,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -51311,6 +51848,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -51446,6 +51991,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -51505,6 +52058,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -51611,6 +52172,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -51765,6 +52334,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -51911,6 +52488,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -51971,6 +52556,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -52030,6 +52623,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -52268,6 +52869,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -52424,6 +53033,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -52753,6 +53370,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -52868,6 +53493,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -52918,6 +53551,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -53094,6 +53735,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -54357,6 +55006,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -58704,6 +59361,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -58973,6 +59638,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -59551,6 +60224,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -59951,6 +60632,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -60098,6 +60787,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -61580,6 +62277,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -61694,6 +62399,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -61782,6 +62495,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -61959,6 +62680,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -62032,6 +62761,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -62143,6 +62880,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -62420,6 +63165,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -62713,6 +63466,14 @@
             "type": "array",
             "title": "Debug Sqlite"
           },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
           "_is_cached": {
             "type": "boolean",
             "title": "Is Cached",
@@ -62791,6 +63552,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",
@@ -63049,6 +63818,14 @@
             },
             "type": "array",
             "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
           },
           "_is_cached": {
             "type": "boolean",

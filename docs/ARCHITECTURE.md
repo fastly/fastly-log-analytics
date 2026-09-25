@@ -17,12 +17,10 @@ The system uses a layered storage architecture to optimize for real-time query s
 |---|---|---|
 | **Raw Logs** | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON logs streamed directly from Fastly logging endpoints. v3 services use these roots exclusively; v2 services must be torn down and reprovisioned. |
 | **Local Buffer** | `cache/{bucket}/` | Transient Parquet files stored locally during active ingestion before commit. |
-| **DuckLake Table** | Catalog: local `.ducklake` file (single-pod) or a Postgres DSN (multi-pod, required in Celery mode); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Long-term, transactional storage powered by DuckDB's DuckLake extension. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0-beta1 — see [ADR-14](adr/14-ducklake-replacement.md). |
+| **DuckLake Table** | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required in all modes — see [ADR-22](adr/22-postgres-only-metadata.md)); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Long-term, transactional storage powered by DuckDB's DuckLake extension. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0-beta1 — see [ADR-14](adr/14-ducklake-replacement.md). |
 | **Admin State** | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | Replicated metadata: views, custom fields, audit logs, and log format history. (Path predates the DuckLake cutover; not moved, since it isn't part of the Iceberg/DuckLake commit-path catalog itself.) |
 | **DuckDB Engine** | `data/services/{service_id}.duckdb` | Per-service analytical query engine (compiles temporary tables and unified `logs` view). |
-| **Service Metadata** | `data/services/{service_id}.metadata.db` (SQLite, WAL mode) or a shared Postgres database (`METADATA_DSN`, required for multi-pod) | Stores local alerts, views, crons, ingested-file manifests, and (celery mode) the ingest ledger. See [ADR-15](adr/15-multi-writer-topology.md). |
-| **NGWAF Bot Cache** | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite database caching known verified bots from Fastly's NGWAF API. |
-| **Live Share State** | `data/system/remote_share.db` | Central SQLite database managing invitations, active shared sessions, and audit records. |
+| **Metadata & State Store** | PostgreSQL 16 (`METADATA_DSN`, mandatory across all deployment modes — see [ADR-22](adr/22-postgres-only-metadata.md)) | Stores alerts, views, crons, ingested-file manifests, usage logs, live share invites/sessions, and the NGWAF bot cache. Eliminates all file lock contention. |
 
 ### Module layout
 
@@ -57,7 +55,7 @@ graph TD
 
 **Atomic Manifest & Crash Recovery** (write-ahead registry pattern, unchanged from earlier releases):
 
-1.  **In-Flight Recording:** Before writing any staged Parquet files, a per-service SQLite table `ingest_in_flight` records the source filename, unique hash, and row counts.
+1.  **In-Flight Recording:** Before writing any staged Parquet files, a PostgreSQL table `ingest_in_flight` records the source filename, unique hash, and row counts.
 2.  **Deterministic Buffering:** Staged Parquet files are named deterministically based on a SHA-256 hash of their sorted content (`batch_{sha256[:16]}.parquet`). If an ingest restarts or crashes mid-way, duplicate writes naturally overwrite the same file instead of creating redundant rows.
 3.  **Commit Promotion:** Once the Parquet buffer is written successfully, the database transfers the records into `ingested_files` and clears the `ingest_in_flight` table.
 4.  **Idempotent Auto-Recovery:** Upon any startup or tick cycle, the ingest system inspects left-over entries in the in-flight table. If the corresponding buffer exists, it is promoted; otherwise, it is dropped and queued for clean re-download on the next LIST tick.

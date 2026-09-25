@@ -20,7 +20,7 @@ These instructions govern all coding, debugging, provisioning, deployment, and v
 - **ALWAYS** dynamically resolve standard active cloud environment and VM hostname server-side inside `components/ServerFooter.tsx` by querying standard Google Cloud Metadata server (`http://169.254.169.254` with a 500ms fail-open timeout), falling back to Kubernetes node name environment properties (`KUBERNETES_SERVICE_HOST`) and local variables.
 
 ### 3. Native Container Database Storage
-- **NEVER** mount standard backend's SQLite/DuckDB `/app/data` directory as standard host-volume on macOS/Colima development setups (`- ./data:/app/data` must be omitted/removed).
+- **NEVER** mount standard backend's DuckDB `/app/data` directory as standard host-volume on macOS/Colima development setups (`- ./data:/app/data` must be omitted/removed).
 - macOS volume sharing does not support concurrent write-shared memory (`mmap`/POSIX write locks) across standard host boundary, which causes the uvicorn background crons and browser dashboard aggregates queries to deadlock and time out.
 - **ALWAYS** keep `/app/data` completamente internal inside standard backend container to achieve native Linux filesystem speeds, allowing concurrent scheduler crons and read queries to run concurrently with zero locks.
 

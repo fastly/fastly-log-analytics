@@ -55,7 +55,7 @@ make stack-restart            # or your own restart
 
 That is the whole upgrade. On startup:
 
-1. **SQLite metadata migrations apply automatically**, as they always have.
+1. **PostgreSQL metadata schema applies automatically** via `pg_schema.py` upon connecting to `METADATA_DSN`.
 2. **Legacy history is adopted into DuckLake**, once per service, in a background thread. It never blocks startup.
 
 ### Verifying it worked
@@ -126,7 +126,7 @@ To opt out of automatic adoption entirely and drive it by hand, set `FLA_SKIP_LE
 
 **Postgres metadata queries fail with `relation "cron_runs" does not exist`.** The schema was not created. Run `scripts/setup_pg_schema.py` with `METADATA_DSN` set.
 
-**Rolling back to SQLite metadata.** `scripts/rollback_pg_to_sqlite.py` exists for this. Your per-service SQLite files are not deleted when you move to Postgres — they simply stop being read — so unsetting `METADATA_DSN` reverts the metadata backend.
+**Rolling back to SQLite metadata.** Per ADR-22, v3.0.0 standardizes all metadata and catalogs exclusively on PostgreSQL 16; zero-dependency SQLite is no longer supported in v3. To roll back to SQLite, roll back to v2.x.
 
 **Rolling back to v2.x entirely.** Adoption registers parquet in place and never modifies or deletes the Iceberg table, so your v2 data is intact. Restore your `data/` backup and redeploy the previous version.
 

@@ -733,25 +733,6 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
     except (FileNotFoundError, OSError) as e:
         if "No such file or directory" in str(e) or "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
             logger.warning("⚠️ [iceberg] Missing metadata file detected for %s: %s. Healing catalog...", identifier, e)
-            # Remove from local catalog database
-            db_path = _catalog_db_path(source)
-            if os.path.exists(db_path):
-                import sqlite3
-
-                try:
-                    namespace, table_name = identifier
-                    with sqlite3.connect(db_path, timeout=5.0) as cat_con:
-                        cat_con.execute(
-                            "DELETE FROM iceberg_tables WHERE table_namespace = ? AND table_name = ?",
-                            (namespace, table_name),
-                        )
-                        cat_con.commit()
-                    logger.info(
-                        "[iceberg] Successfully removed out-of-sync table %s from local SQLite catalog.", identifier
-                    )
-                except Exception as del_err:
-                    logger.warning("[iceberg] Failed to remove out-of-sync table from SQLite: %s", del_err)
-
             # Clear cached table
             _invalidate_cached_table(source, identifier)
 
@@ -1109,18 +1090,13 @@ def _read_metadata_pointer(source: dict, identifier: tuple) -> str | None:
 
 
 def _refresh_local_catalog_metadata(catalog, source: dict, identifier: tuple) -> bool:
-    """Find the latest metadata.json in FOS and force update the local SQLite catalog.
-
-    This ensures Analyst users (read-only) see the latest snapshots committed by Admins,
-    even though they don't share the same local SQLite database file.
-    """
+    """Find the latest metadata.json in FOS and update the local catalog if present."""
     namespace, table_name = identifier
     try:
         latest_loc = _read_metadata_pointer(source, identifier)
         if not latest_loc:
             return False
 
-        # Check current location in SQLite
         db_path = _catalog_db_path(source)
         if not os.path.exists(db_path):
             return False
@@ -1136,11 +1112,6 @@ def _refresh_local_catalog_metadata(catalog, source: dict, identifier: tuple) ->
             if row:
                 current_loc = row[0]
                 if current_loc != latest_loc:
-                    # MONOTONICITY GUARD (sibling of the one in
-                    # _read_metadata_pointer). Writing an older location here
-                    # makes a rollback sticky in the local catalog: the table
-                    # then commits forward from the stale base and every data
-                    # file in between is orphaned. Refuse to regress.
                     cur_v, new_v = metadata_version(current_loc), metadata_version(latest_loc)
                     if new_v >= 0 and cur_v > new_v:
                         logger.error(

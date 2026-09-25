@@ -65,32 +65,42 @@ _EMPTY_NGWAF_VALUES_SQL = (
 )
 
 
-def _read_ngwaf_bots_as_values_sql(db_path: str) -> str | None:
-    """Fetch the ``ngwaf_bots`` cache table via plain ``sqlite3`` and render
-    it as a DuckDB ``VALUES`` literal aliased ``nb(waf_req_id, bot_name,
-    category)``, instead of handing DuckDB the live file path via
-    ``sqlite_scan`` (see module docstring for why). The cache is small
-    (bot-name cardinality is tens per hour, trimmed by retention), so
-    fetching it whole and inlining it is cheap — done once per
-    ``build_ngwaf_bots_bundles`` call, reused across every closed hour.
-
-    Returns ``None`` on a read failure (mirrors the prior "file missing"
-    skip); returns :data:`_EMPTY_NGWAF_VALUES_SQL` for a valid-but-empty
-    cache so callers still write the load-bearing empty-hour parquet.
+def _read_ngwaf_bots_as_values_sql(db_path: str | None = None) -> str | None:
+    """Fetch the ``ngwaf_bots`` cache table via Postgres (or test SQLite file)
+    and render it as a DuckDB ``VALUES`` literal aliased ``nb(waf_req_id, bot_name, category)``.
     """
-    import sqlite3
+    import os
 
-    try:
-        con = sqlite3.connect(db_path, timeout=5)
+    rows = []
+    if db_path and os.path.exists(db_path):
+        import sqlite3
+
         try:
-            rows = con.execute(
-                "SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-            ).fetchall()
-        finally:
-            con.close()
-    except sqlite3.Error as e:
-        logger.warning("[rollups] failed reading ngwaf_bots cache at %s: %s", db_path, e)
-        return None
+            con = sqlite3.connect(db_path, timeout=5)
+            try:
+                rows = con.execute(
+                    "SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception as e:
+            logger.warning("[rollups] failed reading ngwaf_bots test cache at %s: %s", db_path, e)
+            return None
+    else:
+        from backend.core.metadata import pg_connection
+
+        try:
+            pconn = pg_connection.get_pg_readonly_connection()
+            try:
+                cur = pconn.execute(
+                    "SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = [(r["waf_req_id"], r["bot_name"], r["category"]) for r in cur.fetchall()]
+            finally:
+                pconn.close()
+        except Exception as e:
+            logger.warning("[rollups] failed reading ngwaf_bots cache from postgres: %s", e)
+            return None
 
     if not rows:
         return _EMPTY_NGWAF_VALUES_SQL
@@ -108,7 +118,6 @@ def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) ->
     Skips:
       - The active UTC hour (still being written)
       - Services whose schema lacks ``waf_req_id``
-      - Services without an ngwaf_bot_cache SQLite file on disk
 
     Idempotent — atomic tmp+rename under the per-service iceberg lock.
     Returns the number of bundles written this call.
@@ -120,9 +129,7 @@ def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) ->
         from backend import config as svcconfig
 
         db_path = svcconfig.ngwaf_db_path()
-        if not db_path or not os.path.exists(db_path):
-            # No NGWAF cache on this deployment — the live join would find
-            # nothing either; skip quietly.
+        if db_path and not os.path.exists(db_path):
             return None
         values_sql = _read_ngwaf_bots_as_values_sql(db_path)
         if values_sql is None:

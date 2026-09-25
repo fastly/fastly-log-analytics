@@ -90,7 +90,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="Standard (Local Docker/Native)",
         backend_url="http://127.0.0.1:80",
         frontend_url="http://127.0.0.1:80/dashboard",
-        service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", "ZU15BvY2LX7WcEp43T9VwU"),
+        service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
         is_high_scale=False,
     ),
     "local-high-scale": EnvironmentConfig(
@@ -98,7 +98,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="High-Scale (Local Docker Multipod)",
         backend_url="http://127.0.0.1:8081",
         frontend_url="http://127.0.0.1:8081/dashboard",
-        service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", "qI4D8yXXFYOIpZEMrkJy65"),
+        service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", ""),
         is_high_scale=True,
     ),
     "remote-standard": EnvironmentConfig(
@@ -106,7 +106,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="Standard (Remote/VM)",
         backend_url="http://127.0.0.1:8001",
         frontend_url="http://127.0.0.1:3001/dashboard",
-        service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", "cVnu9mYB3Cvmob3lsqjQU3"),
+        service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", ""),
         is_high_scale=False,
     ),
     "remote-high-scale": EnvironmentConfig(
@@ -114,7 +114,7 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         architecture="High-Scale (Remote/K8s)",
         backend_url="http://127.0.0.1:8002",
         frontend_url="http://127.0.0.1:3002/dashboard",
-        service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", "ZEZ4mcAjoSFDTg7tpkDKV2"),
+        service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", ""),
         is_high_scale=True,
     ),
 }
@@ -147,7 +147,7 @@ def auto_resolve_remote_admin_token() -> str | None:
     if not resolve_cmd:
         # Build standard fallback command if gcloud is present
         if shutil.which("gcloud"):
-            gce_project = os.getenv("GCE_PROJECT", "se-development-9566")
+            gce_project = os.getenv("GCE_PROJECT", "")
             gce_zone = os.getenv("GCE_ZONE", "us-central1-a")
             gce_vm_name = os.getenv("GCE_VM_NAME", "fastly-log-analysis")
             if gce_project and gce_zone and gce_vm_name:

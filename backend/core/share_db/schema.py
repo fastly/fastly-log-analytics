@@ -94,6 +94,14 @@ _SCHEMA = [
 ]
 
 
+def _has_column(con: Any, table: str, col: str) -> bool:
+    try:
+        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        return col in cols
+    except Exception:
+        return False
+
+
 def _migration_002_seed_initial_tos(con: Any) -> None:
     """Seed the initial TOS text used by the acknowledgment gate."""
     row = con.execute("SELECT 1 FROM share_tos_versions WHERE version=?", ("v1",)).fetchone()
@@ -115,8 +123,6 @@ def _migration_002_seed_initial_tos(con: Any) -> None:
 
 def _migration_003_add_allow_concurrent_sessions(con: Any) -> None:
     """Add ``remote_invites.allow_concurrent_sessions``."""
-    from backend.core.sqlite_migrations import _has_column
-
     if _has_column(con, "remote_invites", "allow_concurrent_sessions"):
         return
     con.execute("ALTER TABLE remote_invites ADD COLUMN allow_concurrent_sessions INTEGER NOT NULL DEFAULT 0")
@@ -124,8 +130,6 @@ def _migration_003_add_allow_concurrent_sessions(con: Any) -> None:
 
 def _migration_004_add_oauth_columns(con: Any) -> None:
     """Add the OAuth/OIDC invite columns."""
-    from backend.core.sqlite_migrations import _has_column
-
     if not _has_column(con, "remote_invites", "auth_method"):
         con.execute("ALTER TABLE remote_invites ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'passcode'")
     if not _has_column(con, "remote_invites", "oauth_provider"):

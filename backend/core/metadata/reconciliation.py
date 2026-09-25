@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import time as _t
 from collections.abc import Callable
+from typing import Any
 
 from backend.core.metadata import usage_log_db as _usage_log_db
 from backend.core.metadata.base import db_path, get_con, get_con_readonly
@@ -93,18 +93,11 @@ def _table_uses_postgres(table: str, postgres: bool) -> bool:
     return postgres and table != _USAGE_LOG_TABLE
 
 
-def _open_usage_log(service_id: str) -> sqlite3.Connection | None:
-    """Open the per-service usage_log file if it exists; else None.
-
-    A service that hasn't logged a single call yet has no usage_log.db
-    on disk; ``usage_log_db.get_con`` would create+initialise an empty
-    file, which is wasted I/O when the caller just wants a row count.
-    Use the read-only opener instead and treat ``OperationalError`` as
-    "no rows yet".
-    """
+def _open_usage_log(service_id: str) -> Any | None:
+    """Open the per-service usage_log connection if available; else None."""
     try:
         return _usage_log_db.open_readonly(service_id)
-    except sqlite3.OperationalError:
+    except Exception:
         return None
 
 
@@ -171,7 +164,7 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                             "SELECT sum(pgsize) FROM dbstat WHERE name = ?", ("usage_log",)
                         ).fetchone()
                         bytes_ = int(row[0]) if row and row[0] is not None else 0
-                except (sqlite3.OperationalError, Exception):
+                except Exception:
                     rows, bytes_ = 0, None
                 finally:
                     usage_log_con.close()
@@ -188,11 +181,7 @@ def get_metadata_storage_stats(service_id: str, *, force: bool = False) -> dict:
                 except Exception:
                     bytes_ = None
             else:
-                try:
-                    row = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ?", (sql_table,)).fetchone()
-                    bytes_ = int(row[0]) if row and row[0] is not None else 0
-                except sqlite3.OperationalError:
-                    bytes_ = None
+                bytes_ = None
             out[out_key] = {"rows": int(rows or 0), "bytes": bytes_}
 
     db_bytes: int | None
@@ -297,16 +286,10 @@ def cleanup_metadata(
         cfg["ingested_files_days"] = 0
 
     con = get_con(service_id)
-    from backend.core.metadata.pg_connection import is_postgres
-
-    postgres = is_postgres() and not isinstance(con, sqlite3.Connection)
+    postgres = True
     t0 = _t.time()
 
-    def _con_for(table: str) -> sqlite3.Connection:
-        # usage_log lives in its own per-service file (v2.0 cutover);
-        # every other trimmable table is in the metadata.db.
-        if table == _USAGE_LOG_TABLE:
-            return _usage_log_db.get_con(service_id)
+    def _con_for(table: str) -> Any:
         return con
 
     # Steps: 3 deletes + 1 vacuum + 1 post-count = 5. Set up the progress
@@ -318,7 +301,7 @@ def cleanup_metadata(
     for table, _, _ in _CLEANUP_TABLES:
         try:
             before[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
-        except sqlite3.OperationalError:
+        except Exception:
             before[table] = 0
 
     deleted: dict[str, int] = {}
@@ -395,7 +378,7 @@ def cleanup_metadata(
                     "message": f"{table}: deleted {deleted[table]:,} rows (kept rows ≤{days_int}d old)",
                 }
             )
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             logger.warning("[metadata_cleanup] %s: skip %s — %s", service_id, table, e)
             deleted[table] = 0
             _emit(
@@ -427,113 +410,20 @@ def cleanup_metadata(
             )
 
     vacuumed = False
-    from backend.core.metadata.pg_connection import is_postgres
-
-    # File-vacuum (auto_vacuum/incremental_vacuum/freelist_count) is a
-    # SQLite-file concept with no Postgres equivalent — Postgres reclaims
-    # space via its own autovacuum daemon, outside app control. Skip the
-    # whole branch under a Postgres metadata backend; the DELETE trim above
-    # already ran and is what actually matters there.
-    if any(deleted.values()) and not is_postgres():
-        # A bare VACUUM rewrites the whole file under an exclusive lock —
-        # measured at 9.5s on a populated metadata.db, during which every
-        # other writer to the SAME file (slow_queries batched insert,
-        # ingested_files upsert) queues behind it even with the 30s
-        # busy_timeout. Switch to auto_vacuum=INCREMENTAL so steady-state
-        # cleanups reclaim space via chunked ``PRAGMA incremental_vacuum(N)``
-        # calls instead — same interleaving trick as the batched DELETE loop
-        # above (commit between chunks so other writers get a turn).
-        #
-        # auto_vacuum can only move off "none" by running one full VACUUM
-        # right after setting the pragma (SQLite applies the mode change on
-        # a full-file rewrite) — see sqlite.org/pragma.html#pragma_auto_vacuum.
-        # That happens ONCE per DB file (the mode persists in the file
-        # header), so this is a one-time cost, never a recurring one: every
-        # cleanup after this run's file takes the cheap chunked path below.
-        con.commit()
-        try:
-            mode_row = con.execute("PRAGMA auto_vacuum").fetchone()
-            mode = int(mode_row[0]) if mode_row is not None else 0
-        except sqlite3.OperationalError:
-            mode = 0
-        try:
-            if mode != 2:  # 0=NONE, 1=FULL, 2=INCREMENTAL
-                _emit(
-                    {
-                        "type": "status",
-                        "message": (
-                            "Enabling incremental_vacuum mode — one-time full "
-                            "VACUUM (never again after this run), may take "
-                            "minutes on large DBs…"
-                        ),
-                    }
-                )
-                # VACUUM (and the mode-changing PRAGMA before it) cannot run
-                # inside an open transaction. Drop the Python wrapper's
-                # auto-BEGIN so the next execute() autocommits.
-                old_iso = con.isolation_level
-                con.isolation_level = None
-                try:
-                    con.execute("PRAGMA auto_vacuum=INCREMENTAL")
-                    con.execute("VACUUM")
-                finally:
-                    con.isolation_level = old_iso
-            else:
-                _emit(
-                    {
-                        "type": "status",
-                        "message": "Reclaiming space via incremental_vacuum (chunked)…",
-                    }
-                )
-                # Mirrors the DELETE loop's _BATCH=5,000-row chunking above:
-                # commit between calls so the write lock is released and
-                # other writers can interleave instead of queuing for one
-                # long exclusive rewrite.
-                _VACUUM_BATCH_PAGES = 5_000
-                while True:
-                    pending = con.execute("PRAGMA freelist_count").fetchone()[0]
-                    if not pending:
-                        break
-                    con.execute(f"PRAGMA incremental_vacuum({_VACUUM_BATCH_PAGES})")
-                    con.commit()
-                    remaining = con.execute("PRAGMA freelist_count").fetchone()[0]
-                    if remaining >= pending:
-                        break  # no progress this round — avoid spinning forever
-            vacuumed = True
-            _emit(
-                {
-                    "type": "progress",
-                    "current": len(_CLEANUP_TABLES) + 1,
-                    "total": total_steps,
-                    "message": "Vacuum complete — space reclaimed",
-                }
-            )
-        except sqlite3.OperationalError as e:
-            # Locked / busy — not fatal, the delete already shrank the row count.
-            logger.warning("[metadata_cleanup] %s: vacuum skipped — %s", service_id, e)
-            _emit(
-                {
-                    "type": "progress",
-                    "current": len(_CLEANUP_TABLES) + 1,
-                    "total": total_steps,
-                    "message": f"Vacuum skipped ({e}) — row counts already reduced",
-                }
-            )
-    else:
-        _emit(
-            {
-                "type": "progress",
-                "current": len(_CLEANUP_TABLES) + 1,
-                "total": total_steps,
-                "message": "Nothing deleted — VACUUM skipped (no-op rewrite would waste cycles)",
-            }
-        )
+    _emit(
+        {
+            "type": "progress",
+            "current": len(_CLEANUP_TABLES) + 1,
+            "total": total_steps,
+            "message": "Cleanup complete (Postgres autovacuum manages storage)",
+        }
+    )
 
     after: dict[str, int] = {}
     for table, _, _ in _CLEANUP_TABLES:
         try:
             after[table] = int(_con_for(table).execute(f"SELECT count(*) FROM {table}").fetchone()[0] or 0)
-        except sqlite3.OperationalError:
+        except Exception:
             after[table] = 0
     _emit(
         {
