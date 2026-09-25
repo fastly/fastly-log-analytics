@@ -263,18 +263,25 @@ def http_post_json(
         req_headers.update(headers)
     body = json.dumps(payload if payload is not None else {}).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return resp.status, data
-    except urllib.error.HTTPError as e:
+    for attempt in range(2):
         try:
-            err_body = json.loads(e.read().decode("utf-8"))
-            return e.code, err_body
-        except Exception:
-            return e.code, {"error": str(e)}
-    except Exception as e:
-        return 0, {"error": str(e)}
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return resp.status, data
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = json.loads(e.read().decode("utf-8"))
+                return e.code, err_body
+            except Exception:
+                return e.code, {"error": str(e)}
+        except (ConnectionResetError, urllib.error.URLError) as e:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            return 0, {"error": str(e)}
+        except Exception as e:
+            return 0, {"error": str(e)}
+    return 0, {"error": "request failed"}
 
 
 def parse_timestamp_age(ts_str: str | None) -> float | None:

@@ -360,11 +360,17 @@ class QueryRegistry:
         by the serving-tier watchdog.
         """
         now = time.monotonic() if now_mono is None else now_mono
+        now_wall = time.time()
+        for active in tuple(self._queries.values()):
+            if active.cancelled_at is not None and (now_wall - active.cancelled_at) >= 5.0:
+                self.deregister_query(active.query_id)
+
         expired = [
             active.query_id
             for active in tuple(self._queries.values())
             if active.db_type == "DuckDB"
             and active.attribution.pool_slot is not None
+            and active.cancelled_at is None
             and now - active.started_at_mono >= _POOL_QUERY_TIMEOUT_S
         ]
         interrupted = 0
