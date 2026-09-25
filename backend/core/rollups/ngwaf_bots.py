@@ -92,9 +92,7 @@ def _read_ngwaf_bots_as_values_sql(db_path: str | None = None) -> str | None:
         try:
             pconn = pg_connection.get_pg_readonly_connection()
             try:
-                cur = pconn.execute(
-                    "SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-                )
+                cur = pconn.execute("SELECT waf_req_id, bot_name, category FROM ngwaf_bots WHERE bot_name IS NOT NULL")
                 rows = [(r["waf_req_id"], r["bot_name"], r["category"]) for r in cur.fetchall()]
             finally:
                 pconn.close()

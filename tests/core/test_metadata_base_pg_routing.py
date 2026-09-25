@@ -73,4 +73,3 @@ def test_close_all_connections_routes_to_postgres(postgres_mode):
 def test_teardown_is_noop_under_postgres(postgres_mode):
     """No per-service file exists under Postgres — teardown clears the cache without error."""
     base.teardown("svc-1")
-

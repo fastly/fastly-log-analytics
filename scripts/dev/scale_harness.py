@@ -60,7 +60,9 @@ async def _request(
         headers["Fastly-Request-ID"] = req_id
 
         # Generate a random IP and add X-Source-Ip header to spoof geography/ASNs via Fastly VCL
-        source_ip = f"{random.randint(12, 223)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        source_ip = (
+            f"{random.randint(12, 223)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        )
         headers["X-Source-Ip"] = source_ip
 
         if "/rum-beacon" in url:

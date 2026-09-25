@@ -646,9 +646,7 @@ def enrich_bot_metadata(df: Any) -> None:
                 finally:
                     pconn.close()
                 bot_map = {
-                    (r["waf_req_id"] if isinstance(r, dict) else r[0]): (
-                        r["bot_name"] if isinstance(r, dict) else r[1]
-                    )
+                    (r["waf_req_id"] if isinstance(r, dict) else r[0]): (r["bot_name"] if isinstance(r, dict) else r[1])
                     for r in rows
                 }
                 df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]

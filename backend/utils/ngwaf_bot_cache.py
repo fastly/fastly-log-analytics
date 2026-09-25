@@ -31,7 +31,9 @@ def ensure_schema() -> None:
 def _db_path() -> str:
     """Compatibility shim for path resolution probes."""
     import os
+
     from backend import config
+
     return os.path.join(config.DATA_DIR, "ngwaf_bot_cache.db")
 
 

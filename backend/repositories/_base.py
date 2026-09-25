@@ -564,7 +564,9 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
                 cur = pconn.execute(
                     "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
                 )
-                rows = [(r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"]) for r in cur.fetchall()]
+                rows = [
+                    (r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"]) for r in cur.fetchall()
+                ]
             finally:
                 pconn.close()
         except Exception as e:
@@ -1372,9 +1374,7 @@ class QueryRunner:
             available_cols = physical_cols | {"timestamp_hour", "dt"}
             valid_projected = [c for c in projected if c in available_cols]
             valid_cols_sql = (
-                ", ".join('"{}"'.format(c.replace('"', '""')) for c in valid_projected)
-                if valid_projected
-                else "*"
+                ", ".join('"{}"'.format(c.replace('"', '""')) for c in valid_projected) if valid_projected else "*"
             )
 
             return f"SELECT {valid_cols_sql} FROM ({finalized})"

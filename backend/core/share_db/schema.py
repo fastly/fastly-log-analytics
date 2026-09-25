@@ -107,6 +107,7 @@ def _migration_002_seed_initial_tos(con: Any) -> None:
     row = con.execute("SELECT 1 FROM share_tos_versions WHERE version=?", ("v1",)).fetchone()
     if row is None:
         from backend.utils.date_utils import iso_z_now
+
         con.execute(
             "INSERT INTO share_tos_versions(version, text, published_at) VALUES(?, ?, ?)",
             (

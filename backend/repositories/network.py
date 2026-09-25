@@ -7,7 +7,6 @@ from typing import Any
 
 import duckdb
 
-from backend import config as svcconfig
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table

@@ -322,7 +322,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                         continue
                     except Exception as init_err:
                         if "already attached" not in str(init_err) and "already exists" not in str(init_err):
-                            logger.info("[ducklake] %s: could not pre-create catalog for read-only attach: %s", service_id, init_err)
+                            logger.info(
+                                "[ducklake] %s: could not pre-create catalog for read-only attach: %s",
+                                service_id,
+                                init_err,
+                            )
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
                     for alias in ("lake", "__ducklake_metadata_lake"):
                         try:

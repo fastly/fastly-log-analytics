@@ -632,8 +632,10 @@ class TestExecuteTopNBatchPerFieldLimits:
         """Verify direct active-hour fast path succeeds when schema cols include
         computed partition columns (timestamp_hour, dt) without throwing a BinderException."""
         from datetime import UTC, datetime, timedelta
+
         import pyarrow as pa
         import pyarrow.parquet as pq
+
         from backend.repositories._base import QueryRunner
 
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -653,7 +655,9 @@ class TestExecuteTopNBatchPerFieldLimits:
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
         # In real production, get_schema_cols returns view columns including computed timestamp_hour and dt
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "timestamp_hour", "dt"])
+        monkeypatch.setattr(
+            QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "timestamp_hour", "dt"]
+        )
         monkeypatch.setattr(
             "backend.repositories._base._get_schema",
             lambda _con, _src: [
@@ -691,8 +695,10 @@ class TestExecuteTopNBatchPerFieldLimits:
         """Verify that pre-allocating the wide active-hour temp in try_count_from_rollup
         allows execute_top_n_rollups to reuse the temp table with zero extra table creations."""
         from datetime import UTC, datetime, timedelta
+
         import pyarrow as pa
         import pyarrow.parquet as pq
+
         from backend.repositories._base import QueryRunner
 
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -712,7 +718,9 @@ class TestExecuteTopNBatchPerFieldLimits:
 
         monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: str(cache_root))
         monkeypatch.setattr("backend.core.rollups._safe_table_for", lambda _src: "dummy")
-        monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "status", "timestamp_hour", "dt"])
+        monkeypatch.setattr(
+            QueryRunner, "get_schema_cols", lambda self: ["timestamp", "country", "status", "timestamp_hour", "dt"]
+        )
         monkeypatch.setattr(
             "backend.repositories._base._get_schema",
             lambda _con, _src: [

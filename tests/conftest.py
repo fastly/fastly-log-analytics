@@ -367,6 +367,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
 
     try:
         from backend.core.metadata import pg_connection
+
         _pg_con = pg_connection.get_pg_thread_connection()
         _pg_con.execute(
             """

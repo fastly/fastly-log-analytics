@@ -192,9 +192,7 @@ def get_remote_invites(*, con: Any = None) -> list[dict]:
     return out
 
 
-def get_remote_invite_by_email_passcode(
-    email: str, passcode: str, *, con: Any = None
-) -> dict | None:
+def get_remote_invite_by_email_passcode(email: str, passcode: str, *, con: Any = None) -> dict | None:
     """Constant-time lookup. Returns the invite dict on success, else None.
 
     Security: when no invite exists for ``email`` (e.g., email
@@ -338,9 +336,7 @@ def bind_invite_oauth_subject(invite_id: str, subject: str, *, con: Any = None) 
     return hmac.compare_digest(str(row["oauth_subject"]), str(subject))
 
 
-def update_remote_invite_services(
-    invite_id: str, service_ids: list[str], *, con: Any = None
-) -> None:
+def update_remote_invite_services(invite_id: str, service_ids: list[str], *, con: Any = None) -> None:
     con = con or get_global_share_con()
     with con:
         con.execute("DELETE FROM invite_services WHERE invite_id=?", (invite_id,))
@@ -534,9 +530,7 @@ def export_backup(passphrase: str, *, con: Any = None) -> bytes:
     return b"FOSBACKUP\x01" + salt + nonce + ct
 
 
-def import_backup(
-    blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: Any = None
-) -> dict:
+def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: Any = None) -> dict:
     """Decrypt + validate + apply a backup envelope.
 
     ``mode``: one of ``skip-collisions`` (default), ``merge-services-on-collision``,

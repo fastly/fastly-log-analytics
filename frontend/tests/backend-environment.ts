@@ -6,7 +6,6 @@ const HOST_ENV_KEYS = [
   'PATH', 'HOME', 'USER', 'LOGNAME',
   'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
   'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
-  'METADATA_DSN', 'DUCKLAKE_CATALOG',
 ] as const
 
 interface MockOAuth {
@@ -23,6 +22,9 @@ export function backendTestEnvironment(
   for (const key of HOST_ENV_KEYS) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
+  const metaDsn = process.env.TEST_METADATA_DSN || (process.env.METADATA_DSN && !process.env.METADATA_DSN.includes('example.invalid') ? process.env.METADATA_DSN : 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test')
+  const duckCatalog = process.env.TEST_DUCKLAKE_CATALOG || (process.env.DUCKLAKE_CATALOG && !process.env.DUCKLAKE_CATALOG.includes('example.invalid') ? process.env.DUCKLAKE_CATALOG : metaDsn)
+
   Object.assign(env, {
     UV_NO_ENV_FILE: '1',
     UV_NO_CONFIG: '1',
@@ -39,8 +41,8 @@ export function backendTestEnvironment(
     DUCKDB_POOL_MAX_SIZE: '16',
     CONTRACT_CONFIGS_DIR: join(sandbox, 'configs'),
     CONTRACT_DATA_DIR: join(sandbox, 'data'),
-    METADATA_DSN: process.env.METADATA_DSN || 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test',
-    DUCKLAKE_CATALOG: process.env.DUCKLAKE_CATALOG || process.env.METADATA_DSN || 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test',
+    METADATA_DSN: metaDsn,
+    DUCKLAKE_CATALOG: duckCatalog,
   })
   if (oauth) {
     Object.assign(env, {

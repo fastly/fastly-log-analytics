@@ -524,8 +524,7 @@ def test_optimize_table_flushes_inlined_rows_to_parquet(tmp_path, monkeypatch):
 
     assert "error" not in result
     assert glob.glob(os.path.join(data_root, "**", "*.parquet"), recursive=True), (
-        "parquet files must exist — otherwise the catalog DB holds "
-        "the only copy of every ingested row"
+        "parquet files must exist — otherwise the catalog DB holds the only copy of every ingested row"
     )
     assert _read(src) == [f"r{i}" for i in range(5)], "the flush must be lossless"
 

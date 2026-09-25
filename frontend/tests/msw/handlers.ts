@@ -639,6 +639,10 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/app-config/query-monitor`, () =>
     HttpResponse.json({ config: {} }),
   ),
+  http.get(`${API_BASE}/api/debug/recent-postgres`, () =>
+    HttpResponse.json({ rows: [] }),
+  ),
+  http.post(`${API_BASE}/api/debug/clear-postgres`, ok({ cleared: 0 })),
   http.get(`${API_BASE}/api/debug/recent-sqlite`, () =>
     HttpResponse.json({ rows: [] }),
   ),

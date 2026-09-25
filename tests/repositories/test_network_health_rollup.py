@@ -493,9 +493,7 @@ class TestTryNetworkGeoFromRollup:
             con.execute(
                 "CREATE TABLE logs_test (country VARCHAR, city VARCHAR, lat DOUBLE, lon DOUBLE, metro VARCHAR, tcp_rtt BIGINT, status INT, timestamp TIMESTAMPTZ)"
             )
-            con.execute(
-                "INSERT INTO logs_test VALUES ('US', 'Denver', 39.7, -104.9, '751', 25000, 200, now())"
-            )
+            con.execute("INSERT INTO logs_test VALUES ('US', 'Denver', 39.7, -104.9, '751', 25000, 200, now())")
             runner = QueryRunner(con, src)
             result = runner.try_network_geo_from_rollup(start_iso, end_iso, has_filters=False)
         finally:
@@ -505,4 +503,3 @@ class TestTryNetworkGeoFromRollup:
         map_rows, metro_rows = result
         assert len(map_rows) > 0
         assert len(metro_rows) > 0
-

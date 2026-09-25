@@ -315,7 +315,9 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                             )
                                     else:
                                         # No log output — generate a helpful message based on task type and status
-                                        task_name = (row.get("task") if isinstance(row, dict) else (row["task"] if row else None)) or "unknown task"
+                                        task_name = (
+                                            row.get("task") if isinstance(row, dict) else (row["task"] if row else None)
+                                        ) or "unknown task"
 
                                         msg = f"Run completed with status {status}."
                                         if normalized_status == "done" and task_name == "rum_sync":

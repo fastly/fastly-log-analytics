@@ -14,6 +14,7 @@ def test_usage_log_purging_and_trigger_restricton(tmp_path, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
     from backend.utils.date_utils import iso_z
+
     sid = "test_purge_svc"
     usage_log.clear_usage_log(sid)
 
@@ -99,7 +100,9 @@ def test_clear_usage_log_wipes_both_tables(tmp_path, monkeypatch):
     con = usage_log_db.get_con(sid)
     try:
         assert con.execute("SELECT count(*) FROM usage_log WHERE service_id = ?", (sid,)).fetchone()[0] == 0
-        assert con.execute("SELECT count(*) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()[0] == 0
+        assert (
+            con.execute("SELECT count(*) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()[0] == 0
+        )
     finally:
         usage_log_db.close_all_connections()
 

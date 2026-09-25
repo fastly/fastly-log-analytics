@@ -74,7 +74,8 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         op_class = "B"
         normalized_op = op_type.replace("_", "")
         if svc == "FOS" and (
-            normalized_op in (
+            normalized_op
+            in (
                 "PUTOBJECT",
                 "POSTOBJECT",
                 "COPYOBJECT",
@@ -137,8 +138,7 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         )
         if summary_map:
             summary_rows = [
-                (sid, hr, oc, ot, counts[0], counts[1], now)
-                for (sid, hr, oc, ot), counts in summary_map.items()
+                (sid, hr, oc, ot, counts[0], counts[1], now) for (sid, hr, oc, ot), counts in summary_map.items()
             ]
             con.executemany(
                 "INSERT INTO usage_log_hourly_summary "
@@ -223,8 +223,7 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
         )
         if summary_map:
             summary_rows = [
-                (sid, hr, oc, ot, counts[0], counts[1], now_iso)
-                for (sid, hr, oc, ot), counts in summary_map.items()
+                (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
             ]
             con.executemany(
                 "INSERT INTO usage_log_hourly_summary "
@@ -417,8 +416,7 @@ def reconcile_fastly_stats(
             summary_map[key][0] += gap_count
 
         summary_rows = [
-            (sid, hr, oc, ot, counts[0], counts[1], now_iso)
-            for (sid, hr, oc, ot), counts in summary_map.items()
+            (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
         ]
         con.executemany(
             """

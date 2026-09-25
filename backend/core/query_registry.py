@@ -363,7 +363,7 @@ class QueryRegistry:
         now_wall = time.time()
         for active in tuple(self._queries.values()):
             if active.cancelled_at is not None and (now_wall - active.cancelled_at) >= 5.0:
-                self.deregister_query(active.query_id)
+                self.deregister(active.query_id)
 
         expired = [
             active.query_id
