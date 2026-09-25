@@ -770,7 +770,8 @@ def _purge_surrogate_key(source: dict, key: str) -> None:
     try:
         from backend import config as _cfg
 
-        api_key = _cfg.get_fastly_api_key(source.get("name", ""))
+        sid = source.get("service_id") or source.get("name", "")
+        api_key = source.get("fastly_api_key") or _cfg.get_fastly_api_key(sid)
         if not api_key:
             return
         from backend.core.fastly.client import fastly as _fastly
