@@ -18,7 +18,7 @@ from __future__ import annotations
 import io
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -225,7 +225,8 @@ def test_iceberg_fallback_returns_table_info(tmp_path):
     the DuckLake fallback reads real committed lake state directly."""
     src = _make_source(tmp_path, f"lk{uuid.uuid4().hex[:8]}")
     ts = datetime(2026, 2, 1, tzinfo=UTC)
-    _write_buffer(src, "batch.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=2)
+    _write_buffer(src, "batch_a.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=1)
+    _write_buffer(src, "batch_b.parquet", ts=ts + timedelta(seconds=1), source_file="s3://b/raw/b.gz", n=1)
     from backend.core.iceberg.buffer import _commit_buffer_impl
 
     assert _commit_buffer_impl(src)["rows_committed"] == 2

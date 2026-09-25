@@ -1808,6 +1808,10 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
         if admission_entered:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
+            try:
+                duckdb_con.execute("DETACH lake")
+            except Exception:
+                pass
             duckdb_con.close()
 
     assert lease_generation is not None
@@ -2112,6 +2116,10 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         if admission_entered:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
+            try:
+                duckdb_con.execute("DETACH lake")
+            except Exception:
+                pass
             duckdb_con.close()
 
     for object_key in active:
@@ -2915,6 +2923,10 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
         if admission_entered:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
+            try:
+                duckdb_con.execute("DETACH lake")
+            except Exception:
+                pass
             duckdb_con.close()
 
     assert lease_generation is not None
@@ -3132,6 +3144,10 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
         if admission_entered:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
+            try:
+                duckdb_con.execute("DETACH lake")
+            except Exception:
+                pass
             duckdb_con.close()
 
     for object_key in active:

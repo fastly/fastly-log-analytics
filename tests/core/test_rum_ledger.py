@@ -177,9 +177,10 @@ def test_parse_rum_beacon_file_skips_rows_for_other_services():
 def _fake_attach_factory(lake_file: str):
     def _fake_attach(con_arg, src_arg, read_only=False):
         try:
-            con_arg.execute(f"ATTACH '{lake_file}' AS lake")
+            con_arg.execute("DETACH lake")
         except duckdb.Error:
-            pass  # already attached on this connection
+            pass
+        con_arg.execute(f"ATTACH '{lake_file}' AS lake")
         return True
 
     return _fake_attach
@@ -329,8 +330,15 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
     assert status == "committed"
 
     check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
     # Quarantine sidecar written: the bad line + a .meta.json, exactly like
     # the regular-log path's _quarantine_convert_corrupt_lines protocol.
