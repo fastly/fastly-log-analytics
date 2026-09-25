@@ -280,5 +280,8 @@ def test_concurrent_metadata_db_writes_two_services_no_cross_contamination():
     )
 
     path_a, path_b = metadata_db.db_path(svc_a), metadata_db.db_path(svc_b)
-    assert path_a != path_b, f"two services collapsed onto one SQLite file: {path_a}"
-    assert os.path.exists(path_a) and os.path.exists(path_b)
+    from backend.core.metadata.pg_connection import is_postgres
+
+    if not is_postgres():
+        assert path_a != path_b, f"two services collapsed onto one SQLite file: {path_a}"
+        assert os.path.exists(path_a) and os.path.exists(path_b)

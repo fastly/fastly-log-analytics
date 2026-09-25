@@ -733,6 +733,22 @@ def _load_table_cached(source: dict, identifier: tuple, catalog=None):
     except (FileNotFoundError, OSError) as e:
         if "No such file or directory" in str(e) or "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
             logger.warning("⚠️ [iceberg] Missing metadata file detected for %s: %s. Healing catalog...", identifier, e)
+            # Remove from local catalog database if file exists (legacy sqlite catalog compatibility)
+            db_path = _catalog_db_path(source)
+            if os.path.exists(db_path):
+                import sqlite3
+
+                try:
+                    namespace, table_name = identifier
+                    with sqlite3.connect(db_path, timeout=5.0) as cat_con:
+                        cat_con.execute(
+                            "DELETE FROM iceberg_tables WHERE table_namespace = ? AND table_name = ?",
+                            (namespace, table_name),
+                        )
+                        cat_con.commit()
+                except Exception:
+                    pass
+
             # Clear cached table
             _invalidate_cached_table(source, identifier)
 

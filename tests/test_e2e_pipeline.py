@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import duckdb
@@ -54,11 +55,16 @@ def pipeline_env(monkeypatch):
     cache_path = os.path.join(tmpdir, "cache")
     os.makedirs(warehouse_path, exist_ok=True)
     os.makedirs(cache_path, exist_ok=True)
+    os.makedirs(os.path.join(tmpdir, "ducklake_data"), exist_ok=True)
+
+    unique_suffix = uuid.uuid4().hex[:6]
+    svc_name = f"e2e_svc_{unique_suffix}"
+    svc_id = f"e2e-svc-{unique_suffix}"
 
     source = {
-        "name": "e2e_svc",
-        "service_id": "e2e-svc-id",
-        "service_name": "E2E Test",
+        "name": svc_name,
+        "service_id": svc_id,
+        "service_name": f"E2E Test {unique_suffix}",
         "bucket": "e2e-bucket",
         "prefix": "logs",
         "region": "us-east-1",
@@ -68,7 +74,7 @@ def pipeline_env(monkeypatch):
         "secret_access_key": "test-secret",
         "access_level": "read_write",
         "storage_mode": "cloud",
-        "duckdb_path": os.path.join(tmpdir, "e2e.duckdb"),
+        "duckdb_path": os.path.join(tmpdir, f"e2e_{unique_suffix}.duckdb"),
     }
 
     # Point cache_dir at our temp dir so the buffer/, data/, and

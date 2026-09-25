@@ -28,6 +28,13 @@ def ensure_schema() -> None:
     pass
 
 
+def _db_path() -> str:
+    """Compatibility shim for path resolution probes."""
+    import os
+    from backend import config
+    return os.path.join(config.DATA_DIR, "ngwaf_bot_cache.db")
+
+
 def get_last_timestamp(workspace_id: str) -> str | None:
     """Return last_timestamp_synced for workspace, or None if no sync has run yet."""
     con = _get_readonly_conn()

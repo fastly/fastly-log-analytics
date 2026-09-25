@@ -162,12 +162,16 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     elif dsn.startswith(("postgres://", "postgresql://")):
         dsn = f"postgres:{dsn}"
     elif not dsn.startswith("postgres:"):
-        logger.error(
-            "[ducklake] %s: DUCKLAKE_CATALOG must be a postgres DSN, got: %s",
-            service_id,
-            dsn,
-        )
-        return False
+        env_dsn = os.environ.get("DUCKLAKE_CATALOG", "")
+        if env_dsn.startswith(("postgres://", "postgresql://")):
+            dsn = f"postgres:{env_dsn}"
+        else:
+            logger.error(
+                "[ducklake] %s: DUCKLAKE_CATALOG must be a postgres DSN, got: %s",
+                service_id,
+                dsn,
+            )
+            return False
 
     data_path = config.DUCKLAKE_DATA_PATH or _default_data_path(source)
 
