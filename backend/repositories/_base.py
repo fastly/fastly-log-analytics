@@ -2307,7 +2307,7 @@ class QueryRunner:
                     _last = _EMPTY_ROLLUP_WARN_TS.get(_ts_key, 0.0)
                     if _now - _last >= _EMPTY_ROLLUP_WARN_INTERVAL_S:
                         _EMPTY_ROLLUP_WARN_TS[_ts_key] = _now
-                        _logger.warning(
+                        _logger.debug(
                             "[top_n_rollups] empty result for field=%r (service=%r, window=[%s,%s]) — "
                             "panel will render empty; check rollup backfill coverage if unexpected",
                             field,

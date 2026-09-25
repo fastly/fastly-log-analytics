@@ -1320,10 +1320,10 @@ class TestExecuteTopNBatchPerFieldLimits:
         # global logging state and preserves the exact assertions below.
         captured: list[str] = []
 
-        def _spy_warning(msg, *args, **_kwargs):
+        def _spy_debug(msg, *args, **_kwargs):
             captured.append(msg % args if args else str(msg))
 
-        monkeypatch.setattr(_base._logger, "warning", _spy_warning)
+        monkeypatch.setattr(_base._logger, "debug", _spy_debug)
         runner.execute_top_n_rollups(["country", "rid", "status"], st, et, limit=10)
         in_memory_duckdb.execute("DROP TABLE logs_skipwarn")
 
