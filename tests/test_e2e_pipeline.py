@@ -639,14 +639,23 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
 
+    unique_id = uuid.uuid4().hex[:8]
+    unique_prefix = f"pipe_{unique_id}"
+    fos_source = {
+        **fos_source,
+        "prefix": unique_prefix,
+        "service_id": f"svc_{unique_id}",
+        "name": f"tbl_{unique_id}",
+    }
+
     # ── Seed moto with two gzipped JSON log files ─────────────────────
     # Fastly key shape: raw/YYYY-MM-DD/HH/YYYY-MM-DDTHH-MM-SS.<svc>.gz
     base = datetime.now(UTC) - timedelta(hours=2)
     rows_per_file = 5
     files = [
-        ("raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz", base),
+        (f"{unique_prefix}/raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz", base),
         (
-            "raw/request/year=2026/month=05/day=20/hour=10/minute=05/2026-05-20T10-05-00.svc.gz",
+            f"{unique_prefix}/raw/request/year=2026/month=05/day=20/hour=10/minute=05/2026-05-20T10-05-00.svc.gz",
             base + timedelta(minutes=5),
         ),
     ]
