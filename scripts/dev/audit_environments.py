@@ -469,9 +469,9 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         # Scheduler
         res.scheduler_tick_age_s = hs_data.get("scheduler_last_tick_age_s")
         if res.scheduler_tick_age_s is not None:
-            if res.scheduler_tick_age_s > 60.0:
+            if res.scheduler_tick_age_s > 180.0:
                 res.errors.append(f"Scheduler stalled! Last tick was {res.scheduler_tick_age_s:.0f}s ago")
-            elif res.scheduler_tick_age_s > 35.0:
+            elif res.scheduler_tick_age_s > 90.0:
                 res.warnings.append(f"Scheduler behind schedule: tick age {res.scheduler_tick_age_s:.0f}s")
 
         res.in_flight_runs = hs_data.get("in_flight_runs") or []

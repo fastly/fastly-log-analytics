@@ -781,7 +781,7 @@ def _run_per_field_copy(
             elif field not in cols:
                 continue
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
 
@@ -923,7 +923,7 @@ def _run_ip_spread_per_field(
                 }
             )
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
             try:
