@@ -1086,9 +1086,33 @@ def _run_gap_heal(service_id: str) -> None:
 
     start_time_exec = time.time()
     try:
+        from fastapi import HTTPException
         from backend.routers.admin import compute_log_accounting
 
-        result = compute_log_accounting(src, hours=24, by="hour")
+        try:
+            result = compute_log_accounting(src, hours=24, by="hour")
+        except HTTPException as exc:
+            if "fastly_stats_failed" in str(exc.detail):
+                summary = "Fastly stats unavailable for service (skipped)"
+                log_cron_run(
+                    src,
+                    "gap_heal",
+                    time.time() - start_time_exec,
+                    "success",
+                    summary=summary,
+                    run_id=run_id,
+                    log_output=_extract_log_text(run_id),
+                )
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="gap_heal",
+                    event={"type": "done", "message": summary},
+                )
+                logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: %s", service_id, summary)
+                return
+            raise
+
         sustained = result.get("sustained_loss")
         if sustained is None:
             log_cron_run(
