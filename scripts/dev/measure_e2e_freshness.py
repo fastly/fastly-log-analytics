@@ -302,10 +302,13 @@ def measure_environment(
                         flush=True,
                     )
 
-        # Check Dashboard Bundle
-        if dashboard_detected_at is None:
+        # Check Dashboard Bundle every 4s or immediately once cron/header updates
+        should_check_dash = dashboard_detected_at is None and (
+            header_detected_at is not None or cron_req_detected_at is not None or int(elapsed_s) % 4 == 0
+        )
+        if should_check_dash:
             s_d, data_d = http_post(
-                f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0
+                f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=20.0
             )
             if s_d == 200 and isinstance(data_d, dict):
                 ag = data_d.get("aggregates") or {}
@@ -347,9 +350,9 @@ def measure_environment(
     for page_name, (p_url, p_method, p_payload) in page_probes.items():
         t_start = time.perf_counter()
         if p_method == "GET":
-            st, res_data = http_get(p_url, auth_headers)
+            st, res_data = http_get(p_url, auth_headers, timeout=15.0)
         else:
-            st, res_data = http_post(p_url, p_payload, auth_headers)
+            st, res_data = http_post(p_url, p_payload, auth_headers, timeout=35.0)
         t_latency_ms = (time.perf_counter() - t_start) * 1000
 
         page_ts = None

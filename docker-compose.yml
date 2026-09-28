@@ -37,9 +37,9 @@ services:
       - backend-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-      - DUCKDB_MEMORY_LIMIT=4GB
+      - DUCKDB_MEMORY_LIMIT=2GB
       - DUCKDB_RECYCLE_INTERVAL_MIN=5
-      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=6000
+      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=2500
       # Friendly local hostnames added to the backend's Host allowlist
       # (localhost / 127.0.0.1 are allowed by default). fastly.localhost
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a

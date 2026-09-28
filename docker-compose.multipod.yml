@@ -37,7 +37,7 @@ services:
         condition: service_completed_successfully
     environment:
     - PYTHONUNBUFFERED=1
-    - DUCKDB_MEMORY_LIMIT=4GB
+    - DUCKDB_MEMORY_LIMIT=2GB
     - LOCAL_HOSTS=fastly.localhost,fastly.analytics
     # Celery/multipod mode REQUIRES a transactional multi-writer DuckLake
     # catalog: worker processes write while the backend reads, which a
