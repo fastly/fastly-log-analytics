@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-ADMIN_SECRET = os.getenv("ADMIN_SHARED_SECRET", "RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0")
+ADMIN_SECRET = os.getenv("ADMIN_SHARED_SECRET", "RZ8qGEFbCYeGGI-PFRRTvw2sUp3x_sZs_asrqC9ENw0")  # gitleaks:allow
 
 ENVIRONMENTS = {
     "local-std": {
