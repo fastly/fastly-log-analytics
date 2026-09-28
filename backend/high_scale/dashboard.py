@@ -108,6 +108,36 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
         earliest[domain] = str(earliest_value) if earliest_value is not None else None
         latest[domain] = str(latest_value) if latest_value is not None else None
 
+    if totals.get("rum_errors", 0) == 0:
+        try:
+            err_agg_rows = service.client.execute(
+                "SELECT sum(error_count) AS total_rows, min(bucket_start) AS earliest_log_at, max(bucket_start) AS latest_log_at "
+                "FROM rum_error_aggregates "
+                "WHERE service_id={service_id:String} "
+                "AND publication_state = 'visible' "
+                "AND batch_id IN ("
+                "SELECT batch_id FROM high_scale_batch_publications FINAL "
+                "WHERE service_id={service_id:String} AND domain='rum_errors_aggregate' "
+                "AND publication_state = 'visible'"
+                ")",
+                {"service_id": service.service_id},
+            )
+            if err_agg_rows:
+                agg_row = err_agg_rows[0]
+                agg_total = int(agg_row.get("total_rows") or 0)
+                if agg_total > 0:
+                    totals["rum_errors"] = agg_total
+                    e_val = agg_row.get("earliest_log_at")
+                    l_val = agg_row.get("latest_log_at")
+                    if isinstance(e_val, datetime):
+                        e_val = e_val.isoformat()
+                    if isinstance(l_val, datetime):
+                        l_val = l_val.isoformat()
+                    earliest["rum_errors"] = str(e_val) if e_val is not None else None
+                    latest["rum_errors"] = str(l_val) if l_val is not None else None
+        except Exception:
+            pass
+
     rum_total = totals["rum_vitals"] + totals["rum_errors"]
     rum_earliest_values = [earliest["rum_vitals"], earliest["rum_errors"]]
     rum_latest_values = [latest["rum_vitals"], latest["rum_errors"]]

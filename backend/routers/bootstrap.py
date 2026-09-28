@@ -415,6 +415,7 @@ def _bootstrap_sync(
             return
 
         from backend import config as svcconfig
+        from backend.sync_status_snapshot import compute_sync_status_cached
 
         # Reuse the live snapshot already computed for the admin bootstrap
         # payload. The config status is refreshed by discovery asynchronously

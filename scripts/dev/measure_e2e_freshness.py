@@ -19,14 +19,13 @@ import argparse
 import json
 import os
 import random
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +66,7 @@ def parse_iso(ts_str: str | None) -> datetime | None:
         clean = ts_str.replace("Z", "+00:00")
         dt = datetime.fromisoformat(clean)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         return None
@@ -90,8 +89,14 @@ def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 8
         return 0, str(e)
 
 
-def http_post(url: str, body: dict | None = None, headers: dict[str, str] | None = None, timeout: float = 12.0) -> tuple[int, Any]:
-    req_headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "FLA-FreshnessProbe/1.0"}
+def http_post(
+    url: str, body: dict | None = None, headers: dict[str, str] | None = None, timeout: float = 12.0
+) -> tuple[int, Any]:
+    req_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "FLA-FreshnessProbe/1.0",
+    }
     if headers:
         req_headers.update(headers)
     payload = json.dumps(body if body is not None else {}).encode("utf-8")
@@ -140,13 +145,11 @@ def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
             "os": {"name": "macOS"},
             "page": {"url": f"{cdn_domain}/test-freshness"},
         },
-        "measurements": [
-            {"type": "web-vitals", "values": {"LCP": 1250.0}, "context": {"rating": "good"}}
-        ],
+        "measurements": [{"type": "web-vitals", "values": {"LCP": 1250.0}, "context": {"rating": "good"}}],
         "events": [
             {
                 "name": "freshness_test_click",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "attributes": {"probe": marker},
             }
         ],
@@ -170,17 +173,19 @@ def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
         return 0
 
 
-def measure_environment(env_key: str, env_info: dict[str, str], num_requests: int = 10, num_rum: int = 5, max_wait_s: float = 60.0) -> dict[str, Any]:
+def measure_environment(
+    env_key: str, env_info: dict[str, str], num_requests: int = 10, num_rum: int = 5, max_wait_s: float = 60.0
+) -> dict[str, Any]:
     name = env_info["name"]
     sid = env_info["service_id"]
     be_url = env_info["backend_url"]
     cdn = env_info["cdn_domain"]
     auth_headers = {"x-admin-token": ADMIN_SECRET, "x-fastly-service-id": sid}
 
-    print(f"\n{'='*78}", flush=True)
+    print(f"\n{'=' * 78}", flush=True)
     print(f"  TARGET: {name}", flush=True)
     print(f"  Service ID: {sid} │ Backend: {be_url} │ CDN: {cdn}", flush=True)
-    print(f"{'='*78}", flush=True)
+    print(f"{'=' * 78}", flush=True)
 
     # 1. Capture Pre-Test Baseline
     le_status, le_data = http_get(f"{be_url}/api/log-extents?service_id={sid}", auth_headers, timeout=5.0)
@@ -189,7 +194,9 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     base_latest_ts = parse_iso(le_data.get("latest_log_at") if isinstance(le_data, dict) else None)
     base_local_rows = int(sync_data.get("local_rows") or 0) if isinstance(sync_data, dict) else 0
 
-    cr_req_s, cr_req_data = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task=log_discovery&per_page=1", auth_headers)
+    cr_req_s, cr_req_data = http_get(
+        f"{be_url}/api/cron-runs?service_id={sid}&task=log_discovery&per_page=1", auth_headers
+    )
     cr_rum_s, cr_rum_data = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task=rum_sync&per_page=1", auth_headers)
 
     base_req_run_id = cr_req_data["entries"][0]["id"] if cr_req_s == 200 and cr_req_data.get("entries") else 0
@@ -199,7 +206,9 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     print(f"  [Baseline] Total Rows:        {base_local_rows:,}", flush=True)
     print(f"  [Baseline] Last Cron Runs:    log_discovery=#{base_req_run_id}, rum_sync=#{base_rum_run_id}", flush=True)
 
-    d_status, d_data = http_post(f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0)
+    d_status, d_data = http_post(
+        f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0
+    )
     base_d_rows = 0
     base_d_latest = None
     if d_status == 200 and isinstance(d_data, dict):
@@ -211,8 +220,10 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     # 2. Dispatch Probe Edge Traffic
     marker = f"prb-{uuid.uuid4().hex[:8]}"
     send_start_mono = time.perf_counter()
-    send_start_utc = datetime.now(timezone.utc)
-    print(f"\n🚀 Sending {num_requests} edge requests + {num_rum} RUM beacons to {cdn} (marker={marker})...", flush=True)
+    send_start_utc = datetime.now(UTC)
+    print(
+        f"\n🚀 Sending {num_requests} edge requests + {num_rum} RUM beacons to {cdn} (marker={marker})...", flush=True
+    )
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         req_futures = [pool.submit(send_edge_request_probe, cdn, marker, i) for i in range(num_requests)]
@@ -222,7 +233,10 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
 
     send_finish_mono = time.perf_counter()
     send_duration_s = send_finish_mono - send_start_mono
-    print(f"   Sent in {send_duration_s:.2f}s! Edge HTTP codes: Req={set(req_statuses)}, RUM={set(rum_statuses)}", flush=True)
+    print(
+        f"   Sent in {send_duration_s:.2f}s! Edge HTTP codes: Req={set(req_statuses)}, RUM={set(rum_statuses)}",
+        flush=True,
+    )
     print(f"   Watching ingest pipeline every 1.0s (timeout={max_wait_s}s)...", flush=True)
 
     # 3. Continuous Polling Loop
@@ -241,7 +255,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     while time.perf_counter() < deadline:
         time.sleep(1.0)
         elapsed_s = time.perf_counter() - send_start_mono
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
 
         # Check Header Extents & Sync Status (<0.5s response)
         s_le, data_le = http_get(f"{be_url}/api/log-extents?service_id={sid}", auth_headers, timeout=4.0)
@@ -263,7 +277,9 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
 
         # Check Ingest Crons (log_discovery and rum_sync)
         if cron_req_detected_at is None:
-            s_cr, d_cr = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task=log_discovery&per_page=1", auth_headers, timeout=4.0)
+            s_cr, d_cr = http_get(
+                f"{be_url}/api/cron-runs?service_id={sid}&task=log_discovery&per_page=1", auth_headers, timeout=4.0
+            )
             if s_cr == 200 and d_cr.get("entries"):
                 top_entry = d_cr["entries"][0]
                 if top_entry["id"] > base_req_run_id and top_entry["status"] == "success":
@@ -274,7 +290,9 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
                     )
 
         if cron_rum_detected_at is None:
-            s_rm, d_rm = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task=rum_sync&per_page=1", auth_headers, timeout=4.0)
+            s_rm, d_rm = http_get(
+                f"{be_url}/api/cron-runs?service_id={sid}&task=rum_sync&per_page=1", auth_headers, timeout=4.0
+            )
             if s_rm == 200 and d_rm.get("entries"):
                 top_entry = d_rm["entries"][0]
                 if top_entry["id"] > base_rum_run_id and top_entry["status"] == "success":
@@ -286,7 +304,9 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
 
         # Check Dashboard Bundle
         if dashboard_detected_at is None:
-            s_d, data_d = http_post(f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0)
+            s_d, data_d = http_post(
+                f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0
+            )
             if s_d == 200 and isinstance(data_d, dict):
                 ag = data_d.get("aggregates") or {}
                 cur_d_rows = int(ag.get("total_rows") or 0)
@@ -306,17 +326,21 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
         if header_detected_at is not None and cron_req_detected_at is not None and dashboard_detected_at is not None:
             break
 
-    now_final = datetime.now(timezone.utc)
+    now_final = datetime.now(UTC)
 
     # 4. Probe All Analytics Pages for End-to-End Freshness Comparison
-    print(f"\n📊 Probing All Analytics Pages to measure freshness & query latency...", flush=True)
+    print("\n📊 Probing All Analytics Pages to measure freshness & query latency...", flush=True)
     page_probes = {
         "Header Badge": (f"{be_url}/api/log-extents?service_id={sid}", "GET", None),
         "Dashboard Bundle": (f"{be_url}/api/dashboard/bundle?service_id={sid}", "POST", {"range_token": "24h"}),
         "Performance / RUM": (f"{be_url}/api/performance/aggregates", "POST", {"filters": {}}),
         "Security Aggregates": (f"{be_url}/api/security/aggregates", "POST", {"filters": {}}),
         "Origin Timeseries": (f"{be_url}/api/origin/timeseries", "POST", {"filters": {}}),
-        "Network Health": (f"{be_url}/api/network-health", "POST", {"filters": {}, "metric": "health_score", "bucket_seconds": 60, "top_n": 10}),
+        "Network Health": (
+            f"{be_url}/api/network-health",
+            "POST",
+            {"filters": {}, "metric": "health_score", "bucket_seconds": 60, "top_n": 10},
+        ),
     }
 
     page_results = {}
@@ -381,15 +405,17 @@ def main():
     targets = list(ENVIRONMENTS.keys()) if args.env == "all" else [args.env]
     results = []
 
-    print(f"\n{'#'*80}", flush=True)
-    print(f"# FASTLY LOG ANALYTICS — END-TO-END PIPELINE FRESHNESS & LAG BENCHMARK", flush=True)
+    print(f"\n{'#' * 80}", flush=True)
+    print("# FASTLY LOG ANALYTICS — END-TO-END PIPELINE FRESHNESS & LAG BENCHMARK", flush=True)
     print(f"# Targets: {targets}", flush=True)
-    print(f"# Ingest Cadence: 10s (Target Freshness: ~10s - 20s behind live real-time)", flush=True)
-    print(f"{'#'*80}", flush=True)
+    print("# Ingest Cadence: 10s (Target Freshness: ~10s - 20s behind live real-time)", flush=True)
+    print(f"{'#' * 80}", flush=True)
 
     for tgt in targets:
         env_info = ENVIRONMENTS[tgt]
-        res = measure_environment(tgt, env_info, num_requests=args.requests, num_rum=args.rum_beacons, max_wait_s=args.timeout)
+        res = measure_environment(
+            tgt, env_info, num_requests=args.requests, num_rum=args.rum_beacons, max_wait_s=args.timeout
+        )
         results.append(res)
 
     out_path = Path(args.output)
@@ -398,11 +424,14 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\n✅ Full benchmark report written to {out_path}", flush=True)
 
-    print(f"\n{'='*96}", flush=True)
-    print(f"                      END-TO-END FRESHNESS & INGEST LAG SCORECARD", flush=True)
-    print(f"{'='*96}", flush=True)
-    print(f"{'Environment':<28} │ {'Header Seen':<11} │ {'Cron Ingest':<11} │ {'Dash Seen':<12} │ {'Dashboard Lag':<14} │ {'Header Lag':<11}", flush=True)
-    print(f"{'-'*28}─┼─{'-'*11}─┼─{'-'*11}─┼─{'-'*12}─┼─{'-'*14}─┼─{'-'*11}", flush=True)
+    print(f"\n{'=' * 96}", flush=True)
+    print("                      END-TO-END FRESHNESS & INGEST LAG SCORECARD", flush=True)
+    print(f"{'=' * 96}", flush=True)
+    print(
+        f"{'Environment':<28} │ {'Header Seen':<11} │ {'Cron Ingest':<11} │ {'Dash Seen':<12} │ {'Dashboard Lag':<14} │ {'Header Lag':<11}",
+        flush=True,
+    )
+    print(f"{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 11}─┼─{'-' * 12}─┼─{'-' * 14}─┼─{'-' * 11}", flush=True)
 
     for r in results:
         if "error" in r:
@@ -415,13 +444,20 @@ def main():
 
         head_seen_str = f"{delays['header_seconds']}s" if delays.get("header_seconds") is not None else "TIMEOUT"
         cron_str = f"{delays['cron_request_seconds']}s" if delays.get("cron_request_seconds") is not None else "TIMEOUT"
-        dash_str = f"{delays['dashboard_bundle_seconds']}s" if delays.get("dashboard_bundle_seconds") is not None else "TIMEOUT"
+        dash_str = (
+            f"{delays['dashboard_bundle_seconds']}s"
+            if delays.get("dashboard_bundle_seconds") is not None
+            else "TIMEOUT"
+        )
         dash_lag_str = f"{dash_lag:.1f}s ago" if dash_lag is not None else "—"
         head_lag_str = f"{head_lag:.1f}s ago" if head_lag is not None else "—"
 
-        print(f"{r['name']:<28} │ {head_seen_str:<11} │ {cron_str:<11} │ {dash_str:<12} │ {dash_lag_str:<14} │ {head_lag_str:<11}", flush=True)
+        print(
+            f"{r['name']:<28} │ {head_seen_str:<11} │ {cron_str:<11} │ {dash_str:<12} │ {dash_lag_str:<14} │ {head_lag_str:<11}",
+            flush=True,
+        )
 
-    print(f"{'='*96}\n", flush=True)
+    print(f"{'=' * 96}\n", flush=True)
 
 
 if __name__ == "__main__":

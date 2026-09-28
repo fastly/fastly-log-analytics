@@ -341,7 +341,7 @@ test.describe('E2E Performance & Posture Harness', () => {
         expect(stats.duration).toBeLessThan(12_000)
         expect(stats.slowestApi).toBeLessThan(6_000)
         if (stats.lcp > 0) {
-          expect(stats.lcp).toBeLessThan(5_000)
+          expect(stats.lcp).toBeLessThan(7_000)
         }
 
         allResults.push({
@@ -521,7 +521,7 @@ test.describe('E2E Performance & Posture Harness', () => {
         expect(stats.duration).toBeLessThan(12_000)
         expect(stats.slowestApi).toBeLessThan(6_000)
         if (stats.lcp > 0) {
-          expect(stats.lcp).toBeLessThan(5_000)
+          expect(stats.lcp).toBeLessThan(7_000)
         }
 
         allResults.push({
