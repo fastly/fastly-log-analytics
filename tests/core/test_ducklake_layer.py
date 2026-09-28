@@ -542,3 +542,52 @@ class TestCommitBufferChunking:
         assert result["rows_committed"] == 2
         assert result["files_committed"] == 2
         assert _lake_count(src) == 2
+
+
+def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, caplog):
+    """Verify failsafe blocks S3 DATA_PATH and falls back to local disk unless opted in."""
+    import logging
+    from unittest.mock import MagicMock
+    from backend import config
+    from backend.core.iceberg import _ducklake as dl
+
+    src = {"service_id": "svc-guard-test", "bucket": "fos-some-bucket"}
+    local_expected = str(config.SERVICES_DATA_DIR / "svc-guard-test" / "ducklake")
+
+    # 1. Default should be local disk path even with bucket present
+    assert dl._default_data_path(src) == local_expected
+
+    # 2. If DUCKLAKE_DATA_PATH is set to remote S3, failsafe must intercept and fall back
+    monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", "s3://fos-some-bucket/ducklake/")
+    monkeypatch.delenv("ALLOW_REMOTE_S3_PARQUET_SCAN", raising=False)
+
+    fake_con = MagicMock()
+    # Simulate fresh connection where 'lake' is not yet attached
+    def _execute_side_effect(sql, *args, **kwargs):
+        if "ducklake_snapshots" in sql:
+            raise RuntimeError("database 'lake' does not exist")
+        return MagicMock(fetchone=lambda: None)
+
+    fake_con.execute.side_effect = _execute_side_effect
+
+    with caplog.at_level(logging.ERROR):
+        # We test that _ducklake_attach intercepts the s3 path and substitutes local_expected
+        dl._ducklake_attach(fake_con, src, read_only=True)
+
+    assert "BLOCKED remote S3 DuckLake parquet scan" in caplog.text
+    all_sql = [call[0][0] for call in fake_con.execute.call_args_list]
+    assert any(local_expected in sql for sql in all_sql)
+    assert not any("s3://" in sql for sql in all_sql)
+
+    # 3. Explicit opt-in via ALLOW_REMOTE_S3_PARQUET_SCAN=1 allows it with warning
+    monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
+    fake_con.reset_mock()
+    fake_con.execute.side_effect = _execute_side_effect
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        dl._ducklake_attach(fake_con, src, read_only=True)
+
+    assert "Remote S3 DuckLake parquet scan is actively allowed" in caplog.text
+    all_sql_allowed = [call[0][0] for call in fake_con.execute.call_args_list]
+    assert any("s3://fos-some-bucket/ducklake/" in sql for sql in all_sql_allowed)

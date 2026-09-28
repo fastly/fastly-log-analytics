@@ -126,19 +126,14 @@ def _is_local_only(source: dict) -> bool:
 def _default_data_path(source: dict) -> str:
     """Default DuckLake DATA_PATH for ``source``.
 
-    Cloud-backed sources (same condition the old FOS iceberg write used)
-    default to durable object storage: the pipeline deletes raw ``.gz``
-    files after ingest, so a local default would leave the sole copy of
-    the data on the VM's ephemeral disk. Local-only sources keep local
-    parquet under SERVICES_DATA_DIR.
+    All analytical data is stored locally on disk under SERVICES_DATA_DIR.
+    FOS / S3 is used strictly as an ingress drop bucket for raw .gz logs
+    streamed from Fastly logging endpoints.
     """
-    bucket = source.get("bucket")
-    if bucket and not _is_local_only(source):
-        prefix = (source.get("prefix") or "").strip("/")
-        base = f"{prefix}/ducklake" if prefix else "ducklake"
-        return f"s3://{bucket}/{base}/"
     service_id = source.get("service_id") or source.get("name", "default")
-    return str(config.SERVICES_DATA_DIR / str(service_id) / "parquet")
+    local_path = config.SERVICES_DATA_DIR / str(service_id) / "ducklake"
+    local_path.mkdir(parents=True, exist_ok=True)
+    return str(local_path)
 
 
 def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
@@ -174,6 +169,29 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             return False
 
     data_path = config.DUCKLAKE_DATA_PATH or _default_data_path(source)
+
+    # Failsafe Guardrail: Analytical data must never be read/scanned over remote S3/HTTP
+    # unless explicitly permitted via ALLOW_REMOTE_S3_PARQUET_SCAN=1.
+    if data_path.startswith(("s3://", "http://", "https://")):
+        allow_remote = os.getenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "0").lower() in ("1", "true", "yes")
+        if not allow_remote and not source.get("allow_remote_parquet_scan"):
+            local_fallback = _default_data_path(source)
+            logger.error(
+                "🚨 [storage-guard] BLOCKED remote S3 DuckLake parquet scan for %s (data_path=%s). "
+                "All analytical data must be stored locally on disk. Falling back to local data path: %s. "
+                "Set ALLOW_REMOTE_S3_PARQUET_SCAN=1 if emergency S3 access is strictly required.",
+                service_id,
+                data_path,
+                local_fallback,
+            )
+            data_path = local_fallback
+        else:
+            logger.warning(
+                "⚠️ [storage-guard] Remote S3 DuckLake parquet scan is actively allowed via ALLOW_REMOTE_S3_PARQUET_SCAN=1 "
+                "(service=%s, data_path=%s). Queries will incur S3 network latency.",
+                service_id,
+                data_path,
+            )
 
     # Everything below — extension load included — races with any other
     # connection in this process attaching the same "lake" alias
