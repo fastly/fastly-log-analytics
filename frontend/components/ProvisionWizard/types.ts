@@ -139,8 +139,9 @@ export const SHIELD_MAP: Record<string, string> = {
   "us-east-1": "iad-va-us", // Ashburn, VA
   "us-west": "bfi-wa-us", // Seattle, WA (BFI)
   "us-central-1": "chi-il-us", // Chicago, IL (CHI)
-  "eu-central": "frankfurt-de", // Frankfurt, Germany
+  "eu-central-1": "frankfurt-de", // Frankfurt, Germany
   "eu-south-1": "mxp-milan-it", // Milan, Italy
+  "eu-west-1": "mxp-paris-fr", // Paris, France
   "uk-east-1": "london-uk", // London, UK
   "jp-central-1": "nrt-tokyo-jp", // Tokyo, Japan (NRT)
   "au-east-1": "sydney-au", // Sydney, Australia
@@ -150,8 +151,9 @@ export const REGION_LABELS: Record<string, string> = {
   "us-east-1": "US East (Ashburn)",
   "us-west": "US West (Seattle)",
   "us-central-1": "US Central (Chicago)",
-  "eu-central": "EU Central (Frankfurt)",
+  "eu-central-1": "EU Central (Frankfurt)",
   "eu-south-1": "EU South (Milan)",
+  "eu-west-1": "EU West (Paris)",
   "uk-east-1": "UK East (London)",
   "jp-central-1": "JP Central (Tokyo)",
   "au-east-1": "AU East (Sydney)",
@@ -164,6 +166,7 @@ export const SHIELD_LABELS: Record<string, string> = {
   "chi-il-us": "CHI (Chicago)",
   "frankfurt-de": "FRA (Frankfurt)",
   "mxp-milan-it": "MXP (Milan)",
+  "mxp-paris-fr": "MXP (Paris)",
   "london-uk": "LHR (London)",
   "nrt-tokyo-jp": "NRT (Tokyo)",
   "sydney-au": "SYD (Sydney)",
