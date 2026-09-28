@@ -1087,6 +1087,7 @@ def _run_gap_heal(service_id: str) -> None:
     start_time_exec = time.time()
     try:
         from fastapi import HTTPException
+
         from backend.routers.admin import compute_log_accounting
 
         try:

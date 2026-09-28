@@ -548,6 +548,7 @@ def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, 
     """Verify failsafe blocks S3 DATA_PATH and falls back to local disk unless opted in."""
     import logging
     from unittest.mock import MagicMock
+
     from backend import config
     from backend.core.iceberg import _ducklake as dl
 
@@ -562,6 +563,7 @@ def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, 
     monkeypatch.delenv("ALLOW_REMOTE_S3_PARQUET_SCAN", raising=False)
 
     fake_con = MagicMock()
+
     # Simulate fresh connection where 'lake' is not yet attached
     def _execute_side_effect(sql, *args, **kwargs):
         if "ducklake_snapshots" in sql:
