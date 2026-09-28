@@ -421,7 +421,12 @@ def _bootstrap_sync(
         # and can lag the dedicated sync-status endpoint, which made the
         # first-paint header show stale freshness even when ingestion was
         # current.
-        cached_status = sync_status_payload or svcconfig.get_status(active_src["name"]) or {}
+        cached_status = (
+            sync_status_payload
+            or compute_sync_status_cached(valid_active_id)
+            or svcconfig.get_status(active_src["name"])
+            or {}
+        )
 
         # Get RUM and REQUEST metrics directly from cached_status!
         rum_payload = cached_status.get("rum")

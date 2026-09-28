@@ -149,11 +149,8 @@ def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsR
         return empty2
 
     try:
-        from backend.high_scale.registry import get_high_scale_service_registry
-
-        if get_high_scale_service_registry().resolve(service_id) is not None:
-            cached = compute_sync_status_cached(service_id) or {}
-        else:
+        cached = compute_sync_status_cached(service_id)
+        if not cached:
             cached = svcconfig.get_status(src["name"]) or {}
     except Exception:
         cached = svcconfig.get_status(src["name"]) or {}
