@@ -68,7 +68,7 @@ _attach_lock = threading.Lock()
 # timeout of its own — DuckDB's ATTACH can sit in an uninterruptible kernel
 # wait for the file lock — so without this bound a queued reader can wait
 # indefinitely, and pool exhaustion cascades from there.
-_ATTACH_LOCK_TIMEOUT_S = float(os.environ.get("DUCKLAKE_ATTACH_LOCK_TIMEOUT_S", "20") or "20")
+_ATTACH_LOCK_TIMEOUT_S = float(os.environ.get("DUCKLAKE_ATTACH_LOCK_TIMEOUT_S", "60") or "60")
 
 # Bounds how long a caller retries the ATTACH statement itself after hitting
 # a "unique file handle conflict" — a DIFFERENT connection in this process
