@@ -81,7 +81,8 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
             "access_level": src.get("access_level", "read_write"),
             "storage_mode": src.get("storage_mode", "cloud"),
         }
-    cached_status = svcconfig.get_status(src["name"])
+    lookup_key = service_id or src.get("service_id") or src.get("name", "")
+    cached_status = svcconfig.get_status(lookup_key) or (svcconfig.get_status(src["name"]) if "name" in src else {})
     if not cached_status:
         return None  # fall through to dedicated endpoint
 
@@ -92,13 +93,15 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     if isinstance(request_status, dict):
         cached_status["latest_log_at"] = request_status.get("latest_log_at")
 
-    # Real-time SQLite metadata lookup overlay to bypass stale on-disk config cache
+    # Real-time SQLite/PostgreSQL metadata lookup overlay to bypass stale on-disk config cache
     try:
         import re
 
         from backend.core import metadata as metadata_db
 
-        summary = metadata_db.get_ingested_files_status_summary(src["name"])
+        summary = metadata_db.get_ingested_files_status_summary(lookup_key)
+        if not summary.get("latest_file_name") and "name" in src:
+            summary = metadata_db.get_ingested_files_status_summary(src["name"]) or summary
         latest_file_name = summary.get("latest_file_name")
         total_rows = summary.get("total_rows") or 0
 
