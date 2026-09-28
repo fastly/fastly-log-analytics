@@ -124,8 +124,12 @@ def _age_catalog(src: dict, days: int, *, schedule_too: bool = False) -> None:
 
 
 def _parquet_files(src: dict) -> list[str]:
-    root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "parquet")
-    return glob.glob(os.path.join(root, "**", "*.parquet"), recursive=True)
+    root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "ducklake")
+    files = glob.glob(os.path.join(root, "**", "*.parquet"), recursive=True)
+    if not files:
+        legacy_root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "parquet")
+        files = glob.glob(os.path.join(legacy_root, "**", "*.parquet"), recursive=True)
+    return files
 
 
 def _logs_cols() -> str:
@@ -518,14 +522,16 @@ def test_optimize_table_flushes_inlined_rows_to_parquet(tmp_path, monkeypatch):
     src = _make_source(tmp_path, f"flush{uuid.uuid4().hex[:8]}")
     _seed(src, "logs", _logs_cols(), [(NOW - timedelta(hours=i), f"r{i}") for i in range(5)])
 
-    data_root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "parquet")
+    data_root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "ducklake")
+    legacy_root = os.path.join(str(svcconfig.SERVICES_DATA_DIR), src["service_id"], "parquet")
 
     result = buffer_mod._optimize_table_impl(src)
 
     assert "error" not in result
-    assert glob.glob(os.path.join(data_root, "**", "*.parquet"), recursive=True), (
-        "parquet files must exist — otherwise the catalog DB holds the only copy of every ingested row"
+    files = glob.glob(os.path.join(data_root, "**", "*.parquet"), recursive=True) or glob.glob(
+        os.path.join(legacy_root, "**", "*.parquet"), recursive=True
     )
+    assert files, "parquet files must exist — otherwise the catalog DB holds the only copy of every ingested row"
     assert _read(src) == [f"r{i}" for i in range(5)], "the flush must be lossless"
 
 
