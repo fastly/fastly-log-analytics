@@ -562,6 +562,9 @@ def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, 
     # their default must be durable object storage.
     hs_src = {**src, "deployment_mode": "high_throughput", "prefix": "logs"}
     assert dl._default_data_path(hs_src) == "s3://fos-some-bucket/logs/ducklake/"
+    monkeypatch.setenv("DUCKLAKE_LOCAL_STORAGE", "1")
+    assert dl._default_data_path(hs_src) == local_expected
+    monkeypatch.delenv("DUCKLAKE_LOCAL_STORAGE")
 
     # 2. An explicit remote path in standard mode is still blocked unless opted in.
     monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", "s3://fos-some-bucket/ducklake/")

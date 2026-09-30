@@ -17,6 +17,7 @@ services:
       - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
       - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - CLICKHOUSE_ENABLED=true
+      - DUCKLAKE_LOCAL_STORAGE=1
     volumes: !override
       - ./configs-hs:/app/configs
       - hs-data:/app/data
@@ -28,6 +29,7 @@ services:
       - HIGH_SCALE_SERVICE_IDS=${HIGH_SCALE_SERVICE_IDS:-}
       - HIGH_SCALE_CURSOR_SECRET=${HIGH_SCALE_CURSOR_SECRET:-testsecret}
       - CLICKHOUSE_ENABLED=true
+      - DUCKLAKE_LOCAL_STORAGE=1
     volumes: !override
       - ./configs-hs:/app/configs
       - hs-data:/app/data
@@ -75,6 +77,7 @@ services:
       - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - CELERY_BROKER_URL=redis://valkey:6379/0
       - DEPLOYMENT_MODE=high_throughput
+      - DUCKLAKE_LOCAL_STORAGE=1
     volumes:
       - ./configs-hs:/app/configs
       - hs-data:/app/data

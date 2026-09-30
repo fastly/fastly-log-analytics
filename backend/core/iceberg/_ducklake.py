@@ -130,7 +130,13 @@ def _default_data_path(source: dict) -> str:
     so cloud-backed sources use durable FOS storage in that topology. Standard
     deployments keep analytical data local for low-latency reads.
     """
-    if config.is_high_throughput_mode(source) and source.get("bucket") and not _is_local_only(source):
+    force_local = os.getenv("DUCKLAKE_LOCAL_STORAGE", "").lower() in ("1", "true", "yes")
+    if (
+        config.is_high_throughput_mode(source)
+        and not force_local
+        and source.get("bucket")
+        and not _is_local_only(source)
+    ):
         prefix = (source.get("prefix") or "").strip("/")
         base = f"{prefix}/ducklake" if prefix else "ducklake"
         return f"s3://{source['bucket']}/{base}/"
