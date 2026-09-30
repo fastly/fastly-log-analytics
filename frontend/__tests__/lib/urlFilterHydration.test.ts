@@ -80,6 +80,13 @@ describe('hydrateFilterStoreFromUrl', () => {
     expect(typeof args[2]).toBe('string')
   })
 
+  it('parses minute relative ranges such as ?range=5m', async () => {
+    setSearch('range=5m')
+    await hydrate()
+    expect(mockSetRelativeRange).toHaveBeenCalledOnce()
+    expect(mockSetRelativeRange.mock.calls[0][0]).toBe('5m')
+  })
+
   it('parses modern ?filters JSON payload', async () => {
     const filters = {
       status: { values: ['200', '404'], mode: 'include' },

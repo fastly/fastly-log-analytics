@@ -9,6 +9,7 @@ import json
 import math
 import random
 import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,8 +52,6 @@ async def _request(
     headers: dict[str, str],
 ) -> tuple[int, int]:
     started = time.perf_counter()
-    import uuid
-
     try:
         # Clone headers and generate a completely unique Request ID per log line
         headers = headers.copy()
@@ -159,9 +158,15 @@ def build_request_url(base_url: str, rum_ratio: float) -> str:
     if rum_ratio > 0 and random.random() < rum_ratio:
         metric = random.choice(["LCP", "CLS", "INP", "FID", "TTFB", "FCP"])
         value = random.choice([150, 250, 1200, 2500, 3500]) if metric != "CLS" else round(random.uniform(0.01, 0.45), 3)
-        cid = f"cid-{random.randint(1000, 99999)}"
+        beacon_id = uuid.uuid4().hex
+        cid = f"cid-{beacon_id}"
+        req_id = f"req-{beacon_id}"
         path = random.choice(["/", "/dashboard", "/origin", "/security", "/performance"])
-        return f"{base_url.rstrip('/')}/rum-beacon?rum_metric_name={metric}&rum_metric_value={value}&rum_cid={cid}&rum_pathname={quote(path)}"
+        return (
+            f"{base_url.rstrip('/')}/rum-beacon?rum_metric_name={metric}"
+            f"&rum_metric_value={value}&rum_cid={quote(cid)}&cid={quote(cid)}"
+            f"&req={quote(req_id)}&rum_pathname={quote(path)}"
+        )
     return base_url
 
 

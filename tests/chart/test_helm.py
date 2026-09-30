@@ -334,7 +334,11 @@ def test_no_worker_scaledobject_without_a_worker_fleet():
 
 
 def _high_scale_docs(*extra: str) -> list[dict]:
-    return _render("highScale.enabled=true", *extra)
+    return _render(
+        "highScale.enabled=true",
+        "highScale.sharedState.existingClaim=shared-app-state",
+        *extra,
+    )
 
 
 def test_high_scale_is_disabled_without_opt_in():
@@ -344,6 +348,11 @@ def test_high_scale_is_disabled_without_opt_in():
         "test-release-fastly-log-analytics-backend",
         "test-release-fastly-log-analytics-frontend",
     }
+
+
+def test_high_scale_rejects_missing_shared_storage():
+    error = _render_error("highScale.enabled=true")
+    assert "require sharedState.existingClaim" in error
 
 
 def test_high_scale_renders_only_application_workloads_and_invariants():
@@ -372,6 +381,18 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
         # Packaging must not silently select an application runtime mode.
         assert not any(entry["name"] == "DEPLOYMENT_MODE" for entry in pod["containers"][0].get("env", []))
         assert pod["containers"][0]["envFrom"][0]["secretRef"]["name"] == "fla-high-scale-connections"
+        assert {
+            "name": "shared-state",
+            "mountPath": "/app/data",
+            "subPath": "data",
+        } in pod["containers"][0]["volumeMounts"]
+        assert pod["volumes"] == [
+            {"name": "tmp", "emptyDir": {}},
+            {
+                "name": "shared-state",
+                "persistentVolumeClaim": {"claimName": "shared-app-state"},
+            },
+        ]
 
 
 def test_high_scale_ingest_runs_continuous_worker_without_placeholder_workloads():

@@ -8,10 +8,11 @@ import type { FiltersPayload } from '@/types/filters'
 let hydrated = false
 
 export function rangeLabelToHours(label: string): number | null {
-  const m = /^(\d+)([hd])$/.exec(label)
+  const m = /^(\d+)([mhd])$/.exec(label)
   if (!m) return null
   const n = parseInt(m[1], 10)
   if (!Number.isFinite(n) || n <= 0) return null
+  if (m[2] === 'm') return n / 60
   return m[2] === 'd' ? n * 24 : n
 }
 

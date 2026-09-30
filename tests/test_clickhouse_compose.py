@@ -11,11 +11,16 @@ def test_clickhouse_overlay_is_private_persistent_and_opt_in():
     assert ch["volumes"] == [
         "clickhouse-prototype-data:/var/lib/clickhouse",
         "./clickhouse/config.d/system_logs.xml:/etc/clickhouse-server/config.d/system_logs.xml:ro",
+        "./clickhouse/config.d/resource_limits.xml:/etc/clickhouse-server/config.d/resource_limits.xml:ro",
     ]
     assert ch["mem_limit"] == "6g"
     assert ch["restart"] == "unless-stopped"
     assert ch["networks"] == ["app-network"]
     assert ch["healthcheck"]["test"][-1] == "http://127.0.0.1:8123/ping"
+    limits = Path("clickhouse/config.d/resource_limits.xml").read_text()
+    assert "<background_pool_size>2</background_pool_size>" in limits
+    assert "<background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>" in limits
+    assert "<max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>" in limits
     assert "CLICKHOUSE_ENABLED=${CLICKHOUSE_ENABLED:-false}" in overlay["services"]["backend"]["environment"]
     assert "clickhouse" not in yaml.safe_load(Path("docker-compose.multipod.yml").read_text())["services"]
 

@@ -4,6 +4,9 @@
 {{- fail (printf "high-scale workload %s requires an explicit command" $workload) }}
 {{- end }}
 {{- $root := $ }}
+{{- if and (not $root.Values.sharedState.existingClaim) (not $root.Values.sharedState.emptyDir) }}
+{{- fail "high-scale workloads require sharedState.existingClaim; set sharedState.emptyDir=true only for explicitly ephemeral development runs" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

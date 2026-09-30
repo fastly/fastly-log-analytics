@@ -33,7 +33,10 @@ env:
 workerId: ""
 
 sharedState:
+  # Required for high-scale workloads: this must be the same PVC mounted by
+  # the parent chart's backend and Celery workers.
   existingClaim: ""
+  # Set true only for explicitly ephemeral development runs.
   emptyDir: false
   configSubPath: configs
   dataSubPath: data

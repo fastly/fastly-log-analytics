@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from scripts.dev.scale_harness import (
+    build_request_url,
     freshness_lag_seconds,
     parse_stages,
     render_report,
@@ -27,6 +29,14 @@ def test_parse_stages_rejects_high_rate_without_explicit_flag() -> None:
 def test_parse_stages_accepts_high_rate_with_explicit_flag() -> None:
     stages = parse_stages("2500:10", allow_high_rate=True)
     assert stages[0].target_rps == 2500
+
+
+def test_rum_urls_include_vcl_identity_parameters() -> None:
+    url = build_request_url("https://logs.example.com", 1.0)
+    query = parse_qs(urlparse(url).query)
+    assert query["cid"][0] == query["rum_cid"][0]
+    assert query["req"][0].startswith("req-")
+    assert query["req"][0] != query["cid"][0]
 
 
 def test_freshness_lag_is_separate_from_missing_data() -> None:
