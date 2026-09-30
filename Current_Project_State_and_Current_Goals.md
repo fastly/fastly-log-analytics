@@ -337,9 +337,12 @@ Analyst Path A, and Analyst Path B access checks.
   this shared workstation: cold runs had one 90 ms or 98 ms sample among
   otherwise 8-18 ms samples, above its 52 ms ceiling. Its query, generator,
   and baseline are unchanged in this work; this measurement does not
-  establish a Cron 1 regression, but the local `make ci` gate cannot be
-  reported green. Approved live verification remains outstanding. Do not infer outcomes from
-  discovered counts or the latest service run.
+  establish a Cron 1 regression, and the local `make ci` gate cannot be
+  reported green. The implementation was committed as `c0e6f587` and pushed
+  to `release/v3.0.0-beta3`; GitHub's CI and Playwright E2E workflows passed
+  on that commit, including the CI-runner performance gate. Approved live
+  multi-environment verification remains outstanding. Do not infer outcomes
+  from discovered counts or the latest service run.
 
 The approved request/RUM-aligned ingestion contract is:
 
