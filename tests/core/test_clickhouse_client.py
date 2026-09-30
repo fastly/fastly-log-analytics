@@ -117,6 +117,10 @@ def test_parameters_are_bound_not_interpolated_or_in_url(clients):
         assert request.url.params["default_format"] == "JSON"
         assert float(request.url.params["max_execution_time"]) > 0
         assert request.url.params["wait_end_of_query"] == "1"
+        assert request.url.params["max_memory_usage"] == "1073741824"
+        assert request.url.params["max_threads"] == "2"
+        assert request.url.params["max_bytes_before_external_group_by"] == "134217728"
+        assert request.url.params["max_bytes_before_external_sort"] == "134217728"
         UUID(request.url.params["query_id"])
         return response([{"country": value, "n": 2}])
 
