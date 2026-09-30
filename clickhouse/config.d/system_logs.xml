@@ -26,11 +26,11 @@
     <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
 
     <merge_tree>
-        <!-- Limit the size of parts that can be merged in the background (default is ~150GB) to prevent huge memory spikes -->
-        <max_bytes_to_merge_at_max_space_in_pool>268435456</max_bytes_to_merge_at_max_space_in_pool> <!-- 256 MB -->
-        <max_bytes_to_merge_at_min_space_in_pool>33554432</max_bytes_to_merge_at_min_space_in_pool> <!-- 32 MB -->
-        <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192) -->
-        <merge_max_block_size>2048</merge_max_block_size>
+        <!-- Keep merges small enough for the constrained 6G container. -->
+        <max_bytes_to_merge_at_max_space_in_pool>67108864</max_bytes_to_merge_at_max_space_in_pool> <!-- 64 MB -->
+        <max_bytes_to_merge_at_min_space_in_pool>8388608</max_bytes_to_merge_at_min_space_in_pool> <!-- 8 MB -->
+        <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192). -->
+        <merge_max_block_size>512</merge_max_block_size>
         <!-- Vertical merge algorithm (processes columns independently for wide tables) is
              enabled by default via `enable_vertical_merge_algorithm`; no override needed.
              A prior version of this file used the non-existent setting name
