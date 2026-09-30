@@ -20,6 +20,7 @@ def test_clickhouse_overlay_is_private_persistent_and_opt_in():
     limits = Path("clickhouse/config.d/resource_limits.xml").read_text()
     assert "<background_pool_size>2</background_pool_size>" in limits
     assert "<background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>" in limits
+    assert "<max_concurrent_queries>2</max_concurrent_queries>" in limits
     assert "<max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>" in limits
     assert "CLICKHOUSE_ENABLED=${CLICKHOUSE_ENABLED:-false}" in overlay["services"]["backend"]["environment"]
     assert "clickhouse" not in yaml.safe_load(Path("docker-compose.multipod.yml").read_text())["services"]
