@@ -528,7 +528,40 @@ re-renders triggered by store subscriptions. The trace shows which.
 
 ## Testing
 
-**The Rule:** before committing, run `make ci`. It runs the full gate in parallel (`-j2`): backend pytest + frontend vitest + frontend typecheck (with OpenAPI type regen) + frontend ESLint ceiling (`lint-frontend`) + ruff check + ruff format check + mypy + import-contracts + VCL lint tests (`vcl-test`) + Rust scorer cargo tests (`scorer-test`) + frontend dep resolution (`verify-deps`) + secret scan + OSV scan + OTEL console-exporter guard (`otel-guard`). Add or update tests for every change; if a change is not testable in isolation, document why.
+### Testing Philosophy & Speed (The 3-Tier Workflow)
+
+The project tests ~8,000 backend test cases, ~1,400 frontend test cases, Playwright E2E suites, and 18 security/static gates. Running the entire suite takes several minutes. **Never run `make ci` on every incremental code edit during active development.** Instead, adopt the 3-tier workflow:
+
+1. **Inner Loop (Active Coding — 1 to 3 seconds):**
+   Run only the specific test file or test selector matching the code you are touching:
+   ```bash
+   # Backend: target a single test file or function name
+   uv run pytest tests/routers/test_dashboard_router.py
+   uv run pytest -k "test_specific_feature"
+
+   # Frontend: target a single test spec
+   cd frontend && npx vitest hooks/useDashboardData.test.ts
+   ```
+2. **Intermediate Smoke Loop (`make fast-ci` — ~1 to 2 minutes):**
+   A fast local smoke check run before switching tasks, context switching, or taking a break. It runs OpenAPI drift checks, typechecks, linters, frontend contract tests, and core unit tests across backend and frontend in parallel (`-j4`).
+   *Note: `fast-ci` is strictly a developer convenience check. It skips >80% of backend tests (all DB engines, rollups, API routers, and cron tasks), skips all UI component tests, and skips Playwright E2E. It is NOT a substitute for `make ci`.*
+3. **Outer Loop Gate (`make ci` — Final Pre-Push / Pre-Deploy Gate):**
+   Mirrors every gating GitHub Actions workflow (`ci.yml` and `e2e.yml`). Run once when feature work is complete before pushing to origin or opening a PR:
+   - **Stage 1 (Fail-Fast Static Gates, ~10–15s):** Runs `gen-types` followed by 17 static and security checks in parallel (`-j4`: `typecheck-frontend`, `lint-frontend`, `lint`, `format-check`, `typecheck`, `import-contracts`, `vcl-test`, `scorer-test`, `scorer-audit`, `verify-deps`, `secret-scan`, `osv`, `otel-guard`, `security-regression`, `openapi-drift`, `deploy-validate`, `stray-file-gate`). Syntax errors, lint/format issues, and type mismatches fail immediately.
+   - **Stage 2 (Backend Suite):** Runs `test-ci` (`pytest -n auto` + `--cov-fail-under=85`).
+   - **Stage 3 (Frontend Suite):** Runs `test-frontend-ci` (`vitest` with 4-way coverage gates). Pytest and Vitest run sequentially to prevent CPU-core exhaustion and memory swap thrashing.
+   - **Stage 4 (Load Gate):** Runs `perf-ci` (100k synthetic load benchmark).
+   - **Stage 5 (E2E):** Runs `e2e` (Playwright cross-browser matrix).
+
+### Test Preservation Policy (Never Delete Tests)
+
+**Do NOT remove or delete tests to speed up CI runs.**
+- **The test count is not the bottleneck:** Profiling proves that individual test assertions take negligible time (<10% of total runtime). Over 70% of Vitest's runtime is runner infrastructure overhead (JSDOM environment spinning up and tear down, plus module bundling per worker thread). Pytest's collection alone takes ~33s. Deleting tests buys virtually no speedup while introducing severe regression blind spots.
+- **Coverage ratchets and floors:** Strict coverage gates fail CI if coverage drops:
+  - Backend: `--cov-fail-under=85` in `test-ci` and CI.
+  - Frontend: strict 4-way thresholds for lines (66%), statements (65%), functions (54%), and branches (52%).
+  - Security regressions: Monotonic floor of 24 dedicated regression tests (`scripts/check_security_regression_count.sh`).
+- **Production safety:** Tests protect critical invariants (multi-tenant isolation, real-time log ingestion, DuckLake commits, Rust session scoring, and edge VCL generation). Add or update tests for every change; if a change is not testable in isolation, document why.
 
 ### Backend (`tests/`, mirrors source tree)
 
@@ -1097,21 +1130,25 @@ Before beginning implementation, testing, or refactoring on any page, background
 
 ### Testing
 
-1. **Run focused tests after each coherent code change, then `make ci` after the complete change set.** Batch related selectors in one invocation. Diagnose and rerun a failed stage before repeating the full gate; do not rerun passing suites solely for staging changes. Fix failures without weakening assertions, coverage floors, or required gates. Never report completion without the final CI and required live verification.
-2. **Add tests for every non-trivial change.** New endpoint → router test. New utility → unit test. Bug fix → regression test that would have caught it.
-3. **Prefer integration tests over pure mocks** for backend behavior. The `in_memory_duckdb` + `client` fixture pattern tests real SQL while staying fast.
-4. **Test error paths.** Missing config, external 4xx/5xx, empty DB.
-5. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
-6. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
-7. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
+1. **Adopt the 3-Tier Testing Workflow:**
+   - **Inner Loop (1–3s):** Run focused, targeted tests while coding (`uv run pytest tests/... -k ...` or `cd frontend && npx vitest ...`). Do not run the multi-minute `make ci` on every small edit.
+   - **Intermediate Smoke Loop (~1–2m):** Use `make fast-ci` for smoke checks across contracts, typechecking, linters, and core unit tests before taking a break or context switching.
+   - **Outer Loop Gate:** Run `make ci` once after the coherent change set is complete before pushing to upstream origin.
+2. **Never delete or weaken existing tests:** Do not remove test cases to speed up CI runs. The ~8,000 backend and ~1,400 frontend tests protect mission-critical data integrity, multi-tenant isolation, and production regression history. Coverage floors (`--cov-fail-under=85`, Vitest 4-way thresholds, and the 24-test security regression floor) are strictly enforced ratchets. Test execution assertions account for <10% of runtime; deleting tests introduces regression blind spots without providing meaningful speedup.
+3. **Add tests for every non-trivial change:** New endpoint → router test. New utility → unit test. Bug fix → regression test that would have caught it.
+4. **Prefer integration tests over pure mocks** for backend behavior. The `in_memory_duckdb` + `client` fixture pattern tests real SQL while staying fast.
+5. **Test error paths:** Missing config, external 4xx/5xx, empty DB.
+6. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
+7. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
+8. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
 
 ### Code Changes
 
-7. **No backward-compatibility shims.** Fields like `stats_token` and `cdn_domain` do not exist in the schema — do not add fallbacks for absent fields.
-8. **Never interpolate user-controlled values into SQL.** `_safe_table()` for table names, parameterised queries (`con.execute("... WHERE x = ?", [value])`) for filter values.
-9. **Handle `openapi-fetch` errors explicitly.** Never `.then((r) => r.data?.x || fallback)` without checking `r.error`.
-10. **Keep Python imports at module level.** Conditional mid-function imports trigger `UnboundLocalError` (Trap #2).
-11. **Run `ruff format` before committing** (or rely on `make ci`).
+9. **No backward-compatibility shims.** Fields like `stats_token` and `cdn_domain` do not exist in the schema — do not add fallbacks for absent fields.
+10. **Never interpolate user-controlled values into SQL.** `_safe_table()` for table names, parameterised queries (`con.execute("... WHERE x = ?", [value])`) for filter values.
+11. **Handle `openapi-fetch` errors explicitly.** Never `.then((r) => r.data?.x || fallback)` without checking `r.error`.
+12. **Keep Python imports at module level.** Conditional mid-function imports trigger `UnboundLocalError` (Trap #2).
+13. **Run `ruff format` before committing** (or rely on `make ci`).
 
 ### Secrets & sensitive data
 

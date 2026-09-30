@@ -72,7 +72,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 Calls:** S3 uploads must be logged in `usage_log.db` as Class A PUT calls under `_BOTO3_CALLER_HINT="rum_commit"`.
+  - **FOS S3 Calls:** S3 uploads must be logged in PostgreSQL's `usage_log` table as Class A PUT calls under `_BOTO3_CALLER_HINT="rum_commit"`.
   - **DuckLake Procedures:** DDL/DML commit procedures must be recorded in `telemetry_queries`.
   - **Lock Contention:** Wait time for RUM commit lock must remain < 50ms.
 - **Timing & Resource Budgets:**

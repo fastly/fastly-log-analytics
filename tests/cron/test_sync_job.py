@@ -200,6 +200,68 @@ def test_skips_when_source_missing(monkeypatch, stub_load_config):
     start_cron.assert_not_called()
 
 
+def test_high_throughput_discovery_persists_its_originating_run_id(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    source["deployment_mode"] = "high_throughput"
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://broker")
+    discovery = MagicMock(return_value=1)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discovery)
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=521)
+
+    assert discovery.call_count == 5
+    assert all(call.kwargs["run_id"] == 521 for call in discovery.call_args_list)
+    assert log_cron.call_args.kwargs["run_id"] == 521
+
+
+def test_high_throughput_discovery_rejects_missing_broker_without_listing(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
+    discover = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=522)
+
+    discover.assert_not_called()
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 522
+    assert "CELERY_BROKER_URL" in log_run.call_args.kwargs["error_message"]
+
+
+def test_high_throughput_discovery_records_list_failure_on_its_run(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    discover = MagicMock(side_effect=OSError("FOS unavailable"))
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", run_id=523)
+
+    discover.assert_called_once()
+    assert discover.call_args.kwargs["run_id"] == 523
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 523
+    assert log_run.call_args.kwargs["error_message"] == "FOS unavailable"
+
+
 def test_read_only_skipped_without_force(monkeypatch, stub_load_config):
     """read_only source without ``force=True`` → early return before
     ``start_cron_run``."""
@@ -295,6 +357,109 @@ def test_sync_no_new_files_surfaces_reclaimed_count(
     kwargs = success_calls[-1].kwargs
     assert kwargs.get("files_deleted_fos") == 3, "reclaimed strands must be recorded on idle ticks"
     assert "reclaim" in kwargs.get("summary", "").lower()
+
+
+def test_log_discovery_persists_data_plane_outcomes_as_error(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    from backend.cron.jobs import sync as sync_mod
+
+    counters = {
+        "valid_records": 1,
+        "malformed_records": 1,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 0,
+        "objects_processed": 1,
+        "objects_successful": 0,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr(
+        "backend.core.duckdb.get_source_for_service",
+        MagicMock(return_value=_fake_src()),
+    )
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 1,
+                    "corrupt_rows": 1,
+                    "outcome_counters": counters,
+                }
+            ]
+        ),
+    )
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
+
+    terminal = [call for call in log_cron.call_args_list if call.args[3] == "error"]
+    assert terminal
+    assert terminal[-1].kwargs["outcome_counters"] == counters
+
+
+def test_adaptive_ingest_stops_after_empty_followup_and_aggregates_outcomes(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    pass_results = iter([2, 1, 0])
+    calls = []
+    sleeps = []
+
+    def ingest_fn(**kwargs):
+        count = next(pass_results)
+        calls.append(kwargs)
+        yield {
+            "type": "done",
+            "new_files": count,
+            "rows_inserted": count * 10,
+            "outcome_counters": {"valid_records": count * 10, "objects_processed": count},
+        }
+
+    monkeypatch.setattr(sync_mod.time, "sleep", sleeps.append)
+
+    events = list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=True, service_id="svc"))
+    done = events[-1]
+
+    assert len(calls) == 3
+    assert sleeps == [3, 3]
+    assert done["new_files"] == 3
+    assert done["rows_inserted"] == 30
+    assert done["outcome_counters"]["valid_records"] == 30
+    assert done["outcome_counters"]["objects_processed"] == 3
+
+
+def test_adaptive_ingest_obeys_twenty_second_followup_cap(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    now = [0.0]
+    calls = []
+
+    def monotonic():
+        return now[0]
+
+    def ingest_fn(**_kwargs):
+        calls.append(None)
+        now[0] = 18.0
+        yield {"type": "done", "new_files": 1}
+
+    monkeypatch.setattr(sync_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(sync_mod.time, "sleep", lambda _seconds: now.__setitem__(0, now[0] + 3))
+
+    list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=True))
+
+    assert len(calls) == 1
 
 
 def test_log_discovery_stands_down_for_a_high_scale_shared_source(
@@ -692,6 +857,63 @@ def test_full_sweep_returns_silently_when_source_missing(monkeypatch, stub_load_
     start_cron.assert_not_called()
 
 
+def test_scheduled_discovery_persists_service_creation_time_as_range_start(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    service_id = "svc-creation-range"
+    source = _fake_src()
+    cfg = {"created_at": "2026-09-29T12:00:00Z", "provisioning": {"cron_sync": {"enabled": True}}}
+    save = MagicMock()
+    monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
+    monkeypatch.setattr("backend.config.save_config", save)
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 108)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    discover = MagicMock(return_value=0)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+
+    sync_mod._run_log_discovery_cron.__wrapped__(service_id)
+
+    assert cfg["provisioning"]["time_range"] == {"start": "2026-09-29T12:00:00Z"}
+    assert source["time_range"] == cfg["provisioning"]["time_range"]
+    save.assert_called_once_with(service_id, cfg)
+    assert discover.call_count == 5
+
+
+def test_manual_discovery_clears_pinned_range_before_listing(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    service_id = "svc-manual-range"
+    source = _fake_src()
+    cfg = {
+        "provisioning": {
+            "cron_sync": {"enabled": True, "polling_mode": "adaptive"},
+            "time_range": {"start": "2026-09-01T00:00:00Z"},
+        }
+    }
+    save = MagicMock()
+    monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
+    monkeypatch.setattr("backend.config.save_config", save)
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    discover = MagicMock(return_value=1)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+
+    sync_mod._run_log_discovery_cron.__wrapped__(service_id, force=True, run_id=109)
+
+    assert "time_range" not in cfg["provisioning"]
+    assert source["time_range"] is None
+    save.assert_called_once_with(service_id, cfg)
+    assert discover.call_count == 5
+    assert {call.kwargs["run_id"] for call in discover.call_args_list} == {109}
+
+
 def test_full_sweep_skipped_when_start_cron_run_raises(monkeypatch, stub_load_config):
     """``start_cron_run`` raising RuntimeError → log + return without
     starting progress."""
@@ -934,6 +1156,59 @@ def test_full_sweep_finalizes_duration(monkeypatch, stub_load_config, stub_progr
 
     finalize.assert_called_once()
     assert finalize.call_args.args[1] == 104
+
+
+@pytest.mark.parametrize("discovered", [0, 3])
+def test_high_scale_full_sweep_attributes_discovery_to_its_own_run(monkeypatch, stub_load_config, discovered):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 104)
+    discover = MagicMock(return_value=discovered)
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+    legacy_ingest = MagicMock()
+    monkeypatch.setattr("backend.core.ingest.ingest", legacy_ingest)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    discover.assert_called_once_with("svc-1", run_id=104, originating_task="full_sync")
+    legacy_ingest.assert_not_called()
+    assert log_run.call_args.args[3] == "success"
+    assert log_run.call_args.kwargs["files_downloaded"] == discovered
+    assert log_run.call_args.kwargs["run_id"] == 104
+    assert ("discovered 3 unseen" if discovered else "no unseen files") in log_run.call_args.kwargs["summary"]
+    assert finalize.call_args.args[1] == 104
+
+
+def test_high_scale_full_sweep_records_discovery_failure_on_originating_run(monkeypatch, stub_load_config):
+    from backend.cron.jobs import sync as sync_mod
+
+    source = _fake_src()
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 105)
+    discover = MagicMock(side_effect=OSError("FOS listing unavailable"))
+    monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
+    log_run = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
+    finalize = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
+
+    sync_mod._run_full_sweep.__wrapped__("svc-1")
+
+    discover.assert_called_once_with("svc-1", run_id=105, originating_task="full_sync")
+    assert log_run.call_args.args[3] == "error"
+    assert log_run.call_args.kwargs["run_id"] == 105
+    assert log_run.call_args.kwargs["error_message"] == "FOS listing unavailable"
+    assert finalize.call_args.args[1] == 105
 
 
 # ── Cron → ingest → metadata_db cascade (real ingest, moto S3) ────────────

@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC
+from typing import Any
 
 from backend.cron.decorators import cron_task
 from backend.cron.scheduler import (
@@ -30,6 +32,63 @@ from backend.cron.scheduler import (
 )
 
 logger = logging.getLogger("backend.scheduler")
+
+
+def _ingest_with_adaptive_followups(
+    ingest_fn: Callable[..., Iterator[dict]],
+    *,
+    adaptive: bool,
+    **ingest_kwargs,
+) -> Iterator[dict]:
+    from backend.core.ingest import _new_object_outcome
+
+    started = time.monotonic()
+    pass_number = 0
+    processed_files = 0
+    totals: dict[str, Any] = {
+        "new_files": 0,
+        "rows_inserted": 0,
+        "corrupt_rows": 0,
+        "deleted_files": 0,
+        "quarantined_files": 0,
+        "corrupt_details": [],
+        "touched_hours": set(),
+        "outcome_counters": _new_object_outcome(processed=0),
+    }
+
+    while True:
+        if pass_number:
+            if not adaptive or pass_number >= 3 or time.monotonic() - started + 3 > 20:
+                break
+            time.sleep(3)
+            yield {"type": "status", "message": "Adaptive polling: checking for newly arrived log files."}
+
+        pass_done: dict = {}
+        pass_new_files = 0
+        for event in ingest_fn(**ingest_kwargs):
+            event = dict(event)
+            if event.get("type") == "file_done":
+                event["current"] = processed_files + event.get("current", 0)
+                event["total"] = processed_files + event.get("total", 0)
+            elif event.get("type") == "done":
+                pass_done = event
+                pass_new_files = event.get("new_files", 0)
+                processed_files += pass_new_files
+                for key in ("new_files", "rows_inserted", "corrupt_rows", "deleted_files", "quarantined_files"):
+                    totals[key] += event.get(key, 0)
+                totals["corrupt_details"].extend(event.get("corrupt_details", []))
+                totals["touched_hours"].update(event.get("touched_hours", []))
+                for key, value in event.get("outcome_counters", {}).items():
+                    totals["outcome_counters"][key] = totals["outcome_counters"].get(key, 0) + value
+                event.update(totals)
+                event["touched_hours"] = sorted(totals["touched_hours"])
+            yield event
+            if event.get("type") == "error":
+                return
+
+        if not pass_done or pass_new_files == 0:
+            return
+        pass_number += 1
 
 
 # ── _run_service_cron (per-tick ingest) ──────────────────────────────────────
@@ -67,7 +126,7 @@ def _run_log_discovery_cron(
         refresh_config_status,
         start_cron_run,
     )
-    from backend.core.ingest import ingest
+    from backend.core.ingest import _new_object_outcome, ingest
     from backend.utils.active_requests import should_defer_cron
 
     # Active-request gate (perf #84): defer the sync tick if API requests
@@ -164,12 +223,23 @@ def _run_log_discovery_cron(
                 return
 
             discovery_started = time.time()
-            now = datetime.now(UTC)
             try:
                 discovered = 0
-                for i in range(5):
-                    prefix = minute_list_prefix(now - timedelta(minutes=i))
-                    discovered += discover_prefix(service_id, prefix_subpath=prefix)
+                adaptive = sync_cfg.get("polling_mode", "regular") == "adaptive" and not is_manual
+                poll_started = time.monotonic()
+                for poll_index in range(3):
+                    if poll_index:
+                        if not adaptive or poll_index > 2 or time.monotonic() - poll_started + 3 > 20:
+                            break
+                        time.sleep(3)
+                    now = datetime.now(UTC)
+                    pass_discovered = 0
+                    for i in range(5):
+                        prefix = minute_list_prefix(now - timedelta(minutes=i))
+                        pass_discovered += discover_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
+                    discovered += pass_discovered
+                    if pass_discovered == 0:
+                        break
                 log_cron_run(
                     src,
                     "log_discovery",
@@ -241,12 +311,15 @@ def _run_log_discovery_cron(
         )
 
         done_event: dict = {}
+        ingest_outcomes = _new_object_outcome(processed=0)
         processed_files = 0
         inserted_rows = 0
         corrupt_rows = 0
 
         try:
-            for event in ingest(
+            for event in _ingest_with_adaptive_followups(
+                ingest,
+                adaptive=sync_cfg.get("polling_mode", "regular") == "adaptive" and not is_manual,
                 source=src,
                 delete_after=delete_after,
                 max_files=5000,
@@ -263,6 +336,7 @@ def _run_log_discovery_cron(
                     corrupt_rows = event.get("total_corrupt", corrupt_rows)
                 elif event.get("type") == "done":
                     done_event = event
+                    ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
                 elif event.get("type") == "error":
                     summary = "Ingestion failed"
                     if processed_files > 0:
@@ -279,6 +353,7 @@ def _run_log_discovery_cron(
                         files_downloaded=processed_files,
                         rows_ingested=inserted_rows,
                         corrupt_rows=corrupt_rows,
+                        outcome_counters=ingest_outcomes,
                         log_output=log_text,
                     )
                     _log_and_add_progress(
@@ -313,6 +388,7 @@ def _run_log_discovery_cron(
                             files_deleted_fos=reclaimed,
                             run_id=run_id,
                             log_output=log_text,
+                            outcome_counters=done_event.get("outcome_counters"),
                         )
                         _log_and_add_progress(
                             run_id,
@@ -333,12 +409,26 @@ def _run_log_discovery_cron(
                             summary += f" Deleted {done_event.get('deleted_files')} raw files."
                         corrupt_details = done_event.get("corrupt_details", [])
                         corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
+                        outcome_counters = done_event.get("outcome_counters")
+                        has_ingest_errors = bool(
+                            outcome_counters
+                            and any(
+                                outcome_counters.get(key, 0)
+                                for key in (
+                                    "malformed_records",
+                                    "corrupt_containers",
+                                    "quarantine_capture_failures",
+                                    "source_delete_failures",
+                                    "objects_failed",
+                                )
+                            )
+                        )
 
                         log_cron_run(
                             src,
                             "log_discovery",
                             time.time() - start_time_exec,
-                            "success",
+                            "error" if has_ingest_errors else "success",
                             files_downloaded=done_event.get("new_files", 0),
                             files_deleted_fos=done_event.get("deleted_files", 0),
                             rows_ingested=done_event.get("rows_inserted", 0),
@@ -347,6 +437,7 @@ def _run_log_discovery_cron(
                             error_message=corrupt_message,
                             run_id=run_id,
                             log_output=log_text,
+                            outcome_counters=outcome_counters,
                         )
 
                         # Republish the persistent DuckDB view so dashboard reads pick
@@ -481,6 +572,7 @@ def _run_log_discovery_cron(
                 files_downloaded=processed_files,
                 rows_ingested=inserted_rows,
                 corrupt_rows=corrupt_rows,
+                outcome_counters=ingest_outcomes,
                 error_message=str(e),
                 summary=summary,
                 run_id=run_id,
@@ -810,7 +902,7 @@ def _run_full_sweep(
 
         sweep_started = time.time()
         try:
-            discovered = discover_prefix(service_id)  # default prefix = full raw/request/
+            discovered = discover_prefix(service_id, run_id=run_id, originating_task="full_sync")
             log_cron_run(
                 src,
                 "full_sync",
@@ -1248,7 +1340,7 @@ def _run_ledger_sweep(service_id: str) -> None:
 
     started = time.time()
     try:
-        summary = sweep_ledger_once(service_id)
+        summary = sweep_ledger_once(service_id, run_id=run_id)
         run_status = "success"
         warnings = []
         if not summary.get("broker_ok", True):

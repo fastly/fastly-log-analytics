@@ -55,6 +55,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
   const [ngwafRetention, setNgwafRetention] = useState('7')
 
   const [syncIntervalMins, setSyncIntervalMins] = useState('2')
+  const [pollingMode, setPollingMode] = useState<'regular' | 'adaptive'>('regular')
   const [rumSyncIntervalSeconds, setRumSyncIntervalSeconds] = useState('60')
   const [rumDeleteAfter, setRumDeleteAfter] = useState(false)
 
@@ -62,7 +63,9 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
   useEffect(() => {
     if (service && open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset the controlled settings form on open.
       setSyncIntervalMins(String(service.cron_sync?.interval_mins ?? 2))
+      setPollingMode(service.cron_sync?.polling_mode ?? 'regular')
       setSyncEnabled(service.cron_sync?.enabled ?? false)
       setDeleteAfter(service.cron_sync?.delete_after ?? false)
       setCommitInterval(String(service.cron_sync?.commit_interval_mins ?? 5))
@@ -108,6 +111,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       cron_sync: {
         enabled: syncEnabled,
         delete_after: deleteAfter,
+        polling_mode: pollingMode,
         commit_interval_mins: commitMins,
         log_enabled: syncLogEnabled,
         log_retention_days: parseInt(syncRetention),
@@ -194,6 +198,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
               <LogSyncSection
                 syncEnabled={syncEnabled}
                 setSyncEnabled={setSyncEnabled}
+                pollingMode={pollingMode}
+                setPollingMode={setPollingMode}
                 deleteAfter={deleteAfter}
                 setDeleteAfter={setDeleteAfter}
                 dataRetention={dataRetention}

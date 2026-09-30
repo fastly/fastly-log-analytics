@@ -217,6 +217,7 @@ To route FOS reads through a Fastly CDN service (for free egress and edge cachin
 
 ```bash
 make install         # uv sync + frontend npm ci
+make fast-ci         # smoke gate (~1-2m): linters + typechecks + focused unit/contract tests
 make ci              # full gate: lint + format + typecheck + tests (back + front) + security scans
 make dev             # backend + frontend with hot reload (./run.sh --dev)
 make test            # backend pytest only

@@ -33,7 +33,6 @@ from backend.core.ingest import (
     get_ingest_columns_sql,
 )
 from backend.core.metadata.base import get_con
-from backend.core.metadata.quarantine import list_quarantined_files
 
 SERVICE_ID = "test-convert-object-edges"
 BUCKET = "test-bucket"
@@ -232,6 +231,16 @@ def test_convert_object_widens_the_lake_table_for_a_new_custom_field(tmp_path):
         assert convert_object(SERVICE_ID, object_key, "w1") == "committed"
 
     assert _ledger_row(con, object_key)["status"] == "committed"
+    counters = json.loads(
+        con.execute(
+            "SELECT outcome_counters FROM ingest_ledger WHERE service_id=? AND object_key=?",
+            (SERVICE_ID, object_key),
+        ).fetchone()[0]
+    )
+    assert counters["valid_records"] == 1
+    assert counters["objects_processed"] == 1
+    assert counters["objects_successful"] == 1
+    assert counters["objects_failed"] == 0
     reader = _lake_reader(attach)
     cols = {r[0] for r in reader.execute("DESCRIBE lake.logs").fetchall()}
     assert "status" in cols, "the new field must have been added to the table"
@@ -284,7 +293,7 @@ def test_convert_object_rolls_back_and_stays_retryable_when_the_insert_cannot_la
     reader.close()
 
 
-# ── best-effort reporting must never fail a committed convert ─────────────
+# ── evidence capture failure must be reported without losing valid rows ────
 
 
 def test_convert_object_commits_even_when_the_quarantine_check_blows_up(tmp_path):
@@ -292,15 +301,27 @@ def test_convert_object_commits_even_when_the_quarantine_check_blows_up(tmp_path
     con, _ = _clear_ledger()
     _seed_discovered(con, object_key)
 
-    local = _write_ndjson(tmp_path / "qfail.json", [{"timestamp": "2026-08-27T15:06:00Z", "url": "/a"}])
+    local_path = tmp_path / "qfail.json"
+    local = _write_ndjson(local_path, [{"timestamp": "2026-08-27T15:06:00Z", "url": "/a"}])
     with _convert_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": local})) as attach:
         with patch(
-            "backend.core.ingest._quarantine_convert_corrupt_lines",
-            side_effect=Exception("errors/ prefix unwritable"),
+            "backend.core.quarantine.capture_evidence",
+            return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
         ):
+            local_path.write_text('{"timestamp":"2026-08-27T15:06:00Z","url":"/a"}\n{"url":"/bad"}\n')
             assert convert_object(SERVICE_ID, object_key, "w1") == "committed"
 
     assert _ledger_row(con, object_key)["status"] == "committed"
+    counters = json.loads(
+        con.execute(
+            "SELECT outcome_counters FROM ingest_ledger WHERE service_id=? AND object_key=?",
+            (SERVICE_ID, object_key),
+        ).fetchone()[0]
+    )
+    assert counters["valid_records"] == 1
+    assert counters["malformed_records"] == 1
+    assert counters["quarantine_capture_failures"] == 1
+    assert counters["objects_failed"] == 1
     reader = _lake_reader(attach)
     assert reader.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 1
     reader.close()
@@ -388,6 +409,47 @@ def test_discover_prefix_omits_prefix_subpath_when_not_given():
     assert captured["start_time"] is None
 
 
+def test_discover_prefix_persists_the_originating_cron_run():
+    _clear_ledger()
+    object_key = "raw/request/year=2026/month=08/day=27/hour=13/minute=05/part.json.gz"
+
+    def list_one_file(*args, **kwargs):
+        yield {"type": "status", "message": "Discovering"}
+        return {
+            "new_files": [f"s3://{BUCKET}/{object_key}"],
+            "file_sizes": {f"s3://{BUCKET}/{object_key}": 128},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    with patch("backend.config.load_config", return_value={"service_id": SERVICE_ID}):
+        with patch("backend.core.duckdb.get_source_for_service", return_value=SRC):
+            with patch("backend.core.ingest.list_fos_files", side_effect=list_one_file):
+                with patch("backend.core.ingest.convert_batch_files.delay") as dispatch:
+                    assert discover_prefix(SERVICE_ID, run_id=812) == 1
+                    dispatch.assert_called_once_with(SERVICE_ID, [object_key])
+                    assert (
+                        discover_prefix(
+                            SERVICE_ID,
+                            run_id=913,
+                            originating_task="full_sync",
+                        )
+                        == 0
+                    )
+                    dispatch.assert_called_once_with(SERVICE_ID, [object_key])
+
+    row = (
+        get_con(SERVICE_ID)
+        .execute(
+            "SELECT originating_task, originating_run_id FROM ingest_ledger WHERE service_id=? AND object_key=?",
+            (SERVICE_ID, object_key),
+        )
+        .fetchone()
+    )
+    assert row["originating_task"] == "log_discovery"
+    assert row["originating_run_id"] == 812
+
+
 # ── _quarantine_convert_corrupt_lines ─────────────────────────────────────
 
 
@@ -419,24 +481,65 @@ def test_quarantine_convert_corrupt_lines_records_a_truncated_line(tmp_path):
     fos = MagicMock()
     con = duckdb.connect()
 
-    _quarantine_convert_corrupt_lines(con, fos, SRC, _read_expr(str(local)), str(local), object_key)
+    with patch("backend.core.quarantine.capture_evidence") as capture:
+        capture.return_value = {"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0}
+        result = _quarantine_convert_corrupt_lines(con, fos, SRC, _read_expr(str(local)), str(local), object_key)
     con.close()
 
-    keys = [c.kwargs["Key"] for c in fos.put_object.call_args_list]
-    assert keys == [
-        "errors/year=2026/month=08/day=27/hour=15/minute=08/mixed.json.bad.jsonl",
-        "errors/year=2026/month=08/day=27/hour=15/minute=08/mixed.json.bad.jsonl.meta.json",
-    ]
-    meta = json.loads(fos.put_object.call_args_list[1].kwargs["Body"])
-    assert meta["valid_rows"] == 1
-    assert meta["corrupt_rows"] == 1
-    assert meta["total_rows"] == 2
-    assert meta["reason_counts"] == {"invalid_json": 1}
+    fos.put_object.assert_not_called()
+    assert result == {
+        "valid_records": 1,
+        "malformed_records": 1,
+        "cap_evictions": 0,
+        "quarantine_capture_failures": 0,
+    }
+    capture.assert_called_once()
+    assert capture.call_args.args == (
+        SERVICE_ID,
+        "request",
+        object_key,
+        b'{"timestamp": "2026-08-27T15:08:01Z", "url": "/trunc"\n',
+    )
 
-    row = list_quarantined_files(SERVICE_ID)[0]
-    assert row["file_name"] == "mixed.json.gz"
-    assert row["corrupt_rows"] == 1
-    assert row["valid_rows"] == 1
+
+def test_request_worker_quarantine_captures_exact_line_bytes_without_fos_upload(tmp_path, monkeypatch):
+    from backend.core import quarantine
+
+    local = tmp_path / "mixed.json"
+    valid_line = b'{"timestamp":"2026-08-27T15:08:00Z","url":"/ok"}\n'
+    bad_line = b'{"timestamp":"2026-08-27T15:08:01Z","url":"/bad"\n'
+    local.write_bytes(valid_line + bad_line)
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"id": 12, "cap_evictions": 1, "quarantine_capture_failures": 0}
+
+    monkeypatch.setattr(quarantine, "capture_evidence", capture)
+    con = duckdb.connect()
+    try:
+        result = _quarantine_convert_corrupt_lines(
+            con,
+            MagicMock(),
+            SRC,
+            _read_expr(str(local)),
+            str(local),
+            "raw/request/mixed.json.gz",
+        )
+    finally:
+        con.close()
+
+    assert result == {
+        "valid_records": 1,
+        "malformed_records": 1,
+        "cap_evictions": 1,
+        "quarantine_capture_failures": 0,
+    }
+    assert len(calls) == 1
+    assert calls[0][0][0:3] == (SERVICE_ID, "request", "raw/request/mixed.json.gz")
+    assert calls[0][0][3] == bad_line
+    assert calls[0][1]["line_ordinal"] == 2
+    assert calls[0][1]["byte_offset"] == len(valid_line)
 
 
 def test_quarantine_convert_corrupt_lines_does_nothing_for_a_clean_file(tmp_path):
@@ -446,7 +549,7 @@ def test_quarantine_convert_corrupt_lines_does_nothing_for_a_clean_file(tmp_path
     fos = MagicMock()
     con = duckdb.connect()
 
-    _quarantine_convert_corrupt_lines(
+    result = _quarantine_convert_corrupt_lines(
         con,
         fos,
         SRC,
@@ -457,7 +560,7 @@ def test_quarantine_convert_corrupt_lines_does_nothing_for_a_clean_file(tmp_path
     con.close()
 
     fos.put_object.assert_not_called()
-    assert list_quarantined_files(SERVICE_ID) == []
+    assert result["malformed_records"] == 0
 
 
 def test_quarantine_convert_corrupt_lines_skips_upload_when_the_detectors_disagree(tmp_path):
@@ -478,7 +581,7 @@ def test_quarantine_convert_corrupt_lines_skips_upload_when_the_detectors_disagr
     ).fetchone()
     assert (valid, corrupt) == (0, 1), "precondition: the row-level detector must see this as corrupt"
 
-    _quarantine_convert_corrupt_lines(
+    result = _quarantine_convert_corrupt_lines(
         con,
         fos,
         SRC,
@@ -489,7 +592,7 @@ def test_quarantine_convert_corrupt_lines_skips_upload_when_the_detectors_disagr
     con.close()
 
     fos.put_object.assert_not_called()
-    assert list_quarantined_files(SERVICE_ID) == []
+    assert result["quarantine_capture_failures"] == 1
 
 
 def test_quarantine_convert_corrupt_lines_skips_a_key_outside_the_raw_prefix(tmp_path):
@@ -502,10 +605,64 @@ def test_quarantine_convert_corrupt_lines_skips_a_key_outside_the_raw_prefix(tmp
     fos = MagicMock()
     con = duckdb.connect()
 
-    _quarantine_convert_corrupt_lines(
+    result = _quarantine_convert_corrupt_lines(
         con, fos, SRC, _read_expr(str(local)), str(local), "somewhere/else/offprefix.json.gz"
     )
     con.close()
 
     fos.put_object.assert_not_called()
-    assert list_quarantined_files(SERVICE_ID) == []
+    assert result["quarantine_capture_failures"] == 1
+
+
+def test_quarantine_convert_corrupt_gzip_captures_the_original_container_bytes(tmp_path):
+    payload = b"not a gzip container\x00\xff"
+    local = tmp_path / "broken.json.gz"
+    local.write_bytes(payload)
+    con = MagicMock()
+    con.execute.return_value.fetchone.return_value = (0, 1)
+    key = "raw/request/year=2026/month=08/day=27/hour=15/minute=12/broken.json.gz"
+
+    with patch("backend.core.quarantine.capture_evidence") as capture:
+        capture.return_value = {"cap_evictions": 1, "quarantine_capture_failures": 0}
+        result = _quarantine_convert_corrupt_lines(con, MagicMock(), SRC, "ignored", str(local), key)
+
+    assert result == {
+        "valid_records": 0,
+        "malformed_records": 0,
+        "corrupt_containers": 1,
+        "cap_evictions": 1,
+        "quarantine_capture_failures": 0,
+    }
+    assert capture.call_args.args == (SERVICE_ID, "request", key, payload)
+    assert capture.call_args.kwargs["error_category"] == "corrupt_container"
+
+
+def test_quarantine_convert_corrupt_gzip_reports_when_container_cannot_be_read(tmp_path, monkeypatch):
+    local = tmp_path / "unreadable.json.gz"
+    local.write_bytes(b"not gzip")
+    real_open = open
+
+    def fail_open(path, *args, **kwargs):
+        if str(path) == str(local):
+            raise OSError("local cache unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    con = MagicMock()
+    con.execute.return_value.fetchone.return_value = (0, 1)
+    result = _quarantine_convert_corrupt_lines(
+        con,
+        MagicMock(),
+        SRC,
+        "ignored",
+        str(local),
+        "raw/request/year=2026/month=08/day=27/hour=15/minute=13/unreadable.json.gz",
+    )
+
+    assert result == {
+        "valid_records": 0,
+        "malformed_records": 0,
+        "corrupt_containers": 1,
+        "cap_evictions": 0,
+        "quarantine_capture_failures": 1,
+    }

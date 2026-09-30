@@ -66,18 +66,21 @@ def test_discover_rum_prefix_defaults_to_rum_raw_and_inserts_ledger_rows():
         ):
             with patch("backend.core.ingest.list_fos_files", side_effect=mock_list_fos_files):
                 with patch("backend.core.ingest.convert_batch_rum_files.delay") as mock_convert_rum_delay:
-                    discovered = discover_rum_prefix(service_id)
+                    discovered = discover_rum_prefix(service_id, run_id=813)
                     mock_convert_rum_delay.assert_called_once_with(service_id, [object_key])
 
     assert discovered == 1
     assert captured_kwargs["prefix_subpath"] == "raw/rum/"
 
     row = cur.execute(
-        "SELECT status, size_bytes FROM ingest_ledger WHERE service_id=? AND object_key=?",
+        "SELECT status, size_bytes, originating_task, originating_run_id FROM ingest_ledger "
+        "WHERE service_id=? AND object_key=?",
         (service_id, object_key),
     ).fetchone()
     assert row["status"] == "discovered"
     assert row["size_bytes"] == 999
+    assert row["originating_task"] == "rum_discovery"
+    assert row["originating_run_id"] == 813
 
 
 def test_discover_rum_prefix_honors_explicit_minute_subpath():
@@ -103,6 +106,37 @@ def test_discover_rum_prefix_honors_explicit_minute_subpath():
                 discover_rum_prefix(service_id, prefix_subpath=minute_prefix)
 
     assert captured_kwargs["prefix_subpath"] == minute_prefix
+
+
+def test_rum_ledger_sweep_persists_its_originating_run():
+    service_id = "test-celery-rum-sweep-origin"
+    object_key = "raw/rum/year=2026/month=08/day=27/hour=10/minute=06/beacons.json.gz"
+    con, _ = _clear_ledger(service_id)
+
+    def list_one_file(*args, **kwargs):
+        yield {"type": "status", "message": "Discovering"}
+        return {
+            "new_files": [f"s3://test-bucket/{object_key}"],
+            "file_sizes": {f"s3://test-bucket/{object_key}": 777},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    with patch("backend.config.load_config", return_value={"service_id": service_id}):
+        with patch(
+            "backend.core.duckdb.get_source_for_service", return_value={"name": "test", "bucket": "test-bucket"}
+        ):
+            with patch("backend.core.ingest.list_fos_files", side_effect=list_one_file):
+                with patch("backend.core.ingest.convert_batch_rum_files.delay"):
+                    result = sweep_rum_ledger_once(service_id, run_id=91)
+
+    assert result["discovered"] == 1
+    row = con.execute(
+        "SELECT originating_task, originating_run_id FROM ingest_ledger WHERE service_id=? AND object_key=?",
+        (service_id, object_key),
+    ).fetchone()
+    assert row["originating_task"] == "ledger_rum_sweep"
+    assert row["originating_run_id"] == 91
 
 
 # ── convert: parsing ──────────────────────────────────────────────────────
@@ -324,7 +358,14 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
                                 "backend.core.iceberg._ducklake.ducklake_table_name",
                                 side_effect=lambda src, table_name="logs": table_name,
                             ):
-                                with patch("backend.core.ingest.metadata_db.insert_quarantined_file") as mock_insert:
+                                with patch(
+                                    "backend.core.quarantine.capture_evidence",
+                                    return_value={
+                                        "id": 1,
+                                        "cap_evictions": 0,
+                                        "quarantine_capture_failures": 0,
+                                    },
+                                ) as capture:
                                     status = convert_rum_object(service_id, object_key, "test-worker")
 
     assert status == "committed"
@@ -340,15 +381,16 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
             pass
         check_con.close()
 
-    # Quarantine sidecar written: the bad line + a .meta.json, exactly like
-    # the regular-log path's _quarantine_convert_corrupt_lines protocol.
-    assert fos_mock.put_object.call_count == 2
-    keys = [call.kwargs["Key"] for call in fos_mock.put_object.call_args_list]
-    assert any(k.endswith(".bad.jsonl") for k in keys)
-    assert any(k.endswith(".meta.json") for k in keys)
-    mock_insert.assert_called_once()
-    assert mock_insert.call_args.kwargs["corrupt_rows"] == 1
-    assert mock_insert.call_args.kwargs["valid_rows"] == 1
+    fos_mock.put_object.assert_not_called()
+    capture.assert_called_once()
+    assert capture.call_args.args == (
+        service_id,
+        "rum",
+        object_key,
+        (bad_line + "\n").encode(),
+    )
+    assert capture.call_args.kwargs["line_ordinal"] == 2
+    assert capture.call_args.kwargs["byte_offset"] == len((vitals_line + "\n").encode())
 
 
 def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_path):

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend import config as svcconfig
+from backend.core import quarantine
 from backend.core import reset as reset_mod
 from backend.core.metadata.base import get_con
 from tests.conftest import MOCK_SERVICE_ID
@@ -112,6 +113,18 @@ def fake_scheduler():
 def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_scheduler):
     _save_config()
     _seed_metadata_rows()
+    evidence = quarantine.capture_evidence(
+        MOCK_SERVICE_ID,
+        "request",
+        "raw/request/bad.gz",
+        b'{"invalid":\x00}\n',
+        line_ordinal=1,
+        byte_offset=0,
+        error_category="invalid_json",
+        error_text="invalid JSON",
+    )
+    evidence_path = quarantine._evidence_path(MOCK_SERVICE_ID, int(evidence["id"]))
+    assert evidence_path.exists()
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/meta/admin_state.json", Body=b"{}")
     s3_mock.put_object(Bucket="test-bucket", Key="errors/bad.bad.jsonl", Body=b"bad")
@@ -132,8 +145,10 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
         "committed_buffers",
         "local_compacted_files",
         "quarantined_files",
+        "quarantine_evidence",
     ):
         assert _table_count(table) == 0, f"{table} should be wiped"
+    assert not evidence_path.exists()
 
     for table in ("sources", "views", "alerts", "scoring_labels", "scoring_audit", "asn_names"):
         assert _table_count(table) == 1, f"{table} should be preserved"

@@ -220,29 +220,32 @@ class IngestedFilesResponse(BaseResponse):
     files: list[IngestedFile]
 
 
-class QuarantinedFile(BaseModel):
+class QuarantineEvidenceItem(BaseModel):
     id: int
-    file_name: str
-    error_key: str
-    valid_rows: int = 0
-    corrupt_rows: int = 0
-    file_size_bytes: int | None = None
-    corrupt_samples: list[str] = Field(default_factory=list)
-    reason_counts: dict[str, int] = Field(default_factory=dict)
+    source_type: Literal["request", "rum"]
+    original_key: str
+    line_ordinal: int | None = None
+    byte_offset: int | None = None
+    byte_length: int
+    error_category: str
+    error_text: str
+    sha256: str
     quarantined_at: str
 
 
 class QuarantineSummary(BaseModel):
-    total_files: int = 0
-    total_corrupt_rows: int = 0
+    total_items: int = 0
+    total_bytes: int = 0
+    request_items: int = 0
+    rum_items: int = 0
     oldest_at: str | None = None
     newest_at: str | None = None
+    category_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class QuarantineListResponse(BaseResponse):
-    files: list[QuarantinedFile] = Field(default_factory=list)
+    items: list[QuarantineEvidenceItem] = Field(default_factory=list)
     total: int = 0
-    summary: QuarantineSummary = Field(default_factory=QuarantineSummary)
 
 
 class StreamMetrics(BaseModel):

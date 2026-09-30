@@ -32,11 +32,14 @@ import pytest
 from backend.core.ingest import (
     LEDGER_RECLAIM_AFTER_S,
     _quarantine_rum_corrupt_lines,
+    convert_batch_rum_objects,
     convert_rum_object,
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
 from backend.core.metadata.base import get_con
+from backend.core.metadata.quarantine import list_quarantine_evidence
+from backend.core.quarantine import read_evidence
 
 SERVICE_ID = "test-rum-ledger-edges"
 BUCKET = "test-bucket"
@@ -274,13 +277,25 @@ def test_convert_rum_object_commits_valid_rows_even_when_quarantine_upload_fails
     fos = MagicMock()
     fos.put_object.side_effect = Exception("AccessDenied writing errors/ prefix")
     with _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}), fos=fos) as attach:
-        assert convert_rum_object(SERVICE_ID, object_key, "w1") == "committed"
+        with patch(
+            "backend.core.quarantine.capture_evidence",
+            return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
+        ):
+            assert convert_rum_object(SERVICE_ID, object_key, "w1") == "committed"
 
     assert _ledger_row(con, object_key)["status"] == "committed"
     reader = _lake_reader(attach)
     assert reader.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
     reader.close()
-    fos.put_object.assert_called_once()  # first sidecar write blew up; no meta.json followed
+    counters = json.loads(
+        con.execute(
+            "SELECT outcome_counters FROM ingest_ledger WHERE service_id=? AND object_key=?",
+            (SERVICE_ID, object_key),
+        ).fetchone()[0]
+    )
+    assert counters["quarantine_capture_failures"] == 1
+    assert counters["objects_failed"] == 1
+    fos.put_object.assert_not_called()
 
 
 def test_convert_rum_object_commits_when_ingested_files_bookkeeping_fails(tmp_path):
@@ -423,54 +438,286 @@ def test_convert_rum_object_rolls_back_and_stays_retryable_on_a_schema_drifted_t
 # ── _quarantine_rum_corrupt_lines directly ────────────────────────────────
 
 
-def test_quarantine_rum_corrupt_lines_writes_sidecar_pair_under_source_prefix():
-    """Sidecar protocol: the bad lines as .bad.jsonl plus a .meta.json whose
-    counts and reason histogram are what the admin quarantine UI reads."""
+def test_convert_batch_rum_objects_commits_rows_from_each_claimed_object(tmp_path):
+    object_keys = [
+        "raw/rum/2026/08/27/11/00/batch-a.json.gz",
+        "raw/rum/2026/08/27/11/01/batch-b.json.gz",
+    ]
+    con, _ = _clear_ledger()
+    local_files = {}
+    for index, object_key in enumerate(object_keys):
+        _seed_discovered(con, object_key)
+        local_file = tmp_path / f"batch-{index}.json.gz"
+        _write_gz(
+            local_file,
+            [
+                json.dumps(
+                    {
+                        "timestamp": f"2026-08-27T11:0{index}:00Z",
+                        "rum_metric_name": "LCP",
+                        "rum_metric_value": str(1000 + index),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": f"2026-08-27T11:0{index}:01Z",
+                        "rum_error_message": f"error-{index}",
+                    }
+                ),
+            ],
+        )
+        if index == 0:
+            with gzip.open(local_file, "ab") as raw:
+                raw.write(b'{"invalid":\x00}\n')
+        local_files[f"s3://{BUCKET}/{object_key}"] = str(local_file)
+
+    with _rum_env(tmp_path, _download_stub(local_files)) as attach:
+        with (
+            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
+            patch("backend.config.HOT_S3_ENDPOINT", False),
+        ):
+            summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-batch-rum")
+
+    assert summary == {
+        "requested": 2,
+        "claimed": 2,
+        "not_claimed": 0,
+        "committed": 2,
+        "dead_letter": 0,
+        "failed": 0,
+    }
+    evidence_rows = list_quarantine_evidence(SERVICE_ID)
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0]["original_key"] == object_keys[0]
+    _, evidence = read_evidence(SERVICE_ID, int(evidence_rows[0]["id"]))
+    try:
+        assert evidence.read() == b'{"invalid":\x00}\n'
+    finally:
+        evidence.close()
+    object_outcome = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id=? AND object_key=?",
+        (SERVICE_ID, object_keys[0]),
+    ).fetchone()
+    assert json.loads(object_outcome["outcome_counters"])["malformed_records"] == 1
+    reader = _lake_reader(attach)
+    try:
+        assert reader.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 2
+        assert reader.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 2
+        assert reader.execute("SELECT count(DISTINCT _source_file) FROM lake.client_vitals").fetchone()[0] == 2
+    finally:
+        reader.close()
+    rows = con.execute(
+        "SELECT object_key, status FROM ingest_ledger WHERE service_id=? ORDER BY object_key",
+        (SERVICE_ID,),
+    ).fetchall()
+    assert [(row["object_key"], row["status"]) for row in rows] == [(key, "committed") for key in object_keys]
+
+    con.execute(
+        "UPDATE ingest_ledger SET status='discovered', claimed_by=NULL, claimed_at=NULL WHERE service_id=?",
+        (SERVICE_ID,),
+    )
+    con.commit()
+    with _rum_env(tmp_path, _download_stub(local_files)):
+        with (
+            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
+            patch("backend.config.HOT_S3_ENDPOINT", False),
+        ):
+            assert convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-rum-redelivery")["committed"] == 2
+    reader = _lake_reader(attach)
+    try:
+        assert reader.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 2
+        assert reader.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 2
+    finally:
+        reader.close()
+
+
+def test_convert_batch_rum_objects_noops_for_empty_or_unclaimed_batches():
+    con, _ = _clear_ledger()
+    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
+        assert convert_batch_rum_objects(SERVICE_ID, [], "worker-empty") == {
+            "requested": 0,
+            "claimed": 0,
+            "not_claimed": 0,
+            "committed": 0,
+            "dead_letter": 0,
+            "failed": 0,
+        }
+        assert convert_batch_rum_objects(SERVICE_ID, ["raw/rum/unknown.json.gz"], "worker-unknown") == {
+            "requested": 1,
+            "claimed": 0,
+            "not_claimed": 1,
+            "committed": 0,
+            "dead_letter": 0,
+            "failed": 0,
+        }
+    assert con.execute("SELECT count(*) FROM ingest_ledger WHERE service_id=?", (SERVICE_ID,)).fetchone()[0] == 0
+
+
+def test_convert_batch_rum_objects_keeps_claim_retryable_without_source():
+    object_key = "raw/rum/2026/08/27/11/02/no-source.json.gz"
+    con, _ = _clear_ledger()
+    _seed_discovered(con, object_key)
+
+    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
+        summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-no-source")
+
+    assert summary["failed"] == 1
+    row = _ledger_row(con, object_key)
+    assert row["status"] == "discovered"
+    assert row["attempts"] == 1
+    assert "no source registered" in row["last_error"]
+
+
+def test_convert_batch_rum_objects_separates_deleted_and_transient_downloads(tmp_path):
+    object_keys = [
+        "raw/rum/2026/08/27/11/03/already-deleted.json.gz",
+        "raw/rum/2026/08/27/11/04/still-live.json.gz",
+    ]
+    con, _ = _clear_ledger()
+    for object_key in object_keys:
+        _seed_discovered(con, object_key)
+
+    fos = MagicMock()
+
+    def head_object(*, Bucket, Key):
+        if Key == object_keys[0]:
+            raise RuntimeError("404 Not Found")
+        raise RuntimeError("503 temporary storage error")
+
+    fos.head_object.side_effect = head_object
+    with _rum_env(
+        tmp_path,
+        _download_stub({}),
+        fos=fos,
+        attach=lambda *_args, **_kwargs: True,
+    ):
+        with (
+            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
+            patch("backend.config.HOT_S3_ENDPOINT", False),
+        ):
+            summary = convert_batch_rum_objects(SERVICE_ID, object_keys, "worker-download-failures")
+
+    assert summary["dead_letter"] == 1
+    assert summary["failed"] == 1
+    assert _ledger_row(con, object_keys[0])["status"] == "dead_letter"
+    transient = _ledger_row(con, object_keys[1])
+    assert transient["status"] == "discovered"
+    assert transient["attempts"] == 1
+    assert "download failed" in transient["last_error"]
+
+
+def test_convert_batch_rum_objects_keeps_batch_retryable_when_attach_fails(tmp_path):
+    object_key = "raw/rum/2026/08/27/11/05/attach-failed.json.gz"
+    con, _ = _clear_ledger()
+    _seed_discovered(con, object_key)
+
+    with _rum_env(tmp_path, _download_stub({}), attach=lambda *_args, **_kwargs: False):
+        with (
+            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
+            patch("backend.config.HOT_S3_ENDPOINT", False),
+        ):
+            summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-attach-failure")
+
+    assert summary["failed"] == 1
+    row = _ledger_row(con, object_key)
+    assert row["status"] == "discovered"
+    assert row["attempts"] == 1
+    assert "attach failed" in row["last_error"]
+
+
+def test_convert_batch_rum_objects_commits_valid_rows_when_evidence_capture_raises(tmp_path):
+    object_key = "raw/rum/2026/08/27/11/06/capture-failed.json.gz"
+    con, _ = _clear_ledger()
+    _seed_discovered(con, object_key)
+    local_file = tmp_path / "capture-failed.json.gz"
+    _write_gz(
+        local_file,
+        [
+            json.dumps(
+                {
+                    "timestamp": "2026-08-27T11:06:00Z",
+                    "rum_metric_name": "LCP",
+                    "rum_metric_value": "1200",
+                }
+            ),
+            '{"invalid":',
+        ],
+    )
+    s3_path = f"s3://{BUCKET}/{object_key}"
+
+    with _rum_env(tmp_path, _download_stub({s3_path: str(local_file)})):
+        with (
+            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
+            patch("backend.config.HOT_S3_ENDPOINT", False),
+            patch("backend.core.ingest._quarantine_rum_corrupt_lines", side_effect=OSError("evidence disk full")),
+        ):
+            summary = convert_batch_rum_objects(SERVICE_ID, [object_key], "worker-capture-failure")
+
+    assert summary["committed"] == 1
+    row = con.execute(
+        "SELECT status, outcome_counters FROM ingest_ledger WHERE service_id=? AND object_key=?",
+        (SERVICE_ID, object_key),
+    ).fetchone()
+    counters = json.loads(row["outcome_counters"])
+    assert row["status"] == "committed"
+    assert counters["valid_records"] == 1
+    assert counters["malformed_records"] == 1
+    assert counters["quarantine_capture_failures"] == 1
+    assert counters["objects_failed"] == 1
+
+
+def test_quarantine_rum_corrupt_lines_captures_exact_bytes_locally(tmp_path):
+    """Each malformed RUM line is stored as its own exact-byte evidence item."""
     fos = MagicMock()
     src = {"service_id": SERVICE_ID, "name": "prod-source", "bucket": BUCKET, "prefix": "/tenant-a/"}
     object_key = "tenant-a/raw/rum/2026/08/27/11/09/mixed.json.gz"
-    corrupt = [("{bad one", "invalid_json"), ("{bad two", "invalid_json"), ('{"a":1}', "parse_error: nope")]
+    bad = [b"{bad one\n", b'{"a":1}\n']
+    local_file = tmp_path / "mixed.json"
+    with gzip.open(local_file, "wb") as raw:
+        raw.write(b"".join(bad))
+    corrupt = [("{bad one", "invalid_json"), ('{"a":1}', "parse_error: nope")]
 
-    with patch("backend.core.ingest.metadata_db.insert_quarantined_file") as mock_insert:
-        _quarantine_rum_corrupt_lines(fos, src, object_key, corrupt, valid_count=7)
-
-    keys = [c.kwargs["Key"] for c in fos.put_object.call_args_list]
-    assert keys == [
-        "tenant-a/errors/2026/08/27/11/09/mixed.json.bad.jsonl",
-        "tenant-a/errors/2026/08/27/11/09/mixed.json.bad.jsonl.meta.json",
-    ]
-    assert fos.put_object.call_args_list[0].kwargs["Body"] == b'{bad one\n{bad two\n{"a":1}'
-
-    meta = json.loads(fos.put_object.call_args_list[1].kwargs["Body"])
-    assert meta["original_key"] == object_key
-    assert meta["valid_rows"] == 7
-    assert meta["corrupt_rows"] == 3
-    assert meta["total_rows"] == 10
-    assert meta["reason_counts"] == {"invalid_json": 2, "parse_error: nope": 1}
-    assert meta["source_name"] == "prod-source"
-
-    kw = mock_insert.call_args.kwargs
-    assert kw["file_name"] == "mixed.json.gz"
-    assert kw["fos_key"] == object_key
-    assert kw["error_key"] == keys[0]
-    assert kw["meta_key"] == keys[1]
-    assert kw["valid_rows"] == 7
-    assert kw["corrupt_rows"] == 3
-    assert kw["reason_counts"] == {"invalid_json": 2, "parse_error: nope": 1}
-
-
-def test_quarantine_rum_corrupt_lines_ignores_a_key_outside_the_rum_raw_prefix():
-    """Guard against writing an errors/ key derived from an unrelated
-    prefix — the quarantine key is built by string surgery on the raw
-    prefix, so a non-matching key must be skipped, not mangled."""
-    fos = MagicMock()
-    src = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix": ""}
-
-    with patch("backend.core.ingest.metadata_db.insert_quarantined_file") as mock_insert:
-        _quarantine_rum_corrupt_lines(fos, src, "raw/2026/08/27/regular-log.json.gz", [("x", "invalid_json")], 1)
+    with (
+        patch(
+            "backend.core.quarantine.capture_evidence",
+            return_value={"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
+        ) as capture,
+    ):
+        result = _quarantine_rum_corrupt_lines(fos, src, object_key, corrupt, valid_count=7, local_file=str(local_file))
 
     fos.put_object.assert_not_called()
-    mock_insert.assert_not_called()
+    assert result == {
+        "valid_records": 7,
+        "malformed_records": 2,
+        "cap_evictions": 0,
+        "quarantine_capture_failures": 0,
+    }
+    assert capture.call_count == 2
+    assert capture.call_args_list[0].args == (SERVICE_ID, "rum", object_key, bad[0])
+    assert capture.call_args_list[0].kwargs["line_ordinal"] == 1
+    assert capture.call_args_list[0].kwargs["byte_offset"] == 0
+    assert capture.call_args_list[1].args == (SERVICE_ID, "rum", object_key, bad[1])
+    assert capture.call_args_list[1].kwargs["error_category"] == "parse_error"
+
+
+def test_quarantine_rum_corrupt_lines_rejects_a_key_outside_the_rum_raw_prefix(tmp_path):
+    fos = MagicMock()
+    src = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix": ""}
+    local_file = tmp_path / "one.json"
+    with gzip.open(local_file, "wb") as raw:
+        raw.write(b"x\n")
+
+    result = _quarantine_rum_corrupt_lines(
+        fos,
+        src,
+        "raw/2026/08/27/regular-log.json.gz",
+        [("x", "invalid_json")],
+        1,
+        local_file=str(local_file),
+    )
+
+    fos.put_object.assert_not_called()
+    assert result["quarantine_capture_failures"] == 1
 
 
 # ── discovery guard rails ─────────────────────────────────────────────────

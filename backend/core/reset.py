@@ -3,9 +3,10 @@
 
 Wipes: the cloud Iceberg log table (``iceberg/`` except ``iceberg/meta/``),
 quarantined-file cloud copies (``errors/``), the local DuckDB analytical
-file + cache dir, and the SQLite ingestion ledgers (``ingested_files``,
-``ingested_files_summary``, ``ingest_in_flight``, ``committed_buffers``,
-``local_compacted_files``, ``quarantined_files``).
+file + cache dir, local quarantine evidence, and ingestion metadata
+(``ingested_files``, ``ingested_files_summary``, ``ingest_in_flight``,
+``committed_buffers``, ``local_compacted_files``, ``quarantined_files``,
+``quarantine_evidence``).
 
 Preserves: ``sources``, ``views``, ``alerts``, ``audit_logs``,
 ``scoring_labels``, ``scoring_audit``, ``cron_runs``, ``slow_queries``,
@@ -27,6 +28,8 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Generator, Iterator
+
+from backend.core.quarantine import purge_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +264,9 @@ def reset_service_logs(
                 "type": "status",
                 "message": f"Deleted {deleted_raw:,} request and {deleted_rum:,} RUM raw object(s).",
             }
+
+        yield {"type": "status", "message": "Purging local quarantine evidence..."}
+        purge_evidence(service_id)
 
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)

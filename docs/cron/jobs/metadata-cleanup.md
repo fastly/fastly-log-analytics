@@ -3,8 +3,8 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `metadata_cleanup_{service_id}`
 - **Category:** Operational Database Retention & Pruning
-- **Purpose:** Trims historical operational records from per-service databases (`metadata.db`, `usage_log.db`, or PostgreSQL `METADATA_DSN`), including `usage_log`, `ingested_files`, `cron_runs`, `slow_queries`, and global `metric_snapshots` according to configured retention windows. Quarantine-cap enforcement occurs during writes in log discovery; no separate quarantine cron is required.
-- **Why It Runs:** Continuous streaming writes hundreds of operational records per hour. Unbounded growth in SQLite databases causes WAL bloat, slower indexed lookups, and unneeded disk consumption. Scheduled pruning keeps SQLite databases small, fast, and cached in OS memory.
+- **Purpose:** Trims historical operational records from the unified PostgreSQL `METADATA_DSN`, including `usage_log`, `ingested_files`, `cron_runs`, `slow_queries`, and global `metric_snapshots` according to configured retention windows. Quarantine-cap enforcement occurs during writes in log discovery; no separate quarantine cron is required.
+- **Why It Runs:** Continuous streaming writes hundreds of operational records per hour. Scheduled pruning bounds PostgreSQL table growth and keeps indexed lookups efficient.
 
 ---
 
@@ -28,8 +28,8 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to `data/services/{service_id}.metadata.db` and `usage_log.db`, issues bounded chunked `DELETE FROM` statements, commits WAL, and VACUUMs if rows were trimmed. | ThreadLocalPool connection lock. Politeness gate yields if active dashboard queries are running. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler or Worker | Connects to PostgreSQL `METADATA_DSN` or local usage log; executes SQL deletes in 5,000-row chunks. | PostgreSQL transaction lock. Politeness gate yields if active dashboard queries are running. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to PostgreSQL `METADATA_DSN` and issues bounded chunked `DELETE FROM` statements. | PostgreSQL connection pool and transaction; politeness gate yields if active dashboard queries are running. Gated by `FLA_DEV_NO_CRONS=1`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler or Worker | Connects to PostgreSQL `METADATA_DSN` and executes SQL deletes in bounded chunks. | PostgreSQL transaction; politeness gate yields if active dashboard queries are running. |
 
 ---
 

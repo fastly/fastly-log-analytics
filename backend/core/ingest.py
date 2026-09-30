@@ -10,7 +10,6 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from backend.core import iceberg
@@ -30,6 +29,88 @@ from backend.utils.active_requests import yield_to_api
 from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
+
+_INGEST_OUTCOME_COUNTER_KEYS = (
+    "valid_records",
+    "malformed_records",
+    "corrupt_containers",
+    "quarantine_capture_failures",
+    "source_delete_failures",
+    "cap_evictions",
+    "objects_processed",
+    "objects_successful",
+    "objects_partial",
+    "objects_failed",
+)
+
+
+def _new_object_outcome(*, processed: int = 1) -> dict[str, int]:
+    return {**dict.fromkeys(_INGEST_OUTCOME_COUNTER_KEYS, 0), "objects_processed": processed}
+
+
+def _record_ledger_object_outcome(service_id: str, object_key: str, counters: dict[str, int]) -> None:
+    from backend.core.metadata.cron_log import record_ingest_object_outcome
+
+    record_ingest_object_outcome(service_id, object_key, counters)
+
+
+def _mark_object_failed(counters: dict[str, int]) -> None:
+    counters["objects_failed"] = 1
+    counters["objects_successful"] = 0
+    counters["objects_partial"] = 0
+
+
+def _record_raw_delete_failure(service_id: str, object_key: str) -> None:
+    from backend.core.metadata.base import get_con
+    from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS
+
+    con = get_con(service_id)
+    row = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
+        (service_id, object_key),
+    ).fetchone()
+    counters = json.loads(row["outcome_counters"] or "{}") if row else {}
+    outcome = {key: int(counters.get(key, 0)) for key in OUTCOME_COUNTER_KEYS}
+    outcome["objects_processed"] = max(1, outcome["objects_processed"])
+    outcome["source_delete_failures"] += 1
+    _mark_object_failed(outcome)
+    _record_ledger_object_outcome(service_id, object_key, outcome)
+
+
+def _capture_corrupt_container(
+    service_id: str, source_type: str, object_key: str, local_file: str, error: BaseException
+) -> dict[str, int]:
+    from backend.core.quarantine import capture_evidence
+
+    with open(local_file, "rb") as raw:
+        payload = raw.read()
+    result = capture_evidence(
+        service_id,
+        source_type,
+        object_key,
+        payload,
+        line_ordinal=None,
+        byte_offset=None,
+        error_category="corrupt_container",
+        error_text=str(error)[:2_000],
+    )
+    counters = _new_object_outcome()
+    counters["corrupt_containers"] = 1
+    counters["cap_evictions"] = int(result.get("cap_evictions", 0))
+    counters["quarantine_capture_failures"] = int(result.get("quarantine_capture_failures", 0))
+    _mark_object_failed(counters)
+    return counters
+
+
+def _corrupt_gzip_error(local_file: str) -> BaseException | None:
+    try:
+        with gzip.open(local_file, "rb") as raw:
+            while raw.read(64 * 1024):
+                pass
+    except (gzip.BadGzipFile, EOFError, OSError) as exc:
+        return exc
+    return None
+
 
 # When delete_after is on, files seen in the LIST that are already in the dedup
 # ledger are strands: ingested but never deleted (a restart landed between the
@@ -200,11 +281,12 @@ def _compute_incremental_start_after(already: set[str], lookback_hours: int = 4)
     return lookback.strftime("raw/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
 
 
-def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
-    """Delete multiple objects from S3 in bulk with a fallback to individual calls on failure."""
+def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str]) -> tuple[int, set[str]]:
+    """Delete objects and return the exact keys that could not be acknowledged."""
     if not keys:
-        return 0
+        return 0, set()
 
+    failed_keys: set[str] = set()
     try:
         # S3 bulk delete limit is 1000, we use 500 for safety with varied implementations
         batch_size = 500
@@ -218,6 +300,9 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
             # populate the 'Deleted' array in the response like AWS S3 does.
             # If no errors were returned, assume all were deleted.
             errors = response.get("Errors", [])
+            batch_failures = {error.get("Key") for error in errors if error.get("Key") in batch}
+            if any(error.get("Key") not in batch for error in errors):
+                batch_failures = set(batch)
             if errors:
                 for error in errors[:1]:  # Log the first error
                     if "AccessDenied" in error.get("Code", "") or "UnauthorizedAccess" in error.get("Code", ""):
@@ -225,9 +310,11 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
                             "Bulk delete skipped due to missing permissions (%s). Disabling further delete attempts for this batch.",
                             error.get("Code"),
                         )
-                        return total_deleted
-            total_deleted += len(batch) - len(errors)
-        return total_deleted
+                        total_deleted += len(batch) - len(batch_failures)
+                        return total_deleted, failed_keys | batch_failures | set(keys[i + len(batch) :])
+            total_deleted += len(batch) - len(batch_failures)
+            failed_keys.update(batch_failures)
+        return total_deleted, failed_keys
     except Exception as e:
         err_str = str(e)
         if "AccessDenied" in err_str or "UnauthorizedAccess" in err_str:
@@ -235,12 +322,13 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
                 "Delete failed due to missing permissions: %s",
                 err_str.split(":", 1)[-1].strip() or err_str,
             )
-            return 0
+            return 0, set(keys)
 
         # Fallback to individual deletion if bulk is not supported or fails
         logger.warning("Bulk delete failed, falling back to individual", exc_info=True)
         deleted_count = 0
-        for k in keys:
+        individual_failures: set[str] = set()
+        for index, k in enumerate(keys):
             try:
                 fos_client.delete_object(Bucket=bucket, Key=k)
                 deleted_count += 1
@@ -251,103 +339,35 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
                         "Individual delete failed due to missing permissions: %s. Stopping further deletes.",
                         ind_err_str,
                     )
+                    individual_failures.update(keys[index:])
                     break
                 logger.warning("Failed to delete object %s", k, exc_info=True)
-        return deleted_count
+                individual_failures.add(k)
+        return deleted_count, individual_failures
 
 
-def _quarantine_corrupt_files(
-    fos_client,
-    bucket: str,
-    source: dict,
-    corrupt_s3_paths: list[str],
-    truly_corrupt: list[tuple[str, str, str]],
-    count_map: dict[str, int],
-    valid_counts: dict[str, int],
-    file_sizes: Mapping[str, int | None],
-    source_name: str,
-) -> int:
-    """Write corrupt lines to ``errors/`` prefix in FOS with a sidecar ``.meta.json``.
+def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
+    """Delete multiple objects, retaining the historical deleted-count result."""
+    deleted, _ = _delete_objects_robust_with_failures(fos_client, bucket, keys)
+    return deleted
 
-    Only the bad lines are written — not the entire raw file (valid rows are
-    already ingested). Best-effort: per-file failures are logged but never
-    block the ingest pipeline. Returns the number of files successfully quarantined.
-    """
-    prefix_path = source.get("prefix", "").strip("/")
-    raw_prefix = f"{prefix_path}/raw/request/" if prefix_path else "raw/request/"
-    errors_prefix = f"{prefix_path}/errors/" if prefix_path else "errors/"
-    quarantined = 0
 
-    corrupt_by_file: dict[str, list[str]] = {}
-    reason_counts_by_file: dict[str, dict[str, int]] = {}
-    for fname, raw_line, reason in truly_corrupt:
-        corrupt_by_file.setdefault(fname, []).append(raw_line.strip())
-        rc = reason_counts_by_file.setdefault(fname, {})
-        rc[reason] = rc.get(reason, 0) + 1
-
-    for s3_path in corrupt_s3_paths:
-        bad_lines = corrupt_by_file.get(s3_path, [])
-        if not bad_lines:
-            continue
-        try:
-            original_key = s3_path[len(f"s3://{bucket}/") :]
-            if not original_key.startswith(raw_prefix):
-                continue
-            error_key = errors_prefix + original_key[len(raw_prefix) :].replace(".gz", ".bad.jsonl")
-            meta_key = error_key + ".meta.json"
-            file_name = original_key.rsplit("/", 1)[-1]
-
-            error_body = "\n".join(bad_lines).encode()
-            fos_client.put_object(
-                Bucket=bucket,
-                Key=error_key,
-                Body=error_body,
-                ContentType="application/x-ndjson",
-            )
-
-            file_valid = valid_counts.get(s3_path, 0)
-            file_total = count_map.get(s3_path, 0)
-            file_corrupt = len(bad_lines)
-            samples = [line[:2000] for line in bad_lines[:5]]
-            file_reason_counts = reason_counts_by_file.get(s3_path, {})
-
-            meta = {
-                "original_key": original_key,
-                "quarantined_at": datetime.now(UTC).isoformat(),
-                "valid_rows": file_valid,
-                "corrupt_rows": file_corrupt,
-                "total_rows": file_total,
-                "file_size_bytes": file_sizes.get(s3_path),
-                "corrupt_samples": samples,
-                "reason_counts": file_reason_counts,
-                "source_name": source_name,
-            }
-            fos_client.put_object(
-                Bucket=bucket,
-                Key=meta_key,
-                Body=json.dumps(meta).encode(),
-                ContentType="application/json",
-            )
-
-            metadata_db.insert_quarantined_file(
-                service_id=source.get("service_id") or source.get("name", ""),
-                file_name=file_name,
-                source_name=source_name,
-                fos_key=original_key,
-                error_key=error_key,
-                meta_key=meta_key,
-                valid_rows=file_valid,
-                corrupt_rows=file_corrupt,
-                file_size_bytes=file_sizes.get(s3_path),
-                corrupt_samples=samples,
-                reason_counts=file_reason_counts,
-                error_size_bytes=len(error_body),
-            )
-            quarantined += 1
-        except Exception as qe:
-            logger.warning("[ingest] %s: failed to quarantine %s: %s", source_name, s3_path, qe)
-
-    return quarantined
+def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
+    """Find malformed request rows from downloaded gzip files without DuckDB."""
+    invalid_rows: list[tuple[str, str]] = []
+    for path in paths:
+        with gzip.open(path, "rb") as compressed:
+            for raw_line in compressed:
+                if not raw_line.strip():
+                    continue
+                try:
+                    row = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    invalid_rows.append((path, raw_line.decode("utf-8", errors="replace").rstrip("\r\n")))
+                    continue
+                if not isinstance(row, dict) or not row.get("timestamp"):
+                    invalid_rows.append((path, raw_line.decode("utf-8", errors="replace").rstrip("\r\n")))
+    return invalid_rows
 
 
 def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -716,6 +736,8 @@ def ingest(
     skipped_already = list_res["skipped_already"]
     stranded_already = list_res["stranded_already"]
 
+    outcome_counters = _new_object_outcome(processed=0)
+
     # Reconcile interrupted deletes. Any file we LISTed that is already in the
     # ledger is, by the delete_after contract, one we ingested but never finished
     # deleting (a restart hit between the ledger write and the FOS delete). Re-issue
@@ -791,6 +813,7 @@ def ingest(
             "skipped_files": skipped_already,
             "rows_inserted": 0,
             "deleted_files": reclaimed,
+            "outcome_counters": outcome_counters,
             "message": msg,
         }
         return
@@ -802,13 +825,30 @@ def ingest(
     total_quarantined = 0
     processed_count = 0
     deleted = 0
+    delete_failed_paths: set[str] = set()
+    corrupt_containers = 0
+    quarantine_capture_failures = 0
+    cap_evictions = 0
+    partial_paths: set[str] = set()
+    capture_failed_paths: set[str] = set()
     successfully_processed_files: list[str] = []
     touched_hours: set[str] = set()
 
     mem_con = None
     # Increase parallelism for S3 deletions
     _delete_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest_delete")
-    _pending_deletes: list = []
+    _pending_deletes: list[tuple[concurrent.futures.Future, set[str]]] = []
+
+    def _record_delete_result(future: concurrent.futures.Future, keys: set[str]) -> None:
+        nonlocal deleted
+        try:
+            deleted_count, failed_keys = future.result()
+            deleted += deleted_count
+            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in failed_keys)
+        except Exception as delete_error:
+            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in keys)
+            logger.warning("[ingest] %s: async delete error: %s", source_name, delete_error)
+
     from backend import config as svcconfig
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) if source else None
@@ -867,6 +907,7 @@ def ingest(
                 break
 
             chunk = new_files[chunk_start : chunk_start + chunk_size]
+            outcome_counters["objects_processed"] += len(chunk)
             chunk_num = (chunk_start // chunk_size) + 1
             total_chunks = math.ceil(len(new_files) / chunk_size)
             msg = f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):,} files total)..."
@@ -935,6 +976,21 @@ def ingest(
                             err_msg = err_msg.split(":", 1)[-1].strip()
 
                             failed_paths.add(read_paths_s3[i])
+                            failed_gzip = _corrupt_gzip_error(read_path)
+                            if failed_gzip is not None:
+                                object_key = read_paths_s3[i].removeprefix(f"s3://{src['bucket']}/")
+                                result = _capture_corrupt_container(
+                                    src.get("service_id") or src.get("name", ""),
+                                    "request",
+                                    object_key,
+                                    read_path,
+                                    failed_gzip,
+                                )
+                                corrupt_containers += result["corrupt_containers"]
+                                cap_evictions += result["cap_evictions"]
+                                quarantine_capture_failures += result["quarantine_capture_failures"]
+                                if result["quarantine_capture_failures"]:
+                                    capture_failed_paths.add(read_paths_s3[i])
                             yield {"type": "status", "message": f"Skipping unreadable file {f_name}: {err_msg}"}
 
                     if not valid_paths:
@@ -952,6 +1008,7 @@ def ingest(
                         """,
                         )
                     except Exception as retry_err:
+                        failed_paths.update(read_paths_s3)
                         yield {"type": "status", "message": f"Retry failed: {retry_err}"}
                         continue
 
@@ -1057,22 +1114,13 @@ def ingest(
                 repairs_made = False
                 _chunk_corrupt_s3_paths: list[str] = []
                 _chunk_truly_corrupt: list = []
-                _chunk_valid_counts: dict[str, int] = {}
                 if corrupt_in_batch > 0:
                     try:
-                        valid_counts = dict(
-                            mem_con.execute(
-                                "SELECT _source_file, count(*) FROM _ingest_staging WHERE timestamp IS NOT NULL GROUP BY 1"
-                            ).fetchall()
-                        )
-                        corrupt_read_paths = []
-                        corrupt_s3_paths = []
-                        for i, s3_path in enumerate(read_paths_s3):
-                            expected = count_map.get(s3_path, 0)
-                            actual = valid_counts.get(s3_path, 0)
-                            if actual < expected:
-                                corrupt_read_paths.append(read_paths[i])
-                                corrupt_s3_paths.append(s3_path)
+                        # Identify the affected files from the raw diagnostic
+                        # scan itself; typed staging counts can omit malformed
+                        # rows or change after timestamp filtering.
+                        corrupt_read_paths = read_paths
+                        corrupt_s3_paths = read_paths_s3
 
                         if corrupt_read_paths:
                             # Security: corrupt-file diagnostic path
@@ -1082,7 +1130,16 @@ def ingest(
                                 SELECT filename, column0 FROM read_csv([{paths_sql_str}], header=false, sep='', quote='', escape='', columns={{'column0': 'VARCHAR'}}, filename=true)
                                 WHERE NOT json_valid(column0) OR json_extract(column0, '$.timestamp') IS NULL
                             """
-                            bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
+                            try:
+                                bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
+                            except Exception as diagnostic_error:
+                                logger.warning(
+                                    "[sync] %s: DuckDB corrupt-line scan failed; scanning downloaded gzip files "
+                                    "directly: %s",
+                                    source_name,
+                                    diagnostic_error,
+                                )
+                                bad_rows = _scan_invalid_gzip_lines(corrupt_read_paths)
 
                             _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
                             repaired_by_fname: dict[str, list] = {}
@@ -1102,6 +1159,8 @@ def ingest(
                                     truly_corrupt.append((fname, raw_line, "missing_timestamp"))
                                 except (json.JSONDecodeError, ValueError):
                                     truly_corrupt.append((fname, raw_line, "invalid_json"))
+
+                            partial_paths.update(fname for fname, _raw_line, _reason in truly_corrupt)
 
                             if repaired_by_fname:
                                 repairs_made = True
@@ -1150,7 +1209,6 @@ def ingest(
 
                             _chunk_corrupt_s3_paths = corrupt_s3_paths
                             _chunk_truly_corrupt = truly_corrupt
-                            _chunk_valid_counts = valid_counts
                     except Exception as e:
                         err_str = str(e)
                         # Network/disk failures here mean the local re-read failed —
@@ -1196,21 +1254,44 @@ def ingest(
 
                 total_corrupt += corrupt_in_batch
 
-                if _chunk_corrupt_s3_paths and delete_after:
+                for corrupt_path in _chunk_corrupt_s3_paths:
+                    local_file = s3_to_local.get(corrupt_path)
+                    if local_file is None:
+                        quarantine_capture_failures += 1
+                        capture_failed_paths.add(corrupt_path)
+                        continue
+                    object_key = corrupt_path.removeprefix(f"s3://{src['bucket']}/")
+                    safe_local = escape_sql_literal(local_file)
+                    corrupt_read_expr = (
+                        f"read_json_auto('{safe_local}', format='newline_delimited', "
+                        f"records='auto', columns={columns_sql}, ignore_errors=true)"
+                    )
                     try:
-                        total_quarantined += _quarantine_corrupt_files(
+                        quarantine_result = _quarantine_convert_corrupt_lines(
+                            mem_con,
                             fos_client,
-                            src["bucket"],
                             src,
-                            _chunk_corrupt_s3_paths,
-                            _chunk_truly_corrupt,
-                            count_map,
-                            _chunk_valid_counts,
-                            file_sizes,
-                            source_name,
+                            corrupt_read_expr,
+                            local_file,
+                            object_key,
                         )
-                    except Exception as qe:
-                        logger.warning("[ingest] %s: quarantine failed: %s", source_name, qe)
+                    except Exception:
+                        logger.exception("[ingest] %s: exact-byte quarantine failed for %s", source_name, object_key)
+                        quarantine_result = {
+                            "malformed_records": sum(
+                                1 for fname, _line, _reason in _chunk_truly_corrupt if fname == corrupt_path
+                            ),
+                            "cap_evictions": 0,
+                            "quarantine_capture_failures": 1,
+                        }
+                    outcome_counters["malformed_records"] += quarantine_result["malformed_records"]
+                    cap_evictions += quarantine_result["cap_evictions"]
+                    quarantine_capture_failures += quarantine_result["quarantine_capture_failures"]
+                    if quarantine_result["quarantine_capture_failures"]:
+                        capture_failed_paths.add(corrupt_path)
+                    if quarantine_result["malformed_records"]:
+                        partial_paths.add(corrupt_path)
+                        total_quarantined += 1
             finally:
                 chunk_tmpdir_obj.cleanup()
 
@@ -1279,7 +1360,13 @@ def ingest(
 
             if delete_after:
                 # Clean up completed futures to avoid unbounded list growth
-                _pending_deletes = [f for f in _pending_deletes if not f.done()]
+                remaining_deletes = []
+                for future, keys in _pending_deletes:
+                    if future.done():
+                        _record_delete_result(future, keys)
+                    else:
+                        remaining_deletes.append((future, keys))
+                _pending_deletes = remaining_deletes
 
                 chunk_keys = [
                     f[len(f"s3://{src['bucket']}/") :]
@@ -1293,12 +1380,11 @@ def ingest(
                     # boto3.deleteobjects), so we don't fire a manual record_call
                     # here — doing so produced a 1:1 duplicate row per batch.
 
-                    def _do_delete(keys, bucket, client):
-                        return _delete_objects_robust(client, bucket, keys)
-
                     try:
-                        future = _delete_executor.submit(_do_delete, chunk_keys, src["bucket"], fos_client)
-                        _pending_deletes.append(future)
+                        future = _delete_executor.submit(
+                            _delete_objects_robust_with_failures, fos_client, src["bucket"], chunk_keys
+                        )
+                        _pending_deletes.append((future, set(chunk_keys)))
                         yield {
                             "type": "status",
                             "message": f"{elapsed()} Batch {chunk_num}: Submitted deletion of {len(chunk_keys)} raw files (async)...",
@@ -1327,13 +1413,17 @@ def ingest(
                             submit_err,
                         )
                         try:
-                            inline_deleted = _delete_objects_robust(fos_client, src["bucket"], chunk_keys)
+                            inline_deleted, inline_failures = _delete_objects_robust_with_failures(
+                                fos_client, src["bucket"], chunk_keys
+                            )
                             deleted += inline_deleted
+                            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in inline_failures)
                             yield {
                                 "type": "status",
                                 "message": f"{elapsed()} Batch {chunk_num}: Deleted {inline_deleted} raw files inline (executor unavailable).",
                             }
                         except Exception as inline_err:
+                            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in chunk_keys)
                             logger.error(
                                 "[ingest] %s: inline delete also failed for batch %d (%d files): %s",
                                 source_name,
@@ -1362,13 +1452,14 @@ def ingest(
 
     finally:
         # Wait for all in-flight S3 deletions
+        pending_by_future = {future: keys for future, keys in _pending_deletes}
         try:
-            for f in concurrent.futures.as_completed(_pending_deletes, timeout=300):
-                try:
-                    deleted += f.result()
-                except Exception as _de:
-                    logger.warning("[ingest] %s: async delete error: %s", source_name, _de)
+            for f in concurrent.futures.as_completed(pending_by_future, timeout=300):
+                _record_delete_result(f, pending_by_future[f])
         except concurrent.futures.TimeoutError:
+            for future, keys in _pending_deletes:
+                if not future.done():
+                    delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in keys)
             logger.warning(
                 "[ingest] %s: timed out waiting for all async deletions to complete. Some files may still be deleting in the background.",
                 source_name,
@@ -1390,6 +1481,25 @@ def ingest(
                 pass
 
     total_deleted = deleted + reclaimed
+    outcome_counters.update(
+        {
+            "valid_records": total_inserted,
+            "corrupt_containers": corrupt_containers,
+            "quarantine_capture_failures": quarantine_capture_failures,
+            "source_delete_failures": len(delete_failed_paths),
+            "cap_evictions": cap_evictions,
+        }
+    )
+    failed_objects = failed_paths | capture_failed_paths | delete_failed_paths
+    partial_objects = partial_paths - failed_objects
+    outcome_counters["objects_failed"] = len(failed_objects)
+    outcome_counters["objects_partial"] = len(partial_objects)
+    outcome_counters["objects_successful"] = max(
+        0,
+        outcome_counters["objects_processed"]
+        - outcome_counters["objects_failed"]
+        - outcome_counters["objects_partial"],
+    )
     reclaimed_note = f" (incl. {reclaimed} reclaimed from an interrupted prior run)" if reclaimed else ""
     yield {
         "type": "done",
@@ -1400,6 +1510,7 @@ def ingest(
         "corrupt_details": total_corrupt_details,
         "deleted_files": total_deleted,
         "quarantined_files": total_quarantined,
+        "outcome_counters": outcome_counters,
         "message": (
             f"Successfully ingested {processed_count} new files ({total_inserted} rows) "
             f"and deleted {total_deleted} raw files{reclaimed_note}."
@@ -1482,7 +1593,13 @@ def _celery_ingest_scope(kind: str, service_id: str):
     return _scope()
 
 
-def discover_prefix(service_id: str, prefix_subpath: str | None = None, start_time: str | None = None) -> int:
+def discover_prefix(
+    service_id: str,
+    prefix_subpath: str | None = None,
+    start_time: str | None = None,
+    run_id: int | None = None,
+    originating_task: str = "log_discovery",
+) -> int:
     """LIST one FOS prefix (or a start_time-bounded range), insert unseen keys
     into ``ingest_ledger`` as ``discovered``, and dispatch the new keys in
     ``LEDGER_CONVERT_BATCH_SIZE``-sized ``convert_batch_files`` batches (one
@@ -1524,9 +1641,17 @@ def discover_prefix(service_id: str, prefix_subpath: str | None = None, start_ti
         f_size = fos_result.get("file_sizes", {}).get(f_path, 0)
         object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
         cur.execute(
-            "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, discovered_at) "
-            "VALUES (?, ?, ?, 'discovered', ?) ON CONFLICT DO NOTHING",
-            (service_id, object_key, f_size, time.time()),
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, size_bytes, status, discovered_at, originating_task, originating_run_id) "
+            "VALUES (?, ?, ?, 'discovered', ?, ?, ?) ON CONFLICT DO NOTHING",
+            (
+                service_id,
+                object_key,
+                f_size,
+                time.time(),
+                originating_task if run_id is not None else None,
+                run_id,
+            ),
         )
         if cur.rowcount > 0:
             newly_discovered.append(object_key)
@@ -1659,9 +1784,12 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
     if not claimed:
         return "not_claimed"
 
+    outcome = _new_object_outcome()
     src = get_source_for_service(service_id)
     if src is None:
         _ledger_record_failure(con_meta, service_id, object_key, "no source registered for service", lease_generation)
+        _mark_object_failed(outcome)
+        _record_ledger_object_outcome(service_id, object_key, outcome)
         return "error"
 
     bucket = src.get("bucket", "")
@@ -1709,6 +1837,8 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                         )
                         con_meta.commit()
                         logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
+                        _mark_object_failed(outcome)
+                        _record_ledger_object_outcome(service_id, object_key, outcome)
                         return "dead_letter"
                 raise RuntimeError("download failed (object still exists — transient)")
 
@@ -1784,9 +1914,25 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
             # never fail the convert itself (the valid rows are already
             # durably committed).
             try:
-                _quarantine_convert_corrupt_lines(duckdb_con, fos, src, read_expr, local_file, object_key)
+                quarantine_result = _quarantine_convert_corrupt_lines(
+                    duckdb_con, fos, src, read_expr, local_file, object_key
+                )
             except Exception as qe:
-                logger.warning("[ledger] %s: quarantine check failed for %s: %s", service_id, object_key, qe)
+                logger.exception("[ledger] %s: request quarantine processing failed for %s", service_id, object_key)
+                valid_count_row = duckdb_con.execute(f"SELECT count(*) FROM {clean_read_expr}").fetchone()
+                quarantine_result = {
+                    "valid_records": int(valid_count_row[0]) if valid_count_row else 0,
+                    "malformed_records": 0,
+                    "cap_evictions": 0,
+                    "quarantine_capture_failures": 1,
+                }
+            outcome.update(quarantine_result)
+            if outcome["quarantine_capture_failures"]:
+                _mark_object_failed(outcome)
+            elif outcome["malformed_records"] or outcome["corrupt_containers"]:
+                outcome["objects_partial"] = 1
+            else:
+                outcome["objects_successful"] = 1
 
             # Mirror the sync path's ingested_files bookkeeping so every
             # existing reader (Usage Log / log-line-accounting
@@ -1802,8 +1948,16 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                 metadata_db.insert_ingested_files(service_id, [(object_key, row_count, os.path.getsize(local_file))])
             except Exception as ie:
                 logger.warning("[ledger] %s: ingested_files bookkeeping failed for %s: %s", service_id, object_key, ie)
+            _record_ledger_object_outcome(service_id, object_key, outcome)
     except Exception as e:
-        return _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
+        local_file = locals().get("local_file")
+        failed_gzip = _corrupt_gzip_error(local_file) if local_file else None
+        if failed_gzip is not None and local_file:
+            outcome = _capture_corrupt_container(service_id, "request", object_key, local_file, failed_gzip)
+        _mark_object_failed(outcome)
+        failure_status = _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
+        _record_ledger_object_outcome(service_id, object_key, outcome)
+        return failure_status
     finally:
         if admission_entered:
             admission_cm.__exit__(None, None, None)
@@ -1911,6 +2065,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     # its own terminal ledger status, so the batch-failure path below must
     # not touch it again.
     active: list[str] = list(claimed_keys)
+    outcomes: dict[str, dict[str, int]] = {}
     duckdb_con = None
     admission_cm = ducklake_write_admission(service_id)
     admission_entered = False
@@ -1961,6 +2116,9 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                     con_meta.commit()
                     if cur.rowcount:
                         summary["dead_letter"] += 1
+                        outcome = _new_object_outcome()
+                        _mark_object_failed(outcome)
+                        _record_ledger_object_outcome(service_id, object_key, outcome)
                     logger.info("[ledger] %s: %s gone from FOS — dead_letter", service_id, object_key)
                 else:
                     _ledger_record_failure(
@@ -1971,6 +2129,9 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                         claimed_generations[object_key],
                     )
                     summary["failed"] += 1
+                    outcome = _new_object_outcome()
+                    _mark_object_failed(outcome)
+                    _record_ledger_object_outcome(service_id, object_key, outcome)
 
             if not files:
                 return summary
@@ -2078,16 +2239,29 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             # durably committed and must never be failed by a reporting
             # problem.
             for local_file, _s3_path, object_key in files:
-                if not corrupt_by_local.get(local_file):
-                    continue
+                outcome = _new_object_outcome()
+                outcome["valid_records"] = int(valid_by_local.get(local_file, 0))
                 try:
-                    single_read_expr = (
-                        f"read_json_auto('{escape_sql_literal(local_file)}', format='newline_delimited', "
-                        f"records='auto', columns={columns_sql}, ignore_errors=true)"
-                    )
-                    _quarantine_convert_corrupt_lines(duckdb_con, fos, src, single_read_expr, local_file, object_key)
-                except Exception as qe:
-                    logger.warning("[ledger] %s: quarantine check failed for %s: %s", service_id, object_key, qe)
+                    if corrupt_by_local.get(local_file):
+                        single_read_expr = (
+                            f"read_json_auto('{escape_sql_literal(local_file)}', format='newline_delimited', "
+                            f"records='auto', columns={columns_sql}, ignore_errors=true)"
+                        )
+                        outcome.update(
+                            _quarantine_convert_corrupt_lines(
+                                duckdb_con, fos, src, single_read_expr, local_file, object_key
+                            )
+                        )
+                except Exception:
+                    logger.exception("[ledger] %s: quarantine check failed for %s", service_id, object_key)
+                    outcome["quarantine_capture_failures"] = max(1, outcome["quarantine_capture_failures"])
+                if outcome["quarantine_capture_failures"]:
+                    _mark_object_failed(outcome)
+                elif outcome["malformed_records"] or outcome["corrupt_containers"]:
+                    outcome["objects_partial"] = 1
+                else:
+                    outcome["objects_successful"] = 1
+                outcomes[object_key] = outcome
 
             # Mirror convert_object's ingested_files bookkeeping — one bulk
             # call, but with PER-FILE row counts (the batch total would
@@ -2110,6 +2284,9 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         # every key still claimed becomes retryable rather than stranded.
         for object_key in active:
             _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
+            outcome = _new_object_outcome()
+            _mark_object_failed(outcome)
+            _record_ledger_object_outcome(service_id, object_key, outcome)
         summary["failed"] += len(active)
         return summary
     finally:
@@ -2123,9 +2300,14 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             duckdb_con.close()
 
     for object_key in active:
-        summary["committed"] += int(
-            _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key]) == "committed"
-        )
+        outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
+        if outcome_status == "committed":
+            summary["committed"] += 1
+            _record_ledger_object_outcome(service_id, object_key, outcomes[object_key])
+        else:
+            outcome = outcomes[object_key]
+            _mark_object_failed(outcome)
+            _record_ledger_object_outcome(service_id, object_key, outcome)
     return summary
 
 
@@ -2136,104 +2318,126 @@ def _quarantine_convert_corrupt_lines(
     read_expr: str,
     local_file: str,
     object_key: str,
-) -> None:
-    """Detect lines ``convert_object``'s ``ignore_errors=true`` read turned
-    into an all-NULL row (verified empirically: DuckDB does NOT drop a
-    malformed newline-delimited-JSON line under ``ignore_errors=true`` —
-    it inserts a row of NULLs), and quarantine them — mirroring the sync
-    path's ``_quarantine_corrupt_files`` protocol (upload the bad lines +
-    a ``.meta.json`` sidecar to the ``errors/`` FOS prefix, register in
-    ``quarantined_files``) so corrupt data is visible and recoverable
-    instead of vanishing with zero trace. The caller excludes these same
-    NULL-timestamp rows from the actual lake INSERT (see ``clean_read_expr``
-    at the call site) — this function only handles reporting them.
-
-    Single-file scoped — the sync path's version also auto-repairs a
-    specific empty-value malformation across a whole ingest batch; that
-    repair pass isn't reproduced here, so a repairable line quarantines
-    instead of being fixed. Silence, not silent data loss with no fix
-    available, is the bar this closes.
-    """
-    service_id = src.get("service_id") or src.get("name", "")
-    source_name = src.get("name", service_id)
-    bucket = src.get("bucket", "")
+) -> dict[str, int]:
+    """Capture malformed request lines as exact-byte local evidence items."""
+    from backend.core.quarantine import capture_evidence
 
     valid_count, corrupt_count = duckdb_con.execute(
         f"SELECT count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) FROM {read_expr}"
     ).fetchone()
     if not corrupt_count:
-        return
+        return {
+            "valid_records": int(valid_count or 0),
+            "malformed_records": 0,
+            "cap_evictions": 0,
+            "quarantine_capture_failures": 0,
+        }
 
-    safe_local = escape_sql_literal(local_file)
-    bad_rows = duckdb_con.execute(
-        f"SELECT column0 FROM read_csv('{safe_local}', header=false, sep='', quote='', escape='', "
-        f"columns={{'column0': 'VARCHAR'}}) "
-        "WHERE NOT json_valid(column0) OR json_extract(column0, '$.timestamp') IS NULL"
-    ).fetchall()
-    bad_lines = [r[0].strip() for r in bad_rows if r[0] is not None]
-    if not bad_lines:
-        # DuckDB's row-level NULL count and this raw-line-level scan
-        # disagree — different corruption detectors, kept independent on
-        # purpose so a widened schema doesn't silently blind one of them.
-        # Nothing concrete to attach to the FOS upload; log and move on.
-        logger.warning(
-            "[ledger] %s: %d NULL row(s) from %s but the raw-line scan found none",
-            service_id,
-            corrupt_count,
-            object_key,
-        )
-        return
-
+    service_id = src.get("service_id") or src.get("name", "")
     prefix_path = src.get("prefix", "").strip("/")
     raw_prefix = f"{prefix_path}/raw/request/" if prefix_path else "raw/request/"
-    errors_prefix = f"{prefix_path}/errors/" if prefix_path else "errors/"
     if not object_key.startswith(raw_prefix):
-        return
-    error_key = errors_prefix + object_key[len(raw_prefix) :].replace(".gz", ".bad.jsonl")
-    meta_key = error_key + ".meta.json"
-    file_name = object_key.rsplit("/", 1)[-1]
+        logger.warning(
+            "[ledger] %s: refusing request quarantine for key outside raw prefix: %s",
+            service_id,
+            object_key,
+        )
+        return {
+            "valid_records": int(valid_count or 0),
+            "malformed_records": int(corrupt_count or 0),
+            "cap_evictions": 0,
+            "quarantine_capture_failures": int(corrupt_count or 0),
+        }
 
-    reason_counts: dict[str, int] = {}
-    for line in bad_lines:
+    open_file = gzip.open if local_file.endswith(".gz") else open
+    evidence_results = []
+    offset = 0
+    try:
+        with open_file(local_file, "rb") as raw:
+            for ordinal, line in enumerate(raw, start=1):
+                current_offset = offset
+                offset += len(line)
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                category = None
+                error_text = ""
+                try:
+                    parsed = json.loads(stripped)
+                    if not isinstance(parsed, dict) or not parsed.get("timestamp"):
+                        category = "missing_timestamp"
+                        error_text = "record has no timestamp"
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                    category = "invalid_json"
+                    error_text = str(exc)[:2000]
+                if category is not None:
+                    evidence_results.append(
+                        capture_evidence(
+                            service_id,
+                            "request",
+                            object_key,
+                            line,
+                            line_ordinal=ordinal,
+                            byte_offset=current_offset,
+                            error_category=category,
+                            error_text=error_text,
+                        )
+                    )
+    except (gzip.BadGzipFile, EOFError, OSError) as exc:
+        logger.warning("[ledger] %s: malformed request gzip %s: %s", service_id, object_key, exc)
         try:
-            parsed = json.loads(line)
-            reason = "missing_timestamp" if not parsed.get("timestamp") else "unknown"
-        except (json.JSONDecodeError, ValueError):
-            reason = "invalid_json"
-        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            payload = open(local_file, "rb").read()
+            evidence_results.append(
+                capture_evidence(
+                    service_id,
+                    "request",
+                    object_key,
+                    payload,
+                    line_ordinal=None,
+                    byte_offset=None,
+                    error_category="corrupt_container",
+                    error_text=str(exc)[:2000],
+                )
+            )
+        except OSError:
+            evidence_results.append({"cap_evictions": 0, "quarantine_capture_failures": 1})
+        return {
+            "valid_records": 0,
+            "malformed_records": 0,
+            "corrupt_containers": 1,
+            "cap_evictions": sum(int(r.get("cap_evictions", 0)) for r in evidence_results),
+            "quarantine_capture_failures": sum(int(r.get("quarantine_capture_failures", 0)) for r in evidence_results),
+        }
 
-    error_body = "\n".join(bad_lines).encode()
-    fos_client.put_object(Bucket=bucket, Key=error_key, Body=error_body, ContentType="application/x-ndjson")
+    if len(evidence_results) != int(corrupt_count or 0):
+        logger.error(
+            "[ledger] %s: DuckDB/raw-line corruption count mismatch for %s (%d vs %d)",
+            service_id,
+            object_key,
+            corrupt_count,
+            len(evidence_results),
+        )
+        return {
+            "valid_records": int(valid_count or 0),
+            "malformed_records": len(evidence_results),
+            "cap_evictions": sum(int(r.get("cap_evictions", 0)) for r in evidence_results),
+            "quarantine_capture_failures": 1
+            + sum(int(r.get("quarantine_capture_failures", 0)) for r in evidence_results),
+        }
 
-    meta = {
-        "original_key": object_key,
-        "quarantined_at": datetime.now(UTC).isoformat(),
-        "valid_rows": valid_count,
-        "corrupt_rows": len(bad_lines),
-        "total_rows": valid_count + corrupt_count,
-        "corrupt_samples": [line[:2000] for line in bad_lines[:5]],
-        "reason_counts": reason_counts,
-        "source_name": source_name,
+    for result in evidence_results:
+        if int(result.get("quarantine_capture_failures", 0)):
+            logger.error(
+                "[ledger] %s: request quarantine capture failed for %s",
+                service_id,
+                object_key,
+            )
+    return {
+        "valid_records": int(valid_count or 0),
+        "malformed_records": len(evidence_results),
+        "cap_evictions": sum(int(r.get("cap_evictions", 0)) for r in evidence_results),
+        "quarantine_capture_failures": sum(int(r.get("quarantine_capture_failures", 0)) for r in evidence_results),
     }
-    fos_client.put_object(Bucket=bucket, Key=meta_key, Body=json.dumps(meta).encode(), ContentType="application/json")
-
-    metadata_db.insert_quarantined_file(
-        service_id=service_id,
-        file_name=file_name,
-        source_name=source_name,
-        fos_key=object_key,
-        error_key=error_key,
-        meta_key=meta_key,
-        valid_rows=valid_count,
-        corrupt_rows=len(bad_lines),
-        file_size_bytes=None,
-        corrupt_samples=[line[:2000] for line in bad_lines[:5]],
-        reason_counts=reason_counts,
-        error_size_bytes=len(error_body),
-    )
-    logger.warning(
-        "[ledger] %s: quarantined %d corrupt row(s) from %s -> %s", service_id, len(bad_lines), object_key, error_key
-    )
 
 
 def boto3_client_hot():
@@ -2250,7 +2454,7 @@ def boto3_client_hot():
     )
 
 
-def sweep_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
+def sweep_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:
     """Crash net for the ledger pipeline. Returns a summary dict.
 
     1. Reclaims rows stuck in 'claimed' past LEDGER_RECLAIM_AFTER_S (dead
@@ -2356,7 +2560,12 @@ def sweep_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
             )
 
     st = (datetime.now(UTC) - timedelta(hours=lookback_hours)).isoformat()
-    discovered = discover_prefix(service_id, start_time=st)
+    discovered = discover_prefix(
+        service_id,
+        start_time=st,
+        run_id=run_id,
+        originating_task="ledger_sweep",
+    )
 
     dead_letter_count = 0
     try:
@@ -2396,7 +2605,13 @@ def sweep_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
 # duplicating the Faro-payload extraction logic.
 
 
-def discover_rum_prefix(service_id: str, prefix_subpath: str | None = None, start_time: str | None = None) -> int:
+def discover_rum_prefix(
+    service_id: str,
+    prefix_subpath: str | None = None,
+    start_time: str | None = None,
+    run_id: int | None = None,
+    originating_task: str = "rum_discovery",
+) -> int:
     """RUM counterpart of ``discover_prefix``: LIST one ``raw/rum/`` prefix
     (or a caller-supplied minute-scoped subpath under it), insert unseen keys
     into ``ingest_ledger`` as ``discovered``, and dispatch one ``convert_rum``
@@ -2437,9 +2652,17 @@ def discover_rum_prefix(service_id: str, prefix_subpath: str | None = None, star
         f_size = fos_result.get("file_sizes", {}).get(f_path, 0)
         object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
         cur.execute(
-            "INSERT INTO ingest_ledger (service_id, object_key, size_bytes, status, discovered_at) "
-            "VALUES (?, ?, ?, 'discovered', ?) ON CONFLICT DO NOTHING",
-            (service_id, object_key, f_size, time.time()),
+            "INSERT INTO ingest_ledger "
+            "(service_id, object_key, size_bytes, status, discovered_at, originating_task, originating_run_id) "
+            "VALUES (?, ?, ?, 'discovered', ?, ?, ?) ON CONFLICT DO NOTHING",
+            (
+                service_id,
+                object_key,
+                f_size,
+                time.time(),
+                originating_task if run_id is not None else None,
+                run_id,
+            ),
         )
         if cur.rowcount > 0:
             newly_discovered.append(object_key)
@@ -2674,67 +2897,61 @@ def _quarantine_rum_corrupt_lines(
     object_key: str,
     corrupt_lines: list[tuple[str, str]],
     valid_count: int,
-) -> None:
-    """Upload malformed RUM beacon lines to the ``errors/`` FOS prefix with a
-    ``.meta.json`` sidecar — the RUM counterpart of
-    ``_quarantine_convert_corrupt_lines``. Best-effort: the caller wraps this
-    in a try/except so a quarantine-upload failure never fails the convert
-    itself (the valid rows are already durably committed by the time this
-    runs)."""
-    service_id = src.get("service_id") or src.get("name", "")
-    source_name = src.get("name", service_id)
-    bucket = src.get("bucket", "")
+    *,
+    local_file: str,
+) -> dict[str, int]:
+    """Capture malformed RUM lines as exact-byte local evidence items."""
+    from backend.core.quarantine import capture_evidence
 
+    service_id = src.get("service_id") or src.get("name", "")
     prefix_path = src.get("prefix", "").strip("/")
     raw_prefix = f"{prefix_path}/raw/rum/" if prefix_path else "raw/rum/"
-    errors_prefix = f"{prefix_path}/errors/" if prefix_path else "errors/"
     if not object_key.startswith(raw_prefix):
-        return
-    error_key = errors_prefix + object_key[len(raw_prefix) :].replace(".gz", ".bad.jsonl")
-    meta_key = error_key + ".meta.json"
-    file_name = object_key.rsplit("/", 1)[-1]
+        return {
+            "valid_records": valid_count,
+            "malformed_records": len(corrupt_lines),
+            "cap_evictions": 0,
+            "quarantine_capture_failures": len(corrupt_lines),
+        }
 
-    bad_lines = [line for line, _ in corrupt_lines]
-    reason_counts: dict[str, int] = {}
-    for _, reason in corrupt_lines:
-        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    occurrences: dict[str, list[str]] = {}
+    for line, reason in corrupt_lines:
+        occurrences.setdefault(line, []).append(reason)
+    offsets: dict[str, int] = {}
+    evidence_results = []
+    byte_offset = 0
+    with gzip.open(local_file, "rb") as raw:
+        for ordinal, raw_line in enumerate(raw, start=1):
+            stripped = raw_line.strip().decode("utf-8", errors="replace")
+            current_offset = byte_offset
+            byte_offset += len(raw_line)
+            if not occurrences.get(stripped):
+                continue
+            reason = occurrences[stripped][offsets.get(stripped, 0)]
+            offsets[stripped] = offsets.get(stripped, 0) + 1
+            evidence_results.append(
+                capture_evidence(
+                    service_id,
+                    "rum",
+                    object_key,
+                    raw_line,
+                    line_ordinal=ordinal,
+                    byte_offset=current_offset,
+                    error_category=reason.partition(":")[0],
+                    error_text=reason,
+                )
+            )
 
-    error_body = "\n".join(bad_lines).encode()
-    fos_client.put_object(Bucket=bucket, Key=error_key, Body=error_body, ContentType="application/x-ndjson")
-
-    meta = {
-        "original_key": object_key,
-        "quarantined_at": datetime.now(UTC).isoformat(),
-        "valid_rows": valid_count,
-        "corrupt_rows": len(bad_lines),
-        "total_rows": valid_count + len(bad_lines),
-        "corrupt_samples": [line[:2000] for line in bad_lines[:5]],
-        "reason_counts": reason_counts,
-        "source_name": source_name,
+    failures = len(corrupt_lines) - len(evidence_results)
+    failures += sum(int(result.get("quarantine_capture_failures", 0)) for result in evidence_results)
+    if failures:
+        logger.error("[ledger] %s: RUM evidence capture failed for %s (%d line(s))", service_id, object_key, failures)
+    return {
+        "valid_records": valid_count,
+        "malformed_records": len(corrupt_lines),
+        "cap_evictions": sum(int(result.get("cap_evictions", 0)) for result in evidence_results),
+        "quarantine_capture_failures": failures,
     }
-    fos_client.put_object(Bucket=bucket, Key=meta_key, Body=json.dumps(meta).encode(), ContentType="application/json")
-
-    metadata_db.insert_quarantined_file(
-        service_id=service_id,
-        file_name=file_name,
-        source_name=source_name,
-        fos_key=object_key,
-        error_key=error_key,
-        meta_key=meta_key,
-        valid_rows=valid_count,
-        corrupt_rows=len(bad_lines),
-        file_size_bytes=None,
-        corrupt_samples=[line[:2000] for line in bad_lines[:5]],
-        reason_counts=reason_counts,
-        error_size_bytes=len(error_body),
-    )
-    logger.warning(
-        "[ledger] %s: quarantined %d corrupt RUM line(s) from %s -> %s",
-        service_id,
-        len(bad_lines),
-        object_key,
-        error_key,
-    )
 
 
 def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
@@ -2844,13 +3061,23 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
 
             vitals_rows, errors_rows, corrupt_lines = _parse_rum_beacon_file(local_file, service_id)
 
+            outcome = _new_object_outcome()
+            outcome["valid_records"] = len(vitals_rows) + len(errors_rows)
             if corrupt_lines:
                 try:
-                    _quarantine_rum_corrupt_lines(
-                        fos, src, object_key, corrupt_lines, len(vitals_rows) + len(errors_rows)
+                    quarantine_result = _quarantine_rum_corrupt_lines(
+                        fos,
+                        src,
+                        object_key,
+                        corrupt_lines,
+                        len(vitals_rows) + len(errors_rows),
+                        local_file=local_file,
                     )
-                except Exception as qe:
-                    logger.warning("[ledger] %s: RUM quarantine failed for %s: %s", service_id, object_key, qe)
+                    outcome.update(quarantine_result)
+                except Exception:
+                    logger.exception("[ledger] %s: RUM evidence processing failed for %s", service_id, object_key)
+                    outcome["malformed_records"] = len(corrupt_lines)
+                    outcome["quarantine_capture_failures"] = len(corrupt_lines)
 
             def _write_table(table_name: str, rows: list[dict], schema) -> None:
                 if not rows:
@@ -2917,8 +3144,23 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
                 logger.warning(
                     "[ledger] %s: RUM ingested_files bookkeeping failed for %s: %s", service_id, object_key, ie
                 )
+            if outcome["quarantine_capture_failures"]:
+                _mark_object_failed(outcome)
+            elif outcome["malformed_records"] or outcome["corrupt_containers"]:
+                outcome["objects_partial"] = 1
+            else:
+                outcome["objects_successful"] = 1
+            _record_ledger_object_outcome(service_id, object_key, outcome)
     except Exception as e:
-        return _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
+        local_file = locals().get("local_file")
+        failed_gzip = _corrupt_gzip_error(local_file) if local_file else None
+        if failed_gzip is not None and local_file:
+            outcome = _capture_corrupt_container(service_id, "rum", object_key, local_file, failed_gzip)
+        outcome = locals().get("outcome", _new_object_outcome())
+        _mark_object_failed(outcome)
+        failure_status = _ledger_record_failure(con_meta, service_id, object_key, str(e), lease_generation)
+        _record_ledger_object_outcome(service_id, object_key, outcome)
+        return failure_status
     finally:
         if admission_entered:
             admission_cm.__exit__(None, None, None)
@@ -2991,6 +3233,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
 
     bucket = src.get("bucket", "")
     active: list[str] = list(claimed_keys)
+    outcomes: dict[str, dict[str, int]] = {}
     duckdb_con = None
     admission_cm = ducklake_write_admission(service_id)
     admission_entered = False
@@ -3066,13 +3309,31 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                 source_files.append(s3_path)
                 file_sizes[object_key] = os.path.getsize(local_file)
                 per_file_counts[object_key] = (len(vitals_rows), len(errors_rows))
+                outcome = _new_object_outcome()
+                outcome["valid_records"] = len(vitals_rows) + len(errors_rows)
                 if corrupt_lines:
                     try:
-                        _quarantine_rum_corrupt_lines(
-                            fos, src, object_key, corrupt_lines, len(vitals_rows) + len(errors_rows)
+                        outcome.update(
+                            _quarantine_rum_corrupt_lines(
+                                fos,
+                                src,
+                                object_key,
+                                corrupt_lines,
+                                len(vitals_rows) + len(errors_rows),
+                                local_file=local_file,
+                            )
                         )
-                    except Exception as qe:
-                        logger.warning("[ledger] %s: RUM quarantine failed for %s: %s", service_id, object_key, qe)
+                    except Exception:
+                        logger.exception("[ledger] %s: RUM evidence processing failed for %s", service_id, object_key)
+                        outcome["malformed_records"] = len(corrupt_lines)
+                        outcome["quarantine_capture_failures"] = len(corrupt_lines)
+                if outcome["quarantine_capture_failures"]:
+                    _mark_object_failed(outcome)
+                elif outcome["malformed_records"]:
+                    outcome["objects_partial"] = 1
+                else:
+                    outcome["objects_successful"] = 1
+                outcomes[object_key] = outcome
 
             source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
 
@@ -3138,6 +3399,9 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     except Exception as e:
         for object_key in active:
             _ledger_record_failure(con_meta, service_id, object_key, str(e), claimed_generations[object_key])
+            outcome = _new_object_outcome()
+            _mark_object_failed(outcome)
+            _record_ledger_object_outcome(service_id, object_key, outcome)
         summary["failed"] += len(active)
         return summary
     finally:
@@ -3151,13 +3415,18 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             duckdb_con.close()
 
     for object_key in active:
-        summary["committed"] += int(
-            _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key]) == "committed"
-        )
+        outcome_status = _ledger_mark_committed(con_meta, service_id, object_key, claimed_generations[object_key])
+        if outcome_status == "committed":
+            summary["committed"] += 1
+            _record_ledger_object_outcome(service_id, object_key, outcomes[object_key])
+        else:
+            outcome = outcomes[object_key]
+            _mark_object_failed(outcome)
+            _record_ledger_object_outcome(service_id, object_key, outcome)
     return summary
 
 
-def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
+def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:
     """RUM counterpart of ``sweep_ledger_once``, scoped to ``raw/rum/``
     object keys via an explicit ``LIKE`` filter.
 
@@ -3249,7 +3518,12 @@ def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4) -> dict:
                 )
 
     st = (datetime.now(UTC) - timedelta(hours=lookback_hours)).isoformat()
-    discovered = discover_rum_prefix(service_id, start_time=st)
+    discovered = discover_rum_prefix(
+        service_id,
+        start_time=st,
+        run_id=run_id,
+        originating_task="ledger_rum_sweep",
+    )
 
     dead_letter_count = 0
     try:
@@ -3413,6 +3687,8 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
             )
         except Exception as e:
             logger.warning("[ledger] %s: raw-file batch delete failed: %s", service_id, e)
+            for key in chunk:
+                _record_raw_delete_failure(service_id, key)
             continue
         failed_keys = {err.get("Key") for err in (resp.get("Errors") or [])}
         now = time.time()
@@ -3424,6 +3700,8 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
                     "WHERE service_id=? AND object_key=? AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
                     (service_id, key, claim_token),
                 )
+                con.commit()
+                _record_raw_delete_failure(service_id, key)
                 continue
             cur.execute(
                 "UPDATE ingest_ledger SET raw_deleted_at=?, "

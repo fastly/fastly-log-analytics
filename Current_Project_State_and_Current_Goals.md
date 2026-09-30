@@ -160,9 +160,186 @@ The detailed inventory and per-job specifications live under
 
 **Cron 1: `log_discovery_{service_id}`**
 
-Documentation and design are complete. Implementation and runtime verification
-are next. Do not move to Cron 2 until Cron 1 is implemented and verified in both
-deployment modes with Admin, Analyst Path A, and Analyst Path B access checks.
+The design is approved and implementation is in progress. Do not move to Cron 2
+until Cron 1 is implemented and verified in both deployment modes with Admin,
+Analyst Path A, and Analyst Path B access checks.
+
+### Cron 1 implementation decisions — 2026-09-29
+
+- **Polling choice:** Preserve `log_period` and existing per-service
+  `cron_sync.interval_mins` / `interval_seconds` as the baseline schedule and
+  operator's freshness-vs-FOS-cost control. Add a per-service polling mode:
+  Regular (default, one discovery pass per scheduled tick) or Adaptive
+  (opt-in, at most two 3-second follow-up passes after finding new objects,
+  within a 20-second tick budget; stop on an empty pass). Adaptive can increase
+  FOS LIST charges and the UI must say so. Do not mutate the scheduler interval
+  during a tick.
+- **Freshness scope:** Optimize time until data is queryable from the active
+  serving instance (Admin / Analyst Path B). Analyst Path A's independent
+  snapshot-metadata sync is outside Cron 1's ≤10-second target. No universal
+  ≤10-second guarantee is made when configured polling cadence or processing
+  delay cannot meet it.
+- **Commit boundary:** Do not commit to DuckLake on every discovery tick just
+  to improve serving freshness. Standard serves local buffered rows; the
+  scheduled commit remains separate. High-Scale conversion/publication workers
+  own publication and acknowledgement.
+- **High-Scale recovery boundary:** Keep the request discovery scan at its
+  existing five recent minute prefixes. The separate `ledger_sweep` performs
+  a four-hour FOS-vs-ledger diff, so Cron 1 must not duplicate that wider LIST
+  on every tick. `provisioning.cron_sync.lookback_minutes` in the old job doc
+  is stale and is not an implemented setting.
+- **Counter persistence:** Persist the ten stable outcome counters as an
+  `outcome_counters` JSON object in each request/RUM `cron_runs` record. Keep
+  existing scalar fields populated under their current contracts.
+- **Quarantine upgrade:** No v3.0 deployment is running. v2 deployments must
+  be torn down before upgrading; the legacy FOS-backed quarantine API and
+  request-line uploader have been removed without v2 row migration or
+  compatibility shims.
+
+### Cron 1 development checkpoint — 2026-09-29
+
+- Implemented `cron_runs.outcome_counters` JSON persistence in the Postgres
+  schema and `log_cron_run`; the focused metadata CRUD suite and Postgres DDL
+  test pass.
+- Implemented the local exact-byte quarantine evidence store and
+  `quarantine_evidence` Postgres metadata table. Per-service captures use a
+  PostgreSQL advisory lock, enforce the shared FIFO cap, preserve SHA-256 and
+  bounded error metadata, and report capture failures to the ingest caller.
+  Service log reset also removes the new metadata and local evidence files.
+  Focused evidence, reset, buffer-corruption quarantine, metadata-schema, Ruff, and format
+  checks pass. Capture also converts per-service metadata-lock acquisition
+  failures into an explicit `quarantine_capture_failures` result; its regression
+  test passes.
+- Updated the Cron 1 design and implementation plan with the approved polling,
+  active-serving freshness, Path A scope, commit-boundary, and greenfield
+  upgrade decisions.
+- **Recovery scope resolved:** Preserve the five-prefix discovery scan; the
+  four-hour ledger-sweep FOS diff is the older-file catch-up path. Corrected
+  the stale `lookback_minutes` claim in the Cron 1 job reference; no new
+  lookback setting or extra per-tick LIST is planned.
+- **High-Scale counter attribution and Standard RUM:** Added additive
+  `originating_task` / `originating_run_id` ledger fields. Request/RUM
+  discovery, full-sync catch-up, and both ledger sweeps persist the exact
+  originating run on newly inserted objects; ON CONFLICT rediscovery does not
+  overwrite it. Focused request/RUM discovery and sweep tests pass. Celery
+  workers read this identity and call the new transactional per-object
+  outcome-snapshot helper. The helper replaces an object's prior
+  contribution (rather than incrementing blindly), updates the exact
+  originating run's JSON counters and legacy row-count scalars, and makes
+  data-plane failures visible as run errors. This supports late raw-deletion
+  results revising the originating object's counters instead of double-
+  counting or changing the commit run. High-Scale request/RUM conversion and
+  delayed raw-delete paths now write idempotent object outcomes. Standard RUM
+  captures malformed beacon lines as exact-byte local evidence, preserves
+  valid neighbors, and persists the same ten counters; malformed records and
+  corrupt containers make the run an error. Standard RUM's age-based raw
+  retention cleanup is separate from current-run object outcomes; cleanup
+  deletion failures are logged but do not alter those counters. Faro-only
+  failures yield a warning, while RUM data-plane errors remain errors. A
+  wrapper regression test now prevents Faro warnings from downgrading an
+  ingestion error. Standard request ingest now
+  persists its counters through the cron-run adapter and attributes async and
+  inline deletion failures to the exact source keys, so only affected objects
+  are classified as failed. A regression test also pins the cron wrapper's
+  error status and counter persistence. A DuckDB diagnostic reread failure now
+  falls back to scanning already-downloaded gzip files, preserving healthy
+  neighboring rows and malformed-row accounting. Focused request/RUM/
+  quarantine/metadata/cron suites pass, including this fallback regression.
+  Ruff and backend mypy pass. Do not infer outcomes from discovered counts or
+  the latest service run.
+- Polling-mode configuration and UI are implemented; Regular remains the
+  default, while Adaptive performs bounded follow-up discovery and discloses
+  increased potential FOS LIST costs. Focused tests cover Regular default,
+  Adaptive follow-up aggregation, empty-pass termination, the two-pass/time
+  cap, High-Scale discovery, settings round-trip, and the selector interaction.
+- The quarantine admin surface now reads the per-item evidence store rather
+  than legacy FOS file records. It provides filtered/paginated evidence
+  metadata, summary counts, exact-byte download capped at 50 MiB, and purge-one
+  or purge-all. Endpoint dependencies reject Analyst Path B, and the source
+  `access_level` guard rejects Analyst Path A. Backend router/evidence tests
+  and frontend component tests pass. Backend mypy/Ruff, frontend TypeScript,
+  ESLint, and formatting checks pass; generated OpenAPI types are current.
+  `make openapi-drift` sees the expected generated OpenAPI diff because this
+  work remains uncommitted; it compares against `git diff`, not just the live
+  backend schema.
+- Polling-mode and RUM outcome semantics are complete. The unused legacy
+  FOS-backed request-line quarantine helper and its obsolete tests were removed;
+  the legacy metadata table remains only for DuckLake buffer-file corruption.
+  Cron documentation has been corrected to describe PostgreSQL usage-log
+  storage and the local per-item quarantine store; the design no longer
+  asserts unchanged background-tab polling behavior.
+- The freshness benchmark now reads each target's service ID, backend URL,
+  and CDN URL from `FLA_FRESHNESS_<ENV>_*` variables and admin auth from
+  `REMOTE_ADMIN_TOKEN`, `ADMIN_SHARED_SECRET`, or `ADMIN_TOKEN`. It reports
+  configured Regular/Adaptive cadence, probe-send-to-serving visibility, and
+  discovery-completion-to-serving delay; High-Scale delay includes worker
+  queue/publication. It does not retrieve FOS object `LastModified` or
+  correlate aggregate changes to the probe marker, so results must not be
+  labeled object-to-serving latency.
+  **Verification update — 2026-09-29:** The first sequential `make -j1 ci`
+  run completed with 7,914 passed, 96 skipped, and five failures. Three
+  failures were directly related to this work: the route-table tripwire needed
+  a placeholder for the new quarantine `item_id` parameter; the changelog
+  breaking-path check required a note for the two intentionally removed
+  legacy quarantine endpoints; and a batch-conversion test still asserted the
+  removed FOS quarantine behavior. The route-tripwire and breaking-path checks
+  now pass together in isolation. The batch test now asserts local exact-byte
+  evidence and passes in a serial focused run; the two rollup/scoring tests
+  that had xdist worker aborts also pass in that run.
+
+  A subsequent `make test-ci` completed with 7,911 passed, 96 skipped, and
+  eight failures in `tests/routers/test_admin_log_accounting.py`; each reported
+  a row-count or gap mismatch. The module passes serially and with four xdist
+  workers, identifying the full-auto failures as shared test-data collisions
+  under high worker fan-out. A later bounded full backend run passed 7,918
+  tests and skipped 96, with one remaining assertion in
+  `tests/core/test_lake_info.py`: it assumed two physical DuckLake files for a
+  two-row tiny commit. The test now asserts only a non-empty file/row count
+  (which permits inlined or coalesced data) while preserving the exact
+  two-row calendar check; it passes in isolation.
+
+  **Verification update — 2026-09-30:** `PYTEST_XDIST_AUTO_NUM_WORKERS=4
+  make -j1 ci` did not actually bound the Makefile's backend run:
+  `test-ci` explicitly invokes `pytest -n auto`, which started workers through
+  `gw9`. That run finished with 7,912 passed, 96 skipped, and seven xdist
+  worker crashes (including a Python segmentation fault); the seven affected
+  test node IDs passed together with `uv run pytest -n 0`.
+
+  The initial clean-coverage run with explicit `-n 4` lost one xdist worker;
+  its 83% report was incomplete. The default PostgreSQL endpoint is an
+  unverified SSH forward, so subsequent runs use an isolated disposable
+  PostgreSQL container on `127.0.0.1:15432` instead. Its non-durable settings
+  prevent the test-database checkpoint stalls seen with the first disposable
+  container; they are strictly for tests. Terraform tests pass there.
+  A clean bounded-worker run on that container covered 55,804 statements,
+  missing 8,348 (above the 85% floor), with 7,959 passing and 96 skipped,
+  but two pre-existing expiry unit tests hit a closed pooled connection after
+  other tests. Those tests now mock cron-run persistence along with their
+  already mocked maintenance call and pass both serially and under xdist.
+  The final clean `-n 4` run passed 7,961 tests with 96 skipped; the
+  Terraform append passed both tests and the combined coverage was 85.02%
+  (8,357 misses out of 55,804 statements), above the 85% floor. The final
+  quarantine review found that a failed file unlink discarded the
+  evidence metadata while leaving an orphan file; eviction now fails the
+  capture and purge reports an error instead of losing the retry path.
+  Focused evidence/router regressions pass and coverage appended after this
+  fix remains above the floor (85.03%). The request/RUM error,
+  corrupt-gzip evidence, High-Scale attribution, and
+  scheduled/manual range regression tests pass individually.
+
+  Next.js was updated from 16.3.4 to 16.3.7 to address the critical
+  `GHSA-vcvr-r3jv-pc5j` advisory. OSV now reports no critical findings;
+  the frontend build, backend lint/format/mypy/import contracts, frontend
+  TypeScript/ESLint (831), security regression, secret scan, VCL/scorer,
+  deployment validation, and generated OpenAPI drift checks pass. Frontend
+  coverage passed (1,380 passed, 12 skipped), as did post-upgrade Chromium
+  E2E (92 passed, 4 skipped). The synthetic performance gate remains red on
+  this shared workstation: cold runs had one 90 ms or 98 ms sample among
+  otherwise 8-18 ms samples, above its 52 ms ceiling. Its query, generator,
+  and baseline are unchanged in this work; this measurement does not
+  establish a Cron 1 regression, but the local `make ci` gate cannot be
+  reported green. Approved live verification remains outstanding. Do not infer outcomes from
+  discovered counts or the latest service run.
 
 The approved request/RUM-aligned ingestion contract is:
 
@@ -192,8 +369,8 @@ The approved request/RUM-aligned ingestion contract is:
   `objects_processed`, `objects_successful`, `objects_partial`, and
   `objects_failed`.
 - High-Scale workers own conversion, validation, quarantine capture, durable
-  publication, and acknowledgement. Ledger sweep jobs only repair state and
-  redispatch eligible work.
+  publication, and acknowledgement. Ledger sweeps repair/redispatch work and
+  run a separate four-hour FOS-vs-ledger discovery diff.
 - Faro bundle reconciliation is the only intentionally RUM-specific warning
   condition. RUM data-plane failures remain errors.
 - Quarantine APIs and UI are Admin-only. Both analyst paths are denied by the

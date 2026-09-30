@@ -62,12 +62,17 @@ def _mock_fos(log_dir, keys):
         def get_paginator(self, *args, **kwargs):
             return MockPaginator()
 
+        def __init__(self):
+            self.delete_calls = []
+            self.delete_response = {}
+
         def get_object(self, Bucket, Key):
             with open(log_dir / Key, "rb") as fh:
                 return {"Body": io.BytesIO(fh.read())}
 
         def delete_objects(self, **kwargs):
-            return {}
+            self.delete_calls.append(kwargs)
+            return self.delete_response
 
     return MockFos()
 
@@ -124,7 +129,7 @@ def test_corrupt_row_pipeline_repairs_empty_value_via_null_substitution(
     assert done["rows_inserted"] >= 1
 
 
-def test_corrupt_row_pipeline_unfixable_lines_accumulate_in_corrupt_details(
+def test_corrupt_row_pipeline_captures_exact_evidence_and_still_deletes_source(
     fos_source, in_memory_duckdb, monkeypatch, tmp_path
 ):
     """Lines so malformed even the empty-value regex can't help (e.g.
@@ -132,51 +137,58 @@ def test_corrupt_row_pipeline_unfixable_lines_accumulate_in_corrupt_details(
     event surfaces this as ``corrupt_rows > 0`` and a sample list."""
     log_dir = tmp_path / "mock_logs"
     log_dir.mkdir(parents=True)
-    key = "raw/2026-05-18/12/2026-05-18T12-00-00.b.gz"
+    key = "raw/request/2026-05-18/12/2026-05-18T12-00-00.b.gz"
     (log_dir / key).parent.mkdir(parents=True)
+    malformed = b'{"timestamp": "2026-05-18T12:01:00Z", "status": 200\n'
     with gzip.open(log_dir / key, "wt") as f:
         f.write(json.dumps({"timestamp": "2026-05-18T12:00:00Z", "status": 200, "url": "/ok"}) + "\n")
         # Truly broken: unclosed brace
-        f.write('{"timestamp": "2026-05-18T12:01:00Z", "status": 200\n')
+        f.write(malformed.decode())
 
     _patch_ingest_to_local(monkeypatch, fos_source, in_memory_duckdb, log_dir)
-    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda *a: _mock_fos(log_dir, [key]))
+    mock_fos = _mock_fos(log_dir, [key])
+    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda *a: mock_fos)
+    captured = []
+    mock_fos.delete_response = {"Errors": [{"Key": key, "Code": "InternalError"}]}
 
-    events = _drain(ingest(source={**fos_source}))
+    def capture_evidence(service_id, source_type, original_key, payload, **metadata):
+        captured.append((source_type, original_key, payload))
+        return {"id": len(captured), "cap_evictions": 0, "quarantine_capture_failures": 1}
+
+    monkeypatch.setattr("backend.core.quarantine.capture_evidence", capture_evidence)
+
+    events = _drain(ingest(source={**fos_source}, delete_after=True))
     done = next(e for e in events if e["type"] == "done")
 
     # The valid row is ingested; the broken row is noted as corrupt.
     assert done["rows_inserted"] >= 1
+    assert done["corrupt_rows"] > 0
+    assert captured == [("request", key, malformed)]
+    assert done["outcome_counters"]["malformed_records"] == 1
+    assert done["outcome_counters"]["quarantine_capture_failures"] == 1
+    assert done["outcome_counters"]["source_delete_failures"] == 1
+    assert done["outcome_counters"]["objects_failed"] == 1
+    assert done["outcome_counters"]["objects_partial"] == 0
+    assert mock_fos.delete_calls == [
+        {"Bucket": fos_source["bucket"], "Delete": {"Objects": [{"Key": key}], "Quiet": True}}
+    ]
 
 
-def test_network_failure_during_corrupt_reread_rolls_back_affected_files(
+def test_network_failure_during_corrupt_reread_falls_back_to_gzip_scan(
     fos_source, in_memory_duckdb, monkeypatch, tmp_path
 ):
-    """When the corrupt-line re-read (``read_csv`` at line 856) raises a
-    network-class error, all staging rows for the affected files are
-    DELETEd so those files can be retried on the next sync tick.
+    """A failed DuckDB diagnostic scan falls back to parsing downloaded gzips.
 
-    The rollback path (lines 930-963) fires when the exception string
-    contains any of the network keywords (``"no such file"``,
-    ``"connection refused"``, etc.). After rollback:
-
-    - affected s3_paths are added to ``failed_paths``
-    - ``valid_rows`` is recalculated from what remains in staging
-    - the affected files are NOT marked as ingested in the metadata DB
-
-    Uses the raw ``in_memory_duckdb`` (no ``_Rewrite`` wrapper) because
-    the download-based flow handles s3→local mapping natively through
-    ``_download_chunk_to_local``, and the wrapper's bucket-prefix
-    rewriting corrupts the ``count_map`` / ``valid_counts`` lookup the
-    corrupt-detection code relies on.
+    The raw in-memory connection exercises the download-based path without
+    rewriting paths used by the diagnostic query.
     """
     import backend.core.duckdb as my_duckdb
 
     log_dir = tmp_path / "mock_logs"
     log_dir.mkdir(parents=True)
 
-    clean_key = "raw/2026-05-18/13/2026-05-18T13-00-00.v.gz"
-    corrupt_key = "raw/2026-05-18/13/2026-05-18T13-00-00.r.gz"
+    clean_key = "raw/request/2026-05-18/13/2026-05-18T13-00-00.v.gz"
+    corrupt_key = "raw/request/2026-05-18/13/2026-05-18T13-00-00.r.gz"
     for k in (clean_key, corrupt_key):
         (log_dir / k).parent.mkdir(parents=True, exist_ok=True)
 
@@ -205,10 +217,13 @@ def test_network_failure_during_corrupt_reread_rolls_back_affected_files(
     events = _drain(ingest(source={**fos_source}))
     done = next(e for e in events if e["type"] == "done")
 
-    assert done["rows_inserted"] >= 1
+    assert done["rows_inserted"] == 2
+    assert done["outcome_counters"]["valid_records"] == 2
+    assert done["outcome_counters"]["malformed_records"] == 1
+    assert done["outcome_counters"]["quarantine_capture_failures"] == 0
 
     from backend.core import metadata as metadata_db
 
     ingested = metadata_db.get_ingested_filenames(fos_source["name"])
-    corrupt_s3 = f"s3://{fos_source['bucket']}/{corrupt_key}"
-    assert corrupt_s3 not in ingested
+    assert f"s3://{fos_source['bucket']}/{clean_key}" in ingested
+    assert f"s3://{fos_source['bucket']}/{corrupt_key}" in ingested

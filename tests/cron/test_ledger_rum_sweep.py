@@ -55,7 +55,13 @@ def test_rum_ledger_sweep_success(monkeypatch):
         "broker_ok": True,
         "dead_letter": 0,
     }
-    monkeypatch.setattr("backend.core.ingest.sweep_rum_ledger_once", lambda sid: sweep_result)
+    sweep_calls = []
+
+    def mock_sweep(sid, run_id=None):
+        sweep_calls.append((sid, run_id))
+        return sweep_result
+
+    monkeypatch.setattr("backend.core.ingest.sweep_rum_ledger_once", mock_sweep)
 
     start_progress = MagicMock()
     end_progress = MagicMock()
@@ -67,6 +73,7 @@ def test_rum_ledger_sweep_success(monkeypatch):
 
     start_progress.assert_called_once_with(777, service_id=SERVICE_ID, task="ledger_rum_sweep")
     end_progress.assert_called_once_with(777)
+    assert sweep_calls == [(SERVICE_ID, 777)]
 
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
@@ -100,7 +107,7 @@ def test_rum_ledger_sweep_warning_on_dead_letter_or_broker_down(monkeypatch):
         "broker_ok": False,
         "dead_letter": 4,
     }
-    monkeypatch.setattr("backend.core.ingest.sweep_rum_ledger_once", lambda sid: sweep_result)
+    monkeypatch.setattr("backend.core.ingest.sweep_rum_ledger_once", lambda sid, run_id=None: sweep_result)
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())

@@ -72,7 +72,7 @@
 - **Audit Checklist:**
   - Confirm day bundle preserves exact mathematical sums for count, bytes, and error tallies.
   - Verify that hourly files are deleted only AFTER the day bundle passes read validation.
-  - Verify zero Class A FOS calls in `usage_log.db`.
+  - Verify zero Class A FOS calls in PostgreSQL's `usage_log` table.
 
 ---
 

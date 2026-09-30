@@ -86,6 +86,8 @@ export function AnalystSchedulePanel({
 interface LogSyncSectionProps {
   syncEnabled: boolean
   setSyncEnabled: (v: boolean) => void
+  pollingMode: 'regular' | 'adaptive'
+  setPollingMode: (v: 'regular' | 'adaptive') => void
   deleteAfter: boolean
   setDeleteAfter: (v: boolean) => void
   dataRetention: string
@@ -116,6 +118,8 @@ interface LogSyncSectionProps {
 export function LogSyncSection({
   syncEnabled,
   setSyncEnabled,
+  pollingMode,
+  setPollingMode,
   deleteAfter,
   setDeleteAfter,
   dataRetention,
@@ -157,6 +161,27 @@ export function LogSyncSection({
           </p>
         </div>
         <Switch id="enable-sync" checked={syncEnabled} onCheckedChange={setSyncEnabled} />
+      </div>
+
+      <div className="grid gap-1.5 max-w-sm">
+        <Label htmlFor="polling-mode" className="text-[11px] font-semibold">Discovery Polling Mode</Label>
+        <Select
+          value={pollingMode}
+          onValueChange={v => {
+            if (v === 'regular' || v === 'adaptive') setPollingMode(v)
+          }}
+        >
+          <SelectTrigger id="polling-mode" aria-label="Discovery Polling Mode" className="h-7 text-[11px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="regular" className="text-[11px]">Regular</SelectItem>
+            <SelectItem value="adaptive" className="text-[11px]">Adaptive</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[10px] text-muted-foreground leading-tight">
+          Adaptive makes up to two short follow-up discovery passes after finding logs. It can increase FOS LIST costs.
+        </p>
       </div>
 
       <div className={`space-y-5 pl-4 border-l-2 transition-opacity ${syncEnabled ? 'opacity-100 border-primary' : 'opacity-40 border-muted pointer-events-none'}`}>

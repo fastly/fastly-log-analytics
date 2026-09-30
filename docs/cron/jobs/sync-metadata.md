@@ -68,7 +68,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 Calls:** Class B GET calls for metadata pointers must be attributed to `cron.sync_metadata` in `usage_log.db`.
+  - **FOS S3 Calls:** Class B GET calls for metadata pointers must be attributed to `cron.sync_metadata` in PostgreSQL's `usage_log` table.
   - **Zero FOS Class A PUTs:** Analysts must never execute PUT or DELETE operations against FOS.
   - **DuckDB DDL:** View refresh queries must be tracked in `telemetry_queries`.
 - **Timing & Resource Budgets:**

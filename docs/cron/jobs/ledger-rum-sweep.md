@@ -68,7 +68,7 @@
 - **100% Query & API Call Capture:**
   - **PostgreSQL DML:** All ledger updates must be timed and instrumented.
   - **Queue Probes:** Valkey queue depth checks must be tracked.
-  - **FOS Calls:** S3 LIST diff calls must be logged in `usage_log.db`.
+  - **FOS Calls:** S3 LIST diff calls must be logged in PostgreSQL's `usage_log` table.
 - **Timing & Resource Budgets:**
   - Sweep execution: < 15 seconds.
   - PostgreSQL transaction duration: < 100ms.

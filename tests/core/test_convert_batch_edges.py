@@ -27,7 +27,7 @@ import duckdb
 
 from backend.core.ingest import convert_batch_objects
 from backend.core.metadata.base import get_con
-from backend.core.metadata.quarantine import list_quarantined_files
+from backend.core.metadata.quarantine import list_quarantine_evidence
 
 BUCKET = "test-bucket"
 
@@ -36,6 +36,7 @@ def _clear_ledger(service_id: str):
     con = get_con(service_id)
     cur = con.cursor()
     cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (service_id,))
+    con.execute("DELETE FROM quarantine_evidence WHERE service_id=?", (service_id,))
     con.execute("DELETE FROM quarantined_files")
     con.commit()
     return con, cur
@@ -101,6 +102,7 @@ def _batch_env(service_id: str, tmp_path, download, fos=None, attach=None, cfg=N
     real_attach = _attacher(str(tmp_path / "cat.ducklake"), str(tmp_path / "lakedata"))
     with (
         patch("backend.config.load_config", return_value=cfg or {"service_id": service_id}),
+        patch("backend.config.SERVICES_DATA_DIR", tmp_path / "services"),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.ingest._get_fos_client", return_value=fos if fos is not None else MagicMock()),
         patch("backend.core.ingest._download_chunk_to_local", side_effect=download),
@@ -360,19 +362,17 @@ def test_convert_batch_quarantines_per_originating_file(tmp_path):
 
     assert summary["committed"] == 2, summary
 
-    # Exactly one file quarantined, and it is the dirty one.
-    rows = list_quarantined_files(service_id)
+    # The exact malformed line is stored locally against its originating object.
+    rows = list_quarantine_evidence(service_id)
     assert len(rows) == 1
-    assert rows[0]["file_name"] == "dirty.json.gz"
-    assert rows[0]["fos_key"] == dirty_key
-    assert rows[0]["corrupt_rows"] == 1
-    assert rows[0]["valid_rows"] == 1
-
-    keys_written = [c.kwargs["Key"] for c in fos.put_object.call_args_list]
-    assert keys_written == [
-        "errors/year=2026/month=08/day=27/hour=16/minute=21/dirty.json.bad.jsonl",
-        "errors/year=2026/month=08/day=27/hour=16/minute=21/dirty.json.bad.jsonl.meta.json",
-    ]
+    item = rows[0]
+    assert item["source_type"] == "request"
+    assert item["original_key"] == dirty_key
+    assert item["line_ordinal"] == 2
+    assert item["error_category"] == "invalid_json"
+    evidence_path = tmp_path / "services" / service_id / "quarantine" / item["file_path"]
+    assert evidence_path.read_bytes() == b'{"timestamp": "2026-08-27T16:21:01Z", "url": "/trunc"\n'
+    fos.put_object.assert_not_called()
 
     # The NULL-timestamp row is excluded from the lake; the good rows land.
     reader = _lake_reader(attach)

@@ -1956,6 +1956,8 @@ def test_run_expire_snapshots_swallows_iceberg_exception():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=1),
+        patch("backend.core.duckdb.log_cron_run"),
         patch("backend.core.iceberg.run_cloud_maintenance", side_effect=RuntimeError("S3 throttled")),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
@@ -1971,6 +1973,8 @@ def test_run_expire_snapshots_handles_error_dict_without_raising():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "s", "service_id": "s"}),
+        patch("backend.core.duckdb.start_cron_run", return_value=1),
+        patch("backend.core.duckdb.log_cron_run"),
         patch("backend.core.iceberg.run_cloud_maintenance", return_value={"error": "expire conflict"}),
         patch("backend.utils.usage_logger.flush_usage_log"),
     ):
@@ -3078,7 +3082,7 @@ def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
         patch(
             "backend.core.ingest.sweep_ledger_once",
             return_value={"reclaimed": 5, "redispatched": 5, "discovered": 10, "broker_ok": True, "dead_letter": 0},
-        ),
+        ) as mock_sweep,
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *args, **kw: log_calls.append((args, kw))),
     ):
         _run_ledger_sweep.__wrapped__("svc-sweep-1")
@@ -3086,6 +3090,7 @@ def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
     assert prog_started == [(55, {"service_id": "svc-sweep-1", "task": "ledger_sweep"})]
     assert prog_ended == [55]
     assert finalized == [(fake_src, 55)]
+    mock_sweep.assert_called_once_with("svc-sweep-1", run_id=55)
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
     assert args[3] == "success"

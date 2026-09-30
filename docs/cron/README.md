@@ -12,12 +12,12 @@ Every scheduled background job in this system must adhere to these non-negotiabl
    - Every background job has a dedicated specification file under [`docs/cron/jobs/`](jobs/) documenting its purpose, cadence, architectural execution matrix, role permissions, step-by-step lifecycle, query audit contract, failure modes, manual triggers, and AI verification checklist.
 2. **100% Query, API Call & Telemetry Capture:**
    - Background jobs are subject to the same strict zero-dark-work mandate as user-facing pages.
-   - Every database query (DuckDB analytical SQL, ClickHouse MergeTree DDL/DML, PostgreSQL ledger updates, SQLite operational writes), cloud storage API call (FOS S3 Class A PUT/DELETE and Class B GET/LIST), Fastly API call (Edge Stats, NGWAF signals), and DNS PTR resolution must be timed, attributed, and recorded.
+   - Every database query (DuckDB analytical SQL, ClickHouse MergeTree DDL/DML, and PostgreSQL metadata operations), cloud storage API call (FOS S3 Class A PUT/DELETE and Class B GET/LIST), Fastly API call (Edge Stats, NGWAF signals), and DNS PTR resolution must be timed, attributed, and recorded.
 3. **Multi-Engine Accounting & Observability:**
    - Jobs that interact with **ClickHouse** must register queries with `query_registry.register("ClickHouse", ...)` so they appear in the Live Query Monitor.
    - Jobs that interact with **DuckLake / DuckDB** must record execution durations in `telemetry_queries`.
-   - Jobs that perform FOS S3 operations must record Class A / Class B counts in `usage_log.db`.
-   - Jobs that modify operational SQLite databases must use `ThreadLocalPool` with connection wait times (`app.thread_wait_ms`) instrumented.
+   - Jobs that perform FOS S3 operations must record Class A / Class B counts in PostgreSQL's `usage_log` table.
+   - Jobs that modify operational metadata must use the shared PostgreSQL connection pool and its query instrumentation.
 4. **Strict Concurrency & Pod Safety:**
    - Long-running cloud write jobs (`optimize`, `expire`, `log_commit`) must acquire exclusive per-service distributed or file-based locks.
    - In distributed deployments (`DEPLOYMENT_MODE=high_throughput`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
@@ -47,11 +47,11 @@ flowchart TD
         APStd["In-Process APScheduler<br/>(FastAPI Web Backend)"]
         DuckDBStd["Local DuckDB + Parquet Buffer<br/>cache/{bucket}/"]
         FOSStd["Fastly Object Storage (FOS)<br/>S3-Compatible Bucket"]
-        SQLiteStd["Per-Service SQLite (WAL)<br/>metadata.db & usage_log.db"]
+        PostgresStd["Unified PostgreSQL 16<br/>operational metadata & usage_log"]
 
         APStd -->|Ingest / Compact| DuckDBStd
         APStd -->|Commit / Optimize| FOSStd
-        APStd -->|Audit / State| SQLiteStd
+        APStd -->|Audit / State| PostgresStd
     end
 
     subgraph HighScaleMode["High-Scale Mode (DEPLOYMENT_MODE=high_throughput)"]
@@ -129,7 +129,7 @@ Every background job must participate in the comprehensive telemetry and audit h
 1. **`cron_runs` Table in SQLite (`metadata.db`):**
    - Every execution records: `run_id`, `service_id`, `job_id`, `status` (`success`, `warning`, `error`), `started_at`, `duration_s`, `details_json`.
    - Result tallies (files ingested, rows committed, bytes compacted, memory reclaimed) must be recorded in `details_json`.
-2. **`usage_log.db` Billing & Cost Telemetry:**
+2. **PostgreSQL `usage_log` Billing & Cost Telemetry:**
    - Any job executing FOS operations must record Class A (PUT, DELETE, LIST) and Class B (GET) calls with exact operation attributes.
 3. **`cron_progress` Server-Sent Events (SSE):**
    - Ingest and maintenance tasks emit live step-by-step progress events consumed by the Admin UI (`/admin/sync-status`).
@@ -182,7 +182,7 @@ When verifying background jobs during automated test suites or dedicated AI test
   - Assert that execution status is `success` and `duration_s > 0`.
 - [ ] **4. Telemetry & Query Audit Verification:**
   - Verify queries appear in Live Query Monitor (`/admin/queries`) under appropriate engines (`DuckDB`, `ClickHouse`, `PostgreSQL`, `SQLite`).
-  - Verify FOS operations are attributed in `usage_log.db`.
+  - Verify FOS operations are attributed in PostgreSQL's `usage_log` table.
 - [ ] **5. Dev Safety Verification (`FLA_DEV_NO_CRONS=1`):**
   - Launch application with `FLA_DEV_NO_CRONS=1`.
   - Confirm cloud-writing jobs are not registered and do not fire.

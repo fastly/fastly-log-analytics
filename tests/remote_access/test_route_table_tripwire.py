@@ -79,6 +79,7 @@ _PATH_PARAM_SUBSTITUTIONS = {
     "run_id": "run1",
     "field_name": "field1",
     "label_id": "label1",
+    "item_id": "1",
     "version": "v1",
     "sid": "sid1",
     "view_id": "view1",

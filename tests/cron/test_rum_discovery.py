@@ -52,8 +52,8 @@ def test_rum_discovery_success(monkeypatch):
     monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
     monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
 
-    def mock_discover_rum_prefix(sid, prefix_subpath=None):
-        discovered_calls.append(prefix_subpath)
+    def mock_discover_rum_prefix(sid, prefix_subpath=None, run_id=None):
+        discovered_calls.append((prefix_subpath, run_id))
         return 2  # 2 files per minute slice
 
     monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", mock_discover_rum_prefix)
@@ -69,6 +69,7 @@ def test_rum_discovery_success(monkeypatch):
     start_progress.assert_called_once_with(555, service_id=SERVICE_ID, task="rum_discovery")
     end_progress.assert_called_once_with(555)
     assert len(discovered_calls) == 5  # 5 minute slices
+    assert all(run_id == 555 for _, run_id in discovered_calls)
 
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
@@ -100,7 +101,7 @@ def test_rum_discovery_faro_failure_records_warning(monkeypatch):
         "backend.cron.jobs.rum_sync._reconcile_faro_bundle",
         MagicMock(side_effect=RuntimeError("FOS bundle upload timeout")),
     )
-    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda sid, prefix_subpath=None: 1)
+    monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda sid, prefix_subpath=None, run_id=None: 1)
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())

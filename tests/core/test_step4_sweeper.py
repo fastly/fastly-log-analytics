@@ -171,18 +171,21 @@ def test_sweeper_discovers_unseen_files(monkeypatch):
         ):
             with patch("backend.core.ingest.list_fos_files", side_effect=mock_list_fos_files):
                 with patch("backend.core.ingest.convert_batch_files.delay") as mock_convert_delay:
-                    summary = sweep_ledger_once(service_id)
+                    summary = sweep_ledger_once(service_id, run_id=79)
                     mock_convert_delay.assert_called_with(service_id, [object_key])
 
     assert summary["discovered"] == 1
     cur.execute(
-        "SELECT status, size_bytes, discovered_at FROM ingest_ledger WHERE service_id=? AND object_key=?",
+        "SELECT status, size_bytes, discovered_at, originating_task, originating_run_id "
+        "FROM ingest_ledger WHERE service_id=? AND object_key=?",
         (service_id, object_key),
     )
     row = cur.fetchone()
     assert row["status"] == "discovered"
     assert row["size_bytes"] == 1234
     assert row["discovered_at"] is not None
+    assert row["originating_task"] == "ledger_sweep"
+    assert row["originating_run_id"] == 79
 
 
 def test_convert_failure_requeues_then_quarantines(monkeypatch):
@@ -499,7 +502,7 @@ def _read_expr_for(raw_file, columns_sql="{'timestamp': 'VARCHAR', 'url': 'VARCH
     )
 
 
-def test_quarantine_convert_corrupt_lines_detects_and_uploads(tmp_path):
+def test_quarantine_convert_corrupt_lines_captures_local_evidence(tmp_path):
     """A malformed JSON line: ignore_errors=true does NOT drop it, it
     inserts an all-NULL row (verified empirically against real DuckDB) —
     that NULL-timestamp row is the actual corruption signal this function
@@ -527,25 +530,32 @@ def test_quarantine_convert_corrupt_lines_detects_and_uploads(tmp_path):
     fos = MagicMock()
     src = {"service_id": "svc-quarantine", "name": "svc-quarantine", "bucket": "test-bucket", "prefix": ""}
 
-    with patch("backend.core.ingest.metadata_db.insert_quarantined_file") as mock_insert:
-        _quarantine_convert_corrupt_lines(con, fos, src, read_expr, str(raw_file), "raw/request/year=2026/file.gz")
+    with patch(
+        "backend.core.quarantine.capture_evidence",
+        return_value={"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
+    ) as capture:
+        result = _quarantine_convert_corrupt_lines(
+            con, fos, src, read_expr, str(raw_file), "raw/request/year=2026/file.gz"
+        )
 
-    assert fos.put_object.call_count == 2  # .bad.jsonl + .meta.json
-    keys = [call.kwargs["Key"] for call in fos.put_object.call_args_list]
-    assert any(k.endswith(".bad.jsonl") for k in keys)
-    assert any(k.endswith(".meta.json") for k in keys)
-
-    mock_insert.assert_called_once()
-    kwargs = mock_insert.call_args.kwargs
-    assert kwargs["corrupt_rows"] == 1
-    assert kwargs["valid_rows"] == 2
-    assert kwargs["service_id"] == "svc-quarantine"
+    fos.put_object.assert_not_called()
+    assert result == {
+        "valid_records": 2,
+        "malformed_records": 1,
+        "cap_evictions": 0,
+        "quarantine_capture_failures": 0,
+    }
+    assert capture.call_args.args[0:3] == (
+        "svc-quarantine",
+        "request",
+        "raw/request/year=2026/file.gz",
+    )
+    assert capture.call_args.args[3] == (corrupt_line + "\n").encode()
 
 
 def test_quarantine_convert_corrupt_lines_noop_when_nothing_dropped(tmp_path):
-    """The common case (no corrupt lines) must touch neither FOS nor the
-    quarantine table."""
-    from unittest.mock import MagicMock, patch
+    """The common case (no corrupt lines) performs no evidence writes."""
+    from unittest.mock import MagicMock
 
     import duckdb
 
@@ -560,11 +570,14 @@ def test_quarantine_convert_corrupt_lines_noop_when_nothing_dropped(tmp_path):
     fos = MagicMock()
     src = {"service_id": "svc-clean", "name": "svc-clean", "bucket": "test-bucket", "prefix": ""}
 
-    with patch("backend.core.ingest.metadata_db.insert_quarantined_file") as mock_insert:
-        _quarantine_convert_corrupt_lines(con, fos, src, read_expr, str(raw_file), "raw/file.gz")
-
+    result = _quarantine_convert_corrupt_lines(con, fos, src, read_expr, str(raw_file), "raw/request/file.gz")
     fos.put_object.assert_not_called()
-    mock_insert.assert_not_called()
+    assert result == {
+        "valid_records": 1,
+        "malformed_records": 0,
+        "cap_evictions": 0,
+        "quarantine_capture_failures": 0,
+    }
 
 
 def test_convert_object_excludes_null_timestamp_rows_from_lake(tmp_path, monkeypatch):

@@ -252,7 +252,7 @@ perf-ci:
 # Fast local loop (~1-2m): contract drift, typechecks, linter, focused vitest, and focused unit tests
 fast-ci:
 	$(MAKE) openapi-drift
-	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
+	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
 	cd frontend && npx vitest run hooks/ lib/ stores/ tests/backend-contract.test.ts
 	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
 
@@ -274,12 +274,15 @@ e2e-all:
 # (chromium+firefox+webkit). Intentionally heavy (several minutes + a browser
 # install): use `make test-ci` / `make test-frontend-ci` / `make e2e` for fast
 # focused loops, but run the whole `make ci` before pushing to be confident.
-# The e2e step runs LAST so the cheaper backend/frontend/static gates fail fast
-# before the multi-minute browser matrix.
+# The fast static/security gates run FIRST to fail fast in seconds before the
+# multi-minute test suites. Pytest and Vitest run sequentially to prevent
+# CPU core exhaustion and memory swap thrashing.
 ci:
 	$(MAKE) gen-types
-	@$(MAKE) -j2 test-ci test-frontend-ci
-	@$(MAKE) -j2 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift perf-ci deploy-validate stray-file-gate
+	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift deploy-validate stray-file-gate
+	$(MAKE) test-ci
+	$(MAKE) test-frontend-ci
+	$(MAKE) perf-ci
 	$(MAKE) e2e
 
 # ── v2.0 cleanup targets ──────────────────────────────────────────────────────

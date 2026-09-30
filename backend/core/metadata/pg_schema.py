@@ -158,6 +158,9 @@ _INGEST_LEDGER_ALTERS = (
     "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS published_at DOUBLE PRECISION",
     "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS error_kind TEXT",
     "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS next_attempt_at DOUBLE PRECISION",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS originating_task TEXT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS originating_run_id BIGINT",
+    "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",
     "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS raw_delete_claim_token TEXT",
     "ALTER TABLE ingest_ledger ADD COLUMN IF NOT EXISTS raw_delete_claimed_at DOUBLE PRECISION",
     "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_claimed_scan ON ingest_ledger(service_id, status, claimed_at)",
@@ -183,6 +186,7 @@ _INGEST_LEDGER_INDEX_NAMES = (
 # through this module, never through ``sqlite_migrations``). Same additive,
 # rerunnable pattern as ``_INGEST_LEDGER_ALTERS`` above.
 _QUARANTINED_FILES_ALTERS = ("ALTER TABLE quarantined_files ADD COLUMN IF NOT EXISTS reason_counts TEXT DEFAULT '{}'",)
+_CRON_RUNS_ALTERS = ("ALTER TABLE cron_runs ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",)
 
 # SQLSTATEs that mean "a concurrently-booting pod created this first".
 # 42P07 duplicate_table (covers indexes too), 42710 duplicate_object,
@@ -244,6 +248,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
     statements.extend(_INGEST_LEDGER_ALTERS)
     statements.extend(_QUARANTINED_FILES_ALTERS)
+    statements.extend(_CRON_RUNS_ALTERS)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
     statements.append(_SEED_INITIAL_TOS_DDL)

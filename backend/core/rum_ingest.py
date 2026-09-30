@@ -297,14 +297,19 @@ def ingest_rum_logs(
         CLIENT_VITALS_ARROW_SCHEMA,
     )
     from backend.core.ingest import (
+        _capture_corrupt_container,
+        _corrupt_gzip_error,
         _deterministic_buffer_name,
         _download_chunk_to_local,
+        _new_object_outcome,
+        _quarantine_rum_corrupt_lines,
         _recover_in_flight,
         list_fos_files,
     )
 
     start_time = time.time()
     run_id = start_cron_run(service_id, "rum_sync")
+    outcome_counters = _new_object_outcome(processed=0)
     yield ("started", run_id)
 
     src = get_source_for_service(service_id)
@@ -318,6 +323,7 @@ def ingest_rum_logs(
             "success",
             files_downloaded=0,
             rows_ingested=0,
+            outcome_counters=outcome_counters,
             run_id=run_id,
         )
         return
@@ -387,8 +393,8 @@ def ingest_rum_logs(
 
         for chunk in chunks:
             buf_filename = _deterministic_buffer_name(chunk)
-            vitals_rows = []
-            errors_rows = []
+            vitals_rows: list[dict[str, object]] = []
+            errors_rows: list[dict[str, object]] = []
             vitals_batch_records = []
             errors_batch_records = []
 
@@ -396,16 +402,23 @@ def ingest_rum_logs(
                 s3_to_local, _ = _download_chunk_to_local(s3, chunk, tmpdir)
 
                 for s3_path in chunk:
+                    outcome_counters["objects_processed"] += 1
                     if s3_path not in s3_to_local:
                         error_count += 1
+                        outcome_counters["objects_failed"] += 1
                         logger.error(f"RUM sync: Failed to download {s3_path}")
                         yield ("error", s3_path, "Download failed")
                         continue
 
                     local_path = s3_to_local[s3_path]
+                    vitals_start = len(vitals_rows)
+                    errors_start = len(errors_rows)
+                    vitals_total_start = total_vitals_rows
+                    errors_total_start = total_errors_rows
                     vitals_count_for_file = 0
                     errors_count_for_file = 0
                     size = file_sizes.get(s3_path, 0)
+                    corrupt_lines: list[tuple[str, str]] = []
 
                     try:
                         # Decompress and parse log lines
@@ -629,13 +642,67 @@ def ingest_rum_logs(
                                             total_vitals_rows += 1
                                 except Exception as e:
                                     logger.warning(f"RUM sync: Failed to parse RUM log line: {e}")
+                                    category = (
+                                        "invalid_json"
+                                        if isinstance(e, (json.JSONDecodeError, UnicodeDecodeError))
+                                        else "parse_error"
+                                    )
+                                    corrupt_lines.append((line.strip(), f"{category}: {str(e)[:2000]}"))
                                     continue
+
+                        valid_for_file = vitals_count_for_file + errors_count_for_file
+                        outcome_counters["valid_records"] += valid_for_file
+                        if corrupt_lines:
+                            try:
+                                quarantine_result = _quarantine_rum_corrupt_lines(
+                                    s3,
+                                    src,
+                                    s3_path.removeprefix(f"s3://{bucket}/"),
+                                    corrupt_lines,
+                                    valid_for_file,
+                                    local_file=local_path,
+                                )
+                            except Exception:
+                                logger.exception("RUM sync: exact-byte quarantine failed for %s", s3_path)
+                                quarantine_result = {
+                                    "malformed_records": len(corrupt_lines),
+                                    "cap_evictions": 0,
+                                    "quarantine_capture_failures": len(corrupt_lines),
+                                }
+                            outcome_counters["malformed_records"] += quarantine_result["malformed_records"]
+                            outcome_counters["cap_evictions"] += quarantine_result["cap_evictions"]
+                            outcome_counters["quarantine_capture_failures"] += quarantine_result[
+                                "quarantine_capture_failures"
+                            ]
+                            if quarantine_result["quarantine_capture_failures"]:
+                                outcome_counters["objects_failed"] += 1
+                            else:
+                                outcome_counters["objects_partial"] += 1
+                        else:
+                            outcome_counters["objects_successful"] += 1
 
                         vitals_batch_records.append((s3_path, vitals_count_for_file, size))
                         errors_batch_records.append((s3_path, errors_count_for_file, size))
                         yield ("file_done", s3_path.split("/")[-1], vitals_count_for_file + errors_count_for_file)
                     except Exception as e:
                         error_count += 1
+                        del vitals_rows[vitals_start:]
+                        del errors_rows[errors_start:]
+                        total_vitals_rows = vitals_total_start
+                        total_errors_rows = errors_total_start
+                        failed_gzip = _corrupt_gzip_error(local_path)
+                        if failed_gzip is not None:
+                            result = _capture_corrupt_container(
+                                service_id,
+                                "rum",
+                                s3_path.removeprefix(f"s3://{bucket}/"),
+                                local_path,
+                                failed_gzip,
+                            )
+                            outcome_counters["corrupt_containers"] += result["corrupt_containers"]
+                            outcome_counters["cap_evictions"] += result["cap_evictions"]
+                            outcome_counters["quarantine_capture_failures"] += result["quarantine_capture_failures"]
+                        outcome_counters["objects_failed"] += 1
                         logger.error(f"RUM sync: Failed to ingest RUM log file {s3_path}: {e}")
                         yield ("error", s3_path, str(e))
                         continue
@@ -689,8 +756,17 @@ def ingest_rum_logs(
 
         yield ("done", total_vitals_rows + total_errors_rows)
         duration_s = time.time() - start_time
-        had_errors = error_count > 0
-        run_status = "warning" if had_errors else "success"
+        had_errors = any(
+            (
+                error_count,
+                outcome_counters["malformed_records"],
+                outcome_counters["corrupt_containers"],
+                outcome_counters["quarantine_capture_failures"],
+                outcome_counters["source_delete_failures"],
+                outcome_counters["objects_failed"],
+            )
+        )
+        run_status = "error" if had_errors else "success"
         summary_msg = (
             f"Ingested {total_vitals_rows + total_errors_rows} RUM rows ({error_count} file error(s))"
             if had_errors
@@ -705,6 +781,7 @@ def ingest_rum_logs(
             rows_ingested=total_vitals_rows + total_errors_rows,
             run_id=run_id,
             summary=summary_msg,
+            outcome_counters=outcome_counters,
         )
     except Exception as e:
         logger.error(f"RUM ingest failed: {e}", exc_info=True)
@@ -716,6 +793,7 @@ def ingest_rum_logs(
             "error",
             files_downloaded=len(new_files_s3) if "new_files_s3" in locals() else 0,
             error_message=str(e),
+            outcome_counters=outcome_counters,
             run_id=run_id,
         )
         yield ("error", "sync", str(e))

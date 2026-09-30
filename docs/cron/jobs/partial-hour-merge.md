@@ -60,7 +60,7 @@
 - **Audit Checklist:**
   - Confirm partial-hour queries utilize columnar aggregation without full raw row scans.
   - Verify `app.thread_wait_ms` does not spike during 30s tick execution.
-  - Confirm zero network I/O in `usage_log.db`.
+  - Confirm zero network I/O in PostgreSQL's `usage_log` table.
 
 ---
 
@@ -82,4 +82,4 @@
 - [ ] 3. Verify `rollups/{service_id}/` contains an updated `partial_hour_*.parquet` file.
 - [ ] 4. Query `/api/dashboard/bundle` for a 15-minute window; verify DuckDB queries hit the partial rollup.
 - [ ] 5. Confirm query duration for the active-hour panel is < 50ms.
-- [ ] 6. Verify zero FOS Class A/B calls recorded in `usage_log.db`.
+- [ ] 6. Verify zero FOS Class A/B calls recorded in PostgreSQL's `usage_log` table.

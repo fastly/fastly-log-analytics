@@ -127,7 +127,7 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         discovered = 0
         for i in range(5):
             prefix = rum_minute_list_prefix(now - timedelta(minutes=i))
-            discovered += discover_rum_prefix(service_id, prefix_subpath=prefix)
+            discovered += discover_rum_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
 
         duration = time.time() - started
         if not faro_ok:
@@ -217,7 +217,7 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
 
     started = time.time()
     try:
-        summary = sweep_rum_ledger_once(service_id)
+        summary = sweep_rum_ledger_once(service_id, run_id=run_id)
         run_status = "success"
         warnings = []
         if not summary.get("broker_ok", True):

@@ -71,13 +71,13 @@ The job checks `should_defer_cron("expire_snapshots", service_id)` and initializ
      for missing evidence and preserves/reports unexpected local evidence files.
 6. **Telemetry & Log Recording:**
    - Records step timings and deleted counts in `cron_runs` (marks `warning` if any isolated step failed, `success` if clean).
-   - Records FOS Class A delete calls in `usage_log.db` and finalizes progress tracking via `end_progress`.
+   - Records FOS Class A delete calls in PostgreSQL's `usage_log` table and finalizes progress tracking via `end_progress`.
 
 ---
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 Deletes:** Every unlinked Parquet file must be tracked as a Class A call in `usage_log.db`.
+  - **FOS S3 Deletes:** Every unlinked Parquet file must be tracked as a Class A call in PostgreSQL's `usage_log` table.
   - **DuckLake DDL/DML:** All `DELETE FROM` and `CALL ducklake_*` statements must be recorded in `telemetry_queries`.
   - **Isolated Result Keys:** `cron_runs.details_json` must record `retention_deleted_rows`, `snapshots_expired`, `files_unlinked`, and any `*_error` details.
 - **Timing & Resource Budgets:**
@@ -107,6 +107,6 @@ The job checks `should_defer_cron("expire_snapshots", service_id)` and initializ
 - [ ] 1. Trigger `POST /api/admin/expire-snapshots/{service_id}`; verify HTTP 200.
 - [ ] 2. Confirm in `cron_runs`: status `success` (or `warning` if non-fatal step error).
 - [ ] 3. Verify in logs: `ducklake_expire_snapshots` and `ducklake_cleanup_old_files` executed.
-- [ ] 4. Confirm FOS Class A delete calls recorded in `usage_log.db`.
+- [ ] 4. Confirm FOS Class A delete calls recorded in PostgreSQL's `usage_log` table.
 - [ ] 5. Confirm local cache files older than retention policy are cleaned from disk.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.

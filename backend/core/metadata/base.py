@@ -259,6 +259,9 @@ _SCHEMA = [
         error_kind TEXT,
         next_attempt_at REAL,
         discovered_at REAL,
+        originating_task TEXT,
+        originating_run_id INTEGER,
+        outcome_counters TEXT NOT NULL DEFAULT '{}',
         raw_deleted_at REAL,
         raw_delete_claim_token TEXT,
         raw_delete_claimed_at REAL,
@@ -379,6 +382,7 @@ _SCHEMA = [
         parquet_files_created INTEGER DEFAULT 0,
         parquet_files_optimized INTEGER DEFAULT 0,
         parquet_keys TEXT DEFAULT '[]',
+        outcome_counters TEXT NOT NULL DEFAULT '{}',
         summary TEXT,
         log_output TEXT
     )""",
@@ -513,6 +517,21 @@ _SCHEMA = [
         UNIQUE(service_id, file_name)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantined_at ON quarantined_files(service_id, quarantined_at)",
+    """CREATE TABLE IF NOT EXISTS quarantine_evidence (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        original_key TEXT NOT NULL,
+        line_ordinal INTEGER,
+        byte_offset INTEGER,
+        byte_length INTEGER NOT NULL,
+        error_category TEXT NOT NULL,
+        error_text TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        quarantined_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_quarantine_evidence_fifo ON quarantine_evidence(service_id, quarantined_at, id)",
 ]
 
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw

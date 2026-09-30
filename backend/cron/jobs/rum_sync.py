@@ -279,7 +279,6 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                 if run_id:
                     add_progress(run_id, {"type": "status", "message": msg})
             elif event[0] == "error":
-                had_warning = True
                 _, location, msg = event
                 logger.warning(f"  Error in {location}: {msg}")
                 if run_id:
@@ -302,12 +301,17 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                         try:
                             con = metadata.get_con(service_id)
                             con.execute(
-                                "UPDATE cron_runs SET status = 'warning' WHERE id = ? AND service_id = ?",
+                                "UPDATE cron_runs SET status = 'warning' "
+                                "WHERE id = ? AND service_id = ? AND status = 'success'",
                                 (run_id, service_id),
                             )
                             con.commit()
                         except Exception:
-                            pass
+                            logger.warning(
+                                "Could not mark RUM cron run as warning",
+                                extra={"service_id": service_id, "run_id": run_id},
+                                exc_info=True,
+                            )
 
     except Exception as e:
         logger.error(f"RUM sync failed: {e}", exc_info=True)

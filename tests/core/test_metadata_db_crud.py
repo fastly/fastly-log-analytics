@@ -18,6 +18,11 @@ import pytest
 
 from backend.core import metadata as metadata_db
 from backend.core.metadata import usage_log_db
+from backend.core.metadata.cron_log import (
+    _decode_outcome_counters,
+    _normalize_outcome_counters,
+    record_ingest_object_outcome,
+)
 
 
 @pytest.fixture
@@ -597,6 +602,205 @@ def test_log_cron_run_updates_existing_when_run_id_provided(sid):
     assert row["status"] == "success"
     assert row["duration_s"] == 12.5
     assert row["rows_ingested"] == 1000
+
+
+def test_log_cron_run_persists_outcome_counters_as_json(sid):
+    run_id = metadata_db.start_cron_run(sid, "log_discovery")
+    counters = {
+        "valid_records": 3,
+        "malformed_records": 1,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 2,
+        "objects_processed": 2,
+        "objects_successful": 1,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
+
+    metadata_db.log_cron_run(
+        sid,
+        "log_discovery",
+        duration_s=1.0,
+        status="error",
+        files_downloaded=2,
+        rows_ingested=3,
+        corrupt_rows=1,
+        outcome_counters=counters,
+        run_id=run_id,
+    )
+
+    con = metadata_db.get_con(sid)
+    columns = con.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'cron_runs'"
+    ).fetchall()
+    assert "outcome_counters" in {row[0] for row in columns}
+
+    row = con.execute(
+        "SELECT status, files_downloaded, rows_ingested, corrupt_rows, outcome_counters FROM cron_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row[0:4] == ("error", 2, 3, 1)
+    assert json.loads(row[4]) == counters
+
+
+def test_record_ingest_object_outcome_replaces_its_origin_run_contribution(sid):
+    run_id = metadata_db.start_cron_run(sid, "log_discovery")
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?), "
+        "(?, ?, 'discovered', 'log_discovery', ?)",
+        (
+            sid,
+            "raw/request/object.log.gz",
+            run_id,
+            sid,
+            "raw/request/other.log.gz",
+            run_id,
+        ),
+    )
+    con.commit()
+
+    initial = {
+        "valid_records": 4,
+        "malformed_records": 0,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 0,
+        "objects_processed": 1,
+        "objects_successful": 1,
+        "objects_partial": 0,
+        "objects_failed": 0,
+    }
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", initial)
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", initial)
+    other = {**initial, "valid_records": 6}
+    assert record_ingest_object_outcome(sid, "raw/request/other.log.gz", other)
+
+    revised = {
+        **initial,
+        "malformed_records": 2,
+        "objects_successful": 0,
+        "objects_partial": 1,
+    }
+    assert record_ingest_object_outcome(sid, "raw/request/object.log.gz", revised)
+    expected_totals = {key: revised[key] + other[key] for key in revised}
+    metadata_db.log_cron_run(
+        sid,
+        "log_discovery",
+        duration_s=1.0,
+        status="success",
+        run_id=run_id,
+    )
+
+    row = con.execute(
+        "SELECT status, rows_ingested, corrupt_rows, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?",
+        (run_id, sid),
+    ).fetchone()
+    assert row["status"] == "error"
+    assert row["rows_ingested"] == 10
+    assert row["corrupt_rows"] == 2
+    assert json.loads(row["outcome_counters"]) == expected_totals
+    ledger_row = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
+        (sid, "raw/request/object.log.gz"),
+    ).fetchone()
+    assert json.loads(ledger_row[0]) == revised
+
+
+def test_record_ingest_object_outcome_returns_false_for_unknown_object(sid):
+    assert record_ingest_object_outcome(sid, "raw/request/missing.log.gz", {}) is False
+    assert (
+        metadata_db.get_con(sid)
+        .execute(
+            "SELECT count(*) FROM cron_runs WHERE service_id = ?",
+            (sid,),
+        )
+        .fetchone()[0]
+        == 0
+    )
+
+
+def test_record_ingest_object_outcome_rejects_missing_origin_run(sid):
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?)",
+        (sid, "raw/request/missing-run.log.gz", 987654),
+    )
+    con.commit()
+
+    with pytest.raises(RuntimeError, match="originating cron run 987654 is missing"):
+        record_ingest_object_outcome(sid, "raw/request/missing-run.log.gz", {"valid_records": 1})
+
+    row = con.execute(
+        "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?",
+        (sid, "raw/request/missing-run.log.gz"),
+    ).fetchone()
+    assert row["outcome_counters"] == "{}"
+
+
+def test_record_ingest_object_outcome_rejects_mismatched_origin_task(sid):
+    run_id = metadata_db.start_cron_run(sid, "rum_discovery")
+    con = metadata_db.get_con(sid)
+    con.execute(
+        "INSERT INTO ingest_ledger "
+        "(service_id, object_key, status, originating_task, originating_run_id) "
+        "VALUES (?, ?, 'discovered', 'log_discovery', ?)",
+        (sid, "raw/request/wrong-task.log.gz", run_id),
+    )
+    con.commit()
+
+    with pytest.raises(RuntimeError, match="origin task does not match"):
+        record_ingest_object_outcome(sid, "raw/request/wrong-task.log.gz", {"valid_records": 1})
+
+    row = con.execute(
+        "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?",
+        (run_id, sid),
+    ).fetchone()
+    assert row["status"] == "running"
+    assert row["outcome_counters"] in (None, "{}")
+
+
+def test_normalize_outcome_counters_defaults_omitted_values_to_zero():
+    counters = _normalize_outcome_counters({"valid_records": 2})
+
+    assert counters["valid_records"] == 2
+    assert counters["malformed_records"] == 0
+    assert counters["objects_failed"] == 0
+    assert len(counters) == 10
+
+
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"unexpected": 1},
+        {"valid_records": -1},
+        {"valid_records": True},
+        {"valid_records": 1.5},
+    ],
+)
+def test_normalize_outcome_counters_rejects_unknown_and_invalid_values(counters):
+    with pytest.raises(ValueError):
+        _normalize_outcome_counters(counters)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("{broken", "invalid outcome_counters JSON"),
+        ("[]", "must be a JSON object"),
+        ('{"valid_records": -1}', "invalid outcome_counters values"),
+    ],
+)
+def test_decode_outcome_counters_rejects_malformed_persisted_state(raw, message):
+    with pytest.raises(RuntimeError, match=message):
+        _decode_outcome_counters(raw)
 
 
 def test_log_cron_run_inserts_when_no_run_id(sid):

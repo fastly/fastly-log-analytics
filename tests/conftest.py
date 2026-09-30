@@ -376,6 +376,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
                 ingested_files,
                 ingested_files_summary,
                 quarantined_files,
+                quarantine_evidence,
                 job_runs,
                 cron_runs,
                 audit_logs,

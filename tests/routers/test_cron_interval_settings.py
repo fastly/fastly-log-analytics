@@ -57,6 +57,26 @@ def test_interval_seconds_is_modelled():
     assert parsed.interval_seconds == 90
 
 
+def test_polling_mode_is_modelled_and_persisted():
+    parsed = CronSettingsPartial(**json.loads('{"polling_mode": "adaptive"}'))
+    assert parsed.polling_mode == "adaptive"
+
+    out = _post({"cron_sync": {"polling_mode": "adaptive"}}, {"enabled": True})
+
+    assert out["polling_mode"] == "adaptive"
+
+
+def test_polling_mode_rejects_unknown_values():
+    from pydantic import ValidationError
+
+    try:
+        CronSettingsPartial(**json.loads('{"polling_mode": "continuous"}'))
+    except ValidationError as exc:
+        assert "polling_mode" in str(exc)
+    else:
+        raise AssertionError("unsupported polling mode was accepted")
+
+
 def test_interval_seconds_is_persisted():
     out = _post({"cron_sync": {"interval_seconds": 90}}, {"enabled": True, "interval_seconds": 30})
     assert out["interval_seconds"] == 90

@@ -21,6 +21,78 @@ from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
+OUTCOME_COUNTER_KEYS = (
+    "valid_records",
+    "malformed_records",
+    "corrupt_containers",
+    "quarantine_capture_failures",
+    "source_delete_failures",
+    "cap_evictions",
+    "objects_processed",
+    "objects_successful",
+    "objects_partial",
+    "objects_failed",
+)
+
+
+def _normalize_outcome_counters(counters: dict[str, int] | None) -> dict[str, int]:
+    values = counters or {}
+    unknown = set(values) - set(OUTCOME_COUNTER_KEYS)
+    if unknown:
+        raise ValueError(f"unknown ingestion outcome counter(s): {', '.join(sorted(unknown))}")
+    normalized: dict[str, int] = {}
+    for key in OUTCOME_COUNTER_KEYS:
+        value = values.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"ingestion outcome counter {key!r} must be a non-negative integer")
+        normalized[key] = value
+    return normalized
+
+
+def _decode_outcome_counters(raw: str | None) -> dict[str, int]:
+    if not raw:
+        return _normalize_outcome_counters(None)
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("invalid outcome_counters JSON in metadata") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("outcome_counters metadata must be a JSON object")
+    try:
+        return _normalize_outcome_counters(parsed)
+    except ValueError as exc:
+        raise RuntimeError("invalid outcome_counters values in metadata") from exc
+
+
+def _begin_metadata_write(con: Any, *, postgres: bool) -> None:
+    con.execute("BEGIN" if postgres else "BEGIN IMMEDIATE")
+
+
+def _lock_cron_run(con: Any, service_id: str, run_id: int, *, postgres: bool) -> None:
+    if postgres:
+        con.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+            (service_id, run_id),
+        )
+
+
+def _publish_cron_run_change(service_id: str, run_id: int, task: str, status: str) -> None:
+    try:
+        from backend.cron_runs_publisher import publisher
+
+        publisher.publish(
+            service_id,
+            {
+                "event": "cron_run_changed",
+                "run_id": run_id,
+                "task": task,
+                "status": status,
+                "ts": iso_z_now(),
+            },
+        )
+    except Exception:
+        logger.exception("[cron_log] cron-runs SSE publish failed for %s/%s", service_id, task)
+
 
 def _retry_on_locked[T](con: Any, fn: Callable[[], T]) -> T:
     """Run ``fn`` (a complete, idempotent write+commit unit).
@@ -159,6 +231,7 @@ def log_cron_run(
     parquet_files_created: int = 0,
     parquet_files_optimized: int = 0,
     parquet_keys: list | None = None,
+    outcome_counters: dict[str, int] | None = None,
     summary: str | None = None,
     log_output: str | None = None,
     run_id: int | None = None,
@@ -172,65 +245,110 @@ def log_cron_run(
     con = get_con(service_id)
     started_at = iso_z(datetime.now(UTC) - timedelta(seconds=max(duration_s, 0)))
     keys_json = json.dumps(parquet_keys or [])
+    outcome_counters = _normalize_outcome_counters(outcome_counters) if outcome_counters is not None else None
+    final_status = status
 
     def _write() -> None:
+        nonlocal final_status
         import time
 
-        now = time.time()
-        con.execute(
-            "UPDATE job_runs SET status = ?, finished_at = ? WHERE service_id = ? AND job_name = ? AND status = 'running'",
-            (status, now, service_id, task),
-        )
-        if run_id is not None:
+        from backend.core.metadata import pg_connection
+
+        final_rows_ingested = rows_ingested
+        final_corrupt_rows = corrupt_rows
+        postgres = pg_connection.is_postgres()
+        _begin_metadata_write(con, postgres=postgres)
+        try:
+            _lock_cron_run(con, service_id, run_id, postgres=postgres) if run_id is not None else None
+            if run_id is not None:
+                lock_clause = " FOR UPDATE" if postgres else ""
+                existing = con.execute(
+                    "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
+                    (run_id, service_id),
+                ).fetchone()
+                existing_raw_counters = existing["outcome_counters"] if existing else None
+                has_existing_counters = bool(existing_raw_counters and json.loads(existing_raw_counters))
+                existing_counters = _decode_outcome_counters(existing_raw_counters) if has_existing_counters else None
+                current_status = existing["status"] if existing else None
+                if outcome_counters is None:
+                    merged_counters = existing_counters
+                elif existing_counters is not None and current_status == "running":
+                    merged_counters = {
+                        key: existing_counters[key] + outcome_counters[key] for key in OUTCOME_COUNTER_KEYS
+                    }
+                else:
+                    merged_counters = existing_counters or outcome_counters
+                final_status = "error" if current_status == "error" else status
+            else:
+                merged_counters = outcome_counters
+
+            now = time.time()
             con.execute(
-                """UPDATE cron_runs SET
-                    duration_s = ?, status = ?, error_message = ?,
-                    files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
-                    parquet_files_created = ?, parquet_files_optimized = ?,
-                    parquet_keys = ?, summary = ?, log_output = ?
-                   WHERE id = ? AND service_id = ?""",
-                (
-                    duration_s,
-                    status,
-                    error_message,
-                    files_downloaded,
-                    files_deleted_fos,
-                    rows_ingested,
-                    corrupt_rows,
-                    parquet_files_created,
-                    parquet_files_optimized,
-                    keys_json,
-                    summary,
-                    log_output,
-                    run_id,
-                    service_id,
-                ),
+                "UPDATE job_runs SET status = ?, finished_at = ? "
+                "WHERE service_id = ? AND job_name = ? AND status = 'running'",
+                (final_status, now, service_id, task),
             )
-        else:
-            con.execute(
-                """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
-                    files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                    parquet_files_created, parquet_files_optimized, parquet_keys, summary, log_output)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    service_id,
-                    task,
-                    started_at,
-                    duration_s,
-                    status,
-                    error_message,
-                    files_downloaded,
-                    files_deleted_fos,
-                    rows_ingested,
-                    corrupt_rows,
-                    parquet_files_created,
-                    parquet_files_optimized,
-                    keys_json,
-                    summary,
-                    log_output,
-                ),
-            )
-        con.commit()
+            if run_id is not None:
+                persisted_counters = merged_counters
+                if persisted_counters is not None:
+                    final_rows_ingested = persisted_counters["valid_records"]
+                    final_corrupt_rows = (
+                        persisted_counters["malformed_records"] + persisted_counters["corrupt_containers"]
+                    )
+                con.execute(
+                    """UPDATE cron_runs SET
+                        duration_s = ?, status = ?, error_message = COALESCE(error_message, ?),
+                        files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
+                        parquet_files_created = ?, parquet_files_optimized = ?,
+                        parquet_keys = ?, outcome_counters = ?, summary = ?, log_output = ?
+                       WHERE id = ? AND service_id = ?""",
+                    (
+                        duration_s,
+                        final_status,
+                        error_message,
+                        files_downloaded,
+                        files_deleted_fos,
+                        final_rows_ingested,
+                        final_corrupt_rows,
+                        parquet_files_created,
+                        parquet_files_optimized,
+                        keys_json,
+                        json.dumps(persisted_counters or {}),
+                        summary,
+                        log_output,
+                        run_id,
+                        service_id,
+                    ),
+                )
+            else:
+                con.execute(
+                    """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
+                        files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
+                        parquet_files_created, parquet_files_optimized, parquet_keys, outcome_counters, summary, log_output)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        service_id,
+                        task,
+                        started_at,
+                        duration_s,
+                        status,
+                        error_message,
+                        files_downloaded,
+                        files_deleted_fos,
+                        final_rows_ingested,
+                        final_corrupt_rows,
+                        parquet_files_created,
+                        parquet_files_optimized,
+                        keys_json,
+                        json.dumps(outcome_counters or {}),
+                        summary,
+                        log_output,
+                    ),
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
 
     # A leaked terminal write is worse than a leaked start (the row stays
     # 'running' and blocks the task until the orphan cutoff — the 2026-06-19
@@ -247,21 +365,95 @@ def log_cron_run(
     # Tickle subscribers that this run reached a terminal status.
     # Broad except so an SSE-channel failure never breaks cron
     # bookkeeping.
-    try:
-        from backend.cron_runs_publisher import publisher as _cron_runs_publisher
+    if run_id is not None:
+        _publish_cron_run_change(service_id, run_id, task, final_status)
 
-        _cron_runs_publisher.publish(
-            service_id,
-            {
-                "event": "cron_run_changed",
-                "run_id": run_id,
-                "task": task,
-                "status": status,
-                "ts": iso_z_now(),
-            },
+
+def record_ingest_object_outcome(service_id: str, object_key: str, outcome_counters: dict[str, int]) -> bool:
+    """Replace one ledger object's contribution in its originating cron run.
+
+    The ledger snapshot and aggregated cron counters commit together, so task
+    retries and later source-deletion outcomes cannot double-count an object.
+    """
+    from backend.core.metadata import pg_connection
+
+    new_counters = _normalize_outcome_counters(outcome_counters)
+    con = get_con(service_id)
+    postgres = pg_connection.is_postgres()
+    _begin_metadata_write(con, postgres=postgres)
+    try:
+        lock_clause = " FOR UPDATE" if postgres else ""
+        ledger_row = con.execute(
+            "SELECT originating_task, originating_run_id, outcome_counters "
+            "FROM ingest_ledger WHERE service_id = ? AND object_key = ?" + lock_clause,
+            (service_id, object_key),
+        ).fetchone()
+        if ledger_row is None:
+            con.execute("ROLLBACK")
+            return False
+
+        task = ledger_row["originating_task"]
+        run_id = ledger_row["originating_run_id"]
+        previous = _decode_outcome_counters(ledger_row["outcome_counters"])
+        new_run_status: str | None = None
+        if run_id is not None:
+            run_id = int(run_id)
+            _lock_cron_run(con, service_id, run_id, postgres=postgres)
+            run_row = con.execute(
+                "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
+                (run_id, service_id),
+            ).fetchone()
+            if run_row is None:
+                raise RuntimeError(f"originating cron run {run_id} is missing for ledger object")
+            if task != run_row["task"]:
+                raise RuntimeError(f"ledger origin task does not match cron run {run_id}")
+
+            totals = _decode_outcome_counters(run_row["outcome_counters"])
+            for key in OUTCOME_COUNTER_KEYS:
+                totals[key] += new_counters[key] - previous[key]
+                if totals[key] < 0:
+                    raise RuntimeError(f"outcome counter {key!r} would become negative")
+            has_failure = any(
+                totals[key]
+                for key in (
+                    "malformed_records",
+                    "corrupt_containers",
+                    "quarantine_capture_failures",
+                    "source_delete_failures",
+                    "objects_partial",
+                    "objects_failed",
+                )
+            )
+            new_run_status = "error" if has_failure or run_row["status"] == "error" else run_row["status"]
+            con.execute(
+                "UPDATE cron_runs SET outcome_counters = ?, status = ?, "
+                "rows_ingested = ?, corrupt_rows = ?, "
+                "error_message = CASE WHEN ? = 'error' "
+                "THEN COALESCE(error_message, 'One or more ingestion objects had failures') "
+                "ELSE error_message END WHERE id = ? AND service_id = ?",
+                (
+                    json.dumps(totals),
+                    new_run_status,
+                    totals["valid_records"],
+                    totals["malformed_records"] + totals["corrupt_containers"],
+                    new_run_status,
+                    run_id,
+                    service_id,
+                ),
+            )
+
+        con.execute(
+            "UPDATE ingest_ledger SET outcome_counters = ? WHERE service_id = ? AND object_key = ?",
+            (json.dumps(new_counters), service_id, object_key),
         )
+        con.execute("COMMIT")
     except Exception:
-        logger.exception("[cron_log] cron-runs SSE publish (end) failed for %s/%s", service_id, task)
+        con.execute("ROLLBACK")
+        raise
+
+    if run_id is not None and task is not None and new_run_status is not None:
+        _publish_cron_run_change(service_id, run_id, task, new_run_status)
+    return True
 
 
 def finalize_cron_run_if_running(

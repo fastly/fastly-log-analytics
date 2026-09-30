@@ -69,7 +69,7 @@
   - Compaction write throughput: > 100 MB/s.
   - Memory consumption: Strictly capped by DuckDB thread memory limit.
 - **Audit Checklist:**
-  - Verify zero Class A or Class B FOS API calls in `usage_log.db`.
+  - Verify zero Class A or Class B FOS API calls in PostgreSQL's `usage_log` table.
   - Confirm atomic replacement prevents read errors for concurrent dashboard queries.
   - Verify compacted files do not exceed `_MAX_PARTITION_BYTES` (256MB).
 
@@ -91,6 +91,6 @@
 - [ ] 1. Generate 10 small synthetic Parquet files in an hourly partition directory.
 - [ ] 2. Trigger `POST /api/admin/compact/{service_id}`; confirm HTTP 200.
 - [ ] 3. Verify the 10 small files are consolidated into a single size-capped file.
-- [ ] 4. Verify `usage_log.db` confirms zero outbound FOS calls were made.
+- [ ] 4. Verify PostgreSQL's `usage_log` table confirms zero outbound FOS calls were made.
 - [ ] 5. Confirm concurrent queries against `/api/dashboard/bundle` succeed without `FileNotFoundError`.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify `local_compact` is registered and functions normally.

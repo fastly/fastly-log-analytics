@@ -70,7 +70,7 @@
 - **100% Query & API Call Capture:**
   - **PostgreSQL DML:** All `UPDATE ingest_ledger` statements must complete within transaction boundaries.
   - **Valkey Queue Probes:** Queue length checks against Valkey must be timed.
-  - **FOS S3 Calls:** Lookback LIST calls must be tracked in `usage_log.db`.
+  - **FOS S3 Calls:** Lookback LIST calls must be tracked in PostgreSQL's `usage_log` table.
 - **Timing & Resource Budgets:**
   - Reclaim query duration: < 100ms.
   - Redis queue probe: < 10ms.

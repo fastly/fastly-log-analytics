@@ -316,6 +316,41 @@ def test_finalize_stamps_nothing_when_the_batch_delete_call_itself_raises():
     assert fos.delete_objects.call_count == 1
 
 
+def test_finalize_attributes_late_delete_failure_to_originating_run():
+    import json
+
+    from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
+
+    con, _ = _clear_ledger()
+    key = "raw/2026/08/27/12/10/origin.json.gz"
+    run_id = start_cron_run(SERVICE_ID, "log_discovery")
+    _seed_committed(con, [key], age_s=AGED)
+    initial = dict.fromkeys(OUTCOME_COUNTER_KEYS, 0)
+    initial.update(valid_records=8, objects_processed=1, objects_successful=1)
+    con.execute(
+        "UPDATE ingest_ledger SET originating_task='log_discovery', originating_run_id=? "
+        "WHERE service_id=? AND object_key=?",
+        (run_id, SERVICE_ID, key),
+    )
+    con.commit()
+    assert record_ingest_object_outcome(SERVICE_ID, key, initial)
+
+    fos = MagicMock()
+    fos.delete_objects.return_value = {"Errors": [{"Key": key, "Code": "AccessDenied"}]}
+    assert _run(fos, _cfg(True)) == {"deleted": 0, "eligible": 1, "delete_after": True}
+
+    row = con.execute(
+        "SELECT status, rows_ingested, outcome_counters FROM cron_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    counters = json.loads(row["outcome_counters"])
+    assert row["status"] == "error"
+    assert row["rows_ingested"] == 8
+    assert counters["source_delete_failures"] == 1
+    assert counters["objects_failed"] == 1
+    assert counters["objects_successful"] == 0
+
+
 def test_finalize_without_a_registered_source_deletes_nothing():
     """No source means no bucket to delete from — report the backlog, touch
     nothing."""

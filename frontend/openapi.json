@@ -25290,6 +25290,7 @@
             "schema": {
               "type": "integer",
               "maximum": 500,
+              "minimum": 1,
               "default": 100,
               "title": "Limit"
             }
@@ -25303,6 +25304,24 @@
               "minimum": 0,
               "default": 0,
               "title": "Offset"
+            }
+          },
+          {
+            "name": "error_category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error Category"
             }
           },
           {
@@ -25651,198 +25670,21 @@
         }
       }
     },
-    "/api/admin/quarantine/export": {
+    "/api/admin/quarantine/download/{item_id}": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Export Quarantine",
-        "description": "Export all quarantine metadata as JSONL (no FOS fetch \u2014 SQLite only).",
-        "operationId": "export_quarantine_api_admin_quarantine_export_get",
+        "summary": "Download Quarantine Evidence",
+        "operationId": "download_quarantine_evidence_api_admin_quarantine_download__item_id__get",
         "parameters": [
           {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/admin/quarantine/{quarantine_id}/download": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Download Quarantined File",
-        "description": "Stream the ``.bad.jsonl`` for a single quarantined file from FOS.",
-        "operationId": "download_quarantined_file_api_admin_quarantine__quarantine_id__download_get",
-        "parameters": [
-          {
-            "name": "quarantine_id",
+            "name": "item_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Quarantine Id"
+              "title": "Item Id"
             }
           },
           {
@@ -26017,18 +25859,24 @@
         "tags": [
           "admin"
         ],
-        "summary": "Purge Quarantine",
-        "operationId": "purge_quarantine_api_admin_quarantine_purge_post",
+        "summary": "Purge Quarantine Evidence",
+        "operationId": "purge_quarantine_evidence_api_admin_quarantine_purge_post",
         "parameters": [
           {
-            "name": "retention_days",
+            "name": "item_id",
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Retention Days"
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Item Id"
             }
           },
           {
@@ -26103,8 +25951,10 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Purge Quarantine Api Admin Quarantine Purge Post"
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Purge Quarantine Evidence Api Admin Quarantine Purge Post"
                 }
               }
             }
@@ -45738,6 +45588,21 @@
             ],
             "title": "Enabled"
           },
+          "polling_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "regular",
+                  "adaptive"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Polling Mode"
+          },
           "interval_mins": {
             "anyOf": [
               {
@@ -54983,6 +54848,80 @@
         "type": "object",
         "title": "ProvisionValidateResponse"
       },
+      "QuarantineEvidenceItem": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "request",
+              "rum"
+            ],
+            "title": "Source Type"
+          },
+          "original_key": {
+            "type": "string",
+            "title": "Original Key"
+          },
+          "line_ordinal": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Ordinal"
+          },
+          "byte_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Byte Offset"
+          },
+          "byte_length": {
+            "type": "integer",
+            "title": "Byte Length"
+          },
+          "error_category": {
+            "type": "string",
+            "title": "Error Category"
+          },
+          "error_text": {
+            "type": "string",
+            "title": "Error Text"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "quarantined_at": {
+            "type": "string",
+            "title": "Quarantined At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "source_type",
+          "original_key",
+          "byte_length",
+          "error_category",
+          "error_text",
+          "sha256",
+          "quarantined_at"
+        ],
+        "title": "QuarantineEvidenceItem"
+      },
       "QuarantineListResponse": {
         "properties": {
           "_debug_queries": {
@@ -55028,20 +54967,17 @@
             "type": "array",
             "title": "Section Timings"
           },
-          "files": {
+          "items": {
             "items": {
-              "$ref": "#/components/schemas/QuarantinedFile"
+              "$ref": "#/components/schemas/QuarantineEvidenceItem"
             },
             "type": "array",
-            "title": "Files"
+            "title": "Items"
           },
           "total": {
             "type": "integer",
             "title": "Total",
             "default": 0
-          },
-          "summary": {
-            "$ref": "#/components/schemas/QuarantineSummary"
           }
         },
         "type": "object",
@@ -55049,14 +54985,24 @@
       },
       "QuarantineSummary": {
         "properties": {
-          "total_files": {
+          "total_items": {
             "type": "integer",
-            "title": "Total Files",
+            "title": "Total Items",
             "default": 0
           },
-          "total_corrupt_rows": {
+          "total_bytes": {
             "type": "integer",
-            "title": "Total Corrupt Rows",
+            "title": "Total Bytes",
+            "default": 0
+          },
+          "request_items": {
+            "type": "integer",
+            "title": "Request Items",
+            "default": 0
+          },
+          "rum_items": {
+            "type": "integer",
+            "title": "Rum Items",
             "default": 0
           },
           "oldest_at": {
@@ -55080,73 +55026,17 @@
               }
             ],
             "title": "Newest At"
-          }
-        },
-        "type": "object",
-        "title": "QuarantineSummary"
-      },
-      "QuarantinedFile": {
-        "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
           },
-          "file_name": {
-            "type": "string",
-            "title": "File Name"
-          },
-          "error_key": {
-            "type": "string",
-            "title": "Error Key"
-          },
-          "valid_rows": {
-            "type": "integer",
-            "title": "Valid Rows",
-            "default": 0
-          },
-          "corrupt_rows": {
-            "type": "integer",
-            "title": "Corrupt Rows",
-            "default": 0
-          },
-          "file_size_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "File Size Bytes"
-          },
-          "corrupt_samples": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Corrupt Samples"
-          },
-          "reason_counts": {
+          "category_counts": {
             "additionalProperties": {
               "type": "integer"
             },
             "type": "object",
-            "title": "Reason Counts"
-          },
-          "quarantined_at": {
-            "type": "string",
-            "title": "Quarantined At"
+            "title": "Category Counts"
           }
         },
         "type": "object",
-        "required": [
-          "id",
-          "file_name",
-          "error_key",
-          "quarantined_at"
-        ],
-        "title": "QuarantinedFile"
+        "title": "QuarantineSummary"
       },
       "QueryAttribution": {
         "properties": {
@@ -60032,6 +59922,15 @@
           "enabled": {
             "type": "boolean",
             "title": "Enabled"
+          },
+          "polling_mode": {
+            "type": "string",
+            "enum": [
+              "regular",
+              "adaptive"
+            ],
+            "title": "Polling Mode",
+            "default": "regular"
           },
           "interval_mins": {
             "anyOf": [

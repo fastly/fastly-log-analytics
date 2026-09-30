@@ -61,7 +61,7 @@
      `cron_runs.status` must be set to `error` (never `success`); the original raw-source
      ingestion outcome remains represented by the discovery/worker run counters.
    - If commit transaction fails, records `error` in `cron_runs` and triggers an Admin UI banner alert ("Commits to FOS failing").
-   - Records FOS Class A PUT calls in `usage_log.db`.
+   - Records FOS Class A PUT calls in PostgreSQL's `usage_log` table.
 
 ### High-Scale Mode:
 1. Queries PostgreSQL `ingest_ledger` for claimed batches where conversion is done.
@@ -73,7 +73,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS PUT Calls:** Every committed Parquet file upload must record Class A PUT count and byte size in `usage_log.db`.
+  - **FOS PUT Calls:** Every committed Parquet file upload must record Class A PUT count and byte size in PostgreSQL's `usage_log` table.
   - **DuckLake Catalog Operations:** SQL commit statements against the catalog must be instrumented.
   - **SQLite Updates:** Updates to `cron_runs` and `service_metadata` must flow through `ThreadLocalPool`.
 - **Timing & Resource Budgets:**
@@ -106,5 +106,5 @@
 - [ ] 3. Verify local buffer files in `cache/{bucket}/` are unlinked.
 - [ ] 4. Verify FOS `ducklake/data/` contains newly uploaded Parquet files.
 - [ ] 5. Run an analytical query against `/api/dashboard/bundle`; confirm newly committed rows are returned.
-- [ ] 6. Confirm FOS Class A PUT calls recorded in `usage_log.db`.
+- [ ] 6. Confirm FOS Class A PUT calls recorded in PostgreSQL's `usage_log` table.
 - [ ] 7. In High-Scale mode, confirm `ingest_ledger` rows transition to `committed`.

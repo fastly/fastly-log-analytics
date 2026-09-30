@@ -689,6 +689,9 @@ export const handlers = [
   http.get(`${API_BASE}/api/admin/quarantine/:quarantine_id/download`, () =>
     new HttpResponse('', { headers: { 'Content-Type': 'application/x-ndjson' } }),
   ),
+  http.get(`${API_BASE}/api/admin/quarantine/download/:item_id`, () =>
+    new HttpResponse(new Uint8Array(), { headers: { 'Content-Type': 'application/octet-stream' } }),
+  ),
   http.post(`${API_BASE}/api/admin/quarantine/purge`, ok({ ok: true, deleted: 0 })),
 
   // ── Share-login (analyst auth) ────────────────────────────────────

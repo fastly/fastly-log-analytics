@@ -193,3 +193,175 @@ def delete_quarantined_rows(service_id: str, ids: list[int]) -> int:
     )
     con.commit()
     return cur.rowcount
+
+
+def insert_quarantine_evidence(
+    service_id: str,
+    source_type: str,
+    original_key: str,
+    *,
+    line_ordinal: int | None,
+    byte_offset: int | None,
+    byte_length: int,
+    error_category: str,
+    error_text: str,
+    sha256: str,
+) -> int:
+    con = get_con(service_id)
+    row = con.execute(
+        """
+        INSERT INTO quarantine_evidence
+            (service_id, source_type, original_key, line_ordinal, byte_offset,
+             byte_length, error_category, error_text, sha256, file_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+        RETURNING id
+        """,
+        (
+            service_id,
+            source_type,
+            original_key,
+            line_ordinal,
+            byte_offset,
+            byte_length,
+            error_category,
+            error_text,
+            sha256,
+        ),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("quarantine evidence insert returned no item id")
+    item_id = int(row[0])
+    try:
+        con.execute(
+            "UPDATE quarantine_evidence SET file_path = ? WHERE service_id = ? AND id = ?",
+            (f"{item_id}.dat", service_id, item_id),
+        )
+        con.commit()
+    except Exception:
+        con.execute("DELETE FROM quarantine_evidence WHERE service_id = ? AND id = ?", (service_id, item_id))
+        con.commit()
+        raise
+    return item_id
+
+
+def get_quarantine_evidence(service_id: str, item_id: int) -> dict | None:
+    con = get_con(service_id)
+    row = con.execute(
+        """
+        SELECT id, service_id, source_type, original_key, line_ordinal,
+               byte_offset, byte_length, error_category, error_text, sha256,
+               file_path, quarantined_at
+        FROM quarantine_evidence
+        WHERE service_id = ? AND id = ?
+        """,
+        (service_id, item_id),
+    ).fetchone()
+    if row is None:
+        return None
+    names = (
+        "id",
+        "service_id",
+        "source_type",
+        "original_key",
+        "line_ordinal",
+        "byte_offset",
+        "byte_length",
+        "error_category",
+        "error_text",
+        "sha256",
+        "file_path",
+        "quarantined_at",
+    )
+    return dict(zip(names, row, strict=True))
+
+
+def list_quarantine_evidence(
+    service_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    *,
+    oldest_first: bool = False,
+    error_category: str | None = None,
+) -> list[dict]:
+    con = get_con(service_id)
+    order = "ASC" if oldest_first else "DESC"
+    query = """
+        SELECT id, service_id, source_type, original_key, line_ordinal,
+               byte_offset, byte_length, error_category, error_text, sha256,
+               file_path, quarantined_at
+        FROM quarantine_evidence
+        WHERE service_id = ?
+    """
+    params: list[object] = [service_id]
+    if error_category is not None:
+        query += " AND error_category = ?"
+        params.append(error_category)
+    query += f" ORDER BY quarantined_at {order}, id {order} LIMIT ? OFFSET ?"
+    params.extend((limit, offset))
+    rows = con.execute(query, params).fetchall()
+    names = (
+        "id",
+        "service_id",
+        "source_type",
+        "original_key",
+        "line_ordinal",
+        "byte_offset",
+        "byte_length",
+        "error_category",
+        "error_text",
+        "sha256",
+        "file_path",
+        "quarantined_at",
+    )
+    return [dict(zip(names, row, strict=True)) for row in rows]
+
+
+def get_quarantine_evidence_summary(service_id: str) -> dict:
+    con = get_con(service_id)
+    row = con.execute(
+        """
+        SELECT count(*), coalesce(sum(byte_length), 0), min(quarantined_at), max(quarantined_at)
+        FROM quarantine_evidence
+        WHERE service_id = ?
+        """,
+        (service_id,),
+    ).fetchone()
+    grouped = con.execute(
+        """
+        SELECT source_type, error_category, count(*)
+        FROM quarantine_evidence
+        WHERE service_id = ?
+        GROUP BY source_type, error_category
+        """,
+        (service_id,),
+    ).fetchall()
+    categories: dict[str, int] = {}
+    source_counts = {"request": 0, "rum": 0}
+    for source_type, category, count in grouped:
+        source_counts[source_type] = source_counts.get(source_type, 0) + count
+        categories[category] = categories.get(category, 0) + count
+    return {
+        "total_items": row[0],
+        "total_bytes": row[1],
+        "oldest_at": str(row[2]) if row[2] is not None else None,
+        "newest_at": str(row[3]) if row[3] is not None else None,
+        "request_items": source_counts["request"],
+        "rum_items": source_counts["rum"],
+        "category_counts": categories,
+    }
+
+
+def delete_quarantine_evidence(service_id: str, ids: list[int] | None = None) -> int:
+    con = get_con(service_id)
+    if ids is None:
+        cur = con.execute("DELETE FROM quarantine_evidence WHERE service_id = ?", (service_id,))
+    elif ids:
+        placeholders = ", ".join("?" * len(ids))
+        cur = con.execute(
+            f"DELETE FROM quarantine_evidence WHERE service_id = ? AND id IN ({placeholders})",
+            [service_id, *ids],
+        )
+    else:
+        return 0
+    con.commit()
+    return cur.rowcount

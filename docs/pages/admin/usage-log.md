@@ -39,8 +39,8 @@ The **Admin FOS Usage Ledger** page provides granular auditability into Fastly O
 
 | Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
 |---|---|---|
-| **Ledger Storage** | Split SQLite DB `data/services/{id}.usage_log.db` (WAL mode). | Postgres or SQLite distributed usage log database. |
-| **Lock Isolation** | Dedicated `usage_log.db` ensures writer locks never block admin dashboard readers. | High-concurrency database connection. |
+| **Ledger Storage** | Unified PostgreSQL 16 metadata database. | Unified PostgreSQL 16 metadata database. |
+| **Lock Isolation** | PostgreSQL MVCC keeps usage-log writers from blocking dashboard readers. | PostgreSQL MVCC keeps usage-log writers from blocking dashboard readers. |
 
 ---
 
@@ -99,4 +99,4 @@ The **Admin FOS Usage Ledger** page provides granular auditability into Fastly O
 ## 10. Automated Test Suite & Traffic Generation
 
 - **Playwright Test:** `frontend/e2e/pages/admin-usage-log.spec.ts` (Pending implementation).
-- **Synthetic Traffic Profile:** Ingestion and compaction runs logging FOS calls to `usage_log.db`.
+- **Synthetic Traffic Profile:** Ingestion and compaction runs logging FOS calls to PostgreSQL's `usage_log` table.

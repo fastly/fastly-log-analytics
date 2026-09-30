@@ -11,6 +11,7 @@ names on every call). No test makes a real network call.
 from __future__ import annotations
 
 import copy
+import sqlite3
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -481,6 +482,50 @@ def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, f
         call.args[1]["message"] for call in add_progress.call_args_list if call.args[1]["type"] == "error"
     ]
     assert any("RUM sync failed" in m for m in error_messages)
+
+
+def test_faro_only_reconcile_failure_marks_standard_rum_run_warning(monkeypatch):
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE cron_runs (id INTEGER, service_id TEXT, status TEXT)")
+    con.execute("INSERT INTO cron_runs VALUES (42, ?, 'success')", (SERVICE_ID,))
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda service_id: iter([("started", 42), ("done", 0)]))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert con.execute("SELECT status FROM cron_runs WHERE id = 42").fetchone() == ("warning",)
+    con.close()
+
+
+def test_standard_rum_data_plane_error_is_not_downgraded_to_warning(monkeypatch):
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE cron_runs (id INTEGER, service_id TEXT, status TEXT)")
+    con.execute("INSERT INTO cron_runs VALUES (43, ?, 'success')", (SERVICE_ID,))
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
+
+    def failed_ingest(service_id):
+        yield ("started", 43)
+        con.execute("UPDATE cron_runs SET status = 'error' WHERE id = 43")
+        con.commit()
+        yield ("error", "rum/beacon.log.gz", "corrupt gzip")
+        yield ("done", 0)
+
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", failed_ingest)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert con.execute("SELECT status FROM cron_runs WHERE id = 43").fetchone() == ("error",)
+    con.close()
 
 
 # ── skip conditions ──────────────────────────────────────────────────────

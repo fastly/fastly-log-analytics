@@ -1321,6 +1321,7 @@ def log_cron_run(
     summary: str = None,
     log_output: str = None,
     run_id: int | None = None,
+    outcome_counters: dict[str, int] | None = None,
 ):
     """Persist the terminal state of a cron run.
 
@@ -1364,6 +1365,7 @@ def log_cron_run(
             summary=summary,
             log_output=log_output,
             run_id=run_id,
+            outcome_counters=outcome_counters,
         )
     except Exception as e:
         logger.warning("[cron_log] failed to persist cron run for %s/%s: %s", service_id, task, e)

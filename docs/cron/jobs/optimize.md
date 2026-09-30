@@ -56,7 +56,7 @@
    - Populates `files_rewritten` and `files_added` accurately in `cron_runs` (eliminating `-1` stubs).
 6. **Metadata Pointer Sync & Audit:**
    - Updates `_sync_metadata_pointer_from_discovery` and commits rewritten file references.
-   - Logs FOS Class A PUT and Class B GET/DELETE calls in `usage_log.db`.
+   - Logs FOS Class A PUT and Class B GET/DELETE calls in PostgreSQL's `usage_log` table.
    - Records status, `parquet_files_optimized`, and `parquet_files_created` in `cron_runs`.
 7. **Lock Release:** Releases exclusive service lock.
 
@@ -64,7 +64,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 Calls:** Rewrites generate Class A PUT and Class B GET/DELETE calls; all must be tracked and attributed in `usage_log.db`.
+  - **FOS S3 Calls:** Rewrites generate Class A PUT and Class B GET/DELETE calls; all must be tracked and attributed in PostgreSQL's `usage_log` table.
   - **DuckLake DDL/CALLs:** Every `CALL ducklake_*` procedure must be recorded in `telemetry_queries` with execution duration.
   - **SQLite Auditing:** Run state recorded in `metadata.db` via `ThreadLocalPool`.
 - **Timing & Resource Budgets:**
@@ -95,5 +95,5 @@
 - [ ] 2. Verify in logs: `ducklake_flush_inlined_data` executed successfully.
 - [ ] 3. Verify in logs: `ducklake_rewrite_data_files` executed successfully.
 - [ ] 4. Confirm in `cron_runs`: run status `success` with non-zero duration.
-- [ ] 5. Confirm `usage_log.db` records FOS Class A/B calls attributed to `cron.optimize`.
+- [ ] 5. Confirm PostgreSQL's `usage_log` table records FOS Class A/B calls attributed to `cron.optimize`.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.

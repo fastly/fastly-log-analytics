@@ -73,8 +73,8 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 LIST Calls:** Full paginated LIST must be attributed to `cron.full_sync` in `usage_log.db`.
-  - **SQLite / Postgres Queries:** Diff check queries must use indexed lookups.
+  - **FOS S3 LIST Calls:** Full paginated LIST must be attributed to `cron.full_sync` in PostgreSQL's `usage_log` table.
+  - **PostgreSQL Queries:** Diff check queries must use indexed lookups.
   - **Ingest Telemetry:** Number of discovered missing files must be explicitly logged in `cron_runs.details_json`.
   - **Corrupt Rows:** Valid rows continue, each failed line is stored separately when possible,
     and the run transitions to `error` with per-category counters.

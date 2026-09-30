@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 from backend.core.ingest import (
     _delete_objects_robust,
+    _delete_objects_robust_with_failures,
     get_catalog_field_ids,
     get_ingest_columns_sql,
     get_ingest_type_hints,
@@ -148,6 +149,16 @@ def test_delete_objects_robust_uses_bulk_delete_for_happy_path():
     payload = fake_s3.delete_objects.call_args.kwargs["Delete"]
     assert len(payload["Objects"]) == 20
     assert payload["Quiet"] is True  # silences per-key success entries
+
+
+def test_delete_objects_robust_reports_exact_partial_failures():
+    fake_s3 = MagicMock()
+    fake_s3.delete_objects.return_value = {"Errors": [{"Key": "k2", "Code": "InternalError", "Message": "retry later"}]}
+
+    deleted, failed_keys = _delete_objects_robust_with_failures(fake_s3, "bkt", ["k1", "k2", "k3"])
+
+    assert deleted == 2
+    assert failed_keys == {"k2"}
 
 
 def test_delete_objects_robust_batches_in_500_chunks():

@@ -11,8 +11,8 @@ def _drain_ingest(gen):
     return events
 
 
-def test_ingest_skips_corrupted_gzip_files(fos_source, in_memory_duckdb, monkeypatch, tmp_path):
-    """Verify that ingest handles corrupted .gz files by skipping them via the isolation loop.
+def test_ingest_retains_corrupt_gzip_evidence_and_outcomes(fos_source, in_memory_duckdb, monkeypatch, tmp_path):
+    """A bad container must not abort valid siblings and must retain exact evidence.
 
     Pinned because a single malformed file (e.g. truncated upload) must NOT
     abort the entire batch or crash the cron scheduler.
@@ -69,6 +69,13 @@ def test_ingest_skips_corrupted_gzip_files(fos_source, in_memory_duckdb, monkeyp
             return {}
 
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda *a: MockFos())
+    captured_evidence = []
+
+    def capture_evidence(service_id, source_type, original_key, payload, **metadata):
+        captured_evidence.append((service_id, source_type, original_key, payload, metadata))
+        return {"id": len(captured_evidence), "cap_evictions": 0, "quarantine_capture_failures": 0}
+
+    monkeypatch.setattr("backend.core.quarantine.capture_evidence", capture_evidence)
 
     # 5. Route ingest through local filesystem.
     # Production ingest hands s3://bucket/... paths to DuckDB and lets the
@@ -108,6 +115,23 @@ def test_ingest_skips_corrupted_gzip_files(fos_source, in_memory_duckdb, monkeyp
 
     # 7. Assertions
     done = next(e for e in events if e["type"] == "done")
+    assert done["outcome_counters"] == {
+        "valid_records": 1,
+        "malformed_records": 0,
+        "corrupt_containers": 1,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "cap_evictions": 0,
+        "objects_processed": 2,
+        "objects_successful": 1,
+        "objects_partial": 0,
+        "objects_failed": 1,
+    }
+    assert captured_evidence[0][1:4] == (
+        "request",
+        "raw/2026-05-18/10/2026-05-18T10-05-00.c.gz",
+        b"This is definitely not a gzip file",
+    )
 
     # new_files counts attempted/processed files (both)
     assert done["new_files"] == 2

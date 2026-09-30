@@ -73,8 +73,8 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **FOS S3 Calls:** LIST operations must be logged in `usage_log.db` under `cron.rum_discovery`.
-  - **PostgreSQL DML:** All ledger operations must be timed and instrumented.
+  - **FOS S3 Calls:** LIST operations are attributed to the PostgreSQL `usage_log` table under `cron.rum_discovery`.
+  - **PostgreSQL DML:** Ledger and originating-run outcome updates use the shared instrumented Postgres metadata connection.
   - **Celery Enqueue Time:** Task dispatch latency must be < 10ms.
 - **Timing & Resource Budgets:**
   - Discovery LIST execution: < 200ms.

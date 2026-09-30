@@ -2919,38 +2919,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/quarantine/export": {
+    "/api/admin/quarantine/download/{item_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Export Quarantine
-         * @description Export all quarantine metadata as JSONL (no FOS fetch — SQLite only).
-         */
-        get: operations["export_quarantine_api_admin_quarantine_export_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/admin/quarantine/{quarantine_id}/download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Download Quarantined File
-         * @description Stream the ``.bad.jsonl`` for a single quarantined file from FOS.
-         */
-        get: operations["download_quarantined_file_api_admin_quarantine__quarantine_id__download_get"];
+        /** Download Quarantine Evidence */
+        get: operations["download_quarantine_evidence_api_admin_quarantine_download__item_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2968,8 +2945,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Purge Quarantine */
-        post: operations["purge_quarantine_api_admin_quarantine_purge_post"];
+        /** Purge Quarantine Evidence */
+        post: operations["purge_quarantine_evidence_api_admin_quarantine_purge_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -7128,6 +7105,8 @@ export interface components {
         CronSettingsPartial: {
             /** Enabled */
             enabled?: boolean | null;
+            /** Polling Mode */
+            polling_mode?: ("regular" | "adaptive") | null;
             /** Interval Mins */
             interval_mins?: number | null;
             /** Interval Seconds */
@@ -10877,6 +10856,32 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** QuarantineEvidenceItem */
+        QuarantineEvidenceItem: {
+            /** Id */
+            id: number;
+            /**
+             * Source Type
+             * @enum {string}
+             */
+            source_type: "request" | "rum";
+            /** Original Key */
+            original_key: string;
+            /** Line Ordinal */
+            line_ordinal?: number | null;
+            /** Byte Offset */
+            byte_offset?: number | null;
+            /** Byte Length */
+            byte_length: number;
+            /** Error Category */
+            error_category: string;
+            /** Error Text */
+            error_text: string;
+            /** Sha256 */
+            sha256: string;
+            /** Quarantined At */
+            quarantined_at: string;
+        };
         /** QuarantineListResponse */
         QuarantineListResponse: {
             /** Debug Queries */
@@ -10900,60 +10905,44 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Files */
-            files?: components["schemas"]["QuarantinedFile"][];
+            /** Items */
+            items?: components["schemas"]["QuarantineEvidenceItem"][];
             /**
              * Total
              * @default 0
              */
             total: number;
-            summary?: components["schemas"]["QuarantineSummary"];
         };
         /** QuarantineSummary */
         QuarantineSummary: {
             /**
-             * Total Files
+             * Total Items
              * @default 0
              */
-            total_files: number;
+            total_items: number;
             /**
-             * Total Corrupt Rows
+             * Total Bytes
              * @default 0
              */
-            total_corrupt_rows: number;
+            total_bytes: number;
+            /**
+             * Request Items
+             * @default 0
+             */
+            request_items: number;
+            /**
+             * Rum Items
+             * @default 0
+             */
+            rum_items: number;
             /** Oldest At */
             oldest_at?: string | null;
             /** Newest At */
             newest_at?: string | null;
-        };
-        /** QuarantinedFile */
-        QuarantinedFile: {
-            /** Id */
-            id: number;
-            /** File Name */
-            file_name: string;
-            /** Error Key */
-            error_key: string;
-            /**
-             * Valid Rows
-             * @default 0
-             */
-            valid_rows: number;
-            /**
-             * Corrupt Rows
-             * @default 0
-             */
-            corrupt_rows: number;
-            /** File Size Bytes */
-            file_size_bytes?: number | null;
-            /** Corrupt Samples */
-            corrupt_samples?: string[];
-            /** Reason Counts */
-            reason_counts?: {
+            /** Category Counts */
+            category_counts?: {
                 [key: string]: number;
             };
-            /** Quarantined At */
-            quarantined_at: string;
         };
         /**
          * QueryAttribution
@@ -12590,6 +12579,12 @@ export interface components {
         ServiceCronSync: {
             /** Enabled */
             enabled: boolean;
+            /**
+             * Polling Mode
+             * @default regular
+             * @enum {string}
+             */
+            polling_mode: "regular" | "adaptive";
             /** Interval Mins */
             interval_mins?: number | null;
             /** Interval Seconds */
@@ -30233,6 +30228,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: number;
+                error_category?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -30444,114 +30440,7 @@ export interface operations {
             };
         };
     };
-    export_quarantine_api_admin_quarantine_export_get: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    download_quarantined_file_api_admin_quarantine__quarantine_id__download_get: {
+    download_quarantine_evidence_api_admin_quarantine_download__item_id__get: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -30562,7 +30451,7 @@ export interface operations {
                 "x-service-id"?: string | null;
             };
             path: {
-                quarantine_id: number;
+                item_id: number;
             };
             cookie?: never;
         };
@@ -30660,10 +30549,10 @@ export interface operations {
             };
         };
     };
-    purge_quarantine_api_admin_quarantine_purge_post: {
+    purge_quarantine_evidence_api_admin_quarantine_purge_post: {
         parameters: {
             query?: {
-                retention_days?: number;
+                item_id?: number | null;
                 service?: string | null;
                 service_id?: string | null;
             };
@@ -30683,7 +30572,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        [key: string]: unknown;
+                        [key: string]: number;
                     };
                 };
             };
