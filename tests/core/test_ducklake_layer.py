@@ -555,10 +555,15 @@ def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, 
     src = {"service_id": "svc-guard-test", "bucket": "fos-some-bucket"}
     local_expected = str(config.SERVICES_DATA_DIR / "svc-guard-test" / "ducklake")
 
-    # 1. Default should be local disk path even with bucket present
+    # 1. Standard mode defaults to local disk even with a bucket present.
     assert dl._default_data_path(src) == local_expected
 
-    # 2. If DUCKLAKE_DATA_PATH is set to remote S3, failsafe must intercept and fall back
+    # High-throughput workers may not share /app/data with the serving pod, so
+    # their default must be durable object storage.
+    hs_src = {**src, "deployment_mode": "high_throughput", "prefix": "logs"}
+    assert dl._default_data_path(hs_src) == "s3://fos-some-bucket/logs/ducklake/"
+
+    # 2. An explicit remote path in standard mode is still blocked unless opted in.
     monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", "s3://fos-some-bucket/ducklake/")
     monkeypatch.delenv("ALLOW_REMOTE_S3_PARQUET_SCAN", raising=False)
 

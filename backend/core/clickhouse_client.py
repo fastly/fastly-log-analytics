@@ -397,7 +397,17 @@ class ClickHouseClient:
                 "max_bytes_before_external_sort": "268435456",
             }
             if operation == "insert":
-                query.update({"query": sql or "", "async_insert": "0", "date_time_input_format": "best_effort"})
+                query.update(
+                    {
+                        "query": sql or "",
+                        "async_insert": "0",
+                        "date_time_input_format": "best_effort",
+                        "max_memory_usage": "536870912",
+                        "max_threads": "2",
+                        "max_insert_threads": "1",
+                        "max_block_size": "2048",
+                    }
+                )
             response = self._http.post(
                 "/",
                 params=query,

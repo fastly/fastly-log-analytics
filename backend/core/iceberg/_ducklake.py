@@ -126,10 +126,15 @@ def _is_local_only(source: dict) -> bool:
 def _default_data_path(source: dict) -> str:
     """Default DuckLake DATA_PATH for ``source``.
 
-    All analytical data is stored locally on disk under SERVICES_DATA_DIR.
-    FOS / S3 is used strictly as an ingress drop bucket for raw .gz logs
-    streamed from Fastly logging endpoints.
+    High-throughput workers and the serving pod may not share a filesystem,
+    so cloud-backed sources use durable FOS storage in that topology. Standard
+    deployments keep analytical data local for low-latency reads.
     """
+    if config.is_high_throughput_mode(source) and source.get("bucket") and not _is_local_only(source):
+        prefix = (source.get("prefix") or "").strip("/")
+        base = f"{prefix}/ducklake" if prefix else "ducklake"
+        return f"s3://{source['bucket']}/{base}/"
+
     service_id = source.get("service_id") or source.get("name", "default")
     local_path = config.SERVICES_DATA_DIR / str(service_id) / "ducklake"
     local_path.mkdir(parents=True, exist_ok=True)
@@ -173,7 +178,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # Failsafe Guardrail: Analytical data must never be read/scanned over remote S3/HTTP
     # unless explicitly permitted via ALLOW_REMOTE_S3_PARQUET_SCAN=1.
     if data_path.startswith(("s3://", "http://", "https://")):
-        allow_remote = os.getenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "0").lower() in ("1", "true", "yes")
+        allow_remote = os.getenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        ) or config.is_high_throughput_mode(source)
         if not allow_remote and not source.get("allow_remote_parquet_scan"):
             local_fallback = _default_data_path(source)
             logger.error(

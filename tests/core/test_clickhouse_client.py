@@ -168,6 +168,10 @@ def test_insert_internal_columns_and_values_are_separate(clients, settings):
         assert request.url.params["async_insert"] == "0"
         assert request.url.params["wait_end_of_query"] == "1"
         assert float(request.url.params["max_execution_time"]) == settings.insert_timeout_s
+        assert request.url.params["max_memory_usage"] == "536870912"
+        assert request.url.params["max_threads"] == "2"
+        assert request.url.params["max_insert_threads"] == "1"
+        assert request.url.params["max_block_size"] == "2048"
         body = json.loads(request.content)
         assert body[:4] == list(row[:4])
         assert body[4] == "2026-09-07 00:00:00.000000"
