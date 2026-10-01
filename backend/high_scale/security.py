@@ -32,7 +32,7 @@ def security_aggregates(
     # 1. proxy_dist
     proxy_rows = _query("""
         SELECT custom_fields['p_desc'] as type, count() as count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
           AND custom_fields['p_desc'] != ''
@@ -42,7 +42,7 @@ def security_aggregates(
     # 2. tls_fingerprints
     tls_fp_rows = _query("""
         SELECT custom_fields['tls_ciphers_sha'] as fingerprint, count() as count, count(distinct client_ip) as ips
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
           AND custom_fields['tls_ciphers_sha'] != ''
@@ -62,7 +62,7 @@ def security_aggregates(
                 ELSE '>1MB'
             END as label,
             count() as count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
         GROUP BY label ORDER BY count DESC
@@ -73,7 +73,7 @@ def security_aggregates(
         SELECT
             if(custom_fields['is_ipv6'] = '1', 'IPv6', 'IPv4') as version,
             count() as count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
         GROUP BY version ORDER BY count DESC
@@ -90,7 +90,7 @@ def security_aggregates(
                 ELSE '51+'
             END as label,
             count() as count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
         GROUP BY label ORDER BY count DESC
@@ -101,7 +101,7 @@ def security_aggregates(
         SELECT
             custom_fields['ngwaf_bot'] as bot_name,
             count() as request_count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
           AND custom_fields['ngwaf_bot'] != ''
@@ -154,7 +154,7 @@ def top_bots(
         SELECT
             custom_fields['ngwaf_bot'] as bot_name,
             count() as request_count
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String} AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}
           AND custom_fields['ngwaf_bot'] != ''

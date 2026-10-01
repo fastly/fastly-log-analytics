@@ -26,7 +26,7 @@ def sessions_endpoint(
             toInt64OrZero(custom_fields['resp_bytes']) as resp_bytes,
             toFloat64OrZero(custom_fields['tcp_rtt']) as tcp_rtt,
             custom_fields['cmcd_sid'] as cmcd_sid
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id = {service_id:String}
           AND publication_state = 'visible'
           AND event_timestamp >= {start_time:DateTime64(3)}
@@ -169,7 +169,7 @@ def sessions_detail(
         custom_fields['edge_sid'] as edge_sid,
         custom_fields['ua'] as ua,
         toInt32OrNull(custom_fields['asn']) as asn
-    FROM fastly_log_analytics.request_facts
+    FROM request_facts
     WHERE service_id = {service_id:String}
       AND publication_state = 'visible'
       AND client_ip = {ip:String}

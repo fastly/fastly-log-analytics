@@ -19,7 +19,7 @@ def cmcd_aggregates(
     # Check if there is data
     query = """
     SELECT sum(event_count)
-    FROM fastly_log_analytics.cmcd_aggregates
+    FROM cmcd_aggregates
     WHERE service_id = {service_id:String}
       AND bucket_start >= {start_time:DateTime64(3)}
       AND bucket_start <= {end_time:DateTime64(3)}

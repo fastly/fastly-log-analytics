@@ -14,7 +14,7 @@ def insights_endpoint(
 
     query = """
         SELECT url, count() as errors
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String}
           AND event_timestamp >= subtractDays(now(), 1)
           AND toInt32OrZero(custom_fields['status']) >= 500

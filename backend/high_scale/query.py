@@ -14,9 +14,9 @@ def query_endpoint(
     sql = req.sql.strip()
 
     # Very basic translation from DuckDB syntax to ClickHouse syntax for the Query Builder
-    sql = re.sub(r"\blogs\b", "fastly_log_analytics.request_facts", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_vitals\b", "fastly_log_analytics.rum_vitals_facts", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_errors\b", "fastly_log_analytics.rum_error_facts", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\blogs\b", "request_facts", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bclient_vitals\b", "rum_vitals_facts", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bclient_errors\b", "rum_error_facts", sql, flags=re.IGNORECASE)
 
     from backend.high_scale.dashboard import _FIELD_DIMENSIONS
 

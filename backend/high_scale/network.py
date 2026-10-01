@@ -31,7 +31,7 @@ def network_health(
             count() AS reqs,
             sum(if(toInt32OrZero(custom_fields['status']) >= 500, 1, 0)) AS err_count,
             avg(toFloat64OrZero(custom_fields['tcp_rtt']) / 1000.0) AS avg_rtt
-        FROM fastly_log_analytics.request_facts
+        FROM request_facts
         WHERE service_id={service_id:String}
           AND publication_state='visible'
           AND event_timestamp >= {start:DateTime64(3)}
@@ -99,7 +99,7 @@ def network_quality(
                 {dimension} AS label,
                 count() AS reqs,
                 median(toFloat64OrZero(custom_fields['tcp_rtt']) / 1000.0) AS rtt_ms
-            FROM fastly_log_analytics.request_facts
+            FROM request_facts
             WHERE service_id={{service_id:String}}
               AND publication_state='visible'
               AND event_timestamp >= {{start:DateTime64(3)}}
