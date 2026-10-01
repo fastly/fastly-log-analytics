@@ -34,6 +34,31 @@ function getUrlWithParam(url, key, value) {
   return `${url}${joiner}${key}=${encodeURIComponent(value)}`;
 }
 
+// Bounded navigation retry. The page shell can take well over the old tight 10s
+// to paint `main` under the harness's self-induced verify-phase CPU spike (4
+// envs rendering in parallel on shared 6-CPU Colima while seeding continues),
+// even though the data is already present. Retry a small bounded number of
+// times with a generous shell timeout; a genuinely dead page still exhausts the
+// retries and fails the run.
+async function gotoWithShellReady(page, url, label, { attempts = 3, navTimeout = 30000, shellTimeout = 30000 } = {}) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const response = await page.goto(url, { timeout: navTimeout });
+      if (!response || !response.ok()) {
+        throw new Error(`load status ${response ? response.status() : 'unknown'}`);
+      }
+      await page.waitForSelector('main', { timeout: shellTimeout });
+      return response;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`⚠️ [${label}] navigation attempt ${i}/${attempts} failed under load: ${e.message}`);
+      await page.waitForTimeout(2000 * i);
+    }
+  }
+  throw new Error(`[${label}] navigation failed after ${attempts} attempts: ${lastErr && lastErr.message}`);
+}
+
 // Known self-healing transient conditions that occur during the harness's own
 // verify-phase load spike (4 parallel browsers + continuous seeder + crons on a
 // shared 6-CPU Colima) and recover within seconds with NO code defect:
@@ -493,13 +518,13 @@ function registerErrorListeners(page, browser, contextName) {
     // 2.4. Validate 30d RUM Consistency: Header RUM Total vs. Page RUM Total
     const rumUrl30d = getUrlWithParam(rumBaseUrl, "range", "30d");
     console.log(`[RUM 30d] Checking data consistency on ${rumUrl30d} ...`);
-    response = await rumPage.goto(rumUrl30d, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[RUM 30d] Failed to load RUM page. Status: ${response ? response.status() : 'Unknown'}`);
+    try {
+      response = await gotoWithShellReady(rumPage, rumUrl30d, 'RUM 30d', { attempts: 3, navTimeout: 30000, shellTimeout: 30000 });
+    } catch (e) {
+      console.error(`[RUM 30d] Failed to load RUM page: ${e.message}`);
       await browser.close();
       process.exit(1);
     }
-    await rumPage.waitForSelector('main', { timeout: 10000 });
 
     // Wait for standard loading indicators to clear
     try {
