@@ -21,16 +21,31 @@
         <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
     </part_log>
 
-    <!-- Optimize background merges and memory usage for a constrained 6G container -->
-    <background_pool_size>2</background_pool_size>
+    <!-- Optimize background merges and memory usage for an 8G container (raised
+         2026-10-01 from 6G after the Colima host VM itself was resized from
+         8GiB/4CPU to 12GiB/6CPU. The prior 6G/2-CPU ceiling left ClickHouse
+         alone consuming nearly the entire old Colima VM budget, which was the
+         actual root cause of repeated MEMORY_LIMIT_EXCEEDED / HTTP 500s under
+         concurrent background merges + heavy aggregate queries, not app
+         ingestion volume: `system.parts` showed the real data tables
+         (request_aggregates, request_facts, rum_*_aggregates) in the low
+         single-digit MB, while ClickHouse's own internal text_log/
+         asynchronous_metric_log tables held millions of rows. Keep this
+         value in sync with docker-compose.clickhouse-prototype.yml's cpus/
+         mem_limit and with resource_limits.xml's background_pool_size/
+         max_concurrent_queries. This file loads after resource_limits.xml
+         (alphabetical config.d order) and will silently win on any
+         duplicate key. -->
+    <background_pool_size>4</background_pool_size>
     <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
 
     <merge_tree>
-        <!-- Keep merges small enough for the constrained 6G container. -->
-        <max_bytes_to_merge_at_max_space_in_pool>67108864</max_bytes_to_merge_at_max_space_in_pool> <!-- 64 MB -->
-        <max_bytes_to_merge_at_min_space_in_pool>8388608</max_bytes_to_merge_at_min_space_in_pool> <!-- 8 MB -->
+        <!-- Merge sizing for the 8G container, doubled from the prior 6G
+             tuning now that there's real headroom. -->
+        <max_bytes_to_merge_at_max_space_in_pool>134217728</max_bytes_to_merge_at_max_space_in_pool> <!-- 128 MB -->
+        <max_bytes_to_merge_at_min_space_in_pool>16777216</max_bytes_to_merge_at_min_space_in_pool> <!-- 16 MB -->
         <!-- Reduce merge block size to lower peak memory per merge thread (default is 8192). -->
-        <merge_max_block_size>512</merge_max_block_size>
+        <merge_max_block_size>1024</merge_max_block_size>
         <!-- Vertical merge algorithm (processes columns independently for wide tables) is
              enabled by default via `enable_vertical_merge_algorithm`; no override needed.
              A prior version of this file used the non-existent setting name
@@ -38,10 +53,10 @@
              "Code: 115. Unknown setting" and crash-loops the container. -->
         <!-- ClickHouse's own startup sanity check requires every
              number_of_free_entries_in_pool_to_* setting to stay below
-             background_pool_size * background_merges_mutations_concurrency_ratio (2
+             background_pool_size * background_merges_mutations_concurrency_ratio (4
              here). Their defaults (20 / 25 / 8) are all far above that, and each one
              crash-loops the container in turn with "Code: 36. BAD_ARGUMENTS" if left
-             unset; set all three below the 2 threshold up front. -->
+             unset; set all three below that threshold up front (1 remains valid). -->
         <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
         <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
         <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>

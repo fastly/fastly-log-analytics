@@ -13,8 +13,8 @@ services:
       - clickhouse-prototype-data:/var/lib/clickhouse
       - ./clickhouse/config.d/system_logs.xml:/etc/clickhouse-server/config.d/system_logs.xml:ro
       - ./clickhouse/config.d/resource_limits.xml:/etc/clickhouse-server/config.d/resource_limits.xml:ro
-    mem_limit: 6g
-    cpus: 2
+    mem_limit: 8g
+    cpus: 4
     ulimits:
       nofile:
         soft: 65536
