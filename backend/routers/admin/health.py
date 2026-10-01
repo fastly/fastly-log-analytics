@@ -171,7 +171,14 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         failures: list[dict] = []
         for sid in _svcconfig.list_service_ids():
             try:
-                for task, run in latest_cron_per_task(sid).items():
+                # Exclude boot-reap rows (a cron the deploy/restart stopped
+                # mid-run) BEFORE ranking, so a restart-interrupted cron isn't
+                # reported as an environment fault and can't mask the real
+                # terminal run beneath it — same classification the deep-health
+                # degraded check applies in backend/main.py.
+                for task, run in latest_cron_per_task(
+                    sid, exclude_error_messages=("Process interrupted by server restart",)
+                ).items():
                     if run.get("status") == "error":
                         failures.append(
                             {

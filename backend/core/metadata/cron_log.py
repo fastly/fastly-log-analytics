@@ -812,7 +812,7 @@ def get_cron_runs(
     return total, entries
 
 
-def latest_cron_per_task(service_id: str) -> dict[str, dict]:
+def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...] = ()) -> dict[str, dict]:
     """Return {task: latest_completed_run_dict} for the sync-status endpoint.
 
     Single window-function pass: ROW_NUMBER() OVER (PARTITION BY task) keeps
@@ -822,10 +822,27 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
     taking ~12.9 ms — fast in absolute terms but per-task overhead added
     up on services with many task types. Mirrors the same pattern used
     by `cron_summary_for_tasks` below.
+
+    ``exclude_error_messages`` (default none) drops rows carrying one of
+    these exact error_message sentinels BEFORE the per-task ranking, so an
+    excluded row cannot become a task's "latest" and cannot mask the real
+    terminal run beneath it. The fault-surfacing caller
+    (``recent_cron_failures`` in ``routers/admin/health.py``) passes the
+    boot-reap sentinel ``"Process interrupted by server restart"`` here, so a
+    cron the deploy restarted mid-run isn't reported as an environment fault —
+    matching the identical exclusion the deep-health degraded check already
+    applies in ``backend/main.py`` (see its comment on boot-reap rows being
+    lifecycle artifacts, not failing crons). Default callers are unaffected.
     """
     con = get_con(service_id)
+    exclusion_sql = ""
+    params: list[Any] = [service_id]
+    if exclude_error_messages:
+        placeholders = ",".join(["?"] * len(exclude_error_messages))
+        exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
+        params.extend(exclude_error_messages)
     rows = con.execute(
-        """
+        f"""
         SELECT task, started_at, status, duration_s, summary, error_message
         FROM (
             SELECT task, started_at, status, duration_s, summary, error_message,
@@ -833,11 +850,11 @@ def latest_cron_per_task(service_id: str) -> dict[str, dict]:
                        PARTITION BY task ORDER BY started_at DESC, id DESC
                    ) AS rn
             FROM cron_runs
-            WHERE service_id = ? AND status != 'running'
+            WHERE service_id = ? AND status != 'running'{exclusion_sql}
         ) AS ranked
         WHERE rn = 1
         """,
-        (service_id,),
+        tuple(params),
     ).fetchall()
     return {
         r["task"]: {

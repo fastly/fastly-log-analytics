@@ -854,6 +854,41 @@ def test_latest_cron_per_task_picks_latest_non_running_per_task(sid):
     assert out["optimize"]["duration_s"] == 3.0
 
 
+def test_latest_cron_per_task_excludes_boot_reap_sentinel_before_ranking(sid):
+    """``exclude_error_messages`` drops boot-reap rows BEFORE the per-task
+    ranking (mirrors backend/main.py's deep-health exclusion), so:
+      (a) a restart-interrupted cron whose newest row is the reap sentinel
+          is NOT surfaced as the task's latest run, and
+      (b) the exclusion reveals the real terminal run beneath the reap —
+          it must not merely hide the task. A genuine error that is the
+          latest NON-reap run still surfaces.
+    """
+    sentinel = "Process interrupted by server restart"
+
+    # Task A: a real success, then a boot-reap on top. Excluding the reap must
+    # reveal the success (not drop the task, not report an error).
+    ra1 = metadata_db.start_cron_run(sid, "insights_prewarmer")
+    metadata_db.log_cron_run(sid, "insights_prewarmer", duration_s=1.0, status="success", run_id=ra1)
+    ra2 = metadata_db.start_cron_run(sid, "insights_prewarmer")
+    metadata_db.log_cron_run(
+        sid, "insights_prewarmer", duration_s=0.0, status="error", run_id=ra2, error_message=sentinel
+    )
+
+    # Task B: a genuine (non-reap) error as the latest run — must still surface.
+    rb1 = metadata_db.start_cron_run(sid, "optimize")
+    metadata_db.log_cron_run(sid, "optimize", duration_s=2.0, status="error", run_id=rb1, error_message="real boom")
+
+    out = metadata_db.latest_cron_per_task(sid, exclude_error_messages=(sentinel,))
+    assert out["insights_prewarmer"]["status"] == "success", "reap must not mask the real latest run"
+    assert out["optimize"]["status"] == "error"
+    assert out["optimize"]["error_message"] == "real boom"
+
+    # Default behavior is unchanged: without the exclusion the reap IS latest.
+    out_default = metadata_db.latest_cron_per_task(sid)
+    assert out_default["insights_prewarmer"]["status"] == "error"
+    assert out_default["insights_prewarmer"]["error_message"] == sentinel
+
+
 def test_get_usage_logs_aggregates_and_breaks_down_in_one_pass(sid):
     """The aggregate totals and per-type breakdown are derived from a single
     GROUP BY (operation_class, operation_type) scan. Pinned because the prior
