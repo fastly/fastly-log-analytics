@@ -785,6 +785,20 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
     )
 
 
+async def test_reset_for_tests_stops_log_flusher(proxy_server):
+    with patch("backend.core.metadata.log_usage_calls"):
+        proxy_server._submit_log_write("test-svc", {"method": "GET"}, None)
+        proxy_server._flush_log_writes_for_tests()
+
+    flusher = proxy_server._LOG_FLUSHER_THREAD
+    assert flusher is not None and flusher.is_alive()
+
+    proxy_server.stop_proxy_server()
+    proxy_server._reset_for_tests()
+
+    assert not flusher.is_alive()
+
+
 # ── Streaming follow-up (Phase 1 follow-up plan) ─────────────────────────────
 
 

@@ -30,14 +30,9 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   forbidOnly: isCI,
-  // Retry once locally too (not just CI). The e2e suite has rare, genuine
-  // flakes — e.g. a transient Turbopack-dev module-load hiccup on firefox that
-  // surfaces as a one-off hydration error on an already-SSR-hardened route.
-  // CI (retries:1) absorbs those and stays green; local `make ci` previously
-  // ran retries:0, so a single flake reddened the whole run even though the
-  // code was fine — breaking the "green `make ci` == green CI" parity goal.
-  // Matching CI here restores that parity. Retries only mask flakes, never a
-  // deterministic failure (which fails both attempts).
+  // Retries are opt-in so CI surfaces backend failures instead of masking them
+  // or doubling suite time. The E2E workflow sets workers=1 because every
+  // browser worker shares one backend and DuckLake serializes catalog attaches.
   retries: process.env.PLAYWRIGHT_RETRIES ? parseInt(process.env.PLAYWRIGHT_RETRIES, 10) : 0,
   workers: process.env.PLAYWRIGHT_WORKERS ? parseInt(process.env.PLAYWRIGHT_WORKERS, 10) : 2,
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',

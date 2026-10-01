@@ -211,11 +211,14 @@ async function globalSetup() {
     ],
     {
       cwd: repoRoot,
-      env: backendTestEnvironment(sandbox, {
-        backendPort: E2E_BACKEND_PORT,
-        frontendPort: E2E_FRONTEND_PORT,
-        registryPath: oauthRegistryPath,
-      }),
+      env: {
+        ...backendTestEnvironment(sandbox, {
+          backendPort: E2E_BACKEND_PORT,
+          frontendPort: E2E_FRONTEND_PORT,
+          registryPath: oauthRegistryPath,
+        }),
+        FLA_SKIP_LEGACY_ADOPTION: '1',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.
       detached: false,

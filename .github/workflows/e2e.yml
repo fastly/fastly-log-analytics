@@ -106,7 +106,7 @@ jobs:
       - name: Run Playwright (${{ matrix.browser }})
         env:
           CI: "1"
-          PLAYWRIGHT_WORKERS: "2"
+          PLAYWRIGHT_WORKERS: "1"
           PLAYWRIGHT_RETRIES: "0"
         run: cd frontend && npx playwright test --project=${{ matrix.browser }}
 

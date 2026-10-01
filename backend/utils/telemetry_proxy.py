@@ -916,7 +916,7 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
 
 
 def _reset_for_tests() -> None:
-    global _PORT, _SERVER_THREAD, _RUNNER, _LOOP, _SESSION
+    global _PORT, _SERVER_THREAD, _RUNNER, _LOOP, _SESSION, _LOG_FLUSHER_THREAD
     # Drain any rows the prior test left in the coalescer queue so the next
     # test's log_usage_calls mock doesn't capture stale rows from an
     # already-torn-down patch context.
@@ -929,6 +929,18 @@ def _reset_for_tests() -> None:
             _LOG_QUEUE.get_nowait()
         except queue.Empty:
             break
+    flusher = _LOG_FLUSHER_THREAD
+    if flusher is not None and flusher.is_alive():
+        _LOG_FLUSHER_STOP.set()
+        barrier = _FlushBarrier()
+        _LOG_QUEUE.put(barrier)
+        if not barrier.event.wait(timeout=1.0):
+            raise RuntimeError("telemetry log flusher did not drain during test reset")
+        flusher.join(timeout=1.0)
+        if flusher.is_alive():
+            raise RuntimeError("telemetry log flusher did not stop during test reset")
+    _LOG_FLUSHER_THREAD = None
+    _LOG_FLUSHER_STOP.clear()
     _PORT = None
     _SERVER_THREAD = None
     _RUNNER = None

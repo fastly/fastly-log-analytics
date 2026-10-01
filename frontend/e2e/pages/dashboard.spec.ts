@@ -60,7 +60,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     const placeholders = page.locator('main [data-empty-placeholder="true"]')
     const count = await placeholders.count()
     if (count > 0) {
-      const texts = await placeholders.allInnerTexts()
+      const texts = await placeholders.allTextContents()
       expect(texts.some(text => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(text))).toBeTruthy()
     }
   })
