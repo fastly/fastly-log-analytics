@@ -46,8 +46,13 @@
 		header_up X-Forwarded-For 127.0.0.1
 		flush_interval -1
 		transport http {
-			response_header_timeout 120s
-			read_timeout 120s
+			# 120s -> 180s 2026-10-01: /api/network-health's rollup-ineligible
+			# raw-scan fallback (any freshly-provisioned/low-history service)
+			# took ~117.5s under concurrent synthetic load, right at the old
+			# ceiling. See root Caddyfile's admin-tunnel block for the same
+			# pattern on dashboard-30d.
+			response_header_timeout 180s
+			read_timeout 180s
 		}
 	}
 

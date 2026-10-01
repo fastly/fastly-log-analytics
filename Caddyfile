@@ -165,15 +165,19 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	# 2026-06-10_rollups_time_series_backfill migration completes on a
 	# given service). Caddy's default response_header_timeout is short
 	# enough that those requests come back to the client as 502 Bad
-	# Gateway. 120 s lets the slow path finish at the cost of one stuck
+	# Gateway. 180 s lets the slow path finish at the cost of one stuck
 	# worker per such request. Once the time_series rollup backfill is
 	# in place, queries return in <1 s and the timeout never matters.
+	# Raised 120s -> 180s 2026-10-01: /api/network-health hits the exact
+	# same rollup-ineligible raw-scan path (require >=50% closed-hour
+	# coverage) on any freshly-provisioned/low-history service, and under
+	# concurrent synthetic load took ~117.5s -- right at the old ceiling.
 	@api path /api/* /js/* /rum-beacon
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
 		transport http {
-			response_header_timeout 120s
-			read_timeout 120s
+			response_header_timeout 180s
+			read_timeout 180s
 		}
 	}
 
@@ -396,8 +400,10 @@ https://localhost:8443, https://127.0.0.1:8443 {
 		header_up X-Forwarded-For 127.0.0.1
 		flush_interval -1
 		transport http {
-			response_header_timeout 120s
-			read_timeout 120s
+			# 120s -> 180s 2026-10-01: see the admin-tunnel block above for
+			# why (dashboard-30d / network-health rollup-ineligible raw scan).
+			response_header_timeout 180s
+			read_timeout 180s
 		}
 	}
 
