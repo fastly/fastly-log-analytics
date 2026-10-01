@@ -11223,7 +11223,7 @@
           "rum"
         ],
         "summary": "Rum Versions",
-        "description": "List available Faro Web SDK versions + the pinned/latest state (admin-only).",
+        "description": "List available Faro Web SDK versions + the pinned/latest state (admin-only).\n\nThe available-versions list is served from a cached, stale-on-error path\n(``get_faro_versions_cached``) so a slow or unavailable npm registry\ndegrades the \"update available\" badge instead of 503-ing the whole RUM\npage \u2014 this is a non-critical affordance, not page-critical data.",
         "operationId": "rum_versions_api_services__service_id__rum_versions_get",
         "parameters": [
           {

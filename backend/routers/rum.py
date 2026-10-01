@@ -27,7 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend import config as svcconfig
 from backend.core.duckdb import rum_source_for
-from backend.core.faro_versions import fetch_available_faro_versions
+from backend.core.faro_versions import fetch_available_faro_versions, get_faro_versions_cached
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import _ConnectionHolder
@@ -372,15 +372,18 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
 
 @router.get("/{service_id}/rum/versions", response_model=RumVersionsResponse, response_model_exclude_unset=True)
 async def rum_versions(service_id: str = Path(...)) -> RumVersionsResponse:
-    """List available Faro Web SDK versions + the pinned/latest state (admin-only)."""
+    """List available Faro Web SDK versions + the pinned/latest state (admin-only).
+
+    The available-versions list is served from a cached, stale-on-error path
+    (``get_faro_versions_cached``) so a slow or unavailable npm registry
+    degrades the "update available" badge instead of 503-ing the whole RUM
+    page — this is a non-critical affordance, not page-critical data.
+    """
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
     current = rum_cfg.get("faro_version")
 
-    try:
-        available = await fetch_available_faro_versions()
-    except ValueError as e:
-        raise HTTPException(status_code=503, detail=make_error("faro_registry_unavailable", str(e))) from e
+    available = await get_faro_versions_cached()
 
     latest = available[0] if available else None
     update_available = bool(current and latest and current != latest)

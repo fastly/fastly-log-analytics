@@ -39,6 +39,15 @@ def with_config(monkeypatch):
     return container
 
 
+@pytest.fixture(autouse=True)
+def _reset_faro_cache():
+    from backend.core import faro_versions
+
+    faro_versions.reset_versions_cache()
+    yield
+    faro_versions.reset_versions_cache()
+
+
 # ── GET /rum/versions ────────────────────────────────────────────────────
 
 
@@ -48,7 +57,7 @@ def test_versions_update_available(client, with_config, monkeypatch):
     async def fake_fetch():
         return ["2.9.0", "2.8.2", "2.8.1"]
 
-    monkeypatch.setattr("backend.routers.rum.fetch_available_faro_versions", fake_fetch)
+    monkeypatch.setattr("backend.core.faro_versions.fetch_available_faro_versions", fake_fetch)
 
     r = client.get(f"/api/services/{SVC}/rum/versions")
     assert r.status_code == 200
@@ -65,7 +74,7 @@ def test_versions_already_up_to_date(client, with_config, monkeypatch):
     async def fake_fetch():
         return ["2.9.0", "2.8.2"]
 
-    monkeypatch.setattr("backend.routers.rum.fetch_available_faro_versions", fake_fetch)
+    monkeypatch.setattr("backend.core.faro_versions.fetch_available_faro_versions", fake_fetch)
 
     r = client.get(f"/api/services/{SVC}/rum/versions")
     assert r.status_code == 200
@@ -84,7 +93,7 @@ def test_versions_unpinned_service(client, with_config, monkeypatch):
     async def fake_fetch():
         return ["2.9.0", "2.8.2"]
 
-    monkeypatch.setattr("backend.routers.rum.fetch_available_faro_versions", fake_fetch)
+    monkeypatch.setattr("backend.core.faro_versions.fetch_available_faro_versions", fake_fetch)
 
     r = client.get(f"/api/services/{SVC}/rum/versions")
     assert r.status_code == 200
@@ -94,20 +103,27 @@ def test_versions_unpinned_service(client, with_config, monkeypatch):
     assert body["update_available"] is False
 
 
-def test_versions_registry_failure_returns_503(client, with_config, monkeypatch):
-    """A raw ValueError from fetch_available_faro_versions (registry down /
-    rate-limited / malformed payload) must surface as a deliberate 503, not
-    an unhandled 500 and not a silently-empty 200."""
+def test_versions_registry_failure_degrades_gracefully(client, with_config, monkeypatch):
+    """A registry failure (down / rate-limited / malformed payload) with no
+    cached list must degrade to a 200 with an empty ``available`` list — the
+    version list is a non-critical "update available?" affordance, so a slow
+    or unavailable npm registry must never 503 and break the whole RUM page
+    (measured 2026-10-01: an uncached per-request fetch 503'd under
+    verify-phase load and hard-failed the dashboard verifier)."""
     with_config[SVC] = {"service_id": SVC, "rum": {"faro_version": "2.8.2"}}
 
     async def fake_fetch():
         raise ValueError("Failed to fetch Faro versions: registry returned 503")
 
-    monkeypatch.setattr("backend.routers.rum.fetch_available_faro_versions", fake_fetch)
+    monkeypatch.setattr("backend.core.faro_versions.fetch_available_faro_versions", fake_fetch)
 
     r = client.get(f"/api/services/{SVC}/rum/versions")
-    assert r.status_code == 503
-    assert r.json()["detail"]["error"] == "faro_registry_unavailable"
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] == []
+    assert body["current"] == "2.8.2"
+    assert body.get("latest") is None
+    assert body["update_available"] is False
 
 
 # ── POST /rum/upgrade ────────────────────────────────────────────────────

@@ -1187,6 +1187,11 @@ export interface paths {
         /**
          * Rum Versions
          * @description List available Faro Web SDK versions + the pinned/latest state (admin-only).
+         *
+         *     The available-versions list is served from a cached, stale-on-error path
+         *     (``get_faro_versions_cached``) so a slow or unavailable npm registry
+         *     degrades the "update available" badge instead of 503-ing the whole RUM
+         *     page — this is a non-critical affordance, not page-critical data.
          */
         get: operations["rum_versions_api_services__service_id__rum_versions_get"];
         put?: never;
