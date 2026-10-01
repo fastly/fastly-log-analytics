@@ -20,9 +20,12 @@ if (!actualExpectedCommit || actualExpectedCommit === 'unknown') {
   }
 }
 
-// Recency window for the "fresh ingest" liveness checks. Requests and RUM
-// share ONE pipeline (edge->FOS->discovery->commit, a 6-15min floor), so both
-// use the same window — a 5m window sat below that floor and failed at 0.
+// Recency window for the "fresh ingest" liveness checks. Ingest is
+// near-real-time: requests (~8s) and RUM beacons (~1s) are served from the
+// buffer-stitched DuckLake view within seconds of the edge request, NOT gated
+// on the 5-min commit tick. This window is a jitter cushion for edge->FOS
+// delivery batching + verify-phase CPU spikes — NOT a pipeline latency floor.
+// Requests and RUM share ONE pipeline, so both use the same symmetric window.
 const RECENT_RANGE = "15m";
 
 // Helper to append query parameters cleanly

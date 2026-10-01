@@ -85,3 +85,16 @@ def test_recency_window_absorbs_edge_delivery_jitter() -> None:
         "cushion — edge->FOS delivery batching + verify-phase CPU spikes can "
         "briefly empty a window this short and flap the check"
     )
+
+
+def test_verifier_does_not_claim_a_multiminute_pipeline_floor() -> None:
+    # Ingest is near-real-time (measured ~1-8s buffer-stitched, 2026-10-01).
+    # The recency window is a jitter cushion, NOT a pipeline latency floor.
+    # A comment asserting a multi-minute "floor" is a false premise that
+    # misleads future readers into widening the window to mask staleness.
+    src = _VERIFY_JS.read_text()
+    assert not re.search(r"\d+\s*-\s*\d+\s*min.*floor|floor.*\d+\s*-\s*\d+\s*min", src), (
+        "verify_dashboard.js must not describe the recency window as a "
+        "multi-minute pipeline floor — ingest is real-time; the window is a "
+        "jitter cushion (see module docstring)"
+    )
