@@ -67,6 +67,40 @@ def test_decode_normalizes_dedicated_rum_vitals_fields_for_serving() -> None:
     assert result.events[0]["pathname"] == "/home"
 
 
+def test_decode_falls_back_to_querystring_when_flat_rum_vitals_fields_are_empty() -> None:
+    # Mirrors the live Elevation shape: the VCL-extracted flat rum_metric_* log
+    # fields came through empty (edge-snippet ordering/case drift), but the
+    # full beacon querystring is still present in rum_raw_query. Without a
+    # fallback, metric_name/metric_value decode to ""/None for every row.
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_cid":"","rum_metric_name":"","rum_metric_value":"","rum_metric_rating":"","rum_pathname":"",'
+        b'"rum_raw_query":"/beacon?rum_metric_name=LCP&rum_metric_value=123.5&rum_metric_rating=good'
+        b'&cid=cid-1&rum_pathname=%2Fhome"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["client_id"] == "cid-1"
+    assert result.events[0]["metric_name"] == "LCP"
+    assert result.events[0]["metric_value"] == 123.5
+    assert result.events[0]["metric_rating"] == "good"
+    assert result.events[0]["pathname"] == "/home"
+
+
+def test_decode_prefers_flat_rum_vitals_fields_over_querystring_fallback() -> None:
+    source = ArchiveSourceObject("svc", "rum_vitals", "raw/rum/vitals.gz", "sha256:source", 100, "v7")
+    payload = gzip.compress(
+        b'{"rum_metric_name":"CLS","rum_metric_value":"0.02",'
+        b'"rum_raw_query":"/beacon?rum_metric_name=LCP&rum_metric_value=999"}\n'
+    )
+
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+
+    assert result.events[0]["metric_name"] == "CLS"
+    assert result.events[0]["metric_value"] == 0.02
+
+
 def test_decode_normalizes_dedicated_rum_error_fields_for_serving() -> None:
     source = ArchiveSourceObject("svc", "rum_errors", "raw/rum/errors.gz", "sha256:source", 100, "v7")
     payload = gzip.compress(

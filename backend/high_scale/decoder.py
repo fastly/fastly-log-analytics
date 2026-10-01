@@ -7,6 +7,7 @@ import gzip
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from backend.high_scale.archive_models import ArchiveSourceObject
 from backend.high_scale.schema import build_event_id, build_request_event_id, build_rum_event_id
@@ -94,9 +95,28 @@ def _decode_payload(payload: bytes) -> bytes:
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain == "rum_vitals":
-        event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
-        event["metric_name"] = event.get("rum_metric_name") or event.get("metric_name") or ""
+        client_id = event.get("rum_cid") or event.get("client_id") or ""
+        metric_name = event.get("rum_metric_name") or event.get("metric_name") or ""
         raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))
+        metric_rating = event.get("rum_metric_rating") or event.get("metric_rating") or ""
+        pathname = event.get("rum_pathname") or event.get("pathname") or ""
+
+        # The edge-extracted flat rum_metric_* fields can legitimately come
+        # through empty (edge-snippet ordering/case drift) while the raw
+        # beacon querystring survives in rum_raw_query/url — mirrors the
+        # standard-tier fallback in backend/core/ingest.py.
+        if not metric_name or raw_metric_value in (None, ""):
+            qparams = _rum_querystring_params(event)
+            if qparams:
+                metric_name = metric_name or _first_qparam(qparams, "rum_metric_name")
+                if raw_metric_value in (None, ""):
+                    raw_metric_value = _first_qparam(qparams, "rum_metric_value")
+                metric_rating = metric_rating or _first_qparam(qparams, "rum_metric_rating")
+                client_id = client_id or _first_qparam(qparams, "cid")
+                pathname = pathname or _first_qparam(qparams, "rum_pathname")
+
+        event["client_id"] = client_id
+        event["metric_name"] = metric_name
         if raw_metric_value in (None, ""):
             event["metric_value"] = None
         elif isinstance(raw_metric_value, (int, float)) and not isinstance(raw_metric_value, bool):
@@ -105,13 +125,28 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
             event["metric_value"] = float(raw_metric_value)
         else:
             event["metric_value"] = None
-        event["metric_rating"] = event.get("rum_metric_rating") or event.get("metric_rating") or ""
-        event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
+        event["metric_rating"] = metric_rating
+        event["pathname"] = pathname
     elif domain == "rum_errors":
         event["client_id"] = event.get("rum_cid") or event.get("client_id") or ""
         event["error_message"] = event.get("rum_error_message") or event.get("error_message") or ""
         event["error_file"] = event.get("rum_error_file") or event.get("error_file") or ""
         event["pathname"] = event.get("rum_pathname") or event.get("pathname") or ""
+
+
+def _rum_querystring_params(event: dict[str, Any]) -> dict[str, list[str]]:
+    raw_url = event.get("url") or event.get("rum_raw_query") or ""
+    if not raw_url:
+        return {}
+    try:
+        return parse_qs(urlparse(raw_url).query)
+    except ValueError:
+        return {}
+
+
+def _first_qparam(qparams: dict[str, list[str]], key: str) -> str:
+    values = qparams.get(key)
+    return values[0] if values else ""
 
 
 def _event_id(event: dict[str, Any], domain: str) -> str:
