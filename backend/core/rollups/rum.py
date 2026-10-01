@@ -360,4 +360,47 @@ def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[
             [service_id] * 3,
         )
 
+    # 7. Populate a single unified beacon count per hour. This MUST match the
+    # header badge's cross-table COUNT(DISTINCT distinct_id) semantics
+    # (backend/routers/bootstrap.py) — summing the vitals 'pageviews' +
+    # 'interactions' dimension counts (step 5) plus the error 'errors'
+    # dimension count (step 6) double-counts any physical beacon event that
+    # emits more than one row sharing a distinct_id (e.g. a vitals metric AND
+    # an interaction event from the same page load). Computed directly from
+    # a UNION of the raw tables rather than from the per-dimension aggregates
+    # above, since those are already partitioned in a way that loses the
+    # cross-partition distinct_id overlap.
+    union_parts = []
+    if has_vitals:
+        union_parts.append(
+            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_vitals "
+            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        )
+    if has_errors:
+        union_parts.append(
+            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_errors "
+            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        )
+    con.execute(
+        f"""
+        INSERT INTO rum_vitals_aggregates
+        SELECT
+            ? AS service_id,
+            DATE_TRUNC('hour', timestamp) AS bucket_start,
+            'total' AS dimension,
+            'total_beacons' AS value,
+            COUNT(DISTINCT distinct_id) AS event_count,
+            0.0 AS value_sum,
+            0 AS good_count,
+            0 AS ni_count,
+            0 AS poor_count,
+            0.0 AS p50_value,
+            0.0 AS p75_value,
+            0.0 AS p99_value
+        FROM ({" UNION ALL ".join(union_parts)})
+        GROUP BY bucket_start
+        """,
+        [service_id],
+    )
+
     logger.info("[rum_rollups] %s: RUM aggregates successfully updated for %d hours", service_id, len(hours_list))

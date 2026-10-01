@@ -933,7 +933,22 @@ async def rum_analytics(
                 ) as cur_e:
                     errors_count = cur_e.fetchone()[0] or 0
 
-                total_beacons = pageviews + interactions + errors_count
+                # NOT pageviews + interactions + errors_count: those are
+                # separate distinct-id partitions and a single physical
+                # beacon event can appear in more than one (see the writer's
+                # 'total_beacons' comment in backend/core/rollups/rum.py).
+                with track_query(
+                    con,
+                    """
+                    SELECT
+                        COALESCE(SUM(event_count) FILTER (WHERE dimension = 'total' AND value = 'total_beacons'), 0) AS total_beacons
+                    FROM rum_vitals_aggregates
+                    WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)
+                    """,
+                    [service_id, start_time, end_time],
+                    "rum_rollup_counts_total_beacons",
+                ) as cur_t:
+                    total_beacons = cur_t.fetchone()[0] or 0
 
                 # 2. Vitals summary
                 with track_query(
@@ -1154,7 +1169,8 @@ async def rum_analytics(
                     SELECT
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name NOT LIKE 'event_%' THEN distinct_id END) AS pageviews,
                         COUNT(DISTINCT CASE WHEN src = 'vitals' AND metric_name LIKE 'event_%' THEN distinct_id END) AS interactions,
-                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count
+                        COUNT(DISTINCT CASE WHEN src = 'errors' THEN distinct_id END) AS errors_count,
+                        COUNT(DISTINCT distinct_id) AS total_beacons
                     FROM (
                         SELECT 'vitals' AS src, metric_name, {distinct_id} AS distinct_id
                         FROM t_client_vitals
@@ -1166,11 +1182,15 @@ async def rum_analytics(
                     [],
                     "rum_consolidated_counts",
                 ) as cur_counts:
-                    pageviews, interactions, errors_count = cur_counts.fetchone()
+                    pageviews, interactions, errors_count, total_beacons = cur_counts.fetchone()
                     pageviews = pageviews or 0
                     interactions = interactions or 0
                     errors_count = errors_count or 0
-                    total_beacons = pageviews + interactions + errors_count
+                    # NOT pageviews + interactions + errors_count: those are
+                    # separate distinct-id partitions and a single physical
+                    # beacon event can appear in more than one (e.g. a vitals
+                    # metric and an interaction event sharing one distinct_id).
+                    total_beacons = total_beacons or 0
 
                 # A. Check if any data exists at all (Deferred check ONLY if no matches in selected bounds)
                 if total_beacons == 0:

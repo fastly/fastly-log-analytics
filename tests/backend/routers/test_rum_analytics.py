@@ -520,6 +520,104 @@ def test_rum_analytics_date_filtering(setup_temp_rum_db) -> None:
         assert int(p.split("_")[1]) < 10
 
 
+def test_rum_analytics_total_beacons_does_not_double_count_shared_distinct_id(setup_temp_rum_db) -> None:
+    """A single physical beacon event (one cid/timestamp, empty req_id -> one
+    distinct_id) can legitimately emit both a vitals metric row and an
+    interaction (event_*) row at once. beacon_count must count that as ONE
+    beacon, matching the header's single unified COUNT(DISTINCT distinct_id)
+    (backend/routers/bootstrap.py) — not sum separate pageviews/interactions/
+    errors_count distinct-id partitions, which double-counts it. Reproduces
+    the live Local Standard 30d-consistency failure from the 2026-09-30
+    canonical deploy run (Page RUM count exceeded header lifetime count)."""
+    service_id = "test_service_shared_distinct_id"
+    rum_db_path = setup_temp_rum_db
+
+    shared_ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
+    other_ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=6)
+
+    con = duckdb.connect(str(rum_db_path), read_only=False)
+    try:
+        # Beacon A: one physical event (cid="shared", empty req_id, same
+        # timestamp) emitting BOTH a vitals metric and an interaction event.
+        con.executemany(
+            "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    shared_ts,
+                    "lcp",
+                    2.1,
+                    "good",
+                    "/",
+                    "Chrome",
+                    "macOS",
+                    "Desktop",
+                    "shared",
+                    "",
+                    "Austin",
+                    "TX",
+                    "US",
+                    "SIN",
+                    "1.3",
+                    45.0,
+                ),
+                (
+                    shared_ts,
+                    "event_click",
+                    1.0,
+                    "",
+                    "/",
+                    "Chrome",
+                    "macOS",
+                    "Desktop",
+                    "shared",
+                    "",
+                    "Austin",
+                    "TX",
+                    "US",
+                    "SIN",
+                    "1.3",
+                    45.0,
+                ),
+            ],
+        )
+        # Beacon B: a separate, unrelated error beacon.
+        con.execute(
+            "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                other_ts,
+                "TypeError",
+                "main.js",
+                0,
+                0,
+                "/",
+                "Chrome",
+                "macOS",
+                "Desktop",
+                "other",
+                "",
+                "Austin",
+                "TX",
+                "US",
+                "SIN",
+                "1.3",
+                45.0,
+            ),
+        )
+    finally:
+        con.close()
+
+    response = client.get(f"/api/services/{service_id}/rum/analytics")
+    assert response.status_code == 200
+    data = response.json()
+    assert not data["is_mock"]
+    # Two physical beacons total: the shared vitals+interaction event, and
+    # the separate error. Must not be inflated to 3 by double-counting the
+    # shared distinct_id across the pageviews/interactions partitions.
+    assert data["beacon_count"] == 2
+    assert data["pageview_count"] == 1
+    assert data["error_count"] == 1
+
+
 def test_rum_status_endpoint(setup_temp_rum_db) -> None:
     service_id = "svc-test-rum-status"
     response = client.get(f"/api/services/{service_id}/rum/status")
