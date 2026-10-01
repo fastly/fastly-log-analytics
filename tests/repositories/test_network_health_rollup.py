@@ -287,6 +287,40 @@ class TestTryNetworkHeatmapFromRollup:
         assert result is not None, "expected non-None for eligible 72h window"
         assert len(result) > 0, "expected at least one row"
 
+    def test_serves_hourly_rollup_for_finer_requested_bucket(self, heatmap_rollup_layout):
+        """REGRESSION: the real caller (network.py) computes bucket_seconds=300
+        for every window from 24h..30d (router default 300, and span//8640
+        never exceeds 300 below 30d). The reader must still serve its hourly
+        rollup for these finer-than-hourly requests — the whole point of the
+        rollup is to spare the 30d view a multi-second raw scan, and the
+        heatmap is a per-hour time series where hourly resolution is the
+        documented, correct granularity on wide windows. Prior to the fix the
+        reader bailed on any bucket_seconds != 3600, so the hourly rollup was
+        structurally unreachable by the live FE and every 30d network-health
+        query fell to the raw scan (→ the 504 under concurrent load)."""
+        _, src, start_iso, end_iso, _ = heatmap_rollup_layout
+        con = duckdb.connect()
+        try:
+            runner = QueryRunner(con, src)
+            rows = runner.try_network_heatmap_from_rollup(start_iso, end_iso, has_filters=False, bucket_seconds=300)
+        finally:
+            con.close()
+        assert rows is not None, "hourly rollup must serve the 300s-bucket 30d view, not fall to raw"
+        assert len(rows) > 0
+
+    def test_returns_none_for_coarser_than_hourly_bucket(self, heatmap_rollup_layout):
+        """A request coarser than hourly (e.g. 2h/daily buckets) can't be
+        served from an hourly rollup without re-aggregation this reader does
+        not do, so it still returns None and lets the caller's path handle it."""
+        _, src, start_iso, end_iso, _ = heatmap_rollup_layout
+        con = duckdb.connect()
+        try:
+            runner = QueryRunner(con, src)
+            rows = runner.try_network_heatmap_from_rollup(start_iso, end_iso, has_filters=False, bucket_seconds=7200)
+        finally:
+            con.close()
+        assert rows is None
+
     def test_row_shape_matches_live_heatmap_loop(self, heatmap_rollup_layout):
         """Each row has 10 elements at the positions the live heatmap loop reads:
         r[0]=asn (int-able), r[1]=bucket_ts (isoformat-able), r[2..8]=floats|None,

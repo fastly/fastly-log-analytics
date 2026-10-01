@@ -3994,13 +3994,32 @@ class QueryRunner:
         from per-hour + per-day network_heatmap parquets when eligible.
 
         Same eligibility posture as :meth:`try_network_rtt_from_rollup`:
-        unfiltered only, window ≥ 48 h, ≥ 50% closed-hour coverage.
+        unfiltered only, window ≥ 24 h, ≥ 50% closed-hour coverage.
 
         Each parquet row covers exactly one (asn, hour) pair. The reader
         returns one row per (asn, hour) with the hour as the heatmap
         bucket — hourly bucket granularity on 30 d windows (720 buckets
         instead of the 5-min live resolution of 8640), which is still
         meaningful for trend/health analysis.
+
+        BUCKET GRANULARITY: the caller's ``bucket_seconds`` is the FE's
+        *requested* resolution. The real caller (network.py) computes it as
+        ``max(router_default_300, span // 8640)``, which is 300 s for every
+        window from 24 h to 30 d (span // 8640 only exceeds 300 past 30 d).
+        So gating on ``== 3600`` made this rollup structurally unreachable
+        for every live FE window — every 30 d network-health query fell to
+        the multi-second raw scan (the source of the 504s under concurrent
+        load). The heatmap is a per-hour TIME SERIES: serving hourly buckets
+        when the caller asked for hourly-or-finer is correct, not a
+        downgrade of accuracy — the downstream ``bucket_idx`` is assigned
+        POSITIONALLY from the distinct row timestamps (network.py's
+        ``sorted(all_buckets_set)`` → ``enumerate``), never from
+        ``bucket_seconds``, so hourly rows render as a dense 720-column axis
+        with no gaps regardless of the requested width. We therefore serve
+        whenever ``bucket_seconds <= 3600`` and return ``None`` only for a
+        COARSER-than-hourly request (e.g. 2 h / daily buckets), which an
+        hourly rollup can't satisfy without re-aggregation this reader
+        doesn't do.
 
         Returns rows shaped as
         ``(asn, bucket_ts, throughput_bps, rtt_med_us, rtt_baseline_us,
@@ -4010,7 +4029,7 @@ class QueryRunner:
         """
         from backend.core.rollups._common import NETWORK_HEATMAP_BUNDLE_FILENAME
 
-        if bucket_seconds != 3600:
+        if bucket_seconds > 3600:
             return None
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters, min_hours=24)
