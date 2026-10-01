@@ -353,7 +353,14 @@ class _Pool:
         self._rebind_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._rebind_wait_samples_lock = threading.Lock()
 
-    def acquire(self, src: dict, max_wait: float, *, skip_view_update: bool = False) -> duckdb.DuckDBPyConnection:
+    def acquire(
+        self,
+        src: dict,
+        max_wait: float,
+        *,
+        skip_view_update: bool = False,
+        reuse_only: bool = False,
+    ) -> duckdb.DuckDBPyConnection:
         # Phase 6 telemetry: time how long this checkout spends WAITING for
         # an idle connection (the saturated path). Both fast-path (idle
         # ready) and fresh-build paths record ~0 ms here; only contention
@@ -386,6 +393,10 @@ class _Pool:
                 # if the recycle overruns the checkout budget we fall back to
                 # rejecting (_PoolBusy) so a hung recycle can't strand the request.
                 if self._draining:
+                    if reuse_only:
+                        # Best-effort parallel checkout: never wait out a
+                        # recycle. Fall straight back to serial.
+                        raise _PoolBusy(f"pool for {self.service_key} draining for recycle")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._drain_rejects_total += 1
@@ -400,6 +411,17 @@ class _Pool:
                     break  # fall through to UNLOCKED _prepare_checkout
                 except queue.Empty:
                     pass
+
+                # Reuse-only (best-effort parallel) checkout: an idle conn was
+                # NOT instantly available, so bail immediately. Building fresh
+                # here is exactly the wedge — a cold build is admitted under
+                # the cap, then stalls in the serialized DuckLake attach while
+                # holding a slot, so concurrent second-checkouts drain the
+                # pool and every request 503s (prod 2026-10-01, Local Std).
+                # Not a real saturation, so don't inflate the reject counter;
+                # the caller (dashboard bundle) just runs serially on ctx.con.
+                if reuse_only:
+                    raise _PoolBusy(f"pool for {self.service_key} has no idle connection (reuse_only)")
 
                 # Capacity available: build a new one outside the lock
                 if self._in_use < self.max_size:
@@ -899,7 +921,7 @@ def _get_pool(service_key: str, max_size: int | None = None) -> _Pool:
 
 
 @contextmanager
-def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: bool = False):
+def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: bool = False, reuse_only: bool = False):
     """Yield a fully-configured DuckDB connection from the per-service pool.
 
     Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
@@ -924,6 +946,11 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
     if not _pool_enabled():
         from backend.core.duckdb import get_connection
 
+        if reuse_only:
+            # No pool ⇒ no idle connection to reuse. The reuse-only contract
+            # is "hand back a spare or bail" — never build on this path — so
+            # the caller falls back to serial execution.
+            raise _PoolBusy("pool disabled, no idle connection to reuse (reuse_only)")
         raw_con = get_connection(source=src, read_only=True, max_wait=max_wait)
         wrapped = _instrument(raw_con, service_key=src.get("name") or src.get("service_id"))
         try:
@@ -937,7 +964,7 @@ def checkout_connection(src: dict, max_wait: float = 10.0, *, skip_view_update: 
 
     service_key = src.get("name") or src.get("service_id") or "default"
     pool = _get_pool(service_key)
-    raw_con = pool.acquire(src, max_wait=max_wait, skip_view_update=skip_view_update)
+    raw_con = pool.acquire(src, max_wait=max_wait, skip_view_update=skip_view_update, reuse_only=reuse_only)
     wrapped = _instrument(raw_con, service_key=service_key)
     errored = False
     try:

@@ -260,14 +260,19 @@ async def dashboard_bundle(
     # guard untouched). ``sections=None`` and ``sections=['core','bots']``
     # both land here.
     # Try to acquire a 2nd pooled connection for parallel execution.
-    # max_wait=0.2 lets us absorb very brief contention but bails before
-    # the wait itself eats the parallel-execution savings.
+    # reuse_only: hand back an already-idle conn if one is instantly
+    # available, else raise _PoolBusy at once and fall back to serial. It
+    # must never build fresh — an admitted cold build holds a slot while it
+    # stalls in the serialized DuckLake attach, and concurrent second-
+    # checkouts then drain the pool and 503 every request (prod 2026-10-01,
+    # Local Std; py-spy showed all 8 slots stuck in get_connection). The
+    # best-effort parallel win is simply skipped under contention.
     second_cm = None
     second_con = None
     parallel = False
 
     def _checkout_second():
-        cm = checkout_connection(ctx.source, max_wait=0.2)
+        cm = checkout_connection(ctx.source, max_wait=0.2, reuse_only=True)
         return cm, cm.__enter__()
 
     # Shield checkout to prevent connection leaks if client cancels mid-flight
