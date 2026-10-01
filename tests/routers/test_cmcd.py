@@ -63,3 +63,45 @@ def test_cmcd_aggregates_range_token(client, in_memory_duckdb, test_service_sour
         assert data["available"] is True
         assert data["has_data"] is False
         mock_get.assert_called_once()
+
+
+def test_content_security_route_registered():
+    from backend.main import app
+
+    assert "post" in app.openapi()["paths"]["/api/cmcd/content-security"]
+
+
+def test_content_security_passes_content_id(client, in_memory_duckdb, test_service_source):
+    mock_ret = {
+        "available": True,
+        "fields": {"host": True},
+        "content_id": "movie-1",
+        "top_hosts": [{"value": "pirate.example", "requests": 3, "bytes": 3000}],
+        "bandwidth_ts": [{"bucket": "2026-08-19 12:00:00", "edge_bytes": 10, "shield_bytes": 2}],
+    }
+    with patch("backend.repositories.content_security.get_content_security", return_value=mock_ret) as mock_get:
+        resp = client.post(
+            "/api/cmcd/content-security",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "start_time": "2026-08-19T12:00:00Z",
+                "end_time": "2026-08-19T13:00:00Z",
+                "content_id": "movie-1",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["top_hosts"][0]["value"] == "pirate.example"
+    assert data["bandwidth_ts"][0]["shield_bytes"] == 2
+    assert mock_get.call_args.kwargs["content_id"] == "movie-1"
+    assert mock_get.call_args.kwargs["top_n"] == 10
+
+
+def test_content_security_rejects_oversized_content_id(client):
+    resp = client.post(
+        "/api/cmcd/content-security",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "content_id": "x" * 513},
+    )
+    assert resp.status_code == 422

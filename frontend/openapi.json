@@ -10816,6 +10816,194 @@
         }
       }
     },
+    "/api/cmcd/content-security": {
+      "post": {
+        "tags": [
+          "cmcd"
+        ],
+        "summary": "Cmcd Content Security",
+        "description": "Streaming \u2192 Content Security: top countries/referers/hosts + edge-vs-shield bandwidth.",
+        "operationId": "cmcd_content_security_api_cmcd_content_security_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContentSecurityRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentSecurityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/services/{service_id}/rum/enable": {
       "post": {
         "tags": [
@@ -45199,6 +45387,293 @@
           "bytes"
         ],
         "title": "CompressionPerformanceRow"
+      },
+      "ContentSecurityBandwidthPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "edge_bytes": {
+            "type": "integer",
+            "title": "Edge Bytes"
+          },
+          "shield_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shield Bytes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "edge_bytes"
+        ],
+        "title": "ContentSecurityBandwidthPoint"
+      },
+      "ContentSecurityContentId": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id",
+          "requests"
+        ],
+        "title": "ContentSecurityContentId"
+      },
+      "ContentSecurityRequest": {
+        "properties": {
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "filters": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FilterSpec"
+            },
+            "type": "object",
+            "title": "Filters",
+            "default": {}
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "bucket_seconds": {
+            "type": "integer",
+            "title": "Bucket Seconds",
+            "default": 300
+          },
+          "top_n": {
+            "type": "integer",
+            "title": "Top N",
+            "default": 10
+          },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          }
+        },
+        "type": "object",
+        "title": "ContentSecurityRequest"
+      },
+      "ContentSecurityResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "fields": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Fields",
+            "default": {}
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "has_shield_split": {
+            "type": "boolean",
+            "title": "Has Shield Split",
+            "default": false
+          },
+          "content_ids": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityContentId"
+            },
+            "type": "array",
+            "title": "Content Ids",
+            "default": []
+          },
+          "top_countries": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Top Countries",
+            "default": []
+          },
+          "top_referers": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Top Referers",
+            "default": []
+          },
+          "top_hosts": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Top Hosts",
+            "default": []
+          },
+          "bandwidth_ts": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityBandwidthPoint"
+            },
+            "type": "array",
+            "title": "Bandwidth Ts",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "available"
+        ],
+        "title": "ContentSecurityResponse"
+      },
+      "ContentSecurityTopRow": {
+        "properties": {
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "value",
+          "requests"
+        ],
+        "title": "ContentSecurityTopRow"
       },
       "CorrelateRequest": {
         "properties": {

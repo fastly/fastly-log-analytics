@@ -218,7 +218,7 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/network-quality",  # POST /api/network-quality
     "/api/query",  # POST /api/query
     "/api/sessions",  # POST /api/sessions and /api/sessions/detail
-    "/api/cmcd/",  # POST /api/cmcd/aggregates — streaming read-only query
+    "/api/cmcd/",  # POST /api/cmcd/aggregates + /content-security — streaming read-only queries
     "/api/value/",  # POST /api/value/summary — service summary read-only query
     "/api/web-vitals",  # POST /api/web-vitals — browser perf beacon (no PII)
     "/api/charts/",

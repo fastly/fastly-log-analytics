@@ -788,6 +788,19 @@ export const handlers = [
       startup_ts: [],
     }),
   ),
+  http.post(`${API_BASE}/api/cmcd/content-security`, () =>
+    HttpResponse.json({
+      available: true,
+      fields: {},
+      content_id: null,
+      has_shield_split: false,
+      content_ids: [],
+      top_countries: [],
+      top_referers: [],
+      top_hosts: [],
+      bandwidth_ts: [],
+    }),
+  ),
 
   // ── Client telemetry collectors ───────────────────────────────────
   // Mounted globally by the SPA: web-vitals reports on pagehide /

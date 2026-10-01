@@ -1117,6 +1117,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cmcd/content-security": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cmcd Content Security
+         * @description Streaming → Content Security: top countries/referers/hosts + edge-vs-shield bandwidth.
+         */
+        post: operations["cmcd_content_security_api_cmcd_content_security_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/rum/enable": {
         parameters: {
             query?: never;
@@ -6965,6 +6985,128 @@ export interface components {
             requests: number;
             /** Bytes */
             bytes: number;
+        };
+        /** ContentSecurityBandwidthPoint */
+        ContentSecurityBandwidthPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Edge Bytes */
+            edge_bytes: number;
+            /** Shield Bytes */
+            shield_bytes?: number | null;
+        };
+        /** ContentSecurityContentId */
+        ContentSecurityContentId: {
+            /** Content Id */
+            content_id: string;
+            /** Requests */
+            requests: number;
+        };
+        /** ContentSecurityRequest */
+        ContentSecurityRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /** Content Id */
+            content_id?: string | null;
+            /**
+             * Bucket Seconds
+             * @default 300
+             */
+            bucket_seconds: number;
+            /**
+             * Top N
+             * @default 10
+             */
+            top_n: number;
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
+        };
+        /** ContentSecurityResponse */
+        ContentSecurityResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Available */
+            available: boolean;
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Fields
+             * @default {}
+             */
+            fields: {
+                [key: string]: boolean;
+            };
+            /** Content Id */
+            content_id?: string | null;
+            /**
+             * Has Shield Split
+             * @default false
+             */
+            has_shield_split: boolean;
+            /**
+             * Content Ids
+             * @default []
+             */
+            content_ids: components["schemas"]["ContentSecurityContentId"][];
+            /**
+             * Top Countries
+             * @default []
+             */
+            top_countries: components["schemas"]["ContentSecurityTopRow"][];
+            /**
+             * Top Referers
+             * @default []
+             */
+            top_referers: components["schemas"]["ContentSecurityTopRow"][];
+            /**
+             * Top Hosts
+             * @default []
+             */
+            top_hosts: components["schemas"]["ContentSecurityTopRow"][];
+            /**
+             * Bandwidth Ts
+             * @default []
+             */
+            bandwidth_ts: components["schemas"]["ContentSecurityBandwidthPoint"][];
+        };
+        /** ContentSecurityTopRow */
+        ContentSecurityTopRow: {
+            /** Value */
+            value: string;
+            /** Requests */
+            requests: number;
+            /** Bytes */
+            bytes?: number | null;
         };
         /** CorrelateRequest */
         CorrelateRequest: {
@@ -20535,6 +20677,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CmcdAggregatesResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cmcd_content_security_api_cmcd_content_security_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContentSecurityRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContentSecurityResponse"];
                 };
             };
             /** @description Bad request */

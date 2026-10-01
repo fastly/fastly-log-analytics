@@ -47,7 +47,7 @@ export default function StreamingClient() {
       description="Video streaming analytics — playback quality and content security for your streaming services."
       icon={Play}
     >
-      {({ startTime, endTime, activeServiceId, filterPayload, timezone }) => {
+      {({ startTime, endTime, activeServiceId, filterPayload, timezone, bucketSeconds }) => {
         const tabProps = {
           activeServiceId,
           filterPayload,
@@ -75,7 +75,7 @@ export default function StreamingClient() {
               <QualityTab {...tabProps} />
             </TabsContent>
             <TabsContent value="security">
-              <SecurityTab />
+              <SecurityTab {...tabProps} bucketSeconds={bucketSeconds} />
             </TabsContent>
           </Tabs>
         )

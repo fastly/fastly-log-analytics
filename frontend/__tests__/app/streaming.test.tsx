@@ -26,6 +26,10 @@ vi.mock('@/app/streaming/_sections/tabs/QualityTab', () => ({
   default: () => <div data-testid="quality-tab" />,
 }))
 
+vi.mock('@/app/streaming/_sections/tabs/SecurityTab', () => ({
+  default: () => <div data-testid="security-tab" />,
+}))
+
 vi.mock('@/components/ReportLayout', async () =>
   (await import('../helpers/page-smoke')).reportLayoutModuleMock({
     startTime: '2026-01-01T00:00:00Z',
@@ -64,15 +68,15 @@ test('defaults to the Quality tab', () => {
   expect(screen.getByRole('tab', { name: /quality/i })).toHaveAttribute('aria-selected', 'true')
   expect(screen.getByRole('tab', { name: /security/i })).toHaveAttribute('aria-selected', 'false')
   expect(screen.getByTestId('quality-tab')).toBeInTheDocument()
-  expect(screen.queryByText(/content security metrics/i)).not.toBeInTheDocument()
+  expect(screen.queryByTestId('security-tab')).not.toBeInTheDocument()
 })
 
-test('switching to Security shows the placeholder and writes ?tab=security', async () => {
+test('switching to Security shows the Security tab and writes ?tab=security', async () => {
   const onUrlUpdate = vi.fn<(e: UrlUpdateEvent) => void>()
   renderPage('', onUrlUpdate)
   await userEvent.click(screen.getByRole('tab', { name: /security/i }))
   expect(screen.getByRole('tab', { name: /security/i })).toHaveAttribute('aria-selected', 'true')
-  expect(screen.getByText(/content security metrics/i)).toBeInTheDocument()
+  expect(screen.getByTestId('security-tab')).toBeInTheDocument()
   expect(screen.queryByTestId('quality-tab')).not.toBeInTheDocument()
   expect(onUrlUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ queryString: '?tab=security' }))
 })
@@ -80,7 +84,7 @@ test('switching to Security shows the placeholder and writes ?tab=security', asy
 test('?tab=security deep-links to the Security tab', () => {
   renderPage('?tab=security')
   expect(screen.getByRole('tab', { name: /security/i })).toHaveAttribute('aria-selected', 'true')
-  expect(screen.getByText(/content security metrics/i)).toBeInTheDocument()
+  expect(screen.getByTestId('security-tab')).toBeInTheDocument()
 })
 
 test('switching back to Quality clears ?tab from the URL', async () => {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, StringConstraints
 
 from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
 
@@ -43,3 +45,41 @@ class CmcdAggregatesResponse(BaseResponse):
     sessions_ts: list[dict[str, Any]] = []
     startup_ts: list[dict[str, Any]] = []
     session_duration_dist: list[dict[str, Any]] = []
+
+
+class ContentSecurityRequest(FilteredRequest):
+    content_id: Annotated[str, StringConstraints(max_length=512)] | None = None
+    bucket_seconds: Seconds14400 = 300
+    top_n: Limit100 = 10
+    range_token: str | None = None
+    anchor: str | None = None
+
+
+class ContentSecurityTopRow(BaseModel):
+    value: str
+    requests: int
+    bytes: int | None = None
+
+
+class ContentSecurityContentId(BaseModel):
+    content_id: str
+    requests: int
+
+
+class ContentSecurityBandwidthPoint(BaseModel):
+    bucket: str
+    edge_bytes: int
+    shield_bytes: int | None = None
+
+
+class ContentSecurityResponse(BaseResponse):
+    available: bool
+    reason: str | None = None
+    fields: dict[str, bool] = {}
+    content_id: str | None = None
+    has_shield_split: bool = False
+    content_ids: list[ContentSecurityContentId] = []
+    top_countries: list[ContentSecurityTopRow] = []
+    top_referers: list[ContentSecurityTopRow] = []
+    top_hosts: list[ContentSecurityTopRow] = []
+    bandwidth_ts: list[ContentSecurityBandwidthPoint] = []
