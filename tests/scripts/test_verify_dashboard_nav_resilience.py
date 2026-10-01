@@ -66,3 +66,26 @@ def test_network_30d_navigation_tolerates_portforward_resets() -> None:
     assert not re.search(r"networkPage\.goto\(networkUrl30d", src), (
         "Network 30d must not keep the un-retried single-shot goto that dies on a port-forward reset"
     )
+
+
+def test_rum_24h_vitals_render_is_polled_not_blind_slept() -> None:
+    # The RUM 24h step used a blind waitForTimeout(4000) before reading the
+    # body, then declared vitals "missing" if the heavy Plotly vitals cards had
+    # not painted within that fixed 4s. Under the verify-phase CPU spike (4 envs
+    # rendering in parallel on a shared 6-CPU Colima) the data is present and
+    # the analytics endpoint answers in ~0.5s, but the client render lags past
+    # 4s and the step false-fails. It must POLL for the vitals title+rating to
+    # actually render (returning immediately once painted) with a generous
+    # bounded timeout, not sleep a fixed 4s and hope.
+    src = _src()
+    m = re.search(r"RUM_RENDER_SETTLE_MS\s*=\s*(\d+)", src)
+    assert m, "verify_dashboard.js must define a named RUM_RENDER_SETTLE_MS render-poll budget"
+    assert int(m.group(1)) >= 8000, (
+        "the RUM vitals render-poll budget must be generous enough to absorb the verify-phase CPU spike (>=8s)"
+    )
+    assert "RUM_RENDER_SETTLE_MS" in src and src.count("waitForFunction") >= 1, (
+        "RUM 24h must waitForFunction-poll for the vitals render using RUM_RENDER_SETTLE_MS"
+    )
+    assert not re.search(r"rumPage\.waitForTimeout\(4000\)", src), (
+        "RUM 24h must not keep the blind 4s settle that false-fails vitals render under load"
+    )

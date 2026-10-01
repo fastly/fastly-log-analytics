@@ -74,6 +74,13 @@ async function gotoWithShellReady(page, url, label, { attempts = 3, navTimeout =
 const TRANSIENT_ERROR_BUDGET = 8;
 let transientErrorsSeen = 0;
 
+// The RUM vitals cards are heavy Plotly renders gated behind a status->analytics
+// query chain. Under the verify-phase CPU spike (4 envs rendering in parallel on
+// a shared 6-CPU Colima) the data is present and the analytics endpoint answers
+// in ~0.5s, but the client paint can lag several seconds. Poll for the vitals to
+// actually render (returns the instant they paint) rather than blind-sleeping.
+const RUM_RENDER_SETTLE_MS = 12000;
+
 function isTransientConsoleBlip(text) {
   return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION/i.test(text);
 }
@@ -432,7 +439,20 @@ function registerErrorListeners(page, browser, contextName) {
         response = await rumPage.goto(rumUrl24h, { timeout: 35000 });
         if (response && response.ok()) {
           await rumPage.waitForSelector('main', { timeout: 10000 });
-          await rumPage.waitForTimeout(4000);
+          // Poll for the vitals cards to actually paint (returns immediately once
+          // rendered); tolerates a slow render under the verify-phase CPU spike
+          // instead of blind-sleeping a fixed 4s and false-failing.
+          try {
+            await rumPage.waitForFunction(() => {
+              const text = document.body.innerText;
+              const hasTitle = text.includes("Largest Contentful Paint") || text.includes("LCP");
+              const hasRating = text.includes("GOOD") || text.includes("POOR") || text.includes("NEEDS IMP.");
+              const failedToLoad = text.includes("Failed to load") && !text.includes("Faro version");
+              return hasTitle && hasRating && !failedToLoad;
+            }, { timeout: RUM_RENDER_SETTLE_MS });
+          } catch (e) {
+            // Fall through to read the body and let the outer attempt loop retry.
+          }
           rumBodyText24h = await rumPage.evaluate(() => document.body.innerText);
           const rumFailedToLoad24h = rumBodyText24h.includes("Failed to load") && !rumBodyText24h.includes("Faro version");
 
@@ -471,7 +491,13 @@ function registerErrorListeners(page, browser, contextName) {
         response = await rumPage.goto(rumUrl5m, { timeout: 35000 });
         if (response && response.ok()) {
           await rumPage.waitForSelector('main', { timeout: 10000 });
-          await rumPage.waitForTimeout(4000);
+          // Poll for the beacon card to paint (returns immediately once rendered)
+          // so a slow render under load doesn't read 0 and waste the attempt.
+          try {
+            await rumPage.waitForFunction(() => document.body.innerText.includes("TOTAL BEACONS"), { timeout: RUM_RENDER_SETTLE_MS });
+          } catch (e) {
+            // Fall through; the outer attempt loop retries for ingestion/render.
+          }
           rumBodyText5m = await rumPage.evaluate(() => document.body.innerText);
 
           if (rumBodyText5m.includes("TOTAL BEACONS")) {
