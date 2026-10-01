@@ -20,6 +20,11 @@ if (!actualExpectedCommit || actualExpectedCommit === 'unknown') {
   }
 }
 
+// Recency window for the "fresh ingest" liveness checks. Requests and RUM
+// share ONE pipeline (edge->FOS->discovery->commit, a 6-15min floor), so both
+// use the same window — a 5m window sat below that floor and failed at 0.
+const RECENT_RANGE = "15m";
+
 // Helper to append query parameters cleanly
 function getUrlWithParam(url, key, value) {
   const joiner = url.includes('?') ? '&' : '?';
@@ -140,9 +145,9 @@ function registerErrorListeners(page, browser, contextName) {
     }
     console.log(`[Dashboard 24h] Verified: 24h data is active with ${totalMatch24h[1]} total rows.`);
 
-    // 1.2. Verify 5m Range with ROBUST POLLING (At least 150 rows)
-    const url5m = getUrlWithParam(baseUrl, "range", "5m");
-    console.log(`[Dashboard 5m] Checking ${url5m} with active polling...`);
+    // 1.2. Verify recent-window Range with ROBUST POLLING (At least 150 rows)
+    const url5m = getUrlWithParam(baseUrl, "range", RECENT_RANGE);
+    console.log(`[Dashboard ${RECENT_RANGE}] Checking ${url5m} with active polling...`);
 
     let count5m = 0;
     const MIN_REQ_5M = 150; // Safe minimum for standard traffic seeding
@@ -163,19 +168,19 @@ function registerErrorListeners(page, browser, contextName) {
           }
         }
       } catch (err) {
-        console.log(`[Dashboard 5m] Navigation warning (attempt ${attempt}): ${err.message}`);
+        console.log(`[Dashboard ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[Dashboard 5m] Attempt ${attempt}/4: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 8s for background ingestion...`);
+      console.log(`[Dashboard ${RECENT_RANGE}] Attempt ${attempt}/4: Standard request count is ${count5m}/${MIN_REQ_5M}. Waiting 8s for background ingestion...`);
       await page.waitForTimeout(8000);
     }
 
     if (count5m < MIN_REQ_5M) {
-      console.error(`[Dashboard 5m] Verification Failed: Recent 5m data count is only ${count5m} (expected at least ${MIN_REQ_5M} from our recent edge load-test!). Ingestion did not complete.`);
+      console.error(`[Dashboard ${RECENT_RANGE}] Verification Failed: Recent ${RECENT_RANGE} data count is only ${count5m} (expected at least ${MIN_REQ_5M} from our recent edge load-test!). Ingestion did not complete.`);
       console.error(`Body text sample:\n${bodyText5m.slice(0, 1000)}`);
       await browser.close();
       process.exit(1);
     }
-    console.log(`[Dashboard 5m] Verified: 5m data contains ${count5m} rows (greater than load-test minimum of ${MIN_REQ_5M} rows).`);
+    console.log(`[Dashboard ${RECENT_RANGE}] Verified: ${RECENT_RANGE} data contains ${count5m} rows (greater than load-test minimum of ${MIN_REQ_5M} rows).`);
 
     // 1.3. Validate Header Liveness (REQUEST)
     const reqLatestMatch = bodyText5m.match(/REQUEST[\s\n]*latest:[\s\n]*([^\n]+)/i);
@@ -392,9 +397,9 @@ function registerErrorListeners(page, browser, contextName) {
     }
     console.log(`[RUM 24h] Verified: 24h RUM data is active and charts/ratings successfully populated.`);
 
-    // 2.2. Verify 5m RUM Range with active polling (At least 50 beacons)
-    const rumUrl5m = getUrlWithParam(rumBaseUrl, "range", "5m");
-    console.log(`[RUM 5m] Checking ${rumUrl5m} with active polling...`);
+    // 2.2. Verify recent-window RUM Range with active polling (At least 50 beacons)
+    const rumUrl5m = getUrlWithParam(rumBaseUrl, "range", RECENT_RANGE);
+    console.log(`[RUM ${RECENT_RANGE}] Checking ${rumUrl5m} with active polling...`);
 
     let beaconCount5m = 0;
     const MIN_BEACONS_5M = 50; // Safe threshold allowing for global edge S3 streaming latency
@@ -418,20 +423,20 @@ function registerErrorListeners(page, browser, contextName) {
           }
         }
       } catch (err) {
-        console.log(`[RUM 5m] Navigation warning (attempt ${attempt}): ${err.message}`);
+        console.log(`[RUM ${RECENT_RANGE}] Navigation warning (attempt ${attempt}): ${err.message}`);
       }
-      console.log(`[RUM 5m] Attempt ${attempt}/4: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 8s for background ingestion...`);
+      console.log(`[RUM ${RECENT_RANGE}] Attempt ${attempt}/4: Beacon count is ${beaconCount5m}/${MIN_BEACONS_5M}. Waiting 8s for background ingestion...`);
       await rumPage.waitForTimeout(8000);
     }
 
     if (beaconCount5m < MIN_BEACONS_5M) {
-      console.error(`[RUM 5m] Verification Failed: Recent 5m RUM beacon count is only ${beaconCount5m} (expected at least ${MIN_BEACONS_5M} from our recent edge load-test!). Ingestion did not complete.`);
+      console.error(`[RUM ${RECENT_RANGE}] Verification Failed: Recent ${RECENT_RANGE} RUM beacon count is only ${beaconCount5m} (expected at least ${MIN_BEACONS_5M} from our recent edge load-test!). Ingestion did not complete.`);
       console.error(`Body text sample:\n${rumBodyText5m.slice(0, 1000)}`);
       await browser.close();
       process.exit(1);
     }
-    console.log(`[RUM 5m] Verified: 5m RUM data contains ${beaconCount5m} beacons (greater than load-test minimum of ${MIN_BEACONS_5M} beacons).`);
-    console.log(`[RUM 5m] Verified: Web Vitals metrics are active in the 5m window.`);
+    console.log(`[RUM ${RECENT_RANGE}] Verified: ${RECENT_RANGE} RUM data contains ${beaconCount5m} beacons (greater than load-test minimum of ${MIN_BEACONS_5M} beacons).`);
+    console.log(`[RUM ${RECENT_RANGE}] Verified: Web Vitals metrics are active in the ${RECENT_RANGE} window.`);
 
     // 2.3. Validate Header Liveness (RUM)
     const rumLatestMatch = rumBodyText5m.match(/RUM[\s\n]*latest:[\s\n]*([^\n]+)/i);
