@@ -653,9 +653,8 @@ function registerErrorListeners(page, browser, contextName) {
 
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
-        response = await networkPage.goto(networkUrl30d, { timeout: 35000 });
+        response = await gotoWithShellReady(networkPage, networkUrl30d, 'Network 30d', { attempts: 3, navTimeout: 35000, shellTimeout: 10000 });
         if (response && response.ok()) {
-          await networkPage.waitForSelector('main', { timeout: 10000 });
 
           // GEMINI.md Mandate #4: Positive-case wait for Plotly charts to become visible
           try {

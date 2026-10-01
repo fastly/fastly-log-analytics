@@ -48,3 +48,21 @@ def test_rum_30d_navigation_shell_wait_tolerates_load() -> None:
     # helper owns navigation now). Other RUM sections keep their 10s shell wait
     # because they already sit inside 4-attempt retry loops.
     assert not re.search(r"rumPage\.goto\(rumUrl30d", src), "RUM 30d must not keep the un-retried single-shot goto"
+
+
+def test_network_30d_navigation_tolerates_portforward_resets() -> None:
+    # The Network 30d step issues a raw goto inside its retry loop. On the K8s
+    # high-scale env the port-forward drops mid-navigation (net::ERR_CONNECTION_RESET
+    # / goto Timeout), so the page never loads and the step falsely reports
+    # "No data available" from a blank page even though the network-health
+    # backend returns has_data=True in ~0.4s. Navigation must go through the
+    # bounded retry helper (which absorbs a reset with backoff before giving
+    # up) exactly like RUM 30d.
+    src = _src()
+    assert "gotoWithShellReady(networkPage, networkUrl30d" in src, (
+        "Network 30d navigation must go through the bounded retry helper so a "
+        "transient port-forward reset is retried, not reported as missing data"
+    )
+    assert not re.search(r"networkPage\.goto\(networkUrl30d", src), (
+        "Network 30d must not keep the un-retried single-shot goto that dies on a port-forward reset"
+    )
