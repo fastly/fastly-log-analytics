@@ -81,9 +81,7 @@ let transientErrorsSeen = 0;
 // actually render (returns the instant they paint) rather than blind-sleeping.
 const RUM_RENDER_SETTLE_MS = 12000;
 
-function isTransientConsoleBlip(text) {
-  return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION/i.test(text);
-}
+const { isTransientConsoleBlip } = require('./lib/console_blip');
 
 function failOrTolerate(browser, contextName, label, detail, transient) {
   if (transient) {
