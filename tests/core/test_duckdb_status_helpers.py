@@ -728,6 +728,87 @@ def test_get_sync_status_empty_view_falls_back_to_metadata_without_prior(in_memo
     assert out["local_rows"] == 400
 
 
+def test_get_sync_status_empty_view_reads_authoritative_lake_over_stale_prior(in_memory_duckdb, fos_source):
+    """An empty view on a service with no local cache mirror (GCE standard)
+    must NOT persist an ancient prior. Before the fix a skip_view_update
+    status connection holding a 'WHERE false' baked view returned 0 rows,
+    and the fallback preserved the last-known-good persisted local_rows /
+    latest_log_at forever — the GCE header flap that read a 10-day-stale
+    Sept-22 timestamp while the DuckLake table was committing fresh rows
+    every few minutes. The fix reads count/min/max STRAIGHT from the
+    committed lake table, self-healing the header. Pinned: trap #33/#35."""
+    from datetime import datetime
+
+    from backend.core import duckdb as _db
+    from backend.core._duckdb_status import get_sync_status
+    from backend.utils.date_utils import safe_iso
+
+    # Real EMPTY table → the view stats query returns (0, None, None) with no
+    # error, so the empty-view branch (not the exception branch) fires.
+    table_name = _db._safe_table_name(fos_source["name"])
+    in_memory_duckdb.execute(f"CREATE TABLE {table_name} (timestamp TIMESTAMP)")
+    in_memory_duckdb.execute(
+        "CREATE TABLE _cron_run_log (task VARCHAR, started_at VARCHAR, "
+        "duration_s DOUBLE, status VARCHAR, error_message VARCHAR, summary VARCHAR)"
+    )
+
+    fresh_max = datetime(2026, 10, 2, 20, 31, 27)
+    fresh_min = datetime(2026, 10, 1, 0, 0, 0)
+    real_execute = in_memory_duckdb.execute
+
+    def _patched_execute(sql, *args, **kwargs):
+        # Lake existence probe → the lake table exists.
+        if "duckdb_tables()" in sql and "database_name = 'lake'" in sql:
+
+            class _RExists:
+                def fetchone(self_inner):
+                    return (1,)
+
+            return _RExists()
+        # Direct read of the committed lake table → fresh authoritative stats.
+        if 'FROM lake."' in sql and "count(*)" in sql:
+
+            class _RFresh:
+                def fetchone(self_inner):
+                    return (500, fresh_min, fresh_max)
+
+            return _RFresh()
+        return real_execute(sql, *args, **kwargs)
+
+    class _ConProxy:
+        def execute(self, sql, *args, **kwargs):
+            return _patched_execute(sql, *args, **kwargs)
+
+    stale_prior = {"local_rows": 13_948_280, "latest_log_at": "2026-09-22T00:58:06"}
+    summary = {
+        "file_count": 1,
+        "total_rows": 100,
+        "total_bytes": 100,
+        "count_with_bytes": 1,
+        "last_ingested": "2026-10-02T20:31:00",
+        "latest_file_name": "raw/2026-10-02T20:31:00.gz",
+    }
+
+    with (
+        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.config.get_status", return_value=stale_prior),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.iceberg.buffer_files", return_value=[]),
+        patch("backend.core.iceberg.clear_source_caches") as mock_clear,
+        patch("backend.core.iceberg.update_iceberg_view") as mock_update,
+    ):
+        out = get_sync_status(_ConProxy(), fos_source, force=True)
+
+    # Empty view is not an error → no expensive rebuild.
+    mock_clear.assert_not_called()
+    mock_update.assert_not_called()
+    # The authoritative committed lake read wins over BOTH the stale prior
+    # (13.9M) and the trimmed metadata sum (100).
+    assert out["local_rows"] == 500
+    assert out["latest_log_at"] == safe_iso(fresh_max)
+    assert out["earliest_log_at"] == safe_iso(fresh_min)
+
+
 # ── refresh_config_status remaining branches ─────────────────────────
 
 

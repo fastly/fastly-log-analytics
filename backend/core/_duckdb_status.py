@@ -100,6 +100,71 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 
+def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
+    """Count/min/max read STRAIGHT from the committed DuckLake table plus the
+    live buffer parquet, bypassing a possibly-poisoned per-connection baked
+    iceberg view.
+
+    The empty-view fallback in ``get_sync_status`` otherwise preserves an
+    ancient persisted ``local_rows``/``latest_log_at``: on a service with no
+    local ``cache/data`` mirror (e.g. GCE standard), the split-stats fast path
+    is skipped and the status read hits the iceberg view directly. A
+    ``skip_view_update`` status connection that happens to hold a "WHERE false"
+    empty view then returns 0 rows with no error, and the fallback sticks at
+    the last-known value forever — the GCE header flap that read a 10-day-stale
+    Sept-22 timestamp while the lake was committing fresh rows every few
+    minutes (AGENTS.md trap #33/#35). The committed lake table is the latest
+    snapshot by construction, so reading it directly self-heals the header.
+
+    Returns ``(count, min_ts, max_ts)`` or ``None`` when nothing is readable.
+    """
+    counts: list[int] = []
+    mins: list[Any] = []
+    maxs: list[Any] = []
+    try:
+        from backend.core.iceberg._ducklake import ducklake_table_name
+
+        lake_table = ducklake_table_name(src)
+        exists = con.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+            [lake_table],
+        ).fetchone()
+        if exists:
+            row = con.execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"').fetchone()
+            if row:
+                counts.append(row[0] or 0)
+                if row[1] is not None:
+                    mins.append(row[1])
+                if row[2] is not None:
+                    maxs.append(row[2])
+    except Exception as e:
+        logger.debug("[sync-status] direct lake stats unavailable: %s", e)
+    try:
+        from backend.core import iceberg as _ice
+        from backend.utils.sql_validator import escape_sql_literal as _esl
+
+        buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
+        if buf_paths:
+            paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
+            row = con.execute(
+                "SELECT count(*), min(timestamp), max(timestamp) "
+                f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
+            ).fetchone()
+            if row:
+                counts.append(row[0] or 0)
+                if row[1] is not None:
+                    mins.append(row[1])
+                if row[2] is not None:
+                    maxs.append(row[2])
+    except Exception as e:
+        logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
+
+    total = sum(counts)
+    if total <= 0:
+        return None
+    return (total, min(mins) if mins else None, max(maxs) if maxs else None)
+
+
 def get_sync_status(
     con: duckdb.DuckDBPyConnection, source: dict | None = None, skip_fos: bool = False, force: bool = False
 ) -> dict:
@@ -291,16 +356,28 @@ def get_sync_status(
                 latest_log_at = stats[2]
             else:
                 # Transient empty view (catalog mid-rebuild / "WHERE false").
-                # The metadata rollup is a poor proxy for queryable rows — it's
-                # the retention-trimmed ingested_files sum (≈1 day), not the
-                # parquet lake — so prefer the last-known-good persisted
-                # local_rows from the previous successful poll (the real
-                # parquet count). The badge "sticks" at the true value until
-                # the view recovers instead of flapping to a wrong number.
-                # Fall back to the metadata sum only when there is no prior
-                # value (first-ever poll for this service).
-                prior_rows = (cached_status or {}).get("local_rows") or 0
-                local_rows = prior_rows if prior_rows > 0 else local_rows_ingested
+                # Before preserving a possibly-ancient prior, read the
+                # authoritative committed DuckLake table (+ live buffer)
+                # DIRECTLY — it is the latest snapshot by construction and
+                # bypasses a poisoned per-connection baked view. Without this,
+                # a skip_view_update status connection holding an empty view
+                # persists a stale latest_log_at forever (the GCE header flap
+                # that read Sept-22 while the lake was fresh — trap #33/#35).
+                direct = _authoritative_direct_stats(con, src)
+                if direct is not None:
+                    local_rows = direct[0]
+                    earliest_log_at = direct[1]
+                    latest_log_at = direct[2]
+                else:
+                    # The metadata rollup is a poor proxy for queryable rows —
+                    # it's the retention-trimmed ingested_files sum (≈1 day),
+                    # not the parquet lake — so prefer the last-known-good
+                    # persisted local_rows from the previous successful poll
+                    # (the real parquet count). The badge "sticks" at the true
+                    # value until the view recovers instead of flapping. Fall
+                    # back to the metadata sum only on a first-ever poll.
+                    prior_rows = (cached_status or {}).get("local_rows") or 0
+                    local_rows = prior_rows if prior_rows > 0 else local_rows_ingested
     except Exception as e:
         if (
             "No files found" in str(e)
