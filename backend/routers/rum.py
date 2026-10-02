@@ -741,114 +741,27 @@ async def rum_analytics(
             # 1. No filters allowed for rollups (same as standard rollups)
             # 2. RUM aggregates tables must exist and have data
 
-            target_hours = None
             prefer_raw_window = False
             try:
                 st = parse_iso_utc(start_time)
                 et = parse_iso_utc(end_time)
-                if st and et:
-                    if (et - st).total_seconds() <= _RUM_RAW_WINDOW_MAX_S:
-                        prefer_raw_window = True
-                    st_hour = st.replace(minute=0, second=0, microsecond=0)
-                    et_hour = et.replace(minute=0, second=0, microsecond=0)
-                    target_hours = []
-                    curr = st_hour
-                    while curr <= et_hour:
-                        target_hours.append(curr)
-                        curr += datetime.timedelta(hours=1)
+                if st and et and (et - st).total_seconds() <= _RUM_RAW_WINDOW_MAX_S:
+                    prefer_raw_window = True
             except Exception:
                 pass
 
             if not parsed_filters and not prefer_raw_window:
                 from backend.core.rollups.rum import table_exists
 
+                # RUM reads are pure-read. Serve from cron-built rollups when they
+                # exist (even if the newest hour is slightly stale — the rum_commit
+                # cron refreshes it, exactly like request-log rollups); otherwise
+                # scan the raw tables directly. Never recompute aggregates in-request:
+                # opening a second read-write DuckLake connection competes for the
+                # process-wide attach lock and, under verify-phase concurrency, wedges
+                # the whole /api surface (120s pool-timeout on client_vitals).
                 if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
                     use_rollup = True
-                    try:
-                        raw_max = None
-                        if table_exists(con, "client_vitals"):
-                            ts_raw_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()[0]
-                            if ts_raw_v:
-                                # handle timezone if needed
-                                raw_max = ts_raw_v.replace(tzinfo=None) if hasattr(ts_raw_v, "replace") else ts_raw_v
-                        if table_exists(con, "client_errors"):
-                            ts_raw_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()[0]
-                            if ts_raw_e:
-                                ts_raw_e_naive = (
-                                    ts_raw_e.replace(tzinfo=None) if hasattr(ts_raw_e, "replace") else ts_raw_e
-                                )
-                                if not raw_max or ts_raw_e_naive > raw_max:
-                                    raw_max = ts_raw_e_naive
-
-                        agg_max = None
-                        ts_agg_v = con.execute("SELECT MAX(bucket_start) FROM rum_vitals_aggregates").fetchone()[0]
-                        if ts_agg_v:
-                            agg_max = ts_agg_v.replace(tzinfo=None) if hasattr(ts_agg_v, "replace") else ts_agg_v
-                        ts_agg_e = con.execute("SELECT MAX(bucket_start) FROM rum_error_aggregates").fetchone()[0]
-                        if ts_agg_e:
-                            ts_agg_e_naive = ts_agg_e.replace(tzinfo=None) if hasattr(ts_agg_e, "replace") else ts_agg_e
-                            if not agg_max or ts_agg_e_naive > agg_max:
-                                agg_max = ts_agg_e_naive
-
-                        if raw_max and (not agg_max or raw_max > agg_max):
-                            logger.info(
-                                "[rum_rollups] %s: RUM aggregates are stale (raw_max=%s > agg_max=%s). Running fast on-demand recompute for active hours...",
-                                service_id,
-                                raw_max,
-                                agg_max,
-                            )
-                            try:
-                                from contextlib import closing
-
-                                from backend.core.duckdb import get_connection
-                                from backend.core.rollups.rum import recompute_rum_aggregates
-
-                                target_recompute_hours = [raw_max]
-                                if agg_max and agg_max.replace(minute=0, second=0, microsecond=0) != raw_max.replace(
-                                    minute=0, second=0, microsecond=0
-                                ):
-                                    target_recompute_hours.append(agg_max)
-                                with closing(get_connection(rum_source, read_only=False)) as write_con:
-                                    recompute_rum_aggregates(write_con, service_id, hours=target_recompute_hours)
-                                use_rollup = True
-                            except Exception as recompute_err:
-                                logger.warning(
-                                    "[rum_rollups] On-demand recompute failed: %s; falling back to raw query",
-                                    recompute_err,
-                                )
-                                use_rollup = False
-                    except Exception as stale_check_err:
-                        logger.warning("[rum_rollups] Failed to check liveness of RUM aggregates: %s", stale_check_err)
-                else:
-                    # Tables don't exist yet! Let's see if raw data exists and trigger creation + recompute
-                    if table_exists(con, "client_vitals") or table_exists(con, "client_errors"):
-                        with track_query(
-                            con,
-                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM client_vitals) OR EXISTS (SELECT 1 FROM client_errors) THEN 1 ELSE 0 END",
-                            [],
-                            "rum_any_data_initial",
-                        ) as cur_raw_any_init:
-                            if cur_raw_any_init.fetchone()[0]:
-                                try:
-                                    logger.info(
-                                        "[rum_rollups] %s: RUM aggregates tables do not exist. Triggering initial on-demand creation and recomputation...",
-                                        service_id,
-                                    )
-                                    from contextlib import closing
-
-                                    from backend.core.duckdb import get_connection
-
-                                    with closing(get_connection(rum_source, read_only=False)) as write_con:
-                                        from backend.core.rollups.rum import recompute_rum_aggregates
-
-                                        recompute_rum_aggregates(write_con, service_id)
-                                    use_rollup = True
-                                except Exception as init_err:
-                                    logger.warning(
-                                        "[rum_rollups] %s: Initial on-demand RUM aggregates recomputation failed: %s",
-                                        service_id,
-                                        init_err,
-                                    )
 
             if use_rollup:
                 # Run optimized rollup-based query
@@ -874,48 +787,10 @@ async def rum_analytics(
                             if not cur_raw_any.fetchone()[0]:
                                 return {"no_data": True}
 
-                            # On-demand RUM aggregates recomputation!
-                            try:
-                                logger.info(
-                                    "[rum_rollups] %s: No rollup data in range but raw exists. Triggering on-demand RUM aggregates recomputation...",
-                                    service_id,
-                                )
-                                from contextlib import closing
-
-                                from backend.core.duckdb import get_connection
-
-                                # Open a temporary read-write connection to the RUM source
-                                with closing(get_connection(rum_source, read_only=False)) as write_con:
-                                    from backend.core.rollups.rum import recompute_rum_aggregates
-
-                                    recompute_rum_aggregates(write_con, service_id, hours=target_hours)
-
-                                # If successful, we can re-verify if we now have rollup data!
-                                with track_query(
-                                    con,
-                                    "SELECT COUNT(*) FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start >= CAST(? AS TIMESTAMPTZ) AND bucket_start <= CAST(? AS TIMESTAMPTZ)",
-                                    [service_id, start_time, end_time],
-                                    "rum_rollup_any_data_retry",
-                                ) as cur_any_retry:
-                                    if cur_any_retry.fetchone()[0] > 0:
-                                        logger.info(
-                                            "[rum_rollups] %s: On-demand RUM aggregates successfully populated. Querying from rollups!",
-                                            service_id,
-                                        )
-                                        use_rollup = True
-                                    else:
-                                        logger.warning(
-                                            "[rum_rollups] %s: On-demand RUM aggregates populated but range is still empty. Falling back to raw query.",
-                                            service_id,
-                                        )
-                                        use_rollup = False
-                            except Exception as on_demand_err:
-                                logger.warning(
-                                    "[rum_rollups] %s: On-demand RUM aggregates recomputation failed: %s. Falling back to raw query.",
-                                    service_id,
-                                    on_demand_err,
-                                )
-                                use_rollup = False
+                        # Rollups hold no rows for this window yet (the rum_commit
+                        # cron hasn't built them) but raw beacons exist — serve the
+                        # raw path directly instead of recomputing in-request.
+                        use_rollup = False
 
             if use_rollup:
                 # 1. Pageviews, interactions, errors, total beacons

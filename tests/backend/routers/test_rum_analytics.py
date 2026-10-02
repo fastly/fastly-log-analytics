@@ -21,6 +21,7 @@ def skip_view_update(request):
 from backend.core.request_context import RequestContext
 from backend.main import app
 from backend.routers import rum as rum_router
+from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import get_analyst_time_bounds
 
 client = TestClient(app)
@@ -525,6 +526,68 @@ def test_rum_analytics_recent_window_serves_raw_without_in_request_recompute(set
     assert data["is_mock"] is False
     assert data["beacon_count"] > 0
     mock_recompute.assert_not_called()
+
+
+def test_rum_analytics_long_window_does_not_recompute_in_request(setup_temp_rum_db) -> None:
+    """A longer RUM window (e.g. the verifier's 24h check) must also serve
+    without a synchronous in-request ``recompute_rum_aggregates``. Like the
+    request-log dashboard, the read path serves from cron-built rollups when they
+    exist and otherwise scans the raw tables directly — it never opens a second
+    read-write DuckLake connection. In-request recompute competes for the
+    process-wide attach lock and, under verify-phase concurrency, wedged the
+    entire /api surface (120s pool-timeout at ``SELECT MAX(timestamp) FROM
+    client_vitals``). The rum_commit cron owns all recompute."""
+    service_id = "test_service_long_window"
+
+    now = datetime.datetime.now(datetime.UTC)
+    test_beacons = []
+    for i in range(12):
+        received = (now - datetime.timedelta(hours=1, minutes=i)).isoformat()
+        test_beacons.append(
+            {
+                "pathname": f"/p_{i}",
+                "load_time": 1.4,
+                "lcp": 1.8,
+                "cls": 0.02,
+                "received_at": received,
+                "req_id": f"rid_{i}",
+            }
+        )
+    _insert_beacons(setup_temp_rum_db, test_beacons)
+
+    start = iso_z(now - datetime.timedelta(hours=24))
+    end = iso_z(now)
+
+    # Spy on get_connection: the read handler must never open a second
+    # read-write connection (read_only=False). The pooled read path uses
+    # checkout_connection / get_connection(read_only=True); only the removed
+    # in-request recompute blocks opened a write connection, which is what
+    # stalled on the attach lock under load.
+    import backend.core.duckdb as _duckdb_mod
+
+    real_get_connection = _duckdb_mod.get_connection
+    write_conn_calls = []
+
+    def _spy_get_connection(*args, **kwargs):
+        if kwargs.get("read_only") is False:
+            write_conn_calls.append((args, kwargs))
+        return real_get_connection(*args, **kwargs)
+
+    with (
+        patch("backend.core.rollups.rum.recompute_rum_aggregates") as mock_recompute,
+        patch.object(_duckdb_mod, "get_connection", side_effect=_spy_get_connection),
+    ):
+        response = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start}&end_time={end}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_mock"] is False
+    assert data["beacon_count"] > 0
+    mock_recompute.assert_not_called()
+    assert write_conn_calls == [], (
+        f"RUM read handler opened {len(write_conn_calls)} read-write connection(s); "
+        "reads must be pure-read and let the rum_commit cron own recompute"
+    )
 
 
 def test_rum_analytics_date_filtering(setup_temp_rum_db) -> None:
