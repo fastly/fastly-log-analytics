@@ -162,7 +162,13 @@ async def dashboard_bundle(
     if high_scale_service is not None:
         from backend.high_scale.dashboard import bundle as high_scale_bundle
 
-        return high_scale_bundle(high_scale_service, req, start_time, end_time)
+        # Run the blocking ClickHouse aggregate queries OFF the asyncio event
+        # loop. Called synchronously here (as it was), every per-field
+        # ``_aggregate`` + ``_time_series`` query executes ON the loop, freezing
+        # /api/health, SSE, and every concurrent request for the whole bundle —
+        # the Elevation high-scale 24h "Crunching logs… → Failed to fetch"
+        # wedge. Mirrors the non-high-scale branch's off-loop execution below.
+        return await asyncio.to_thread(high_scale_bundle, high_scale_service, req, start_time, end_time)
 
     # Resolve the primary pooled connection OFF the asyncio event loop. The
     # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake

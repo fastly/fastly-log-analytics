@@ -800,3 +800,81 @@ async def test_bundle_resolves_primary_connection_off_event_loop(monkeypatch):
         "heartbeat ticks observed) — dashboard_bundle must resolve ctx.con "
         "off the event loop"
     )
+
+
+async def test_high_scale_bundle_runs_off_event_loop(monkeypatch):
+    """The high-scale dashboard bundle runs a series of BLOCKING ClickHouse
+    aggregate queries (one per field, plus the time series) inside the
+    ``async def dashboard_bundle`` handler. The non-high-scale branch already
+    offloads its blocking work via ``asyncio.to_thread``; the high-scale
+    branch returned ``high_scale_bundle(...)`` synchronously, executing every
+    ClickHouse query ON the asyncio event loop. That froze ``/api/health``,
+    SSE, and every concurrent request for the whole query — the Elevation
+    high-scale 24h "Crunching logs… → Failed to fetch" wedge. The high-scale
+    branch must run off the event loop too.
+    """
+    import asyncio
+    import time as _time
+    from unittest.mock import MagicMock
+
+    import backend.high_scale.dashboard as hsd
+    import backend.high_scale.registry as hsreg
+    import backend.routers.dashboard as dash
+    from backend.core.request_context import RequestContext
+    from backend.models.dashboard import AggregatesRequest
+
+    monkeypatch.setattr(dash, "_clamp_window", lambda req, ctx: (req.start_time, req.end_time))
+
+    sentinel_service = object()
+
+    class _Reg:
+        def resolve(self, _sid):
+            return sentinel_service
+
+    monkeypatch.setattr(hsreg, "get_high_scale_service_registry", lambda: _Reg())
+
+    block_s = 0.25
+
+    def _blocking_bundle(service, req, start, end):
+        assert service is sentinel_service
+        _time.sleep(block_s)
+        return {"aggregates": {}, "top_bots": {}}
+
+    monkeypatch.setattr(hsd, "bundle", _blocking_bundle)
+
+    ctx = RequestContext(
+        service_id="svc-highscale",
+        source={"name": "svc", "service_id": "svc-highscale"},
+        telemetry=MagicMock(),
+        _holder=MagicMock(),  # must never be entered on the high-scale path
+    )
+
+    req = AggregatesRequest(
+        start_time="2026-06-12T00:00:00Z",
+        end_time="2026-06-12T01:00:00Z",
+        filters={},
+        chart_metric="requests",
+        chart_interval="minute",
+        sections=["core"],
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        for _ in range(500):
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    hb = asyncio.create_task(_heartbeat())
+    result = await dash.dashboard_bundle(req, ctx)
+    hb.cancel()
+
+    assert result["aggregates"] == {}
+    # Off-loop, the 5ms heartbeat advances ~45x across the 0.25s query.
+    # On-loop (the bug), it cannot tick at all while the loop is blocked.
+    assert ticks >= 10, (
+        f"event loop was blocked during the high-scale bundle (only {ticks} "
+        "heartbeat ticks observed) — the high-scale branch of dashboard_bundle "
+        "must run off the event loop"
+    )
