@@ -4,7 +4,7 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { NuqsTestingAdapter, type UrlUpdateEvent } from 'nuqs/adapters/testing'
 import React from 'react'
-import SecurityTab, { subscriberBarTraces } from '@/app/streaming/_sections/tabs/SecurityTab'
+import SecurityTab from '@/app/streaming/_sections/tabs/SecurityTab'
 import { client } from '@/lib/api'
 import { createTestQueryClient } from '../../helpers/query'
 import { spyOnConsoleError } from '../../helpers/page-smoke'
@@ -31,19 +31,9 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
   ),
 }))
 
-vi.mock('@/components/PlotlyChart', () => ({
-  PlotlyChart: ({ data, a11yTitle }: { data: { y: string[]; x: number[] }[]; a11yTitle?: string }) => (
-    <div data-testid="subscriber-chart" aria-label={a11yTitle}>
-      {data[0].y.map((id, i) => (
-        <span key={id}>{`${id}: ${data[0].x[i]}`}</span>
-      ))}
-    </div>
-  ),
-}))
-
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cmcd_cid: true, ip: true, token_subscriber_id: true },
+  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cmcd_cid: true, ip: true, cs_sub_id: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -54,8 +44,8 @@ const FULL_RESPONSE = {
   top_referers: [{ value: 'https://pirate.example/watch', requests: 3, bytes: 3072 }],
   top_hosts: [{ value: 'pirate.example', requests: 1234, bytes: 1048576 }],
   top_subscribers: [
-    { subscriber_id: 'acct-shared', distinct_ips: 14, requests: 90 },
-    { subscriber_id: 'acct-home', distinct_ips: 1, requests: 300 },
+    { subscriber_id: 'acct-shared', distinct_ips: 14, distinct_countries: 5, requests: 90, bytes: 2097152, last_seen: '2026-01-01T00:55:00+00:00' },
+    { subscriber_id: 'acct-home', distinct_ips: 1, distinct_countries: 1, requests: 300, bytes: 1024, last_seen: '2026-01-01T00:40:00+00:00' },
   ],
   subscribers_masked: false,
   bandwidth_ts: [
@@ -185,48 +175,64 @@ test('shows the reason when the service is not supported', async () => {
   expect(screen.queryByTestId('bandwidth-chart')).not.toBeInTheDocument()
 })
 
-test('charts subscriber IDs ranked by distinct IPs', async () => {
-  renderTab()
+function subscriberCard() {
+  const title = screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === 'Subscriber IDs by Distinct IPs (Top 10)')
+  return title.closest('[data-slot="card"]') as HTMLElement
+}
 
-  const chart = await screen.findByTestId('subscriber-chart')
-  expect(within(chart).getByText('acct-shared: 14')).toBeInTheDocument()
-  expect(within(chart).getByText('acct-home: 1')).toBeInTheDocument()
-  expect(screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === 'Subscriber IDs by Distinct IPs (Top 10)')).toBeInTheDocument()
+test('lists subscriber IDs with IPs, countries, requests, bandwidth and last seen', async () => {
+  renderTab()
+  await screen.findByText('acct-shared')
+
+  const card = within(subscriberCard())
+  const headers = card.getAllByRole('columnheader').map((h) => h.textContent)
+  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Countries', 'Requests', 'Bandwidth', 'Last seen'])
+
+  const [, first, second] = card.getAllByRole('row')
+  expect(within(first).getAllByRole('cell').map((c) => c.textContent)).toEqual([
+    '1', 'acct-shared', '14', '5', '90', '2 MB', '2026-01-01 00:55:00',
+  ])
+  // Server order is kept: fewer IPs ranks lower even with more requests.
+  expect(within(second).getAllByRole('cell')[1]).toHaveTextContent('acct-home')
   expect(screen.queryByText(/hidden for shared sessions/)).not.toBeInTheDocument()
+})
+
+test('drops the Countries and Bandwidth columns when those fields are not logged', async () => {
+  postMock.mockResolvedValue({
+    data: {
+      ...FULL_RESPONSE,
+      fields: { ...FULL_RESPONSE.fields, country: false },
+      top_countries: [],
+      top_subscribers: [{ subscriber_id: 'acct-1', distinct_ips: 3, distinct_countries: null, requests: 7, bytes: null, last_seen: null }],
+    },
+  } as never)
+  renderTab()
+  await screen.findByText('acct-1')
+
+  const headers = within(subscriberCard()).getAllByRole('columnheader').map((h) => h.textContent)
+  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Requests', 'Last seen'])
 })
 
 test('notes masking when the analyst sees rank labels', async () => {
   postMock.mockResolvedValue({
     data: {
       ...FULL_RESPONSE,
-      top_subscribers: [{ subscriber_id: 'Subscriber #1', distinct_ips: 14, requests: 90 }],
+      top_subscribers: [{ ...FULL_RESPONSE.top_subscribers[0], subscriber_id: 'Subscriber #1' }],
       subscribers_masked: true,
     },
   } as never)
   renderTab()
 
-  expect(await screen.findByText('Subscriber #1: 14')).toBeInTheDocument()
+  expect(await screen.findByText('Subscriber #1')).toBeInTheDocument()
   expect(screen.getByText(/hidden for shared sessions/)).toBeInTheDocument()
 })
 
-test('explains that the Token option is required for the subscriber chart', async () => {
+test('explains that the Token option is required for the subscriber list', async () => {
   postMock.mockResolvedValue({
-    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, token_subscriber_id: false }, top_subscribers: [] },
+    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, cs_sub_id: false }, top_subscribers: [] },
   } as never)
   renderTab()
 
   expect(await screen.findByText(/Streaming → Token option \(Subscriber ID\)/)).toBeInTheDocument()
-  expect(screen.queryByTestId('subscriber-chart')).not.toBeInTheDocument()
-})
-
-test('subscriberBarTraces builds one horizontal bar trace in server order', () => {
-  expect(subscriberBarTraces([])).toEqual([])
-  const [trace] = subscriberBarTraces(FULL_RESPONSE.top_subscribers)
-  expect(trace).toMatchObject({
-    type: 'bar',
-    orientation: 'h',
-    y: ['acct-shared', 'acct-home'],
-    x: [14, 1],
-    customdata: [90, 300],
-  })
+  expect(screen.queryByText('acct-shared')).not.toBeInTheDocument()
 })

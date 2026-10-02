@@ -1,8 +1,8 @@
 """Token (subscriber id) system field + VCL extraction.
 
-The subscriber id is extracted into ``req.http.x-subscriber-id`` by an
+The subscriber id is extracted into ``req.http.x-cs-sub-id`` by an
 admin-supplied VCL expression and promoted into the log line by the
-system-managed ``token_subscriber_id`` field. Same two failure modes as CMCD:
+system-managed ``cs_sub_id`` field. Same two failure modes as CMCD:
 the field silently dropping out of ``log_fields`` (Trap #27) and extraction
 being emitted after capture (Trap #29).
 """
@@ -28,9 +28,9 @@ from backend.provision.token_fields import (
 _EXPR = 'regsub(req.http.Authorization, "^Bearer ", "")'
 _USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
 
-_UNSET = "unset req.http.x-subscriber-id;"
-_SET = f"set req.http.x-subscriber-id = {_EXPR};"
-_CAPTURE = f"set req.http.x-fos-edge-data:{SUBSCRIBER_ID_FIELD} = req.http.x-subscriber-id;"
+_UNSET = "unset req.http.x-cs-sub-id;"
+_SET = f"set req.http.x-cs-sub-id = {_EXPR};"
+_CAPTURE = f"set req.http.x-fos-edge-data:{SUBSCRIBER_ID_FIELD} = req.http.x-cs-sub-id;"
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -107,6 +107,7 @@ def test_field_registry_mirror_matches_provision_names():
     assert set(_TOKEN_SYSTEM_FIELDS) == _TOKEN_FIELD_NAMES
     assert _is_system_field(SUBSCRIBER_ID_FIELD)
     assert not _is_system_field("token_my_own_field")
+    assert not _is_system_field("cs_sub_id_extra")
 
 
 # ── generated VCL ordering (Trap #29) ────────────────────────────────────────
@@ -119,7 +120,7 @@ def _assert_ordered(recv: str) -> None:
     # The unset sits inside the contiguous block of scrub unsets.
     lines = [ln.strip() for ln in recv.splitlines()]
     i = lines.index(_UNSET)
-    assert lines[i - 1].startswith("unset "), f"x-subscriber-id unset is not grouped with the scrubs: {lines[i - 1]!r}"
+    assert lines[i - 1].startswith("unset "), f"x-cs-sub-id unset is not grouped with the scrubs: {lines[i - 1]!r}"
     assert recv.count(_UNSET) == 1
 
 
@@ -130,7 +131,7 @@ def test_capture_vcl_orders_extraction_before_capture():
 
 def test_capture_vcl_omits_extraction_when_disabled():
     lf = {"groups": ["A"], "custom_fields": []}
-    assert "x-subscriber-id" not in generate_capture_vcl(lf)["recv"]
+    assert "x-cs-sub-id" not in generate_capture_vcl(lf)["recv"]
 
 
 def _state(**token_kw) -> FeatureState:
@@ -153,7 +154,7 @@ def test_declarative_state_injects_field_and_orders_extraction():
 def test_declarative_state_disabled_emits_nothing():
     state = _state()
     assert SUBSCRIBER_ID_FIELD not in {cf["name"] for cf in state.log_fields.custom_fields}
-    assert "x-subscriber-id" not in generate_consolidated_snippet(state, "vcl_recv")
+    assert "x-cs-sub-id" not in generate_consolidated_snippet(state, "vcl_recv")
 
 
 def test_declarative_state_rejects_invalid_expression():

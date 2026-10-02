@@ -9,8 +9,8 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2 } from 
 import { useDebounce } from '@/hooks/useDebounce'
 import { customFieldsApi } from '@/lib/api/custom-fields'
 
-/** Header the generated VCL sets; promoted into the `token_subscriber_id` log field. */
-export const SUBSCRIBER_ID_HEADER = 'req.http.x-subscriber-id'
+/** Header the generated VCL sets; promoted into the `cs_sub_id` log field. */
+export const SUBSCRIBER_ID_HEADER = 'req.http.x-cs-sub-id'
 
 /**
  * Client-side mirror of the backend's expression guard (backend/core/log_fields.py

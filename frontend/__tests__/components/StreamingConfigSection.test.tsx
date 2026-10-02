@@ -56,7 +56,7 @@ test('groups CMCD Metrics and Token as independent sub-options', async () => {
   expect(screen.getByText(/HMAC, JWT, or CAT format/)).toBeInTheDocument()
   expect(screen.getByText(/deploys a VCL snippet to your service to extract token information/)).toBeInTheDocument()
   expect(screen.getByText('Subscriber ID')).toBeInTheDocument()
-  expect(screen.getByText('set req.http.x-subscriber-id =')).toBeInTheDocument()
+  expect(screen.getByText('set req.http.x-cs-sub-id =')).toBeInTheDocument()
 
   await userEvent.click(screen.getByRole('checkbox', { name: 'Enable Token' }))
   expect(screen.getByRole('checkbox', { name: 'Enable Token' })).toBeChecked()

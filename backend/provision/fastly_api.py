@@ -178,10 +178,10 @@ def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
         "unset req.http.X-Edge-Prev-Anchor;",
         "unset req.http.x-sigsci-skip-inspection-once;",
     ]
-    # Token: x-subscriber-id is set from the admin's expression later in this
+    # Token: x-cs-sub-id is set from the admin's expression later in this
     # block; a client-supplied value must never survive to be logged.
-    if any(cf["name"] == "token_subscriber_id" for cf in enabled_custom):
-        lines.append("unset req.http.x-subscriber-id;")
+    if any(cf["name"] == "cs_sub_id" for cf in enabled_custom):
+        lines.append("unset req.http.x-cs-sub-id;")
     if enabled_custom:
         for cf in enabled_custom:
             name = cf["name"]
@@ -359,8 +359,8 @@ def generate_capture_vcl(
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
 
-    # Token extraction sets req.http.x-subscriber-id, which capture promotes
-    # into x-fos-edge-data:token_subscriber_id — so it too must precede capture.
+    # Token extraction sets req.http.x-cs-sub-id, which capture promotes
+    # into x-fos-edge-data:cs_sub_id — so it too must precede capture.
     if token_subscriber_id_expr:
         from backend.provision.token_fields import generate_token_vcl_lines
 

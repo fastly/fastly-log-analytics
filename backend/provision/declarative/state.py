@@ -3,7 +3,7 @@
 The FeatureState is the sole input to the VCL generation system. It's constructed
 via from_config() which auto-injects mandatory custom fields when features are
 enabled (rum_cid for RUM, edge_score for Scoring, cmcd_* for CMCD,
-token_subscriber_id for Token).
+cs_sub_id for Token).
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "cmcd_tb",
     "cmcd_rtp",
     # Token fields
-    "token_subscriber_id",
+    "cs_sub_id",
 }
 
 

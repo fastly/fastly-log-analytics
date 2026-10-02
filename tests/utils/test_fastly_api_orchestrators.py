@@ -1330,7 +1330,7 @@ def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present()
 
 
 def test_update_logging_endpoint_enables_token_with_field():
-    """Turning Token on persists the expression and injects token_subscriber_id."""
+    """Turning Token on persists the expression and injects cs_sub_id."""
     stored = {"logging_enabled": True, "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []}}
 
     saved_cfg, _ = _run_update_logging_endpoint(
@@ -1346,7 +1346,7 @@ def test_update_logging_endpoint_enables_token_with_field():
 
     assert saved_cfg["token"]["enabled"] is True
     assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
-    assert "token_subscriber_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert "cs_sub_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
 
 
 def test_update_logging_endpoint_disables_token_and_strips_field():
@@ -1356,7 +1356,7 @@ def test_update_logging_endpoint_disables_token_and_strips_field():
         "log_fields": {
             "schema_version": 2,
             "groups": ["A"],
-            "custom_fields": [{"name": "token_subscriber_id", "duckdb_type": "VARCHAR", "enabled": True}],
+            "custom_fields": [{"name": "cs_sub_id", "duckdb_type": "VARCHAR", "enabled": True}],
         },
     }
 
@@ -1383,4 +1383,4 @@ def test_update_logging_endpoint_keeps_token_when_request_is_silent():
     )
 
     assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
-    assert "token_subscriber_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert "cs_sub_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}

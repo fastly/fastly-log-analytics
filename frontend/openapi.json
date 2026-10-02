@@ -45702,9 +45702,42 @@
             "type": "integer",
             "title": "Distinct Ips"
           },
+          "distinct_countries": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distinct Countries"
+          },
           "requests": {
             "type": "integer",
             "title": "Requests"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen"
           }
         },
         "type": "object",

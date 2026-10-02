@@ -7115,8 +7115,14 @@ export interface components {
             subscriber_id: string;
             /** Distinct Ips */
             distinct_ips: number;
+            /** Distinct Countries */
+            distinct_countries?: number | null;
             /** Requests */
             requests: number;
+            /** Bytes */
+            bytes?: number | null;
+            /** Last Seen */
+            last_seen?: string | null;
         };
         /** ContentSecurityTopRow */
         ContentSecurityTopRow: {

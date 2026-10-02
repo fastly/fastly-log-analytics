@@ -201,8 +201,8 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
                 if line.strip():
                     edge_first_hop_statements.append(f"  {line}")
 
-        # Token extraction likewise feeds capture (x-subscriber-id →
-        # x-fos-edge-data:token_subscriber_id), so it must also come first.
+        # Token extraction likewise feeds capture (x-cs-sub-id →
+        # x-fos-edge-data:cs_sub_id), so it must also come first.
         if state.token.enabled:
             from backend.provision.token_fields import generate_token_vcl_lines
 

@@ -12,7 +12,6 @@ import { cn } from '@/lib/utils'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { PlotlyChart } from '@/components/PlotlyChart'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -38,30 +37,53 @@ const BANDWIDTH_LAYOUT = {
   yaxis: { title: { text: 'Bandwidth' }, tickformat: '.3s', ticksuffix: 'bps', rangemode: 'tozero' as const },
 }
 
-const SUBSCRIBERS_LAYOUT = {
-  xaxis: { title: { text: 'Distinct client IPs' }, rangemode: 'tozero' as const, tickformat: ',d' },
-  // Rank 1 at the top; categories keep server order.
-  yaxis: { type: 'category' as const, autorange: 'reversed' as const },
-  margin: { l: 20, r: 20, t: 10, b: 40 },
-  hovermode: 'closest' as const,
-  showlegend: false,
-}
-
-/** Horizontal bars of distinct IPs per subscriber id (server-ranked, top N). */
-export function subscriberBarTraces(rows: SubscriberRow[]): Record<string, unknown>[] {
-  if (!rows.length) return []
-  return [
-    {
-      type: 'bar' as const,
-      orientation: 'h' as const,
-      name: 'Distinct IPs',
-      y: rows.map((r) => r.subscriber_id),
-      x: rows.map((r) => r.distinct_ips),
-      customdata: rows.map((r) => r.requests),
-      marker: { color: '#6366f1' },
-      hovertemplate: '%{y}<br>%{x:,} distinct IPs<br>%{customdata:,} requests<extra></extra>',
-    },
-  ]
+/** Subscriber ids ranked server-side by distinct client IPs (then requests). */
+export function SubscriberTable({
+  rows,
+  showCountries,
+  timezone,
+}: {
+  rows: SubscriberRow[]
+  showCountries: boolean
+  timezone: string
+}) {
+  const showBytes = rows.some((r) => r.bytes != null)
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-8 text-right">#</TableHead>
+          <TableHead>Subscriber ID</TableHead>
+          <TableHead className="text-right">Distinct IPs</TableHead>
+          {showCountries && <TableHead className="text-right">Countries</TableHead>}
+          <TableHead className="text-right">Requests</TableHead>
+          {showBytes && <TableHead className="text-right">Bandwidth</TableHead>}
+          <TableHead className="text-right">Last seen</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row, i) => (
+          <TableRow key={row.subscriber_id}>
+            <TableCell className="text-right tabular-nums text-muted-foreground">{i + 1}</TableCell>
+            <TableCell className="max-w-[20rem] truncate font-mono text-xs" title={row.subscriber_id}>
+              {row.subscriber_id}
+            </TableCell>
+            <TableCell className="text-right tabular-nums font-medium">{row.distinct_ips.toLocaleString()}</TableCell>
+            {showCountries && (
+              <TableCell className="text-right tabular-nums">{row.distinct_countries?.toLocaleString() ?? '—'}</TableCell>
+            )}
+            <TableCell className="text-right tabular-nums">{row.requests.toLocaleString()}</TableCell>
+            {showBytes && (
+              <TableCell className="text-right tabular-nums">{row.bytes == null ? '—' : formatBytes(row.bytes)}</TableCell>
+            )}
+            <TableCell className="text-right tabular-nums whitespace-nowrap">
+              {row.last_seen ? formatDate(row.last_seen, timezone, 'yyyy-MM-dd HH:mm:ss') : '—'}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
 }
 
 function TopTable({
@@ -225,7 +247,6 @@ export default function SecurityTab({
     return traces
   }, [data?.bandwidth_ts, data?.has_shield_split, timezone, bucketSeconds])
 
-  const subscriberData = React.useMemo(() => subscriberBarTraces(data?.top_subscribers ?? []), [data?.top_subscribers])
 
   if (data && !data.available) {
     return (
@@ -306,19 +327,13 @@ export default function SecurityTab({
         }
         icon={<KeyRound className="h-4 w-4" />}
         {...cardState}
-        className="h-[380px]"
-        contentClassName="p-2"
+        className="min-h-[200px]"
       >
-        {subscriberData.length ? (
+        {data?.top_subscribers?.length ? (
           <>
-            <PlotlyChart
-              data={subscriberData}
-              layout={SUBSCRIBERS_LAYOUT}
-              height={data?.subscribers_masked ? 300 : 320}
-              a11yTitle="Top subscriber IDs ranked by distinct client IPs"
-            />
-            {data?.subscribers_masked && (
-              <p className="px-2 text-[11px] text-muted-foreground">
+            <SubscriberTable rows={data.top_subscribers} showCountries={!missing('country')} timezone={timezone} />
+            {data.subscribers_masked && (
+              <p className="px-2 pt-2 text-[11px] text-muted-foreground">
                 Subscriber IDs are hidden for shared sessions; ranks and counts are exact.
               </p>
             )}
@@ -326,7 +341,7 @@ export default function SecurityTab({
         ) : (
           <ChartEmptyState
             requires={
-              missing('token_subscriber_id')
+              missing('cs_sub_id')
                 ? 'the Streaming → Token option (Subscriber ID) to be enabled in Log Settings.'
                 : undefined
             }

@@ -2,11 +2,11 @@
 
 The admin supplies a VCL expression that derives a subscriber id from the
 request (typically a header or a ``regsub()`` over a token). The generated
-``vcl_recv`` code sets ``req.http.x-subscriber-id`` from that expression; the
+``vcl_recv`` code sets ``req.http.x-cs-sub-id`` from that expression; the
 client-supplied header is unset alongside the other scrubs in
 ``fastly_api.get_scrub_vcl_statements`` (keyed on this field being enabled) so a
 client cannot forge it. The system-managed custom field
-``token_subscriber_id`` promotes the header into the log line.
+``cs_sub_id`` promotes the header into the log line.
 
 Mirrors CMCD (``cmcd_fields.py``): the field is generated from code, hidden from
 the user-editable list by ``_is_system_field`` (exact name), and must be
@@ -20,8 +20,8 @@ from typing import Any
 
 from backend.core.log_fields import validate_custom_field
 
-SUBSCRIBER_ID_HEADER = "req.http.x-subscriber-id"
-SUBSCRIBER_ID_FIELD = "token_subscriber_id"
+SUBSCRIBER_ID_HEADER = "req.http.x-cs-sub-id"
+SUBSCRIBER_ID_FIELD = "cs_sub_id"
 
 _TOKEN_CUSTOM_FIELDS: list[dict[str, Any]] = [
     {
@@ -74,10 +74,10 @@ def validate_subscriber_id_expr(expr: str | None) -> list[str]:
 
 
 def generate_token_vcl_lines(subscriber_id_expr: str) -> list[str]:
-    """Return the ``vcl_recv`` statements that populate ``x-subscriber-id``.
+    """Return the ``vcl_recv`` statements that populate ``x-cs-sub-id``.
 
     Callers emit these inside the edge-only block, after the header scrub (which
-    unsets ``x-subscriber-id``) and BEFORE ``get_capture_vcl_statements``.
+    unsets ``x-cs-sub-id``) and BEFORE ``get_capture_vcl_statements``.
     """
     errors = validate_subscriber_id_expr(subscriber_id_expr)
     if errors:

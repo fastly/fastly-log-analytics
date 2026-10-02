@@ -531,7 +531,7 @@ _ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 
 
 # Mirrors backend.provision.token_fields._TOKEN_FIELD_NAMES (core must not import provision).
-_TOKEN_SYSTEM_FIELDS = frozenset({"token_subscriber_id"})
+_TOKEN_SYSTEM_FIELDS = frozenset({"cs_sub_id"})
 
 
 def _is_system_field(field_name: str) -> bool:
@@ -539,8 +539,8 @@ def _is_system_field(field_name: str) -> bool:
 
     System fields are generated on-demand from feature toggles and should
     not be displayed as user-editable custom fields. Token fields match by
-    exact name, not a ``token_`` prefix, so a user's own ``token_*`` field
-    stays visible.
+    exact name (``cs_sub_id``), not a prefix, so a user's own ``cs_sub_*`` or
+    ``token_*`` field stays visible.
     """
     return field_name.startswith("cmcd_") or field_name.startswith("edge_") or field_name in _TOKEN_SYSTEM_FIELDS
 

@@ -64,7 +64,10 @@ class ContentSecurityTopRow(BaseModel):
 class ContentSecuritySubscriberRow(BaseModel):
     subscriber_id: str
     distinct_ips: int
+    distinct_countries: int | None = None
     requests: int
+    bytes: int | None = None
+    last_seen: str | None = None
 
 
 class ContentSecurityContentId(BaseModel):

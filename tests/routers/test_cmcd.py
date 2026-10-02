@@ -109,10 +109,24 @@ def test_content_security_rejects_oversized_content_id(client):
 
 _SUBSCRIBERS_RET = {
     "available": True,
-    "fields": {"token_subscriber_id": True},
+    "fields": {"cs_sub_id": True},
     "top_subscribers": [
-        {"subscriber_id": "acct-123", "distinct_ips": 9, "requests": 40},
-        {"subscriber_id": "acct-456", "distinct_ips": 2, "requests": 80},
+        {
+            "subscriber_id": "acct-123",
+            "distinct_ips": 9,
+            "distinct_countries": 4,
+            "requests": 40,
+            "bytes": 4096,
+            "last_seen": "2026-08-19T12:59:00+00:00",
+        },
+        {
+            "subscriber_id": "acct-456",
+            "distinct_ips": 2,
+            "distinct_countries": 1,
+            "requests": 80,
+            "bytes": None,
+            "last_seen": None,
+        },
     ],
 }
 
@@ -153,8 +167,8 @@ def test_content_security_analyst_gets_rank_labels(client, in_memory_duckdb, tes
         app.dependency_overrides.pop(build_request_context, None)
 
     assert data["top_subscribers"] == [
-        {"subscriber_id": "Subscriber #1", "distinct_ips": 9, "requests": 40},
-        {"subscriber_id": "Subscriber #2", "distinct_ips": 2, "requests": 80},
+        {**_SUBSCRIBERS_RET["top_subscribers"][0], "subscriber_id": "Subscriber #1"},
+        {**_SUBSCRIBERS_RET["top_subscribers"][1], "subscriber_id": "Subscriber #2"},
     ]
     assert data["subscribers_masked"] is True
     assert _SUBSCRIBERS_RET["top_subscribers"][0]["subscriber_id"] == "acct-123"
