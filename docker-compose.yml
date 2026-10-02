@@ -16,6 +16,10 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Run tini as PID 1 so orphaned children are reaped. uvicorn is not an
+    # init: a zombie child makes `docker stop` fail ("PID is zombie and can
+    # not be killed"), aborting force-recreate and the deploy under set -e.
+    init: true
     restart: unless-stopped
     # Give the backend up to 75s to drain on SIGTERM before Docker SIGKILLs.
     # Pairs with _bounded_scheduler_shutdown in backend/main.py (60s scheduler

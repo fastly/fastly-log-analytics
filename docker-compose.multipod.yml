@@ -28,6 +28,10 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Run tini as PID 1 so orphaned children are reaped — see the base
+    # docker-compose.yml backend for the zombie-wedge-on-force-recreate
+    # rationale that aborts the deploy under set -e.
+    init: true
     depends_on:
       valkey:
         condition: service_healthy
@@ -199,6 +203,9 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Run tini as PID 1 so orphaned children are reaped — see the base
+    # docker-compose.yml backend for the zombie-wedge rationale.
+    init: true
     # Prefork pool (celery's default) so task_time_limit is enforceable —
     # the threads pool cannot deliver SIGTERM-based time limits. `celery` is
     # included so tasks not matched by task_routes (default queue) are

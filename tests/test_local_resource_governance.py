@@ -23,9 +23,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """SafeLoader that tolerates compose merge tags (``!override``/``!reset``)."""
+
+
+def _passthrough_tag(loader, node):
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_scalar(node)
+
+
+for _tag in ("!override", "!reset"):
+    _ComposeLoader.add_constructor(_tag, _passthrough_tag)
+
+
+def _load_compose(compose_rel: str) -> dict:
+    return yaml.load((REPO_ROOT / compose_rel).read_text(encoding="utf-8"), Loader=_ComposeLoader)
 
 
 def _env_int(environment: list[str], key: str) -> int | None:
@@ -115,4 +136,34 @@ def test_local_standard_backend_healthcheck_covers_cold_start():
         "docker-compose.yml backend healthcheck start_period must be >= 180s "
         "to cover the measured ~107s cold start plus load margin, so compose "
         f"doesn't falsely mark it unhealthy mid-startup (got {hc['start_period']})"
+    )
+
+
+# Long-lived Python processes that run as container PID 1. uvicorn/celery are
+# not init systems: an orphaned grandchild (scheduler watchdog subprocess, a
+# crashed cold-start helper, an ad-hoc py-spy/pip during debugging) becomes an
+# unreapable zombie under them. Docker then can't stop the container ("PID is
+# zombie and can not be killed. Use the --init option ..."), so the next
+# `docker compose up --force-recreate` fails non-zero and, under the deploy's
+# `set -e`, aborts the entire run. `init: true` inserts tini as PID 1 to
+# forward signals and reap zombies — Docker's own prescribed fix.
+_INIT_REQUIRED_SERVICES = {
+    "docker-compose.yml": ["backend"],
+    "docker-compose.multipod.yml": ["backend", "worker"],
+    "docker-compose.high-scale-local.yml": ["high-scale-worker"],
+}
+
+
+@pytest.mark.parametrize(
+    ("compose_rel", "service"),
+    [(compose_rel, service) for compose_rel, services in _INIT_REQUIRED_SERVICES.items() for service in services],
+)
+def test_long_lived_backend_services_run_an_init(compose_rel: str, service: str):
+    compose = _load_compose(compose_rel)
+    svc = compose["services"][service]
+    assert svc.get("init") is True, (
+        f"{compose_rel} service '{service}' runs a long-lived Python process as "
+        "PID 1 and must set `init: true` so tini reaps orphaned zombies; "
+        "without it a wedged child makes `docker stop`/force-recreate fail and "
+        "aborts deploy_test_all.sh under set -e"
     )

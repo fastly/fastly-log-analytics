@@ -49,6 +49,9 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Run tini as PID 1 so orphaned children are reaped — see the base
+    # docker-compose.yml backend for the zombie-wedge rationale.
+    init: true
     command: ["python", "-m", "backend.high_scale.worker"]
     depends_on:
       clickhouse:
