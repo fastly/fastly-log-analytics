@@ -1384,3 +1384,58 @@ def test_update_logging_endpoint_keeps_token_when_request_is_silent():
 
     assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
     assert "cs_sub_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+
+
+def test_update_logging_endpoint_adds_content_id_and_keeps_subscriber_id():
+    """A request that only sends the content id expression keeps the stored
+    subscriber id, and each configured id gets its field."""
+    stored = {
+        "logging_enabled": True,
+        "token": {"enabled": True, "subscriber_id_expr": "req.http.X-Sub"},
+        "log_fields": {"schema_version": 2, "groups": ["A"]},
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {
+            "logging_service_id": "svc-id",
+            "endpoint_name": "MyEndpoint",
+            "log_period": 60,
+            "token_enabled": True,
+            "token_content_id_expr": "req.http.X-Content",
+        },
+        stored,
+    )
+
+    assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
+    assert saved_cfg["token"]["content_id_expr"] == "req.http.X-Content"
+    names = [cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]]
+    assert names[-2:] == ["cs_sub_id", "cs_content_id"]
+
+
+def test_update_logging_endpoint_clearing_content_id_drops_its_field():
+    stored = {
+        "logging_enabled": True,
+        "token": {"enabled": True, "subscriber_id_expr": "req.http.X-Sub", "content_id_expr": "req.http.X-Content"},
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A"],
+            "custom_fields": [
+                {"name": "cs_sub_id", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "cs_content_id", "duckdb_type": "VARCHAR", "enabled": True},
+            ],
+        },
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {
+            "logging_service_id": "svc-id",
+            "endpoint_name": "MyEndpoint",
+            "log_period": 60,
+            "token_enabled": True,
+            "token_content_id_expr": "",
+        },
+        stored,
+    )
+
+    assert saved_cfg["token"]["content_id_expr"] == ""
+    assert [cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]] == ["cs_sub_id"]

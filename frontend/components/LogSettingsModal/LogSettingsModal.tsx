@@ -25,7 +25,7 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
-import { subscriberIdExprError } from '@/components/TokenConfigSection'
+import { tokenConfigError } from '@/components/TokenConfigSection'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
 // (e.g. ProvisionWizard imports it from this path).
@@ -53,7 +53,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const [cmcdVersion, setCmcdVersion] = useState<number>(1)
   const [tokenEnabled, setTokenEnabled] = useState<boolean>(false)
   const [subscriberIdExpr, setSubscriberIdExpr] = useState<string>('')
-  const tokenInvalid = tokenEnabled && subscriberIdExprError(subscriberIdExpr) !== null
+  const [contentIdExpr, setContentIdExpr] = useState<string>('')
+  const tokenInvalid = tokenEnabled && tokenConfigError(subscriberIdExpr, contentIdExpr) !== null
   const [step, setStep] = useState<number>(1)
 
   const { data: catalog } = useLogFieldsCatalog(service?.service_id)
@@ -101,7 +102,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       // the SSE-style UX without the CSRF risk. Query params stay where
       // they are because the backend reads them via Query(...).
       const encodedCond = encodeURIComponent(customCondition)
-      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}&token_enabled=${tokenEnabled}${tokenEnabled ? `&token_subscriber_id_expr=${encodeURIComponent(subscriberIdExpr.trim())}` : ''}`
+      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}&token_enabled=${tokenEnabled}${tokenEnabled ? `&token_subscriber_id_expr=${encodeURIComponent(subscriberIdExpr.trim())}&token_content_id_expr=${encodeURIComponent(contentIdExpr.trim())}` : ''}`
       start(endpoint, {})
     }
   })
@@ -124,6 +125,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setCmcdVersion(loggingSettings.cmcd?.version ?? 1)
         setTokenEnabled(loggingSettings.token?.enabled ?? false)
         setSubscriberIdExpr(loggingSettings.token?.subscriber_id_expr ?? '')
+        setContentIdExpr(loggingSettings.token?.content_id_expr ?? '')
       }
     }
   }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
@@ -361,6 +363,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       setTokenEnabled={setTokenEnabled}
                       subscriberIdExpr={subscriberIdExpr}
                       setSubscriberIdExpr={setSubscriberIdExpr}
+                      contentIdExpr={contentIdExpr}
+                      setContentIdExpr={setContentIdExpr}
                       serviceId={service.service_id}
                       toggleGroup={toggleGroup}
                       toggleField={toggleField}
@@ -389,6 +393,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       cmcdVersion={cmcdVersion}
                       tokenEnabled={tokenEnabled}
                       subscriberIdExpr={subscriberIdExpr}
+                      contentIdExpr={contentIdExpr}
                     />
                   )}
                 </div>

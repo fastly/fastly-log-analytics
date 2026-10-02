@@ -3,7 +3,7 @@
 The FeatureState is the sole input to the VCL generation system. It's constructed
 via from_config() which auto-injects mandatory custom fields when features are
 enabled (rum_cid for RUM, edge_score for Scoring, cmcd_* for CMCD,
-cs_sub_id for Token).
+cs_sub_id / cs_content_id for Token).
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "cmcd_rtp",
     # Token fields
     "cs_sub_id",
+    "cs_content_id",
 }
 
 
@@ -72,10 +73,14 @@ class CmcdConfig:
 
 @dataclass(frozen=True)
 class TokenConfig:
-    """Immutable token (HMAC / JWT / CAT) subscriber-id extraction configuration."""
+    """Immutable token (HMAC / JWT / CAT) id extraction configuration.
+
+    Each expression is optional; an enabled Token needs at least one.
+    """
 
     enabled: bool = False
     subscriber_id_expr: str = ""
+    content_id_expr: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,11 +177,11 @@ class FeatureState:
 
         # Validate token settings
         if self.token.enabled:
-            from backend.provision.token_fields import validate_subscriber_id_expr
+            from backend.provision.token_fields import validate_token_exprs
 
-            token_errors = validate_subscriber_id_expr(self.token.subscriber_id_expr)
+            token_errors = validate_token_exprs(self.token.subscriber_id_expr, self.token.content_id_expr)
             if token_errors:
-                raise ValueError(f"token.subscriber_id_expr is invalid: {'; '.join(token_errors)}")
+                raise ValueError(f"token config is invalid: {'; '.join(token_errors)}")
 
         # Validate scoring settings
         if self.scoring.enabled and not self.scoring.domain:
@@ -273,6 +278,7 @@ class FeatureState:
         token_config = TokenConfig(
             enabled=token_enabled,
             subscriber_id_expr=(token_cfg.get("subscriber_id_expr") or "").strip(),
+            content_id_expr=(token_cfg.get("content_id_expr") or "").strip(),
         )
 
         # Extract and construct Scoring config
@@ -362,14 +368,12 @@ class FeatureState:
                 if field["name"] not in existing_names:
                     injected_fields.append(dict(field))
 
-        # Auto-inject mandatory token custom fields
-        if token_enabled:
-            from backend.provision.token_fields import _TOKEN_CUSTOM_FIELDS
+        # Token custom fields: exactly the configured ids. Unlike the blocks
+        # above this also strips a field whose expression was cleared, since a
+        # dead field would still reserve log-line budget (Trap #30).
+        from backend.provision.token_fields import configured_token_fields, reconcile_token_custom_fields
 
-            existing_names = {f.get("name") for f in injected_fields}
-            for field in _TOKEN_CUSTOM_FIELDS:
-                if field["name"] not in existing_names:
-                    injected_fields.append(dict(field))
+        injected_fields = reconcile_token_custom_fields(injected_fields, fields=configured_token_fields(token_cfg))
 
         # Construct nested LogFieldsConfig
         log_fields_config = LogFieldsConfig(
@@ -432,7 +436,11 @@ class FeatureState:
             "cmcd_enabled": self.cmcd.enabled,
             "cmcd_mode": self.cmcd.mode,
             "cmcd_version": self.cmcd.version,
-            "token": {"enabled": self.token.enabled, "subscriber_id_expr": self.token.subscriber_id_expr},
+            "token": {
+                "enabled": self.token.enabled,
+                "subscriber_id_expr": self.token.subscriber_id_expr,
+                "content_id_expr": self.token.content_id_expr,
+            },
             "scoring_enabled": self.scoring.enabled,
             "scoring_domain": self.scoring.domain,
             "scoring_request_secret": self.scoring.request_secret,

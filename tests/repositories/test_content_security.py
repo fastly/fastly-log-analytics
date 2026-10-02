@@ -22,7 +22,7 @@ _ALL_COLS = {
     "host": "VARCHAR",
     "resp_bytes": "UBIGINT",
     "edge": "BOOLEAN",
-    "cmcd_cid": "VARCHAR",
+    "cs_content_id": "VARCHAR",
 }
 
 
@@ -53,7 +53,7 @@ def _row(minutes_ago, *, edge=True, country="US", referer="", host="", cid="movi
         "host": host,
         "resp_bytes": nbytes,
         "edge": edge,
-        "cmcd_cid": cid,
+        "cs_content_id": cid,
     }
 
 
@@ -149,7 +149,7 @@ def test_missing_optional_columns_degrade(in_memory_duckdb, test_service_source)
 
     assert res["available"] is True
     assert res["fields"]["host"] is False
-    assert res["fields"]["cmcd_cid"] is False
+    assert res["fields"]["cs_content_id"] is False
     assert res["top_hosts"] == []
     assert res["content_ids"] == []
     # Without the edge flag every line counts, shield included, and there is no split.
@@ -179,7 +179,7 @@ def _sub_row(sub, ip, *, minutes_ago=10, edge=True, country="US"):
         "host": "",
         "resp_bytes": 100,
         "edge": edge,
-        "cmcd_cid": "movie-1",
+        "cs_content_id": "movie-1",
         "cs_sub_id": sub,
     }
 

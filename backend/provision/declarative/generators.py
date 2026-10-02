@@ -55,6 +55,7 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
         cmcd_mode=state.cmcd.mode,
         cmcd_version=state.cmcd.version,
         token_subscriber_id_expr=state.token.subscriber_id_expr if state.token.enabled else None,
+        token_content_id_expr=state.token.content_id_expr if state.token.enabled else None,
     )
 
     snippets: list[VCLSnippet] = []
@@ -201,12 +202,12 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
                 if line.strip():
                     edge_first_hop_statements.append(f"  {line}")
 
-        # Token extraction likewise feeds capture (x-cs-sub-id →
-        # x-fos-edge-data:cs_sub_id), so it must also come first.
+        # Token extraction likewise feeds capture (x-cs-sub-id / x-cs-content-id →
+        # x-fos-edge-data:cs_sub_id / cs_content_id), so it must also come first.
         if state.token.enabled:
             from backend.provision.token_fields import generate_token_vcl_lines
 
-            for line in generate_token_vcl_lines(state.token.subscriber_id_expr):
+            for line in generate_token_vcl_lines(state.token.subscriber_id_expr, state.token.content_id_expr):
                 edge_first_hop_statements.append(f"  {line}")
 
         edge_first_hop_statements.append("  # Capture edge data for logging before shielding or backend fetch")
@@ -324,6 +325,7 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
             cmcd_mode=state.cmcd.mode,
             cmcd_version=state.cmcd.version,
             token_subscriber_id_expr=state.token.subscriber_id_expr if state.token.enabled else None,
+            token_content_id_expr=state.token.content_id_expr if state.token.enabled else None,
         )
         sub_key = subroutine.replace("vcl_", "")
         capture_vcl = capture_snippets.get(sub_key, "")

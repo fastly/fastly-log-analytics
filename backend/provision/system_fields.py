@@ -35,12 +35,17 @@ from __future__ import annotations
 from typing import Any
 
 
-def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool, bool]:
-    """Return ``(scoring_enabled, cmcd_enabled, token_enabled)`` for a service config."""
+def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool, frozenset[str]]:
+    """Return ``(scoring_enabled, cmcd_enabled, token_fields)`` for a service config.
+
+    ``token_fields`` is the set of token system fields to log — Token enabled
+    and that id's expression configured (see ``token_fields.configured_token_fields``).
+    """
+    from backend.provision.token_fields import configured_token_fields
+
     scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
     cmcd_enabled = bool((cfg.get("cmcd") or {}).get("enabled"))
-    token_enabled = bool((cfg.get("token") or {}).get("enabled"))
-    return scoring_enabled, cmcd_enabled, token_enabled
+    return scoring_enabled, cmcd_enabled, configured_token_fields(cfg.get("token"))
 
 
 def reconcile_system_custom_fields(
@@ -48,7 +53,7 @@ def reconcile_system_custom_fields(
     *,
     scoring_enabled: bool,
     cmcd_enabled: bool,
-    token_enabled: bool,
+    token_fields: frozenset[str],
 ) -> list[dict]:
     """Return ``custom_fields`` with system-managed entries re-asserted.
 
@@ -79,7 +84,7 @@ def reconcile_system_custom_fields(
     if scoring_enabled:
         out.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
     out = reconcile_cmcd_custom_fields(out, enabled=cmcd_enabled)
-    return reconcile_token_custom_fields(out, enabled=token_enabled)
+    return reconcile_token_custom_fields(out, fields=token_fields)
 
 
 def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
@@ -88,7 +93,7 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
     Returns the reconciled list. Safe to call on a config with no
     ``log_fields`` block — it creates one with the schema-v2 default shape.
     """
-    scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
+    scoring_enabled, cmcd_enabled, token_fields = system_feature_flags(cfg)
     lf = cfg.get("log_fields")
     if not isinstance(lf, dict):
         lf = {"schema_version": 2, "custom_fields": []}
@@ -97,7 +102,7 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
         lf.get("custom_fields"),
         scoring_enabled=scoring_enabled,
         cmcd_enabled=cmcd_enabled,
-        token_enabled=token_enabled,
+        token_fields=token_fields,
     )
     lf["custom_fields"] = reconciled
     return reconciled

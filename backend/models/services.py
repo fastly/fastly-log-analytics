@@ -104,10 +104,11 @@ class CmcdSettingsResponse(BaseModel):
 
 
 class TokenSettingsResponse(BaseModel):
-    """Token (subscriber id) extraction settings."""
+    """Token (subscriber id / content id) extraction settings."""
 
     enabled: bool = False
     subscriber_id_expr: str | None = None
+    content_id_expr: str | None = None
 
 
 class LoggingSettingsResponse(BaseResponse):

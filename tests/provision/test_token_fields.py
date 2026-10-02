@@ -1,10 +1,12 @@
-"""Token (subscriber id) system field + VCL extraction.
+"""Token (subscriber id / content id) system fields + VCL extraction.
 
-The subscriber id is extracted into ``req.http.x-cs-sub-id`` by an
-admin-supplied VCL expression and promoted into the log line by the
-system-managed ``cs_sub_id`` field. Same two failure modes as CMCD:
-the field silently dropping out of ``log_fields`` (Trap #27) and extraction
-being emitted after capture (Trap #29).
+Each id is extracted into its header (``req.http.x-cs-sub-id`` /
+``req.http.x-cs-content-id``) by an admin-supplied VCL expression and promoted
+into the log line by its system-managed field (``cs_sub_id`` /
+``cs_content_id``). Same two failure modes as CMCD: a field silently dropping
+out of ``log_fields`` (Trap #27) and extraction being emitted after capture
+(Trap #29). Plus one of its own: a field must exist only while its expression
+is configured, or it reserves log-line budget for nothing (Trap #30).
 """
 
 from __future__ import annotations
@@ -18,34 +20,61 @@ from backend.provision.fastly_api import generate_capture_vcl, get_scrub_vcl_sta
 from backend.provision.system_fields import reconcile_cfg_system_custom_fields, system_feature_flags
 from backend.provision.token_fields import (
     _TOKEN_FIELD_NAMES,
+    CONTENT_ID,
+    CONTENT_ID_FIELD,
+    SUBSCRIBER_ID,
     SUBSCRIBER_ID_FIELD,
+    configured_token_fields,
     generate_token_vcl_lines,
     get_token_fields,
     reconcile_token_custom_fields,
-    validate_subscriber_id_expr,
+    resolve_token_exprs,
+    validate_token_exprs,
 )
 
-_EXPR = 'regsub(req.http.Authorization, "^Bearer ", "")'
+_SUB_EXPR = 'regsub(req.http.Authorization, "^Bearer ", "")'
+_CID_EXPR = 'subfield(req.http.CAT, "cid", ",")'
 _USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+_BOTH = frozenset({SUBSCRIBER_ID_FIELD, CONTENT_ID_FIELD})
 
-_UNSET = "unset req.http.x-cs-sub-id;"
-_SET = f"set req.http.x-cs-sub-id = {_EXPR};"
-_CAPTURE = f"set req.http.x-fos-edge-data:{SUBSCRIBER_ID_FIELD} = req.http.x-cs-sub-id;"
+
+def _vcl(t, expr):
+    return {
+        "unset": f"unset {t.header};",
+        "set": f"set {t.header} = {expr};",
+        "capture": f"set req.http.x-fos-edge-data:{t.field} = {t.header};",
+    }
+
+
+_SUB = _vcl(SUBSCRIBER_ID, _SUB_EXPR)
+_CID = _vcl(CONTENT_ID, _CID_EXPR)
 
 
 # ── validation ───────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("expr", [_EXPR, "req.http.X-Subscriber", 'subfield(req.http.CAT, "sub", ",")'])
-def test_valid_expressions_pass(expr):
-    assert validate_subscriber_id_expr(expr) == []
+@pytest.mark.parametrize(
+    "sub,cid",
+    [
+        (_SUB_EXPR, ""),
+        ("", _CID_EXPR),
+        (_SUB_EXPR, _CID_EXPR),
+        ("req.http.X-Subscriber", None),
+        (None, "req.http.X-Content"),
+    ],
+)
+def test_valid_combinations_pass(sub, cid):
+    assert validate_token_exprs(sub, cid) == []
+
+
+def test_at_least_one_id_required():
+    assert validate_token_exprs("", "  ") == ["Configure at least one of Subscriber ID or Content ID"]
+    assert validate_token_exprs(None, None)
 
 
 @pytest.mark.parametrize(
-    "expr",
+    "bad",
     [
-        "",
-        "   ",
         'req.http.a; set req.http.b = "x"',  # statement injection
         "req.http.a # hidden",
         "req.http.a // hidden",
@@ -53,52 +82,96 @@ def test_valid_expressions_pass(expr):
         "x" * 513,
     ],
 )
-def test_unsafe_or_empty_expressions_rejected(expr):
-    assert validate_subscriber_id_expr(expr)
+@pytest.mark.parametrize("which", ["sub", "cid"])
+def test_unsafe_expression_rejected_and_labelled(bad, which):
+    errors = validate_token_exprs(bad, _CID_EXPR) if which == "sub" else validate_token_exprs(_SUB_EXPR, bad)
+    assert errors
+    label = "Subscriber ID" if which == "sub" else "Content ID"
+    assert all(e.startswith(f"{label}: ") for e in errors)
 
 
-def test_generate_lines_only_set():
-    """The unset lives with the other scrubs, not beside the set."""
-    lines = generate_token_vcl_lines(f"  {_EXPR}  ")
-    assert _SET in lines
-    assert _UNSET not in lines
+def test_resolve_keeps_stored_on_none_and_clears_on_empty():
+    stored = {"subscriber_id_expr": "a", "content_id_expr": "b"}
+    assert resolve_token_exprs(stored, None, None) == ("a", "b")
+    assert resolve_token_exprs(stored, " c ", "") == ("c", "")
+    assert resolve_token_exprs(None, None, "d") == ("", "d")
 
 
-def test_scrub_unsets_header_only_when_token_field_enabled():
-    assert _UNSET in get_scrub_vcl_statements({"custom_fields": get_token_fields(True)})
-    assert _UNSET not in get_scrub_vcl_statements({"custom_fields": []})
-    disabled = [{**get_token_fields(True)[0], "enabled": False}]
-    assert _UNSET not in get_scrub_vcl_statements({"custom_fields": disabled})
+def test_generate_lines_set_only_configured_ids():
+    """The unsets live with the other scrubs, not beside the sets."""
+    both = generate_token_vcl_lines(f"  {_SUB_EXPR}  ", _CID_EXPR)
+    assert _SUB["set"] in both and _CID["set"] in both
+    assert _SUB["unset"] not in both and _CID["unset"] not in both
+    only_cid = generate_token_vcl_lines("", _CID_EXPR)
+    assert _CID["set"] in only_cid
+    assert not any(SUBSCRIBER_ID.header in ln for ln in only_cid)
 
 
 def test_generate_lines_refuses_invalid_expression():
     with pytest.raises(ValueError):
-        generate_token_vcl_lines("req.http.a; esi")
+        generate_token_vcl_lines(_SUB_EXPR, "req.http.a; esi")
+
+
+@pytest.mark.parametrize("t", [SUBSCRIBER_ID, CONTENT_ID])
+def test_scrub_unsets_header_only_when_its_field_enabled(t):
+    unset = f"unset {t.header};"
+    assert unset in get_scrub_vcl_statements({"custom_fields": get_token_fields({t.field})})
+    assert unset not in get_scrub_vcl_statements({"custom_fields": []})
+    disabled = [{**get_token_fields({t.field})[0], "enabled": False}]
+    assert unset not in get_scrub_vcl_statements({"custom_fields": disabled})
 
 
 # ── system field reconciliation ──────────────────────────────────────────────
 
 
-def test_reconcile_adds_and_strips():
-    on = reconcile_token_custom_fields([_USER_FIELD], enabled=True)
-    assert [cf["name"] for cf in on] == ["my_custom", SUBSCRIBER_ID_FIELD]
-    assert reconcile_token_custom_fields(on, enabled=False) == [_USER_FIELD]
+def test_configured_fields_follow_expressions():
+    assert configured_token_fields(None) == frozenset()
+    assert configured_token_fields({"enabled": False, "subscriber_id_expr": _SUB_EXPR}) == frozenset()
+    assert configured_token_fields({"enabled": True, "subscriber_id_expr": _SUB_EXPR}) == {SUBSCRIBER_ID_FIELD}
+    assert configured_token_fields({"enabled": True, "content_id_expr": _CID_EXPR, "subscriber_id_expr": " "}) == {
+        CONTENT_ID_FIELD
+    }
+    assert (
+        configured_token_fields({"enabled": True, "subscriber_id_expr": _SUB_EXPR, "content_id_expr": _CID_EXPR})
+        == _BOTH
+    )
 
 
-def test_flags_include_token():
-    assert system_feature_flags({"token": {"enabled": True}}) == (False, False, True)
-    assert system_feature_flags({"token": None}) == (False, False, False)
+def test_reconcile_applies_exact_set_in_canonical_order():
+    on = reconcile_token_custom_fields([_USER_FIELD], fields={CONTENT_ID_FIELD, SUBSCRIBER_ID_FIELD})
+    assert [cf["name"] for cf in on] == ["my_custom", SUBSCRIBER_ID_FIELD, CONTENT_ID_FIELD]
+    only_sub = reconcile_token_custom_fields(on, fields={SUBSCRIBER_ID_FIELD})
+    assert [cf["name"] for cf in only_sub] == ["my_custom", SUBSCRIBER_ID_FIELD]
+    assert reconcile_token_custom_fields(on, fields=frozenset()) == [_USER_FIELD]
+
+
+def test_flags_carry_configured_token_fields():
+    cfg = {"token": {"enabled": True, "subscriber_id_expr": _SUB_EXPR, "content_id_expr": _CID_EXPR}}
+    assert system_feature_flags(cfg) == (False, False, _BOTH)
+    assert system_feature_flags({"token": None}) == (False, False, frozenset())
 
 
 def test_cfg_reconcile_reasserts_token_without_a_transition():
     """Trap #27: keyed on current state, so an already-stripped config heals."""
-    cfg = {"token": {"enabled": True, "subscriber_id_expr": _EXPR}, "log_fields": {"custom_fields": [_USER_FIELD]}}
+    cfg = {
+        "token": {"enabled": True, "subscriber_id_expr": _SUB_EXPR, "content_id_expr": _CID_EXPR},
+        "log_fields": {"custom_fields": [_USER_FIELD]},
+    }
     names = [cf["name"] for cf in reconcile_cfg_system_custom_fields(cfg)]
-    assert names == ["my_custom", SUBSCRIBER_ID_FIELD]
+    assert names == ["my_custom", SUBSCRIBER_ID_FIELD, CONTENT_ID_FIELD]
+
+
+def test_cfg_reconcile_drops_field_when_its_expression_is_cleared():
+    """Trap #30: a dead field would still reserve log-line budget."""
+    cfg = {
+        "token": {"enabled": True, "subscriber_id_expr": _SUB_EXPR, "content_id_expr": ""},
+        "log_fields": {"custom_fields": [_USER_FIELD, *get_token_fields(_BOTH)]},
+    }
+    assert [cf["name"] for cf in reconcile_cfg_system_custom_fields(cfg)] == ["my_custom", SUBSCRIBER_ID_FIELD]
 
 
 def test_cfg_reconcile_strips_token_when_disabled():
-    cfg = {"log_fields": {"custom_fields": [_USER_FIELD, *get_token_fields(True)]}}
+    cfg = {"log_fields": {"custom_fields": [_USER_FIELD, *get_token_fields(_BOTH)]}}
     assert reconcile_cfg_system_custom_fields(cfg) == [_USER_FIELD]
 
 
@@ -106,32 +179,36 @@ def test_field_registry_mirror_matches_provision_names():
     """core can't import provision; the duplicated name set must not drift."""
     assert set(_TOKEN_SYSTEM_FIELDS) == _TOKEN_FIELD_NAMES
     assert _is_system_field(SUBSCRIBER_ID_FIELD)
+    assert _is_system_field(CONTENT_ID_FIELD)
     assert not _is_system_field("token_my_own_field")
     assert not _is_system_field("cs_sub_id_extra")
+    assert not _is_system_field("cs_content_id_extra")
 
 
 # ── generated VCL ordering (Trap #29) ────────────────────────────────────────
 
 
-def _assert_ordered(recv: str) -> None:
-    unset, set_, capture = recv.find(_UNSET), recv.find(_SET), recv.find(_CAPTURE)
+def _assert_ordered(recv: str, vcl: dict) -> None:
+    unset, set_, capture = recv.find(vcl["unset"]), recv.find(vcl["set"]), recv.find(vcl["capture"])
     assert -1 not in (unset, set_, capture), recv
     assert unset < set_ < capture, "scrub, then token extraction, then field capture"
     # The unset sits inside the contiguous block of scrub unsets.
     lines = [ln.strip() for ln in recv.splitlines()]
-    i = lines.index(_UNSET)
-    assert lines[i - 1].startswith("unset "), f"x-cs-sub-id unset is not grouped with the scrubs: {lines[i - 1]!r}"
-    assert recv.count(_UNSET) == 1
+    i = lines.index(vcl["unset"])
+    assert lines[i - 1].startswith("unset "), f"{vcl['unset']} is not grouped with the scrubs: {lines[i - 1]!r}"
+    assert recv.count(vcl["unset"]) == 1
 
 
-def test_capture_vcl_orders_extraction_before_capture():
-    lf = {"groups": ["A"], "custom_fields": get_token_fields(True)}
-    _assert_ordered(generate_capture_vcl(lf, token_subscriber_id_expr=_EXPR)["recv"])
+def test_capture_vcl_orders_extraction_before_capture_for_both_ids():
+    lf = {"groups": ["A"], "custom_fields": get_token_fields(_BOTH)}
+    recv = generate_capture_vcl(lf, token_subscriber_id_expr=_SUB_EXPR, token_content_id_expr=_CID_EXPR)["recv"]
+    _assert_ordered(recv, _SUB)
+    _assert_ordered(recv, _CID)
 
 
 def test_capture_vcl_omits_extraction_when_disabled():
-    lf = {"groups": ["A"], "custom_fields": []}
-    assert "x-cs-sub-id" not in generate_capture_vcl(lf)["recv"]
+    recv = generate_capture_vcl({"groups": ["A"], "custom_fields": []})["recv"]
+    assert "x-cs-sub-id" not in recv and "x-cs-content-id" not in recv
 
 
 def _state(**token_kw) -> FeatureState:
@@ -145,19 +222,51 @@ def _state(**token_kw) -> FeatureState:
     )
 
 
-def test_declarative_state_injects_field_and_orders_extraction():
-    state = _state(enabled=True, subscriber_id_expr=_EXPR)
-    assert SUBSCRIBER_ID_FIELD in {cf["name"] for cf in state.log_fields.custom_fields}
-    _assert_ordered(generate_consolidated_snippet(state, "vcl_recv"))
+def test_declarative_state_injects_both_fields_and_orders_extraction():
+    state = _state(enabled=True, subscriber_id_expr=_SUB_EXPR, content_id_expr=_CID_EXPR)
+    assert _BOTH <= {cf["name"] for cf in state.log_fields.custom_fields}
+    recv = generate_consolidated_snippet(state, "vcl_recv")
+    _assert_ordered(recv, _SUB)
+    _assert_ordered(recv, _CID)
+
+
+def test_declarative_state_content_id_only():
+    state = _state(enabled=True, content_id_expr=_CID_EXPR)
+    names = {cf["name"] for cf in state.log_fields.custom_fields}
+    assert CONTENT_ID_FIELD in names and SUBSCRIBER_ID_FIELD not in names
+    recv = generate_consolidated_snippet(state, "vcl_recv")
+    _assert_ordered(recv, _CID)
+    assert "x-cs-sub-id" not in recv
+
+
+def test_declarative_state_strips_stale_field_for_cleared_id():
+    state = FeatureState.from_config(
+        {
+            "service_id": "svcTOKEN",
+            "log_period": 60,
+            "token": {"enabled": True, "subscriber_id_expr": _SUB_EXPR, "content_id_expr": ""},
+            "log_fields": {"groups": ["A"], "custom_fields": get_token_fields(_BOTH)},
+        }
+    )
+    assert CONTENT_ID_FIELD not in {cf["name"] for cf in state.log_fields.custom_fields}
 
 
 def test_declarative_state_disabled_emits_nothing():
     state = _state()
-    assert SUBSCRIBER_ID_FIELD not in {cf["name"] for cf in state.log_fields.custom_fields}
-    assert "x-cs-sub-id" not in generate_consolidated_snippet(state, "vcl_recv")
+    assert not _BOTH & {cf["name"] for cf in state.log_fields.custom_fields}
+    recv = generate_consolidated_snippet(state, "vcl_recv")
+    assert "x-cs-sub-id" not in recv and "x-cs-content-id" not in recv
 
 
-def test_declarative_state_rejects_invalid_expression():
+@pytest.mark.parametrize(
+    "token",
+    [
+        TokenConfig(enabled=True, subscriber_id_expr="a; b"),
+        TokenConfig(enabled=True, content_id_expr="a // b"),
+        TokenConfig(enabled=True),  # neither id configured
+    ],
+)
+def test_declarative_state_rejects_invalid_token(token):
     with pytest.raises(ValueError):
         FeatureState(
             service_id="svcTOKEN",
@@ -167,6 +276,6 @@ def test_declarative_state_rejects_invalid_expression():
             custom_condition="",
             fos_prefix="",
             fos_endpoint="fos.example.com",
-            token=TokenConfig(enabled=True, subscriber_id_expr="a; b"),
+            token=token,
             log_fields=LogFieldsConfig(),
         )

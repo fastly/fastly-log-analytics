@@ -16,6 +16,8 @@ interface StreamingConfigSectionProps {
   onTokenEnabledChange: (enabled: boolean) => void
   subscriberIdExpr: string
   onSubscriberIdExprChange: (expr: string) => void
+  contentIdExpr: string
+  onContentIdExprChange: (expr: string) => void
   /** Enables live VCL lint of the subscriber id expression (omit before provisioning). */
   serviceId?: string
   disabled?: boolean
@@ -62,6 +64,8 @@ export function StreamingConfigSection(props: StreamingConfigSectionProps) {
             onEnabledChange={props.onTokenEnabledChange}
             subscriberIdExpr={props.subscriberIdExpr}
             onSubscriberIdExprChange={props.onSubscriberIdExprChange}
+            contentIdExpr={props.contentIdExpr}
+            onContentIdExprChange={props.onContentIdExprChange}
             serviceId={props.serviceId}
             disabled={props.disabled}
           />

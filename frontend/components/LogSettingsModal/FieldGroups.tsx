@@ -201,6 +201,8 @@ interface StandardFieldsStepProps {
   setTokenEnabled?: (v: boolean) => void
   subscriberIdExpr?: string
   setSubscriberIdExpr?: (v: string) => void
+  contentIdExpr?: string
+  setContentIdExpr?: (v: string) => void
   serviceId?: string
   toggleGroup: (groupId: string, checked: boolean) => void
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
@@ -231,6 +233,8 @@ export function StandardFieldsStep({
   setTokenEnabled,
   subscriberIdExpr,
   setSubscriberIdExpr,
+  contentIdExpr,
+  setContentIdExpr,
   serviceId,
   toggleGroup,
   toggleField,
@@ -388,7 +392,7 @@ export function StandardFieldsStep({
             updateFieldLimit={updateFieldLimit}
           />
         ))}
-        {setCmcdEnabled && setCmcdMode && setCmcdVersion && setTokenEnabled && setSubscriberIdExpr && (
+        {setCmcdEnabled && setCmcdMode && setCmcdVersion && setTokenEnabled && setSubscriberIdExpr && setContentIdExpr && (
           <StreamingConfigSection
             cmcdEnabled={cmcdEnabled ?? false}
             onCmcdEnabledChange={setCmcdEnabled}
@@ -400,6 +404,8 @@ export function StandardFieldsStep({
             onTokenEnabledChange={setTokenEnabled}
             subscriberIdExpr={subscriberIdExpr ?? ''}
             onSubscriberIdExprChange={setSubscriberIdExpr}
+            contentIdExpr={contentIdExpr ?? ''}
+            onContentIdExprChange={setContentIdExpr}
             serviceId={serviceId}
           />
         )}

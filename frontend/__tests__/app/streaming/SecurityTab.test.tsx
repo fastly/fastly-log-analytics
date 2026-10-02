@@ -33,7 +33,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cmcd_cid: true, ip: true, cs_sub_id: true },
+  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -153,7 +153,7 @@ test('explains which log fields are missing', async () => {
   postMock.mockResolvedValue({
     data: {
       ...FULL_RESPONSE,
-      fields: { ...FULL_RESPONSE.fields, host: false, cmcd_cid: false },
+      fields: { ...FULL_RESPONSE.fields, host: false, cs_content_id: false },
       content_ids: [],
       top_hosts: [],
     },
@@ -161,7 +161,7 @@ test('explains which log fields are missing', async () => {
   renderTab()
 
   expect(await screen.findByText(/Host field \(Group A\)/)).toBeInTheDocument()
-  expect(screen.getByText(/content ID \(cid\)/)).toBeInTheDocument()
+  expect(screen.getByText(/Token option with Content ID configured/)).toBeInTheDocument()
   expect(screen.getByRole('combobox', { name: 'Content ID' })).toBeDisabled()
 })
 

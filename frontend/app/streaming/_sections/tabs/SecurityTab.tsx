@@ -28,7 +28,7 @@ interface SecurityTabProps extends StreamingTabProps {
   bucketSeconds: number
 }
 
-// ?content=<cmcd cid> narrows the whole tab to one piece of content.
+// ?content=<cs_content_id> narrows the whole tab to one piece of content.
 const contentParser = parseAsString.withOptions({ history: 'replace', shallow: true })
 
 const TOP_N = 10
@@ -296,7 +296,7 @@ export default function SecurityTab({
         <ContentPicker
           value={contentId}
           options={data?.content_ids ?? []}
-          disabled={missing('cmcd_cid')}
+          disabled={missing('cs_content_id')}
           onChange={(id) => void setContentId(id)}
         />
         {contentId && (
@@ -305,9 +305,9 @@ export default function SecurityTab({
             Clear
           </Button>
         )}
-        {missing('cmcd_cid') && (
+        {missing('cs_content_id') && (
           <span className="text-xs text-muted-foreground">
-            Requires CMCD with the content ID (cid) field enabled.
+            Requires the Streaming → Token option with Content ID configured in Log Settings.
           </span>
         )}
       </div>

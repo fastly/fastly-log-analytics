@@ -301,9 +301,44 @@ def test_update_passes_token_settings(mock_get_source, mock_update, mock_save_co
 
     response = client.post(
         "/api/services/svc-token/logging-settings/update",
-        params={"token_enabled": True, "token_subscriber_id_expr": "req.http.X-Sub"},
+        params={
+            "token_enabled": True,
+            "token_subscriber_id_expr": "req.http.X-Sub",
+            "token_content_id_expr": "req.http.X-Content",
+        },
     )
 
     assert response.status_code == 200
     assert captured_cfg["token_enabled"] is True
     assert captured_cfg["token_subscriber_id_expr"] == "req.http.X-Sub"
+    assert captured_cfg["token_content_id_expr"] == "req.http.X-Content"
+
+
+@patch("backend.config.load_config")
+@patch("backend.provision.update_logging_endpoint")
+def test_update_rejects_invalid_content_id_expression(mock_update, mock_load_config):
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={"token_enabled": True, "token_content_id_expr": "req.http.a // hidden"},
+    )
+
+    assert response.status_code == 400
+    assert "Content ID" in response.json()["detail"]["error"]
+    mock_update.assert_not_called()
+
+
+@patch("backend.config.load_config")
+@patch("backend.provision.update_logging_endpoint")
+def test_update_rejects_token_with_no_ids(mock_update, mock_load_config):
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={"token_enabled": True, "token_subscriber_id_expr": "", "token_content_id_expr": ""},
+    )
+
+    assert response.status_code == 400
+    assert "at least one" in response.json()["detail"]["error"]
+    mock_update.assert_not_called()

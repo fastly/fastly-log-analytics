@@ -68,6 +68,7 @@ export interface ProvisionConfig {
   cmcd_version: number;
   token_enabled: boolean;
   token_subscriber_id_expr: string;
+  token_content_id_expr: string;
   logging_enabled: boolean;
   rum_enabled: boolean;
   log_retention_days: number;
@@ -109,6 +110,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cmcd_version: 1,
   token_enabled: false,
   token_subscriber_id_expr: "",
+  token_content_id_expr: "",
   logging_enabled: true,
   rum_enabled: false,
   log_retention_days: 30,

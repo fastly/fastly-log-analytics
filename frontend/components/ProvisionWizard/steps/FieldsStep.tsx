@@ -123,6 +123,8 @@ export function FieldsStep({ s }: { s: WizardState }) {
                 onTokenEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_enabled: v }))}
                 subscriberIdExpr={config.token_subscriber_id_expr}
                 onSubscriberIdExprChange={(v) => setConfig((prev) => ({ ...prev, token_subscriber_id_expr: v }))}
+                contentIdExpr={config.token_content_id_expr}
+                onContentIdExprChange={(v) => setConfig((prev) => ({ ...prev, token_content_id_expr: v }))}
               />
             </div>
           </div>

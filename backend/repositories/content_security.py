@@ -2,7 +2,7 @@
 
 Backs the Streaming → Content Security tab: top countries / referers / hosts, top subscriber ids by distinct
 client IPs (``cs_sub_id``, Streaming → Token), and edge-vs-shield bandwidth, optionally narrowed to one
-CMCD content id (``cmcd_cid``).
+content id (``cs_content_id``, Streaming → Token → Content ID).
 
 Subscriber ids are returned raw; analyst masking happens in the router, after
 this module's response cache (which is shared across roles).
@@ -41,7 +41,7 @@ _TOP_N_SECTIONS = {
 }
 
 # Columns the tab can use; each is optional and its section degrades to empty.
-_OPTIONAL_COLS = ("country", "referer", "host", "resp_bytes", "edge", "cmcd_cid", "ip", "cs_sub_id")
+_OPTIONAL_COLS = ("country", "referer", "host", "resp_bytes", "edge", "cs_content_id", "ip", "cs_sub_id")
 
 # Cap on the content-id picker's option list.
 _CONTENT_ID_OPTIONS_LIMIT = 100
@@ -105,7 +105,7 @@ def get_content_security(
     table_name = _safe_table(src["name"])
     has_edge = fields["edge"]
     has_bytes = fields["resp_bytes"]
-    has_cid = fields["cmcd_cid"]
+    has_cid = fields["cs_content_id"]
     edge_where = "edge = true" if has_edge else "1=1"
 
     results: dict[str, Any] = {
@@ -123,11 +123,11 @@ def get_content_security(
         base_params, base_where = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
         rows = runner.execute(
             f"""
-            SELECT cmcd_cid, COUNT(*) AS requests
+            SELECT cs_content_id, COUNT(*) AS requests
             FROM {table_name}
-            WHERE {base_where} AND {edge_where} AND cmcd_cid IS NOT NULL AND cmcd_cid != ''
+            WHERE {base_where} AND {edge_where} AND cs_content_id IS NOT NULL AND cs_content_id != ''
             GROUP BY 1
-            ORDER BY requests DESC, cmcd_cid
+            ORDER BY requests DESC, cs_content_id
             LIMIT {_CONTENT_ID_OPTIONS_LIMIT}
             """,
             base_params or None,
@@ -136,16 +136,16 @@ def get_content_security(
         timer.mark("content_ids", _t)
 
     # The content id goes through build_where_clause like any other filter, so
-    # it is escaped there, and on a schema without cmcd_cid it matches nothing.
+    # it is escaped there, and on a schema without cs_content_id it matches nothing.
     scoped_filters: FiltersDict = dict(filters)
     if content_id:
-        scoped_filters["cmcd_cid"] = FilterSpec(mode="include", values=[content_id])
+        scoped_filters["cs_content_id"] = FilterSpec(mode="include", values=[content_id])
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, scoped_filters, actual_cols, inline_params=True)
     timer.mark("build_where_clause", _t)
 
-    temp_cols = ["timestamp", *[c for c in _OPTIONAL_COLS if c != "cmcd_cid" and fields[c]]]
+    temp_cols = ["timestamp", *[c for c in _OPTIONAL_COLS if c != "cs_content_id" and fields[c]]]
 
     _t = _time.perf_counter()
     with runner.temp_table(temp_cols, actual_cols, table_name, where_clause, params) as t:

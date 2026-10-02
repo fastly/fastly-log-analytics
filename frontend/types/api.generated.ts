@@ -10857,6 +10857,8 @@ export interface components {
             token_enabled: boolean;
             /** Token Subscriber Id Expr */
             token_subscriber_id_expr?: string | null;
+            /** Token Content Id Expr */
+            token_content_id_expr?: string | null;
             /**
              * Logging Enabled
              * @default true
@@ -13640,7 +13642,7 @@ export interface components {
         };
         /**
          * TokenSettingsResponse
-         * @description Token (subscriber id) extraction settings.
+         * @description Token (subscriber id / content id) extraction settings.
          */
         TokenSettingsResponse: {
             /**
@@ -13650,6 +13652,8 @@ export interface components {
             enabled: boolean;
             /** Subscriber Id Expr */
             subscriber_id_expr?: string | null;
+            /** Content Id Expr */
+            content_id_expr?: string | null;
         };
         /**
          * TosAckPayload
@@ -23709,6 +23713,7 @@ export interface operations {
                 cmcd_version?: number | null;
                 token_enabled?: boolean | null;
                 token_subscriber_id_expr?: string | null;
+                token_content_id_expr?: string | null;
             };
             header?: never;
             path: {

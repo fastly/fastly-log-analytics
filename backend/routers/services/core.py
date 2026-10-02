@@ -596,6 +596,7 @@ def api_service_logging_settings(service_id: str):
             "token": TokenSettingsResponse(
                 enabled=bool(token_block.get("enabled")),
                 subscriber_id_expr=token_block.get("subscriber_id_expr"),
+                content_id_expr=token_block.get("content_id_expr"),
             ),
         }
         _logging_settings_cache[service_id] = cacheable
@@ -711,12 +712,12 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     # incoming list was non-empty but omitted them (they're hidden from the
     # user-editable list by _is_system_field, so a UI round-trip always omits
     # them) — see backend/provision/system_fields.py.
-    scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
+    scoring_enabled, cmcd_enabled, token_fields = system_feature_flags(cfg)
     new_lf["custom_fields"] = reconcile_system_custom_fields(
         new_lf.get("custom_fields"),
         scoring_enabled=scoring_enabled,
         cmcd_enabled=cmcd_enabled,
-        token_enabled=token_enabled,
+        token_fields=token_fields,
     )
     new_lf["schema_version"] = 2
     old_groups = set(old_lf.get("groups", []))
@@ -770,9 +771,10 @@ def api_service_update_logging_settings(
     cmcd_version: int | None = Query(default=None),
     token_enabled: bool | None = Query(default=None),
     token_subscriber_id_expr: str | None = Query(default=None, max_length=512),
+    token_content_id_expr: str | None = Query(default=None, max_length=512),
 ):
     from backend import config as svcconfig
-    from backend.provision.token_fields import validate_subscriber_id_expr
+    from backend.provision.token_fields import resolve_token_exprs, validate_token_exprs
 
     _require_service_scope(request, service_id)
 
@@ -800,15 +802,12 @@ def api_service_update_logging_settings(
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
     if token_enabled:
-        expr = (
-            token_subscriber_id_expr
-            if token_subscriber_id_expr is not None
-            else (cfg.get("token") or {}).get("subscriber_id_expr", "")
+        expr_errors = validate_token_exprs(
+            *resolve_token_exprs(cfg.get("token"), token_subscriber_id_expr, token_content_id_expr)
         )
-        expr_errors = validate_subscriber_id_expr(expr)
         if expr_errors:
             raise HTTPException(
-                status_code=400, detail={"error": f"Invalid Subscriber ID expression: {'; '.join(expr_errors)}"}
+                status_code=400, detail={"error": f"Invalid Token configuration: {'; '.join(expr_errors)}"}
             )
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
@@ -834,6 +833,7 @@ def api_service_update_logging_settings(
                 "cmcd_version": cmcd_version,
                 "token_enabled": token_enabled,
                 "token_subscriber_id_expr": token_subscriber_id_expr,
+                "token_content_id_expr": token_content_id_expr,
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
@@ -875,6 +875,7 @@ def api_service_update_logging_settings(
                                 "token": TokenSettingsResponse(
                                     enabled=bool(deployed_token.get("enabled")),
                                     subscriber_id_expr=deployed_token.get("subscriber_id_expr"),
+                                    content_id_expr=deployed_token.get("content_id_expr"),
                                 ),
                             }
                         else:
@@ -917,6 +918,8 @@ def api_service_update_logging_settings(
                                 _details["token_enabled"] = token_enabled
                             if token_subscriber_id_expr is not None:
                                 _details["token_subscriber_id_expr"] = token_subscriber_id_expr
+                            if token_content_id_expr is not None:
+                                _details["token_content_id_expr"] = token_content_id_expr
                             if update_format:
                                 _details["log_fields_deployed"] = True
 

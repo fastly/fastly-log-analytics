@@ -657,17 +657,18 @@ def provision_execute(req: ProvisionExecuteRequest):
     if req.token_enabled:
         import datetime as _dt
 
-        from backend.provision.token_fields import validate_subscriber_id_expr
+        from backend.provision.token_fields import resolve_token_exprs, validate_token_exprs
 
-        expr = (req.token_subscriber_id_expr or "").strip()
-        expr_errors = validate_subscriber_id_expr(expr)
+        sub_expr, content_expr = resolve_token_exprs(None, req.token_subscriber_id_expr, req.token_content_id_expr)
+        expr_errors = validate_token_exprs(sub_expr, content_expr)
         if expr_errors:
             raise HTTPException(
-                status_code=400, detail={"error": f"Invalid Subscriber ID expression: {'; '.join(expr_errors)}"}
+                status_code=400, detail={"error": f"Invalid Token configuration: {'; '.join(expr_errors)}"}
             )
         cfg["token"] = {
             "enabled": True,
-            "subscriber_id_expr": expr,
+            "subscriber_id_expr": sub_expr,
+            "content_id_expr": content_expr,
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
@@ -1079,6 +1080,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         state["token"] = {
             "enabled": True,
             "subscriber_id_expr": (body.get("token_subscriber_id_expr") or "").strip(),
+            "content_id_expr": (body.get("token_content_id_expr") or "").strip(),
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 

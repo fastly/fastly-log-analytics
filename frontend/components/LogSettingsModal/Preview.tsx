@@ -23,6 +23,7 @@ interface ReviewStepProps {
   cmcdVersion?: number
   tokenEnabled?: boolean
   subscriberIdExpr?: string
+  contentIdExpr?: string
 }
 
 export function ReviewStep({
@@ -39,6 +40,7 @@ export function ReviewStep({
   cmcdVersion,
   tokenEnabled,
   subscriberIdExpr,
+  contentIdExpr,
 }: ReviewStepProps) {
   return (
     <div className="space-y-6">
@@ -60,11 +62,24 @@ export function ReviewStep({
                 ? `Enabled (v${cmcdVersion ?? 1}, ${cmcdMode === 'headers' ? 'Headers' : 'Query String'})`
                 : 'Disabled'}
             </p>
-            <p className="text-sm font-medium truncate" title={tokenEnabled ? subscriberIdExpr : undefined}>
-              Token: {tokenEnabled ? (
-                <>Subscriber ID = <code className="text-[10px] bg-background px-1 rounded border">{subscriberIdExpr}</code></>
-              ) : 'Disabled'}
-            </p>
+            <p className="text-sm font-medium">Token: {tokenEnabled ? 'Enabled' : 'Disabled'}</p>
+            {tokenEnabled && (
+              <>
+                {[
+                  ['Subscriber ID', subscriberIdExpr],
+                  ['Content ID', contentIdExpr],
+                ].map(([label, expr]) => (
+                  <p key={label} className="text-sm font-medium truncate pl-3" title={expr || undefined}>
+                    {label}:{' '}
+                    {expr?.trim() ? (
+                      <code className="text-[10px] bg-background px-1 rounded border">{expr}</code>
+                    ) : (
+                      <span className="text-muted-foreground">Not logged</span>
+                    )}
+                  </p>
+                ))}
+              </>
+            )}
           </div>
 
           <div className="p-4 border rounded-lg bg-muted/20 space-y-1">

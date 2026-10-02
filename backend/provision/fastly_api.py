@@ -178,10 +178,15 @@ def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
         "unset req.http.X-Edge-Prev-Anchor;",
         "unset req.http.x-sigsci-skip-inspection-once;",
     ]
-    # Token: x-cs-sub-id is set from the admin's expression later in this
-    # block; a client-supplied value must never survive to be logged.
-    if any(cf["name"] == "cs_sub_id" for cf in enabled_custom):
-        lines.append("unset req.http.x-cs-sub-id;")
+    # Token: x-cs-sub-id / x-cs-content-id are set from the admin's
+    # expressions later in this block; a client-supplied value must never
+    # survive to be logged.
+    from backend.provision.token_fields import TOKEN_FIELD_HEADERS
+
+    enabled_names = {cf["name"] for cf in enabled_custom}
+    for field_name, header in TOKEN_FIELD_HEADERS.items():
+        if field_name in enabled_names:
+            lines.append(f"unset {header};")
     if enabled_custom:
         for cf in enabled_custom:
             name = cf["name"]
@@ -244,11 +249,13 @@ def generate_capture_vcl(
     cmcd_mode: str = "query_string",
     cmcd_version: int = 1,
     token_subscriber_id_expr: str | None = None,
+    token_content_id_expr: str | None = None,
 ) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
 
-    ``token_subscriber_id_expr`` enables token subscriber-id extraction when
-    non-empty (see ``backend/provision/token_fields.py``).
+    ``token_subscriber_id_expr`` / ``token_content_id_expr`` enable token id
+    extraction for each id that is non-empty (see
+    ``backend/provision/token_fields.py``).
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
     is enabled, also returns "fetch", "error", and "deliver".
@@ -359,12 +366,15 @@ def generate_capture_vcl(
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
 
-    # Token extraction sets req.http.x-cs-sub-id, which capture promotes
-    # into x-fos-edge-data:cs_sub_id — so it too must precede capture.
-    if token_subscriber_id_expr:
+    # Token extraction sets req.http.x-cs-sub-id / x-cs-content-id, which
+    # capture promotes into x-fos-edge-data:cs_sub_id / cs_content_id — so it
+    # too must precede capture.
+    if token_subscriber_id_expr or token_content_id_expr:
         from backend.provision.token_fields import generate_token_vcl_lines
 
-        scrub_lines.extend(f"  {line}" for line in generate_token_vcl_lines(token_subscriber_id_expr))
+        scrub_lines.extend(
+            f"  {line}" for line in generate_token_vcl_lines(token_subscriber_id_expr, token_content_id_expr)
+        )
 
     if rum_enabled:
         rum_extraction, _ = generate_rum_recv_parts()
@@ -1543,24 +1553,27 @@ def update_logging_endpoint(cfg: dict, token: str):
                 }
                 cmcd_changed = True
 
-    # Handle token (subscriber id) request. Fields are re-asserted below by
-    # reconcile_cfg_system_custom_fields, keyed on the final cfg["token"] state.
+    # Handle token (subscriber id / content id) request. Fields are re-asserted
+    # below by reconcile_cfg_system_custom_fields, keyed on the final
+    # cfg["token"] state (only ids with an expression get a field).
     token_enabled_req = cfg.get("token_enabled")
     if token_enabled_req is not None:
         import datetime as _dt
 
-        from backend.provision.token_fields import validate_subscriber_id_expr
+        from backend.provision.token_fields import resolve_token_exprs, validate_token_exprs
 
         old_token = service_cfg.get("token") or {}
         if bool(token_enabled_req):
-            expr_req = cfg.get("token_subscriber_id_expr")
-            expr = (expr_req if expr_req is not None else old_token.get("subscriber_id_expr", "")).strip()
-            errors = validate_subscriber_id_expr(expr)
+            sub_expr, content_expr = resolve_token_exprs(
+                old_token, cfg.get("token_subscriber_id_expr"), cfg.get("token_content_id_expr")
+            )
+            errors = validate_token_exprs(sub_expr, content_expr)
             if errors:
-                raise ValueError(f"Invalid Subscriber ID expression: {'; '.join(errors)}")
+                raise ValueError(f"Invalid Token configuration: {'; '.join(errors)}")
             service_cfg["token"] = {
                 "enabled": True,
-                "subscriber_id_expr": expr,
+                "subscriber_id_expr": sub_expr,
+                "content_id_expr": content_expr,
                 "enabled_at": old_token.get("enabled_at")
                 if old_token.get("enabled")
                 else _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),

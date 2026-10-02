@@ -15242,6 +15242,23 @@
               ],
               "title": "Token Subscriber Id Expr"
             }
+          },
+          {
+            "name": "token_content_id_expr",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token Content Id Expr"
+            }
           }
         ],
         "responses": {
@@ -55115,6 +55132,18 @@
             ],
             "title": "Token Subscriber Id Expr"
           },
+          "token_content_id_expr": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Content Id Expr"
+          },
           "logging_enabled": {
             "type": "boolean",
             "title": "Logging Enabled",
@@ -63051,11 +63080,22 @@
               }
             ],
             "title": "Subscriber Id Expr"
+          },
+          "content_id_expr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id Expr"
           }
         },
         "type": "object",
         "title": "TokenSettingsResponse",
-        "description": "Token (subscriber id) extraction settings."
+        "description": "Token (subscriber id / content id) extraction settings."
       },
       "TosAckPayload": {
         "properties": {

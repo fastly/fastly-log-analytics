@@ -67,6 +67,7 @@ class ProvisionExecuteRequest(BaseModel):
     cmcd_version: int | None = None
     token_enabled: bool = False
     token_subscriber_id_expr: str | None = Field(default=None, max_length=512)
+    token_content_id_expr: str | None = Field(default=None, max_length=512)
     logging_enabled: bool = True
     rum_enabled: bool = False
     faro_version: str | None = None
