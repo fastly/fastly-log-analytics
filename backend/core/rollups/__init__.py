@@ -108,6 +108,7 @@ from ._common import (
     _slow_urls_bundle_path,
     _time_series_bundle_path,
     _verified_bots_ts_bundle_path,
+    rollups_present,
 )
 from .day_bundles import (
     backfill_day_bundles,
@@ -260,6 +261,7 @@ __all__ = [
     "_day_rollups_root",
     "_hour_bundled_root",
     "_day_bundled_root",
+    "rollups_present",
     "_markers_path",
     "_load_markers",
     "_save_markers",

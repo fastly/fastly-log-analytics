@@ -456,6 +456,61 @@ def _day_bundled_root(source: dict) -> str:
     return os.path.join(_cache_dir(source), "rollups", "day_bundled")
 
 
+def _tier_has_parquet(root: str) -> bool:
+    """True if ``root`` holds at least one ``.parquet`` in any partition dir.
+
+    Cheap, early-exit scan: walks partition dirs only until the first parquet
+    is found. An empty root (or partition dirs with no parquet left behind by
+    cleanup) counts as absent.
+    """
+    try:
+        with os.scandir(root) as partitions:
+            for part in partitions:
+                if not part.is_dir():
+                    if part.name.endswith(".parquet"):
+                        return True
+                    continue
+                try:
+                    with os.scandir(part.path) as entries:
+                        for e in entries:
+                            if e.is_file() and e.name.endswith(".parquet"):
+                                return True
+                            # Per-field hour tier nests one more level:
+                            # rollups/hour/field=X/hour=H/*.parquet
+                            if e.is_dir():
+                                try:
+                                    with os.scandir(e.path) as sub:
+                                        for s in sub:
+                                            if s.is_file() and s.name.endswith(".parquet"):
+                                                return True
+                                except OSError:
+                                    continue
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def rollups_present(source: dict) -> bool:
+    """True if ANY reader-usable rollup tier holds data for this service.
+
+    The dashboard rollup fast-path reader (``execute_top_n_rollups``) serves
+    from, in preference order, ``day_bundled`` → ``hour_bundled`` → per-field
+    ``day`` → per-field ``hour``. Day compaction deletes the per-field ``hour``
+    tree once a day closes, so probing only that tier (the historical bug)
+    reported "no rollups" for a fully-usable service and forced every
+    unfiltered dashboard request onto the slow wide-temp base scan. This checks
+    every tier the reader can actually consume.
+    """
+    return (
+        _tier_has_parquet(_day_bundled_root(source))
+        or _tier_has_parquet(_hour_bundled_root(source))
+        or _tier_has_parquet(_day_rollups_root(source))
+        or _tier_has_parquet(_rollups_root(source))
+    )
+
+
 # Filename for the per-day bundled rollup (same as the per-hour
 # bundled). Kept identical so future tooling can treat the two trees
 # uniformly when needed.

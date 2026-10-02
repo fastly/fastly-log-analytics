@@ -324,14 +324,19 @@ def get_aggregates(
     # field_totals["url"] computed correctly via Q2, but results["url"]
     # ["total"] stuck at 0 because no rollup row arrived to trigger the
     # populate path. The temp-table fallback always populates totals.
-    from backend.core.duckdb import _cache_dir as _cache_dir_for_rollups
-
-    rollup_dir = os.path.join(_cache_dir_for_rollups(src), "rollups", "hour")
-
+    #
+    # The presence probe must match EVERY tier the reader can serve from
+    # (day_bundled / hour_bundled / day / hour), not just per-field hour.
+    # Day compaction deletes rollups/hour once a day closes, so probing
+    # only that tier reported "no rollups" for a fully-usable service and
+    # forced every unfiltered request onto the slow wide-temp base scan
+    # (prod 2026-10: 24h/30d /api/dashboard/bundle hung >120s → pool
+    # saturation → "Crunching logs..." timeout).
     from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
+    from backend.core.rollups import rollups_present
 
     _durable_blocked = svcconfig.is_durable_serving_mode(src) and not _rollup_coverage_ready(_rc_service_id(src))
-    use_rollups = not filters and os.path.isdir(rollup_dir) and not _durable_blocked
+    use_rollups = not filters and rollups_present(src) and not _durable_blocked
     # Freshness contract on the rollup path: execute_top_n_rollups
     # (backend/repositories/_base.py) is window-correct.
     #   - Fully-contained UTC days: served from the per-day compacted rollup.
