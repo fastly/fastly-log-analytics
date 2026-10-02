@@ -489,6 +489,44 @@ def test_rum_analytics_real_data(setup_temp_rum_db) -> None:
     assert len(events) >= 12
 
 
+def test_rum_analytics_recent_window_serves_raw_without_in_request_recompute(setup_temp_rum_db) -> None:
+    """A short/recent RUM window (e.g. the live 15m view) must serve beacon
+    counts directly from the already-attached read connection and must NOT
+    trigger a synchronous in-request ``recompute_rum_aggregates`` — that opens a
+    second write connection and competes for the process-wide DuckLake attach
+    lock, stalling the page under verify-phase load. Mirrors the request-log
+    'recent data = direct scan' principle."""
+    service_id = "test_service_recent_raw"
+
+    now = datetime.datetime.now(datetime.UTC)
+    test_beacons = []
+    for i in range(12):
+        received = (now - datetime.timedelta(minutes=2 + i)).isoformat()
+        test_beacons.append(
+            {
+                "pathname": f"/recent_{i}",
+                "load_time": 1.4,
+                "lcp": 1.8,
+                "cls": 0.02,
+                "received_at": received,
+                "req_id": f"rid_{i}",
+            }
+        )
+    _insert_beacons(setup_temp_rum_db, test_beacons)
+
+    start = (now - datetime.timedelta(minutes=30)).isoformat()
+    end = now.isoformat()
+
+    with patch("backend.core.rollups.rum.recompute_rum_aggregates") as mock_recompute:
+        response = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start}&end_time={end}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_mock"] is False
+    assert data["beacon_count"] > 0
+    mock_recompute.assert_not_called()
+
+
 def test_rum_analytics_date_filtering(setup_temp_rum_db) -> None:
     service_id = "test_service_date_filter"
 

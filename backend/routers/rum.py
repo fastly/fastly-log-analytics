@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -51,6 +52,14 @@ from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
 logger = logging.getLogger(__name__)
+
+# Short/recent RUM windows (<= this span) are served directly from the
+# already-attached read connection via a raw client_vitals/client_errors scan,
+# never a synchronous in-request rollup recompute. The recompute opens a second
+# write connection + DuckLake attach, competing for the process-wide attach lock
+# and stalling the live view under load. Mirrors the request-log "recent data =
+# direct scan, no write-path in the read path" principle. Override via env.
+_RUM_RAW_WINDOW_MAX_S = int(os.getenv("RUM_RAW_WINDOW_MAX_S", str(2 * 60 * 60)))
 
 router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -733,10 +742,13 @@ async def rum_analytics(
             # 2. RUM aggregates tables must exist and have data
 
             target_hours = None
+            prefer_raw_window = False
             try:
                 st = parse_iso_utc(start_time)
                 et = parse_iso_utc(end_time)
                 if st and et:
+                    if (et - st).total_seconds() <= _RUM_RAW_WINDOW_MAX_S:
+                        prefer_raw_window = True
                     st_hour = st.replace(minute=0, second=0, microsecond=0)
                     et_hour = et.replace(minute=0, second=0, microsecond=0)
                     target_hours = []
@@ -747,7 +759,7 @@ async def rum_analytics(
             except Exception:
                 pass
 
-            if not parsed_filters:
+            if not parsed_filters and not prefer_raw_window:
                 from backend.core.rollups.rum import table_exists
 
                 if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
