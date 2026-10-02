@@ -484,6 +484,76 @@ def test_run_ip_spread_per_field_empty_result_writes_nothing(tmp_path):
     assert not (cache_root / "rollups" / "hour_ip_spread" / "field=country").exists()
 
 
+def test_run_ip_spread_per_field_self_heals_stale_view_on_select(tmp_path):
+    """A transient DuckLake ``schema "lake" does not exist`` (Trap #35)
+    on the per-field ip_spread SELECT must self-heal via
+    ``execute_with_stale_view_retry`` and still publish the field —
+    not warn + skip it. Mirrors the describe-path self-heal so a
+    cold-start lake detach race doesn't drop the rollup (and doesn't
+    flood the deploy log-error gate with Catalog Errors)."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-heal"}
+    _, hour_dt = _past_hour(2)
+    table = "logs_svc_heal"
+    rows = [("1.1.1.1", "JP"), ("2.2.2.2", "JP"), ("3.3.3.3", "US")]
+    real = _make_table_with_rows(table, hour_dt, rows)
+    where_sql = (
+        f"timestamp >= '{(hour_dt - timedelta(minutes=1)).isoformat()}' "
+        f"AND timestamp < '{(hour_dt + timedelta(hours=1)).isoformat()}'"
+    )
+
+    class _FlakySelectCon:
+        """Delegates to a real con but fails the FIRST ip_spread SELECT
+        with a lake-detach Catalog Error, succeeding on retry."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._failed_once = False
+
+        def execute(self, sql, *a, **k):
+            if "ip_sample" in sql and not self._failed_once:
+                self._failed_once = True
+                raise duckdb.CatalogException(
+                    'Catalog Error: Table with name "lake.logs_svc_heal" does '
+                    'not exist because schema "lake" does not exist.'
+                )
+            return self._inner.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    con = _FlakySelectCon(real)
+
+    def _retry_double(c, _src, fn):
+        from backend.core.iceberg import is_stale_view_error
+
+        try:
+            return fn(c)
+        except Exception as e:  # noqa: BLE001
+            if not is_stale_view_error(e):
+                raise
+            return fn(c)
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.iceberg.execute_with_stale_view_retry",
+            side_effect=_retry_double,
+        ),
+    ):
+        recompute._run_ip_spread_per_field("svc-heal", src, table, where_sql, ["country"])
+
+    # The field published despite the first SELECT's transient lake error.
+    field_dir = cache_root / "rollups" / "hour_ip_spread" / "field=country"
+    assert field_dir.exists()
+    assert list(field_dir.glob("hour=*"))
+
+
 # ── recompute_touched_hours ─────────────────────────────────────────────────
 
 

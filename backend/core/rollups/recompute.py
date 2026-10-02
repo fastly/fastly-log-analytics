@@ -836,11 +836,11 @@ def _run_ip_spread_per_field(
     on one field logs + continues so the rest of the fields still
     publish on the same cron tick.
     """
-    import duckdb
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
     from backend.utils.hll import HyperLogLog
 
@@ -883,8 +883,15 @@ def _run_ip_spread_per_field(
                 # eager path is the right pick. ``fetch_arrow_table``
                 # is the legacy alias of the same call and emits a
                 # DeprecationWarning under DuckDB 1.5+.
-                arrow_table = con.execute(select_sql).to_arrow_table()
-            except duckdb.Error as e:
+                #
+                # Routed through the stale-view self-heal (Trap #35) so a
+                # cold-start DuckLake detach race (``schema "lake" does
+                # not exist``) re-attaches + retries instead of dropping
+                # the field — same hop the describe path already takes.
+                arrow_table = execute_with_stale_view_retry(
+                    con, source, lambda c: c.execute(select_sql).to_arrow_table()
+                )
+            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
                 logger.warning(
                     "[rollups] %s: ip_spread SELECT failed for field=%s: %s",
                     service_id,
