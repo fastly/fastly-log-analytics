@@ -611,7 +611,13 @@ def test_convert_batch_rum_objects_keeps_batch_retryable_when_attach_fails(tmp_p
     con, _ = _clear_ledger()
     _seed_discovered(con, object_key)
 
-    with _rum_env(tmp_path, _download_stub({}), attach=lambda *_args, **_kwargs: False):
+    raw = tmp_path / "attach-failed.json"
+    _write_gz(raw, [VITALS_LINE])
+    with _rum_env(
+        tmp_path,
+        _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)}),
+        attach=lambda *_args, **_kwargs: False,
+    ):
         with (
             patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
             patch("backend.config.HOT_S3_ENDPOINT", False),

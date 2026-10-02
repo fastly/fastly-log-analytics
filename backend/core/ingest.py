@@ -1809,10 +1809,6 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
         from backend.core.duckdb import get_memory_connection
 
         duckdb_con = get_memory_connection(src)
-        admission_cm.__enter__()
-        admission_entered = True
-        if not _ducklake_attach(duckdb_con, src, read_only=False):
-            raise RuntimeError("DuckLake read-write attach failed")
         table = ducklake_table_name(src)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1841,6 +1837,14 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
                         _record_ledger_object_outcome(service_id, object_key, outcome)
                         return "dead_letter"
                 raise RuntimeError("download failed (object still exists — transient)")
+
+            # Acquire the per-service write lock only now — for the DuckLake
+            # attach + INSERT below, never across the FOS download above
+            # (which touches no catalog state).
+            admission_cm.__enter__()
+            admission_entered = True
+            if not _ducklake_attach(duckdb_con, src, read_only=False):
+                raise RuntimeError("DuckLake read-write attach failed")
 
             log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
             columns_sql = get_ingest_columns_sql(log_fields_config)
@@ -2077,10 +2081,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         from backend.core.duckdb import get_memory_connection
 
         duckdb_con = get_memory_connection(src)
-        admission_cm.__enter__()
-        admission_entered = True
-        if not _ducklake_attach(duckdb_con, src, read_only=False):
-            raise RuntimeError("DuckLake read-write attach failed")
         table = ducklake_table_name(src)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2135,6 +2135,16 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
 
             if not files:
                 return summary
+
+            # Acquire the per-service write lock only now — for the DuckLake
+            # attach + INSERT below, never across the FOS download above
+            # (which touches no catalog state). Holding it across network I/O
+            # made batches exceed the admission timeout and starve concurrent
+            # converts (test_convert_batch_downloads_outside_admission_lock).
+            admission_cm.__enter__()
+            admission_entered = True
+            if not _ducklake_attach(duckdb_con, src, read_only=False):
+                raise RuntimeError("DuckLake read-write attach failed")
 
             log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
             columns_sql = get_ingest_columns_sql(log_fields_config)
@@ -3028,10 +3038,6 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
         from backend.core.duckdb import get_memory_connection
 
         duckdb_con = get_memory_connection(src)
-        admission_cm.__enter__()
-        admission_entered = True
-        if not _ducklake_attach(duckdb_con, src, read_only=False):
-            raise RuntimeError("DuckLake read-write attach failed")
 
         vitals_table = ducklake_table_name(src, table_name="client_vitals")
         errors_table = ducklake_table_name(src, table_name="client_errors")
@@ -3121,6 +3127,14 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
                             raise
                 finally:
                     duckdb_con.unregister("_rum_stage")
+
+            # Acquire the per-service write lock only now — for the DuckLake
+            # attach + writes below, never across the FOS download + Python
+            # beacon parse above (neither touches catalog state).
+            admission_cm.__enter__()
+            admission_entered = True
+            if not _ducklake_attach(duckdb_con, src, read_only=False):
+                raise RuntimeError("DuckLake read-write attach failed")
 
             _write_table(vitals_table, vitals_rows, CLIENT_VITALS_ARROW_SCHEMA)
             _write_table(errors_table, errors_rows, CLIENT_ERRORS_ARROW_SCHEMA)
@@ -3242,10 +3256,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
         from backend.core.duckdb import get_memory_connection
 
         duckdb_con = get_memory_connection(src)
-        admission_cm.__enter__()
-        admission_entered = True
-        if not _ducklake_attach(duckdb_con, src, read_only=False):
-            raise RuntimeError("DuckLake read-write attach failed")
 
         vitals_table = ducklake_table_name(src, table_name="client_vitals")
         errors_table = ducklake_table_name(src, table_name="client_errors")
@@ -3371,6 +3381,16 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
                             raise
                 finally:
                     duckdb_con.unregister("_rum_stage")
+
+            # Acquire the per-service write lock only now — for the DuckLake
+            # attach + writes below, never across the FOS download + Python
+            # beacon parse above (neither touches catalog state). Holding it
+            # across that I/O starved concurrent converts
+            # (test_convert_batch_downloads_outside_admission_lock).
+            admission_cm.__enter__()
+            admission_entered = True
+            if not _ducklake_attach(duckdb_con, src, read_only=False):
+                raise RuntimeError("DuckLake read-write attach failed")
 
             _write_table_batch(vitals_table, all_vitals, vitals_sources, CLIENT_VITALS_ARROW_SCHEMA)
             _write_table_batch(errors_table, all_errors, errors_sources, CLIENT_ERRORS_ARROW_SCHEMA)

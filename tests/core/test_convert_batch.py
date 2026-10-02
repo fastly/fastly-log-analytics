@@ -347,6 +347,46 @@ def test_convert_batch_proceeds_with_only_the_keys_it_won(tmp_path):
     reader.close()
 
 
+def test_convert_batch_downloads_outside_admission_lock(tmp_path):
+    """The per-service DuckLake write-admission lock must NOT be held during
+    the FOS download. Holding it across up to LEDGER_CONVERT_BATCH_SIZE (50)
+    GETs made the median batch lock-hold 38.5s (max 68.9s) — exceeding the 30s
+    admission timeout — so concurrent batches timed out before the holder
+    released, cascading (measured 2026-10-02: 319 advisory-lock timeouts in
+    3min, 228 request + 95 rum) and starving lower-volume RUM converts to a
+    0-beacon recent window under verify-phase load. The download touches no
+    DuckLake catalog state, so the lock must wrap only attach + INSERT."""
+    service_id = "test-batch-dl-outside-lock-svc"
+    con, cur = _clear_ledger(service_id)
+    keys, s3_map = _write_files(tmp_path, [f"x{i}" for i in range(4)])
+    _seed_discovered(con, cur, service_id, keys)
+
+    state = {"held": False, "held_during_download": None}
+
+    @contextmanager
+    def _tracking_admission(sid, *args, **kwargs):
+        state["held"] = True
+        try:
+            yield
+        finally:
+            state["held"] = False
+
+    def _download(fos_client, s3_paths, tmpdir):
+        state["held_during_download"] = state["held"]
+        got = {p: s3_map[p] for p in s3_paths if p in s3_map}
+        return got, {v: k for k, v in got.items()}
+
+    with _batch_env(service_id, tmp_path, _download):
+        with patch("backend.core.ducklake_admission.ducklake_write_admission", _tracking_admission):
+            summary = convert_batch_objects(service_id, keys, "w-dl")
+
+    assert summary["committed"] == 4, summary
+    assert state["held_during_download"] is False, (
+        "FOS download must happen OUTSIDE the admission lock — holding the "
+        "per-service write lock across network I/O starves concurrent converts"
+    )
+
+
 def test_convert_batch_task_routes_to_ingest_queue():
     """A task with no consumer is a shipped no-op (this branch already had
     one). Pin that convert_batch_files is registered and lands on q.ingest
