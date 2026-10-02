@@ -21,7 +21,7 @@ def test_clickhouse_overlay_is_private_persistent_and_opt_in():
     system_logs = Path("clickhouse/config.d/system_logs.xml").read_text()
     assert "<background_pool_size>4</background_pool_size>" in limits
     assert "<background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>" in limits
-    assert "<max_concurrent_queries>4</max_concurrent_queries>" in limits
+    assert "<max_concurrent_queries>100</max_concurrent_queries>" in limits
     assert "<max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>" in limits
     assert "<max_bytes_to_merge_at_max_space_in_pool>134217728</max_bytes_to_merge_at_max_space_in_pool>" in system_logs
     assert "<max_bytes_to_merge_at_min_space_in_pool>16777216</max_bytes_to_merge_at_min_space_in_pool>" in system_logs
