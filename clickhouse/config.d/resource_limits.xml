@@ -2,5 +2,11 @@
     <background_pool_size>4</background_pool_size>
     <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
     <max_concurrent_queries>100</max_concurrent_queries>
-    <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
+    <!-- Periodically reconcile the global memory tracker against real cgroup RSS.
+         Without this the jemalloc-arena over-count drifts far above real usage and
+         falsely trips MEMORY_LIMIT_EXCEEDED under concurrent query bursts (observed
+         6.01 GiB tracked vs <2 GiB real RSS on a <50 MiB dataset). -->
+    <memory_worker_period_ms>1000</memory_worker_period_ms>
+    <memory_worker_correct_memory_tracker>1</memory_worker_correct_memory_tracker>
 </clickhouse>
