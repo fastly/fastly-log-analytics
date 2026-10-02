@@ -267,13 +267,10 @@ function registerErrorListeners(page, browser, contextName) {
     // 1.4. Validate 30d Data Consistency: Header Total vs. Page Total
     const url30d = getUrlWithParam(baseUrl, "range", "30d");
     console.log(`[Dashboard 30d] Checking data consistency on ${url30d} ...`);
-    response = await page.goto(url30d, { timeout: 20000 });
-    if (!response || !response.ok()) {
-      console.error(`[Dashboard 30d] Failed to load. Status: ${response ? response.status() : 'Unknown'}`);
-      await browser.close();
-      process.exit(1);
-    }
-    await page.waitForSelector('main', { timeout: 30000 });
+    // Use the bounded retry helper (like RUM 30d / Network 30d) so a transient
+    // K8s port-forward drop the healer is re-establishing doesn't hard-fail the
+    // run on the first blip; a genuinely dead page still exhausts retries.
+    response = await gotoWithShellReady(page, url30d, 'Dashboard 30d', { attempts: 3, navTimeout: 20000, shellTimeout: 30000 });
 
     // Robust waiting: Wait for the header badge containing the REQUEST totals to fully render
     try {
