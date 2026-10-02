@@ -79,7 +79,12 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 45s
+      # Cold start imports the full iceberg/ducklake stack (pyiceberg ->
+      # pyarrow -> pandas, s3fs/fsspec, duckdb) and takes ~107s idle, more
+      # under the deploy's double-stack + build load. 45s falsely marked the
+      # still-importing backend unhealthy, aborting `docker compose up` (and
+      # the whole deploy under set -e). prod uses 25m for the same reason.
+      start_period: 300s
     networks:
       - app-network
 
