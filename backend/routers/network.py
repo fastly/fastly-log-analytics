@@ -288,19 +288,26 @@ def get_pop_health(
             ORDER BY requests DESC
         """
 
-        with track_query(ctx.con, query, params, "pop_health") as cursor:
-            for row in cursor.fetchall():
-                data.append(
-                    PopHealthItem(
-                        pop=row[0],
-                        requests=row[1],
-                        errors=row[2],
-                        error_rate=row[3],
-                        p50_rtt_us=row[4],
-                        p95_ttfb_ms=row[5],
-                        cache_hit_rate=row[6],
-                        bandwidth_bytes=row[7] or 0,
+        from backend.core.iceberg import execute_with_stale_view_retry
+
+        def _run_fallback(con):
+            rows = []
+            with track_query(con, query, params, "pop_health") as cursor:
+                for row in cursor.fetchall():
+                    rows.append(
+                        PopHealthItem(
+                            pop=row[0],
+                            requests=row[1],
+                            errors=row[2],
+                            error_rate=row[3],
+                            p50_rtt_us=row[4],
+                            p95_ttfb_ms=row[5],
+                            cache_hit_rate=row[6],
+                            bandwidth_bytes=row[7] or 0,
+                        )
                     )
-                )
+            return rows
+
+        data = execute_with_stale_view_retry(ctx.con, ctx.source, _run_fallback)
 
         return PopHealthListResponse.with_telemetry(data=data)

@@ -152,3 +152,63 @@ def test_get_pop_health_returns_data(client, in_memory_duckdb, test_service_sour
     assert data[0]["requests"] == 5
     assert data[0]["errors"] == 0
     assert data[0]["cache_hit_rate"] == 100.0
+
+
+def test_get_pop_health_self_heals_on_lake_detach_race(client, in_memory_duckdb, test_service_source):
+    """A DuckLake ``lake``-detach-race CatalogException on the raw base-table
+    fallback must self-heal (one retry) instead of surfacing a 500 (Trap #35)."""
+    from datetime import UTC, datetime, timedelta
+
+    import duckdb
+
+    from backend.routers import network as network_mod
+
+    table = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=5)
+    for log in logs:
+        log["pop"] = "IAD"
+        log["status"] = 200
+        log["tcp_rtt"] = 12000
+        log["ttfb"] = 50.0
+        log["cache"] = "HIT"
+        log["resp_bytes"] = 1000
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    now = datetime.now(UTC)
+    st = (now - timedelta(hours=3)).replace(tzinfo=None).isoformat()
+    et = (now + timedelta(hours=3)).replace(tzinfo=None).isoformat()
+
+    real_track_query = network_mod.track_query
+    calls = {"n": 0}
+
+    class _RaiseOnEnter:
+        def __enter__(self):
+            raise duckdb.CatalogException(
+                'Catalog Error: Table with name "lake.logs_x" does not exist because schema "lake" does not exist'
+            )
+
+        def __exit__(self, *_a):
+            return False
+
+    def flaky_track_query(con, query, params, label):
+        if label == "pop_health":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _RaiseOnEnter()
+        return real_track_query(con, query, params, label)
+
+    with (
+        patch.object(network_mod, "track_query", flaky_track_query),
+        patch("backend.core.iceberg._core.update_iceberg_view", lambda *a, **k: None),
+        patch("backend.core.iceberg._core.clear_source_caches", lambda *a, **k: None),
+    ):
+        response = client.get(
+            f"/api/network/pop-health?start_time={st}&end_time={et}",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data[0]["pop"] == "IAD"
+    assert data[0]["requests"] == 5
+    assert calls["n"] == 2  # failed once, self-healed, retried once
