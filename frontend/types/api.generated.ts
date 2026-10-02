@@ -1128,7 +1128,7 @@ export interface paths {
         put?: never;
         /**
          * Cmcd Content Security
-         * @description Streaming → Content Security: top countries/referers/hosts + edge-vs-shield bandwidth.
+         * @description Streaming → Content Security: top countries/referers/hosts/subscribers + edge-vs-shield bandwidth.
          */
         post: operations["cmcd_content_security_api_cmcd_content_security_post"];
         delete?: never;
@@ -7094,10 +7094,29 @@ export interface components {
              */
             top_hosts: components["schemas"]["ContentSecurityTopRow"][];
             /**
+             * Top Subscribers
+             * @default []
+             */
+            top_subscribers: components["schemas"]["ContentSecuritySubscriberRow"][];
+            /**
+             * Subscribers Masked
+             * @default false
+             */
+            subscribers_masked: boolean;
+            /**
              * Bandwidth Ts
              * @default []
              */
             bandwidth_ts: components["schemas"]["ContentSecurityBandwidthPoint"][];
+        };
+        /** ContentSecuritySubscriberRow */
+        ContentSecuritySubscriberRow: {
+            /** Subscriber Id */
+            subscriber_id: string;
+            /** Distinct Ips */
+            distinct_ips: number;
+            /** Requests */
+            requests: number;
         };
         /** ContentSecurityTopRow */
         ContentSecurityTopRow: {
@@ -9059,6 +9078,7 @@ export interface components {
             /** Version */
             version?: number | string | null;
             cmcd?: components["schemas"]["CmcdSettingsResponse"] | null;
+            token?: components["schemas"]["TokenSettingsResponse"] | null;
         };
         /** LowTtlAssetRow */
         LowTtlAssetRow: {
@@ -10824,6 +10844,13 @@ export interface components {
             cmcd_mode?: string | null;
             /** Cmcd Version */
             cmcd_version?: number | null;
+            /**
+             * Token Enabled
+             * @default false
+             */
+            token_enabled: boolean;
+            /** Token Subscriber Id Expr */
+            token_subscriber_id_expr?: string | null;
             /**
              * Logging Enabled
              * @default true
@@ -13604,6 +13631,19 @@ export interface components {
             }[];
             /** Data */
             data: components["schemas"]["ThreatIntelItem"][];
+        };
+        /**
+         * TokenSettingsResponse
+         * @description Token (subscriber id) extraction settings.
+         */
+        TokenSettingsResponse: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Subscriber Id Expr */
+            subscriber_id_expr?: string | null;
         };
         /**
          * TosAckPayload
@@ -23661,6 +23701,8 @@ export interface operations {
                 cmcd_enabled?: boolean | null;
                 cmcd_mode?: string | null;
                 cmcd_version?: number | null;
+                token_enabled?: boolean | null;
+                token_subscriber_id_expr?: string | null;
             };
             header?: never;
             path: {

@@ -178,6 +178,10 @@ def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
         "unset req.http.X-Edge-Prev-Anchor;",
         "unset req.http.x-sigsci-skip-inspection-once;",
     ]
+    # Token: x-subscriber-id is set from the admin's expression later in this
+    # block; a client-supplied value must never survive to be logged.
+    if any(cf["name"] == "token_subscriber_id" for cf in enabled_custom):
+        lines.append("unset req.http.x-subscriber-id;")
     if enabled_custom:
         for cf in enabled_custom:
             name = cf["name"]
@@ -239,8 +243,12 @@ def generate_capture_vcl(
     cmcd_enabled: bool = False,
     cmcd_mode: str = "query_string",
     cmcd_version: int = 1,
+    token_subscriber_id_expr: str | None = None,
 ) -> dict[str, str]:
     """Return dict of VCL snippets keyed by subroutine name.
+
+    ``token_subscriber_id_expr`` enables token subscriber-id extraction when
+    non-empty (see ``backend/provision/token_fields.py``).
 
     Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
     is enabled, also returns "fetch", "error", and "deliver".
@@ -350,6 +358,13 @@ def generate_capture_vcl(
         if cmcd_lines and cmcd_lines[-1] == "":
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
+
+    # Token extraction sets req.http.x-subscriber-id, which capture promotes
+    # into x-fos-edge-data:token_subscriber_id — so it too must precede capture.
+    if token_subscriber_id_expr:
+        from backend.provision.token_fields import generate_token_vcl_lines
+
+        scrub_lines.extend(f"  {line}" for line in generate_token_vcl_lines(token_subscriber_id_expr))
 
     if rum_enabled:
         rum_extraction, _ = generate_rum_recv_parts()
@@ -1527,6 +1542,31 @@ def update_logging_endpoint(cfg: dict, token: str):
                     "version": new_version,
                 }
                 cmcd_changed = True
+
+    # Handle token (subscriber id) request. Fields are re-asserted below by
+    # reconcile_cfg_system_custom_fields, keyed on the final cfg["token"] state.
+    token_enabled_req = cfg.get("token_enabled")
+    if token_enabled_req is not None:
+        import datetime as _dt
+
+        from backend.provision.token_fields import validate_subscriber_id_expr
+
+        old_token = service_cfg.get("token") or {}
+        if bool(token_enabled_req):
+            expr_req = cfg.get("token_subscriber_id_expr")
+            expr = (expr_req if expr_req is not None else old_token.get("subscriber_id_expr", "")).strip()
+            errors = validate_subscriber_id_expr(expr)
+            if errors:
+                raise ValueError(f"Invalid Subscriber ID expression: {'; '.join(errors)}")
+            service_cfg["token"] = {
+                "enabled": True,
+                "subscriber_id_expr": expr,
+                "enabled_at": old_token.get("enabled_at")
+                if old_token.get("enabled")
+                else _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            }
+        else:
+            service_cfg.pop("token", None)
 
     # Update state fields in nested provisioning block
     prov = service_cfg.setdefault("provisioning", {})

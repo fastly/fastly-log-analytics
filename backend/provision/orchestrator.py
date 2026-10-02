@@ -152,7 +152,7 @@ def write_service_config(state: dict):
     # carry — primarily ``scoring`` (set by enable_scoring) and
     # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
     # the existing cfg has that the wizard body lacks survives the rewrite.
-    for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
+    for preserved_key in ("scoring", "cmcd", "token", "ngwaf_workspace_id", "rum"):
         if preserved_key not in state and preserved_key in existing_cfg:
             cfg[preserved_key] = existing_cfg[preserved_key]
         elif preserved_key in state:

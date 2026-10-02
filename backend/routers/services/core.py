@@ -576,9 +576,10 @@ def api_service_logging_settings(service_id: str):
         # debug_calls, section_timings, is_cached) is regenerated per
         # request so the Debug Panel keeps showing per-request data even
         # on cache hits.
-        from backend.models.services import CmcdSettingsResponse
+        from backend.models.services import CmcdSettingsResponse, TokenSettingsResponse
 
         cmcd_block = cfg.get("cmcd") or {}
+        token_block = cfg.get("token") or {}
         cacheable = {
             "prefix": prefix,
             "period": ep.get("period", 60),
@@ -591,6 +592,10 @@ def api_service_logging_settings(service_id: str):
                 enabled=bool(cmcd_block.get("enabled")),
                 mode=cmcd_block.get("mode"),
                 version=cmcd_block.get("version"),
+            ),
+            "token": TokenSettingsResponse(
+                enabled=bool(token_block.get("enabled")),
+                subscriber_id_expr=token_block.get("subscriber_id_expr"),
             ),
         }
         _logging_settings_cache[service_id] = cacheable
@@ -682,7 +687,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
 
     from backend import config as svcconfig
     from backend.core import field_registry as lf
-    from backend.provision.system_fields import reconcile_system_custom_fields
+    from backend.provision.system_fields import reconcile_system_custom_fields, system_feature_flags
 
     _require_service_scope(request, service_id)
 
@@ -706,10 +711,12 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     # incoming list was non-empty but omitted them (they're hidden from the
     # user-editable list by _is_system_field, so a UI round-trip always omits
     # them) — see backend/provision/system_fields.py.
+    scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
     new_lf["custom_fields"] = reconcile_system_custom_fields(
         new_lf.get("custom_fields"),
-        scoring_enabled=bool(cfg.get("scoring", {}).get("enabled")),
-        cmcd_enabled=bool(cfg.get("cmcd", {}).get("enabled")),
+        scoring_enabled=scoring_enabled,
+        cmcd_enabled=cmcd_enabled,
+        token_enabled=token_enabled,
     )
     new_lf["schema_version"] = 2
     old_groups = set(old_lf.get("groups", []))
@@ -761,8 +768,11 @@ def api_service_update_logging_settings(
     cmcd_enabled: bool | None = Query(default=None),
     cmcd_mode: str | None = Query(default=None),
     cmcd_version: int | None = Query(default=None),
+    token_enabled: bool | None = Query(default=None),
+    token_subscriber_id_expr: str | None = Query(default=None, max_length=512),
 ):
     from backend import config as svcconfig
+    from backend.provision.token_fields import validate_subscriber_id_expr
 
     _require_service_scope(request, service_id)
 
@@ -789,6 +799,17 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
+    if token_enabled:
+        expr = (
+            token_subscriber_id_expr
+            if token_subscriber_id_expr is not None
+            else (cfg.get("token") or {}).get("subscriber_id_expr", "")
+        )
+        expr_errors = validate_subscriber_id_expr(expr)
+        if expr_errors:
+            raise HTTPException(
+                status_code=400, detail={"error": f"Invalid Subscriber ID expression: {'; '.join(expr_errors)}"}
+            )
     token = cfg.get("fastly_api_key", "")
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
     from backend.provision.log_paths import analytics_log_path
@@ -811,6 +832,8 @@ def api_service_update_logging_settings(
                 "cmcd_enabled": cmcd_enabled,
                 "cmcd_mode": cmcd_mode,
                 "cmcd_version": cmcd_version,
+                "token_enabled": token_enabled,
+                "token_subscriber_id_expr": token_subscriber_id_expr,
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
@@ -828,7 +851,9 @@ def api_service_update_logging_settings(
                     new_ver = int(event.get("version") or 0)
                     if event.get("changed", False):
                         if update_format and new_ver:
-                            from backend.models.services import CmcdSettingsResponse
+                            from backend.models.services import CmcdSettingsResponse, TokenSettingsResponse
+
+                            deployed_token = (svcconfig.load_config(service_id) or {}).get("token") or {}
 
                             _logging_settings_cache[service_id] = {
                                 "prefix": "",
@@ -846,6 +871,10 @@ def api_service_update_logging_settings(
                                     version=cmcd_version
                                     if cmcd_version is not None
                                     else (cfg.get("cmcd") or {}).get("version"),
+                                ),
+                                "token": TokenSettingsResponse(
+                                    enabled=bool(deployed_token.get("enabled")),
+                                    subscriber_id_expr=deployed_token.get("subscriber_id_expr"),
                                 ),
                             }
                         else:
@@ -884,6 +913,10 @@ def api_service_update_logging_settings(
                                 _details["cmcd_mode"] = cmcd_mode
                             if cmcd_version is not None:
                                 _details["cmcd_version"] = cmcd_version
+                            if token_enabled is not None:
+                                _details["token_enabled"] = token_enabled
+                            if token_subscriber_id_expr is not None:
+                                _details["token_subscriber_id_expr"] = token_subscriber_id_expr
                             if update_format:
                                 _details["log_fields_deployed"] = True
 

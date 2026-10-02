@@ -3,7 +3,7 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
 import { CollapsibleGroup } from "@/components/LogSettingsModal/LogSettingsModal";
-import { CmcdConfigSection } from "@/components/CmcdConfigSection";
+import { StreamingConfigSection } from "@/components/StreamingConfigSection";
 import { FileJson, Loader2, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/format"
@@ -112,13 +112,17 @@ export function FieldsStep({ s }: { s: WizardState }) {
                     updateFieldLimit={s.updateFieldLimit}
                   />
                 ))}
-              <CmcdConfigSection
-                enabled={config.cmcd_enabled}
-                onEnabledChange={(v) => setConfig((prev) => ({ ...prev, cmcd_enabled: v }))}
-                mode={config.cmcd_mode}
-                onModeChange={(v) => setConfig((prev) => ({ ...prev, cmcd_mode: v }))}
-                version={config.cmcd_version}
-                onVersionChange={(v) => setConfig((prev) => ({ ...prev, cmcd_version: v }))}
+              <StreamingConfigSection
+                cmcdEnabled={config.cmcd_enabled}
+                onCmcdEnabledChange={(v) => setConfig((prev) => ({ ...prev, cmcd_enabled: v }))}
+                cmcdMode={config.cmcd_mode}
+                onCmcdModeChange={(v) => setConfig((prev) => ({ ...prev, cmcd_mode: v }))}
+                cmcdVersion={config.cmcd_version}
+                onCmcdVersionChange={(v) => setConfig((prev) => ({ ...prev, cmcd_version: v }))}
+                tokenEnabled={config.token_enabled}
+                onTokenEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_enabled: v }))}
+                subscriberIdExpr={config.token_subscriber_id_expr}
+                onSubscriberIdExprChange={(v) => setConfig((prev) => ({ ...prev, token_subscriber_id_expr: v }))}
               />
             </div>
           </div>

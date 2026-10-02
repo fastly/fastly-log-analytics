@@ -383,11 +383,12 @@ def import_admin_state(service_id: str):
                 # canonical entries from code for whichever features are
                 # enabled locally. CMCD is included for the same reason
                 # scoring is — see backend/provision/system_fields.py.
-                scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+                scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
                 remote_fields = reconcile_system_custom_fields(
                     remote_fields,
                     scoring_enabled=scoring_enabled,
                     cmcd_enabled=cmcd_enabled,
+                    token_enabled=token_enabled,
                 )
 
                 lf["custom_fields"] = remote_fields

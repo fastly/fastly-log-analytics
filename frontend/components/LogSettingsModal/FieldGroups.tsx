@@ -17,7 +17,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { CmcdConfigSection } from '@/components/CmcdConfigSection'
+import { StreamingConfigSection } from '@/components/StreamingConfigSection'
 
 export function CollapsibleGroup({ group, catalog, config, toggleGroup, toggleField, updateFieldLimit }: any) {
   const [isOpen, setIsOpen] = useState(false)
@@ -197,6 +197,11 @@ interface StandardFieldsStepProps {
   setCmcdMode?: (v: string) => void
   cmcdVersion?: number
   setCmcdVersion?: (v: number) => void
+  tokenEnabled?: boolean
+  setTokenEnabled?: (v: boolean) => void
+  subscriberIdExpr?: string
+  setSubscriberIdExpr?: (v: string) => void
+  serviceId?: string
   toggleGroup: (groupId: string, checked: boolean) => void
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
   updateFieldLimit: (fieldId: string, limit?: number) => void
@@ -222,6 +227,11 @@ export function StandardFieldsStep({
   setCmcdMode,
   cmcdVersion,
   setCmcdVersion,
+  tokenEnabled,
+  setTokenEnabled,
+  subscriberIdExpr,
+  setSubscriberIdExpr,
+  serviceId,
   toggleGroup,
   toggleField,
   updateFieldLimit,
@@ -378,14 +388,19 @@ export function StandardFieldsStep({
             updateFieldLimit={updateFieldLimit}
           />
         ))}
-        {setCmcdEnabled && setCmcdMode && setCmcdVersion && (
-          <CmcdConfigSection
-            enabled={cmcdEnabled ?? false}
-            onEnabledChange={setCmcdEnabled}
-            mode={cmcdMode ?? 'query_string'}
-            onModeChange={setCmcdMode}
-            version={cmcdVersion ?? 1}
-            onVersionChange={setCmcdVersion}
+        {setCmcdEnabled && setCmcdMode && setCmcdVersion && setTokenEnabled && setSubscriberIdExpr && (
+          <StreamingConfigSection
+            cmcdEnabled={cmcdEnabled ?? false}
+            onCmcdEnabledChange={setCmcdEnabled}
+            cmcdMode={cmcdMode ?? 'query_string'}
+            onCmcdModeChange={setCmcdMode}
+            cmcdVersion={cmcdVersion ?? 1}
+            onCmcdVersionChange={setCmcdVersion}
+            tokenEnabled={tokenEnabled ?? false}
+            onTokenEnabledChange={setTokenEnabled}
+            subscriberIdExpr={subscriberIdExpr ?? ''}
+            onSubscriberIdExprChange={setSubscriberIdExpr}
+            serviceId={serviceId}
           />
         )}
       </div>

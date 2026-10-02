@@ -10822,7 +10822,7 @@
           "cmcd"
         ],
         "summary": "Cmcd Content Security",
-        "description": "Streaming \u2192 Content Security: top countries/referers/hosts + edge-vs-shield bandwidth.",
+        "description": "Streaming \u2192 Content Security: top countries/referers/hosts/subscribers + edge-vs-shield bandwidth.",
         "operationId": "cmcd_content_security_api_cmcd_content_security_post",
         "parameters": [
           {
@@ -15208,6 +15208,39 @@
                 }
               ],
               "title": "Cmcd Version"
+            }
+          },
+          {
+            "name": "token_enabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token Enabled"
+            }
+          },
+          {
+            "name": "token_subscriber_id_expr",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token Subscriber Id Expr"
             }
           }
         ],
@@ -45631,6 +45664,19 @@
             "title": "Top Hosts",
             "default": []
           },
+          "top_subscribers": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecuritySubscriberRow"
+            },
+            "type": "array",
+            "title": "Top Subscribers",
+            "default": []
+          },
+          "subscribers_masked": {
+            "type": "boolean",
+            "title": "Subscribers Masked",
+            "default": false
+          },
           "bandwidth_ts": {
             "items": {
               "$ref": "#/components/schemas/ContentSecurityBandwidthPoint"
@@ -45645,6 +45691,29 @@
           "available"
         ],
         "title": "ContentSecurityResponse"
+      },
+      "ContentSecuritySubscriberRow": {
+        "properties": {
+          "subscriber_id": {
+            "type": "string",
+            "title": "Subscriber Id"
+          },
+          "distinct_ips": {
+            "type": "integer",
+            "title": "Distinct Ips"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "subscriber_id",
+          "distinct_ips",
+          "requests"
+        ],
+        "title": "ContentSecuritySubscriberRow"
       },
       "ContentSecurityTopRow": {
         "properties": {
@@ -50898,6 +50967,16 @@
                 "type": "null"
               }
             ]
+          },
+          "token": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenSettingsResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -54985,6 +55064,23 @@
               }
             ],
             "title": "Cmcd Version"
+          },
+          "token_enabled": {
+            "type": "boolean",
+            "title": "Token Enabled",
+            "default": false
+          },
+          "token_subscriber_id_expr": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Subscriber Id Expr"
           },
           "logging_enabled": {
             "type": "boolean",
@@ -62904,6 +63000,29 @@
           "data"
         ],
         "title": "ThreatIntelListResponse"
+      },
+      "TokenSettingsResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "subscriber_id_expr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscriber Id Expr"
+          }
+        },
+        "type": "object",
+        "title": "TokenSettingsResponse",
+        "description": "Token (subscriber id) extraction settings."
       },
       "TosAckPayload": {
         "properties": {

@@ -34,7 +34,7 @@ export function CmcdConfigSection({
   const [isOpen, setIsOpen] = useState(false)
 
   return (
-    <div className="border border-border/60 rounded-lg overflow-hidden bg-card/50">
+    <div className="border border-border/60 rounded-lg overflow-hidden bg-card/50" data-testid="cmcd-config-section">
       <div className="w-full flex items-center justify-between p-3 bg-muted/20 hover:bg-muted/40 transition-colors text-left">
         <div className="flex items-center gap-3">
           <Checkbox
@@ -42,6 +42,7 @@ export function CmcdConfigSection({
             onCheckedChange={(checked) => onEnabledChange(checked as boolean)}
             disabled={disabled}
             className="mr-1"
+            aria-label="Enable CMCD Metrics"
           />
           <button
             type="button"
@@ -50,7 +51,7 @@ export function CmcdConfigSection({
             className="flex items-center gap-2 text-left cursor-pointer bg-transparent border-0 p-0"
           >
             <h4 className="text-xs font-bold tracking-tight uppercase text-foreground/80">
-              CMCD Streaming Metrics
+              CMCD Metrics
             </h4>
             <span className="text-[10px] text-muted-foreground ml-1">+~348 bytes</span>
           </button>

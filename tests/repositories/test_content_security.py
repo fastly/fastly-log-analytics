@@ -168,3 +168,53 @@ def test_response_cache_hit(in_memory_duckdb, test_service_source):
     assert warm.get("is_cached") is True
     assert warm["top_hosts"] == cold["top_hosts"]
     assert other.get("is_cached") is not True
+
+
+def _sub_row(sub, ip, *, minutes_ago=10, edge=True):
+    return {
+        "timestamp": _NOW - timedelta(minutes=minutes_ago),
+        "ip": ip,
+        "country": "US",
+        "referer": "",
+        "host": "",
+        "resp_bytes": 100,
+        "edge": edge,
+        "cmcd_cid": "movie-1",
+        "token_subscriber_id": sub,
+    }
+
+
+def test_top_subscribers_ranked_by_distinct_ips(in_memory_duckdb, test_service_source):
+    _ALL_COLS["token_subscriber_id"] = "VARCHAR"
+    try:
+        rows = [
+            # sub-shared: 3 distinct IPs (one repeated) — likely credential sharing.
+            _sub_row("sub-shared", "203.0.113.1"),
+            _sub_row("sub-shared", "203.0.113.2"),
+            _sub_row("sub-shared", "203.0.113.3"),
+            _sub_row("sub-shared", "203.0.113.3"),
+            # sub-busy: more requests but one IP — must rank below sub-shared.
+            *[_sub_row("sub-busy", "198.51.100.7") for _ in range(6)],
+            # Shield line from a new IP is the same request seen twice — not counted.
+            _sub_row("sub-busy", "198.51.100.8", edge=False),
+            # Blank ids are excluded.
+            _sub_row("", "192.0.2.1"),
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call(in_memory_duckdb, test_service_source)
+    finally:
+        _ALL_COLS.pop("token_subscriber_id")
+
+    assert res["fields"]["token_subscriber_id"] is True
+    assert res["top_subscribers"] == [
+        {"subscriber_id": "sub-shared", "distinct_ips": 3, "requests": 4},
+        {"subscriber_id": "sub-busy", "distinct_ips": 1, "requests": 6},
+    ]
+
+
+def test_top_subscribers_empty_without_token_column(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, _fixture_rows())
+    res = _call(in_memory_duckdb, test_service_source)
+
+    assert res["fields"]["token_subscriber_id"] is False
+    assert res["top_subscribers"] == []

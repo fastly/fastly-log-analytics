@@ -398,7 +398,8 @@ export function AppLayout({
   const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
   const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
   const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
-  const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
+  // /streaming serves CMCD (cmcd_sid) and Token (token_subscriber_id); either one shows it.
+  const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid' || col.name === 'token_subscriber_id') ?? false
   const hasRum = activeServiceId ? (activeSvc?.rum_enabled ?? false) : (ssrIsRumEnabled ?? activeSvc?.rum_enabled ?? false)
 
   const navActiveServiceId = activeServiceId || ssrActiveServiceId || null

@@ -73,7 +73,7 @@ def cmcd_content_security(
     req: ContentSecurityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    """Streaming → Content Security: top countries/referers/hosts + edge-vs-shield bandwidth."""
+    """Streaming → Content Security: top countries/referers/hosts/subscribers + edge-vs-shield bandwidth."""
     if is_valid_range_token(req.range_token):
         earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
         resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
@@ -99,4 +99,15 @@ def cmcd_content_security(
         bucket_seconds=req.bucket_seconds,
         top_n=req.top_n,
     )
+    # Subscriber ids are per-subscriber PII: any analyst sees rank labels, never
+    # the raw (or a hashed, dictionary-reversible) id. Applied after the repo's
+    # role-shared response cache, on a copy so the cached rows stay raw.
+    if ctx.analyst_session is not None and res.get("top_subscribers"):
+        res = {
+            **res,
+            "top_subscribers": [
+                {**row, "subscriber_id": f"Subscriber #{i}"} for i, row in enumerate(res["top_subscribers"], start=1)
+            ],
+            "subscribers_masked": True,
+        }
     return ContentSecurityResponse.with_telemetry(**res)

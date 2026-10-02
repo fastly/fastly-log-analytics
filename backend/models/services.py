@@ -103,6 +103,13 @@ class CmcdSettingsResponse(BaseModel):
     version: int | None = None
 
 
+class TokenSettingsResponse(BaseModel):
+    """Token (subscriber id) extraction settings."""
+
+    enabled: bool = False
+    subscriber_id_expr: str | None = None
+
+
 class LoggingSettingsResponse(BaseResponse):
     ok: bool
     prefix: str
@@ -113,6 +120,7 @@ class LoggingSettingsResponse(BaseResponse):
     format_match: bool | None = None
     version: int | str | None = None
     cmcd: CmcdSettingsResponse | None = None
+    token: TokenSettingsResponse | None = None
 
 
 class AnalystInvite(BaseResponse):

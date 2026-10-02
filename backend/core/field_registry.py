@@ -530,13 +530,19 @@ _ALL_CODES: frozenset[str] = frozenset(f.code for f in REGISTRY)
 # compatibility (same-identity re-export; see AGENTS.md's shim convention).
 
 
+# Mirrors backend.provision.token_fields._TOKEN_FIELD_NAMES (core must not import provision).
+_TOKEN_SYSTEM_FIELDS = frozenset({"token_subscriber_id"})
+
+
 def _is_system_field(field_name: str) -> bool:
-    """Return True if field_name is a system-managed field (CMCD or Scoring).
+    """Return True if field_name is a system-managed field (CMCD, Scoring, or Token).
 
     System fields are generated on-demand from feature toggles and should
-    not be displayed as user-editable custom fields.
+    not be displayed as user-editable custom fields. Token fields match by
+    exact name, not a ``token_`` prefix, so a user's own ``token_*`` field
+    stays visible.
     """
-    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+    return field_name.startswith("cmcd_") or field_name.startswith("edge_") or field_name in _TOKEN_SYSTEM_FIELDS
 
 
 def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:

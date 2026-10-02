@@ -1,4 +1,4 @@
-"""Reconciliation of system-managed custom fields (session scoring + CMCD).
+"""Reconciliation of system-managed custom fields (session scoring + CMCD + token).
 
 Both features inject a canonical set of ``log_fields.custom_fields`` entries
 that are generated from code, not authored by the admin. ``_is_system_field``
@@ -35,11 +35,12 @@ from __future__ import annotations
 from typing import Any
 
 
-def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool]:
-    """Return ``(scoring_enabled, cmcd_enabled)`` for a service config."""
+def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool, bool]:
+    """Return ``(scoring_enabled, cmcd_enabled, token_enabled)`` for a service config."""
     scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
     cmcd_enabled = bool((cfg.get("cmcd") or {}).get("enabled"))
-    return scoring_enabled, cmcd_enabled
+    token_enabled = bool((cfg.get("token") or {}).get("enabled"))
+    return scoring_enabled, cmcd_enabled, token_enabled
 
 
 def reconcile_system_custom_fields(
@@ -47,6 +48,7 @@ def reconcile_system_custom_fields(
     *,
     scoring_enabled: bool,
     cmcd_enabled: bool,
+    token_enabled: bool,
 ) -> list[dict]:
     """Return ``custom_fields`` with system-managed entries re-asserted.
 
@@ -56,7 +58,7 @@ def reconcile_system_custom_fields(
     untouched and keep their relative order.
 
     System entries are appended in a DETERMINISTIC order (scoring, then CMCD,
-    each in its canonical declaration order). This matters beyond tidiness:
+    then token, each in its canonical declaration order). This matters beyond tidiness:
     Iceberg assigns a field id when a column is first added, so the order the
     fields appear here decides the ids on a freshly-built table. Two tables
     built from the same config in different orders end up with the same columns
@@ -71,11 +73,13 @@ def reconcile_system_custom_fields(
         _SCORING_CUSTOM_FIELDS,
         _SCORING_FIELD_NAMES,
     )
+    from backend.provision.token_fields import reconcile_token_custom_fields
 
     out = [cf for cf in (custom_fields or []) if cf.get("name") not in _SCORING_FIELD_NAMES]
     if scoring_enabled:
         out.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
-    return reconcile_cmcd_custom_fields(out, enabled=cmcd_enabled)
+    out = reconcile_cmcd_custom_fields(out, enabled=cmcd_enabled)
+    return reconcile_token_custom_fields(out, enabled=token_enabled)
 
 
 def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
@@ -84,7 +88,7 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
     Returns the reconciled list. Safe to call on a config with no
     ``log_fields`` block — it creates one with the schema-v2 default shape.
     """
-    scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+    scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
     lf = cfg.get("log_fields")
     if not isinstance(lf, dict):
         lf = {"schema_version": 2, "custom_fields": []}
@@ -93,6 +97,7 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
         lf.get("custom_fields"),
         scoring_enabled=scoring_enabled,
         cmcd_enabled=cmcd_enabled,
+        token_enabled=token_enabled,
     )
     lf["custom_fields"] = reconciled
     return reconciled

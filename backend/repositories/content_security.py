@@ -1,7 +1,11 @@
 """Streaming content-security repository — who is pulling your content, and from where.
 
-Backs the Streaming → Content Security tab: top countries / referers / hosts and edge-vs-shield bandwidth, optionally narrowed to one CMCD content
-id (``cmcd_cid``).
+Backs the Streaming → Content Security tab: top countries / referers / hosts, top subscriber ids by distinct
+client IPs (``token_subscriber_id``, Streaming → Token), and edge-vs-shield bandwidth, optionally narrowed to one
+CMCD content id (``cmcd_cid``).
+
+Subscriber ids are returned raw; analyst masking happens in the router, after
+this module's response cache (which is shared across roles).
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ _TOP_N_SECTIONS = {
 }
 
 # Columns the tab can use; each is optional and its section degrades to empty.
-_OPTIONAL_COLS = ("country", "referer", "host", "resp_bytes", "edge", "cmcd_cid")
+_OPTIONAL_COLS = ("country", "referer", "host", "resp_bytes", "edge", "cmcd_cid", "ip", "token_subscriber_id")
 
 # Cap on the content-id picker's option list.
 _CONTENT_ID_OPTIONS_LIMIT = 100
@@ -175,6 +179,23 @@ def get_content_security(
                 {"value": r[0], "requests": r[1], "bytes": int(r[2]) if r[2] is not None else None} for r in rows
             ]
             timer.mark(section, _t)
+
+        # ── Subscriber ids shared across the most client IPs ─────────────
+        results["top_subscribers"] = []
+        if fields["token_subscriber_id"] and fields["ip"]:
+            _t = _time.perf_counter()
+            rows = runner.execute(
+                f"""
+                SELECT token_subscriber_id AS subscriber_id, COUNT(DISTINCT ip) AS distinct_ips, COUNT(*) AS requests
+                FROM {t}
+                WHERE {edge_where} AND token_subscriber_id IS NOT NULL AND token_subscriber_id != ''
+                GROUP BY 1
+                ORDER BY distinct_ips DESC, requests DESC, subscriber_id
+                LIMIT {int(top_n)}
+                """
+            ).fetchall()
+            results["top_subscribers"] = [{"subscriber_id": r[0], "distinct_ips": r[1], "requests": r[2]} for r in rows]
+            timer.mark("top_subscribers", _t)
 
         # ── Edge vs shield bandwidth ──────────────────────────────────────
         results["bandwidth_ts"] = []

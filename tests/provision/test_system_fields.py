@@ -33,15 +33,15 @@ def _names(fields: list[dict]) -> set[str]:
 
 
 def test_flags_read_both_features():
-    assert system_feature_flags({}) == (False, False)
-    assert system_feature_flags({"cmcd": {"enabled": True}}) == (False, True)
-    assert system_feature_flags({"scoring": {"enabled": True}}) == (True, False)
-    assert system_feature_flags({"scoring": {"enabled": True}, "cmcd": {"enabled": True}}) == (True, True)
+    assert system_feature_flags({}) == (False, False, False)
+    assert system_feature_flags({"cmcd": {"enabled": True}}) == (False, True, False)
+    assert system_feature_flags({"scoring": {"enabled": True}}) == (True, False, False)
+    assert system_feature_flags({"scoring": {"enabled": True}, "cmcd": {"enabled": True}}) == (True, True, False)
 
 
 def test_flags_tolerate_null_blocks():
     """A config that carries ``cmcd: null`` must not raise."""
-    assert system_feature_flags({"cmcd": None, "scoring": None}) == (False, False)
+    assert system_feature_flags({"cmcd": None, "scoring": None}) == (False, False, False)
 
 
 # ── reconcile_system_custom_fields ───────────────────────────────────────────
@@ -49,7 +49,7 @@ def test_flags_tolerate_null_blocks():
 
 def test_cmcd_fields_reinjected_when_enabled():
     """THE REGRESSION: a non-empty list that omits cmcd_* must regain them."""
-    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=False, cmcd_enabled=True)
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=False, cmcd_enabled=True, token_enabled=False)
     names = _names(out)
     for name in _CMCD_FIELD_NAMES:
         assert name in names, f"CMCD field {name!r} was not re-injected"
@@ -59,14 +59,14 @@ def test_cmcd_fields_reinjected_when_enabled():
 def test_cmcd_fields_stripped_when_disabled():
     """Disable must converge too — stale cmcd_* entries are removed."""
     stale = [_USER_FIELD, {"name": "cmcd_sid", "duckdb_type": "VARCHAR"}]
-    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=False)
+    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=False, token_enabled=False)
     assert _names(out) == {"my_custom"}
 
 
 def test_stale_cmcd_entries_replaced_by_canonical():
     """A remote/partial cmcd_* entry is replaced, not duplicated."""
     stale = [{"name": "cmcd_sid", "duckdb_type": "WRONG", "enabled": False}]
-    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=True)
+    out = reconcile_system_custom_fields(stale, scoring_enabled=False, cmcd_enabled=True, token_enabled=False)
     sids = [cf for cf in out if cf["name"] == "cmcd_sid"]
     assert len(sids) == 1, "cmcd_sid duplicated instead of replaced"
     assert sids[0]["duckdb_type"] == "VARCHAR"
@@ -74,7 +74,7 @@ def test_stale_cmcd_entries_replaced_by_canonical():
 
 
 def test_both_features_coexist():
-    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True, token_enabled=False)
     names = _names(out)
     assert _CMCD_FIELD_NAMES <= names
     assert _SCORING_FIELD_NAMES <= names
@@ -83,28 +83,28 @@ def test_both_features_coexist():
 
 def test_scoring_enabled_does_not_drag_in_cmcd():
     """The two features are independent — scoring on, CMCD off."""
-    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=False)
+    out = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=False, token_enabled=False)
     names = _names(out)
     assert _SCORING_FIELD_NAMES <= names
     assert not (_CMCD_FIELD_NAMES & names)
 
 
 def test_none_input_is_safe():
-    out = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    out = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True, token_enabled=False)
     assert _CMCD_FIELD_NAMES <= _names(out)
 
 
 def test_returned_entries_are_copies():
     """Callers mutating the result must not corrupt the module-level canon."""
-    first = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    first = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True, token_enabled=False)
     first[0]["label"] = "MUTATED"
-    second = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True)
+    second = reconcile_system_custom_fields(None, scoring_enabled=False, cmcd_enabled=True, token_enabled=False)
     assert second[0]["label"] != "MUTATED"
 
 
 def test_idempotent():
-    once = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
-    twice = reconcile_system_custom_fields(once, scoring_enabled=True, cmcd_enabled=True)
+    once = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True, token_enabled=False)
+    twice = reconcile_system_custom_fields(once, scoring_enabled=True, cmcd_enabled=True, token_enabled=False)
     assert _names(once) == _names(twice)
     assert len(once) == len(twice), "repeat reconcile duplicated entries"
 

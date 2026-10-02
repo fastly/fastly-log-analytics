@@ -226,6 +226,8 @@ export function runDeploy(args: DeployArgs) {
     cmcd_enabled: config.cmcd_enabled,
     cmcd_mode: config.cmcd_mode,
     cmcd_version: config.cmcd_version,
+    token_enabled: config.token_enabled,
+    token_subscriber_id_expr: config.token_enabled ? config.token_subscriber_id_expr.trim() : null,
     logging_enabled: config.logging_enabled,
     rum_enabled: config.rum_enabled,
     rum_custom_condition: config.rum_custom_condition,

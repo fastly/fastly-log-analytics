@@ -21,6 +21,8 @@ interface ReviewStepProps {
   cmcdEnabled?: boolean
   cmcdMode?: string
   cmcdVersion?: number
+  tokenEnabled?: boolean
+  subscriberIdExpr?: string
 }
 
 export function ReviewStep({
@@ -35,6 +37,8 @@ export function ReviewStep({
   cmcdEnabled,
   cmcdMode,
   cmcdVersion,
+  tokenEnabled,
+  subscriberIdExpr,
 }: ReviewStepProps) {
   return (
     <div className="space-y-6">
@@ -55,6 +59,11 @@ export function ReviewStep({
               CMCD: {cmcdEnabled
                 ? `Enabled (v${cmcdVersion ?? 1}, ${cmcdMode === 'headers' ? 'Headers' : 'Query String'})`
                 : 'Disabled'}
+            </p>
+            <p className="text-sm font-medium truncate" title={tokenEnabled ? subscriberIdExpr : undefined}>
+              Token: {tokenEnabled ? (
+                <>Subscriber ID = <code className="text-[10px] bg-background px-1 rounded border">{subscriberIdExpr}</code></>
+              ) : 'Disabled'}
             </p>
           </div>
 

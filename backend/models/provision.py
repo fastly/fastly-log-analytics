@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CheckFosRequest(BaseModel):
@@ -65,6 +65,8 @@ class ProvisionExecuteRequest(BaseModel):
     cmcd_enabled: bool = False
     cmcd_mode: str | None = None
     cmcd_version: int | None = None
+    token_enabled: bool = False
+    token_subscriber_id_expr: str | None = Field(default=None, max_length=512)
     logging_enabled: bool = True
     rum_enabled: bool = False
     faro_version: str | None = None

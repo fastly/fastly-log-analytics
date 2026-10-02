@@ -1327,3 +1327,60 @@ def test_load_log_format_keeps_standard_fields_when_only_custom_fields_present()
     # Empty / None configs still fall back to the standard fields (unchanged).
     assert "req.url" in load_log_format({})
     assert "req.url" in load_log_format(None)
+
+
+def test_update_logging_endpoint_enables_token_with_field():
+    """Turning Token on persists the expression and injects token_subscriber_id."""
+    stored = {"logging_enabled": True, "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []}}
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {
+            "logging_service_id": "svc-id",
+            "endpoint_name": "MyEndpoint",
+            "log_period": 60,
+            "token_enabled": True,
+            "token_subscriber_id_expr": " req.http.X-Sub ",
+        },
+        stored,
+    )
+
+    assert saved_cfg["token"]["enabled"] is True
+    assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
+    assert "token_subscriber_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+
+
+def test_update_logging_endpoint_disables_token_and_strips_field():
+    stored = {
+        "logging_enabled": True,
+        "token": {"enabled": True, "subscriber_id_expr": "req.http.X-Sub"},
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A"],
+            "custom_fields": [{"name": "token_subscriber_id", "duckdb_type": "VARCHAR", "enabled": True}],
+        },
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {"logging_service_id": "svc-id", "endpoint_name": "MyEndpoint", "log_period": 60, "token_enabled": False},
+        stored,
+    )
+
+    assert "token" not in saved_cfg
+    assert saved_cfg["log_fields"]["custom_fields"] == []
+
+
+def test_update_logging_endpoint_keeps_token_when_request_is_silent():
+    """A reconcile that says nothing about Token keeps it and its field."""
+    stored = {
+        "logging_enabled": True,
+        "token": {"enabled": True, "subscriber_id_expr": "req.http.X-Sub"},
+        "log_fields": {"schema_version": 2, "groups": ["A"]},
+    }
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {"logging_service_id": "svc-id", "endpoint_name": "MyEndpoint", "log_period": 60},
+        stored,
+    )
+
+    assert saved_cfg["token"]["subscriber_id_expr"] == "req.http.X-Sub"
+    assert "token_subscriber_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}

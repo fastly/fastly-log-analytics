@@ -32,7 +32,9 @@ IP_FAMILY_KEYS = frozenset({"ip", "client_ip", "ip_address", "remote_addr"})
 # ``/query`` surfaces exactly like ``ip``. mask_ip() would fail-closed to
 # "[redacted]" on a hash anyway; we redact explicitly so the intent is clear and
 # doesn't depend on the value shape.
-SESSION_ID_KEYS = frozenset({"cookie_session", "cid"})
+# ``token_subscriber_id`` is the operator-extracted subscriber/account id from an
+# HMAC / JWT / CAT token (Streaming → Token) — a direct per-subscriber identifier.
+SESSION_ID_KEYS = frozenset({"cookie_session", "cid", "token_subscriber_id"})
 
 # Non-word strip used to canonicalize an analyst-supplied field name to the real
 # column it resolves to. MUST match the column resolution used by the query

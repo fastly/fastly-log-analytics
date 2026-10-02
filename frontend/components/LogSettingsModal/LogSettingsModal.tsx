@@ -25,6 +25,7 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
+import { subscriberIdExprError } from '@/components/TokenConfigSection'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
 // (e.g. ProvisionWizard imports it from this path).
@@ -50,6 +51,9 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const [cmcdEnabled, setCmcdEnabled] = useState<boolean>(false)
   const [cmcdMode, setCmcdMode] = useState<string>('query_string')
   const [cmcdVersion, setCmcdVersion] = useState<number>(1)
+  const [tokenEnabled, setTokenEnabled] = useState<boolean>(false)
+  const [subscriberIdExpr, setSubscriberIdExpr] = useState<string>('')
+  const tokenInvalid = tokenEnabled && subscriberIdExprError(subscriberIdExpr) !== null
   const [step, setStep] = useState<number>(1)
 
   const { data: catalog } = useLogFieldsCatalog(service?.service_id)
@@ -97,7 +101,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       // the SSE-style UX without the CSRF risk. Query params stay where
       // they are because the backend reads them via Query(...).
       const encodedCond = encodeURIComponent(customCondition)
-      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}`
+      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}&token_enabled=${tokenEnabled}${tokenEnabled ? `&token_subscriber_id_expr=${encodeURIComponent(subscriberIdExpr.trim())}` : ''}`
       start(endpoint, {})
     }
   })
@@ -118,6 +122,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setCmcdEnabled(loggingSettings.cmcd?.enabled ?? false)
         setCmcdMode(loggingSettings.cmcd?.mode ?? 'query_string')
         setCmcdVersion(loggingSettings.cmcd?.version ?? 1)
+        setTokenEnabled(loggingSettings.token?.enabled ?? false)
+        setSubscriberIdExpr(loggingSettings.token?.subscriber_id_expr ?? '')
       }
     }
   }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
@@ -351,6 +357,11 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       setCmcdMode={setCmcdMode}
                       cmcdVersion={cmcdVersion}
                       setCmcdVersion={setCmcdVersion}
+                      tokenEnabled={tokenEnabled}
+                      setTokenEnabled={setTokenEnabled}
+                      subscriberIdExpr={subscriberIdExpr}
+                      setSubscriberIdExpr={setSubscriberIdExpr}
+                      serviceId={service.service_id}
                       toggleGroup={toggleGroup}
                       toggleField={toggleField}
                       updateFieldLimit={updateFieldLimit}
@@ -376,6 +387,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       cmcdEnabled={cmcdEnabled}
                       cmcdMode={cmcdMode}
                       cmcdVersion={cmcdVersion}
+                      tokenEnabled={tokenEnabled}
+                      subscriberIdExpr={subscriberIdExpr}
                     />
                   )}
                 </div>
@@ -400,7 +413,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                     <Button variant="outline" onClick={() => setStep(step - 1)} className="h-10 px-6">Back</Button>
                   )}
                   {step < 3 ? (
-                    <Button onClick={() => setStep(step + 1)} className="h-10 px-6 font-bold">Next Step</Button>
+                    <Button onClick={() => setStep(step + 1)} disabled={tokenInvalid} className="h-10 px-6 font-bold">Next Step</Button>
                   ) : service.storage_mode === "terraform" ? (
                     <Button
                       onClick={() => {
@@ -412,7 +425,7 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       View Terraform
                     </Button>
                   ) : (
-                    <Button onClick={handleSave} disabled={isPending} className="h-10 px-6 font-bold">
+                    <Button onClick={handleSave} disabled={isPending || tokenInvalid} className="h-10 px-6 font-bold">
                       {isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                       Deploy to Fastly
                     </Button>

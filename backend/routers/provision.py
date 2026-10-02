@@ -654,6 +654,23 @@ def provision_execute(req: ProvisionExecuteRequest):
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
+    if req.token_enabled:
+        import datetime as _dt
+
+        from backend.provision.token_fields import validate_subscriber_id_expr
+
+        expr = (req.token_subscriber_id_expr or "").strip()
+        expr_errors = validate_subscriber_id_expr(expr)
+        if expr_errors:
+            raise HTTPException(
+                status_code=400, detail={"error": f"Invalid Subscriber ID expression: {'; '.join(expr_errors)}"}
+            )
+        cfg["token"] = {
+            "enabled": True,
+            "subscriber_id_expr": expr,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
     if getattr(req, "rum_enabled", False):
         import datetime as _dt
 
@@ -1053,6 +1070,16 @@ def provision_ingest(payload: ProvisionConfigRequest):
             if body.get("cmcd_version") is not None
             else existing_cmcd.get("version", 1),
             "enabled_at": existing_cmcd.get("enabled_at") or _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
+
+    # Construct nested token config from flat fields if present
+    if body.get("token_enabled"):
+        import datetime as _dt
+
+        state["token"] = {
+            "enabled": True,
+            "subscriber_id_expr": (body.get("token_subscriber_id_expr") or "").strip(),
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
     # Construct nested Scoring config from flat fields if present

@@ -383,11 +383,12 @@ def handle_update_logs(args):
     # for whichever features are enabled — code is the source of truth.
     existing_lf = cfg.get("log_fields") or {}
     existing_custom = list(existing_lf.get("custom_fields") or [])
-    scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+    scoring_enabled, cmcd_enabled, token_enabled = system_feature_flags(cfg)
     new_lf_config["custom_fields"] = reconcile_system_custom_fields(
         existing_custom,
         scoring_enabled=scoring_enabled,
         cmcd_enabled=cmcd_enabled,
+        token_enabled=token_enabled,
     )
 
     if getattr(args, "dry_run", False):

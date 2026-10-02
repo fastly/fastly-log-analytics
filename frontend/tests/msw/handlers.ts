@@ -798,6 +798,8 @@ export const handlers = [
       top_countries: [],
       top_referers: [],
       top_hosts: [],
+      top_subscribers: [],
+      subscribers_masked: false,
       bandwidth_ts: [],
     }),
   ),

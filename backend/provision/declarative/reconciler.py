@@ -996,6 +996,8 @@ def _clone_active_version(service_id: str, token: str, desired_state: FeatureSta
             enabled_features.append("Session Scoring")
         if desired_state.cmcd and desired_state.cmcd.enabled:
             enabled_features.append("CMCD")
+        if desired_state.token and desired_state.token.enabled:
+            enabled_features.append("Token")
 
         user_custom_fields = (
             [cf for cf in desired_state.log_fields.custom_fields if cf.get("name") not in _AUTO_INJECTED_NAMES]

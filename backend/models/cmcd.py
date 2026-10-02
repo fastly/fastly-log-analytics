@@ -61,6 +61,12 @@ class ContentSecurityTopRow(BaseModel):
     bytes: int | None = None
 
 
+class ContentSecuritySubscriberRow(BaseModel):
+    subscriber_id: str
+    distinct_ips: int
+    requests: int
+
+
 class ContentSecurityContentId(BaseModel):
     content_id: str
     requests: int
@@ -82,4 +88,6 @@ class ContentSecurityResponse(BaseResponse):
     top_countries: list[ContentSecurityTopRow] = []
     top_referers: list[ContentSecurityTopRow] = []
     top_hosts: list[ContentSecurityTopRow] = []
+    top_subscribers: list[ContentSecuritySubscriberRow] = []
+    subscribers_masked: bool = False
     bandwidth_ts: list[ContentSecurityBandwidthPoint] = []

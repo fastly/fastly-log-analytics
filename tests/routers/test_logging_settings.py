@@ -266,3 +266,44 @@ def test_update_pops_cache_when_format_not_deployed(mock_get_source, mock_update
     assert response.status_code == 200
 
     assert services_core._logging_settings_cache.get("svc-fallback") is None
+
+
+@patch("backend.config.load_config")
+@patch("backend.provision.update_logging_endpoint")
+def test_update_rejects_invalid_subscriber_id_expression(mock_update, mock_load_config):
+    """An injectable Subscriber ID expression is refused before any Fastly work starts."""
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={"token_enabled": True, "token_subscriber_id_expr": 'req.http.a; set req.http.b = "x"'},
+    )
+
+    assert response.status_code == 400
+    assert "Subscriber ID" in response.json()["detail"]["error"]
+    mock_update.assert_not_called()
+
+
+@patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_passes_token_settings(mock_get_source, mock_update, mock_save_config, mock_load_config):
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+    captured_cfg = {}
+
+    def fake_generator(cfg, token):
+        captured_cfg.update(cfg)
+        yield {"type": "done", "changed": False}
+
+    mock_update.side_effect = fake_generator
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={"token_enabled": True, "token_subscriber_id_expr": "req.http.X-Sub"},
+    )
+
+    assert response.status_code == 200
+    assert captured_cfg["token_enabled"] is True
+    assert captured_cfg["token_subscriber_id_expr"] == "req.http.X-Sub"

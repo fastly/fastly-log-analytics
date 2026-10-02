@@ -2,7 +2,8 @@
 
 The FeatureState is the sole input to the VCL generation system. It's constructed
 via from_config() which auto-injects mandatory custom fields when features are
-enabled (rum_cid for RUM, edge_score for Scoring, cmcd_* for CMCD).
+enabled (rum_cid for RUM, edge_score for Scoring, cmcd_* for CMCD,
+token_subscriber_id for Token).
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "cmcd_su",
     "cmcd_tb",
     "cmcd_rtp",
+    # Token fields
+    "token_subscriber_id",
 }
 
 
@@ -65,6 +68,14 @@ class CmcdConfig:
     enabled: bool = False
     mode: Literal["query_string", "headers"] = "query_string"
     version: Literal[1, 2] = 1
+
+
+@dataclass(frozen=True)
+class TokenConfig:
+    """Immutable token (HMAC / JWT / CAT) subscriber-id extraction configuration."""
+
+    enabled: bool = False
+    subscriber_id_expr: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,7 @@ class FeatureState:
     rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
 
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
+    token: TokenConfig = field(default_factory=TokenConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     # Log Field Collections
@@ -157,6 +169,14 @@ class FeatureState:
             raise ValueError(f"cmcd.mode must be 'query_string' or 'headers', got {self.cmcd.mode!r}")
         if self.cmcd.enabled and self.cmcd.version not in (1, 2):
             raise ValueError(f"cmcd.version must be 1 or 2, got {self.cmcd.version}")
+
+        # Validate token settings
+        if self.token.enabled:
+            from backend.provision.token_fields import validate_subscriber_id_expr
+
+            token_errors = validate_subscriber_id_expr(self.token.subscriber_id_expr)
+            if token_errors:
+                raise ValueError(f"token.subscriber_id_expr is invalid: {'; '.join(token_errors)}")
 
         # Validate scoring settings
         if self.scoring.enabled and not self.scoring.domain:
@@ -245,6 +265,16 @@ class FeatureState:
         cmcd_version = cfg.get("cmcd_version", cmcd_cfg.get("version", 1))
         cmcd_config = CmcdConfig(enabled=cmcd_enabled, mode=cmcd_mode, version=cmcd_version)
 
+        # Extract token config (nested only — no flat legacy keys exist)
+        token_cfg = cfg.get("token") or {}
+        if not isinstance(token_cfg, dict):
+            token_cfg = {}
+        token_enabled = bool(token_cfg.get("enabled", False))
+        token_config = TokenConfig(
+            enabled=token_enabled,
+            subscriber_id_expr=(token_cfg.get("subscriber_id_expr") or "").strip(),
+        )
+
         # Extract and construct Scoring config
         scoring_cfg = cfg.get("scoring", {})
         if not isinstance(scoring_cfg, dict):
@@ -332,6 +362,15 @@ class FeatureState:
                 if field["name"] not in existing_names:
                     injected_fields.append(dict(field))
 
+        # Auto-inject mandatory token custom fields
+        if token_enabled:
+            from backend.provision.token_fields import _TOKEN_CUSTOM_FIELDS
+
+            existing_names = {f.get("name") for f in injected_fields}
+            for field in _TOKEN_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
+
         # Construct nested LogFieldsConfig
         log_fields_config = LogFieldsConfig(
             groups=log_groups,
@@ -360,6 +399,7 @@ class FeatureState:
             faro_version=faro_version,
             rum_custom_condition=rum_custom_condition,
             cmcd=cmcd_config,
+            token=token_config,
             scoring=scoring_config,
             log_fields=log_fields_config,
         )
@@ -392,6 +432,7 @@ class FeatureState:
             "cmcd_enabled": self.cmcd.enabled,
             "cmcd_mode": self.cmcd.mode,
             "cmcd_version": self.cmcd.version,
+            "token": {"enabled": self.token.enabled, "subscriber_id_expr": self.token.subscriber_id_expr},
             "scoring_enabled": self.scoring.enabled,
             "scoring_domain": self.scoring.domain,
             "scoring_request_secret": self.scoring.request_secret,

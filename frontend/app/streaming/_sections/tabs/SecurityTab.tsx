@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { parseAsString, useQueryState } from 'nuqs'
-import { Activity, Check, ChevronsUpDown, Globe, Link2, Server, X } from 'lucide-react'
+import { Activity, Check, ChevronsUpDown, Globe, KeyRound, Link2, Server, X } from 'lucide-react'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { resolveRangeWire } from '@/lib/range-wire'
@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
+import { PlotlyChart } from '@/components/PlotlyChart'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -22,6 +23,7 @@ import type { StreamingTabProps } from './QualityTab'
 type ContentSecurityData = components['schemas']['ContentSecurityResponse']
 type TopRow = components['schemas']['ContentSecurityTopRow']
 type ContentIdOption = components['schemas']['ContentSecurityContentId']
+type SubscriberRow = components['schemas']['ContentSecuritySubscriberRow']
 
 interface SecurityTabProps extends StreamingTabProps {
   bucketSeconds: number
@@ -34,6 +36,32 @@ const TOP_N = 10
 
 const BANDWIDTH_LAYOUT = {
   yaxis: { title: { text: 'Bandwidth' }, tickformat: '.3s', ticksuffix: 'bps', rangemode: 'tozero' as const },
+}
+
+const SUBSCRIBERS_LAYOUT = {
+  xaxis: { title: { text: 'Distinct client IPs' }, rangemode: 'tozero' as const, tickformat: ',d' },
+  // Rank 1 at the top; categories keep server order.
+  yaxis: { type: 'category' as const, autorange: 'reversed' as const },
+  margin: { l: 20, r: 20, t: 10, b: 40 },
+  hovermode: 'closest' as const,
+  showlegend: false,
+}
+
+/** Horizontal bars of distinct IPs per subscriber id (server-ranked, top N). */
+export function subscriberBarTraces(rows: SubscriberRow[]): Record<string, unknown>[] {
+  if (!rows.length) return []
+  return [
+    {
+      type: 'bar' as const,
+      orientation: 'h' as const,
+      name: 'Distinct IPs',
+      y: rows.map((r) => r.subscriber_id),
+      x: rows.map((r) => r.distinct_ips),
+      customdata: rows.map((r) => r.requests),
+      marker: { color: '#6366f1' },
+      hovertemplate: '%{y}<br>%{x:,} distinct IPs<br>%{customdata:,} requests<extra></extra>',
+    },
+  ]
 }
 
 function TopTable({
@@ -197,6 +225,8 @@ export default function SecurityTab({
     return traces
   }, [data?.bandwidth_ts, data?.has_shield_split, timezone, bucketSeconds])
 
+  const subscriberData = React.useMemo(() => subscriberBarTraces(data?.top_subscribers ?? []), [data?.top_subscribers])
+
   if (data && !data.available) {
     return (
       <div className="py-16 text-center text-sm text-muted-foreground">
@@ -266,6 +296,43 @@ export default function SecurityTab({
         {topCard('Referers', <Link2 className="h-4 w-4" />, data?.top_referers, 'Referer', undefined, 'referer', 'the Referer field (Group A) to be enabled in Fastly logging.')}
         {topCard('Hosts', <Server className="h-4 w-4" />, data?.top_hosts, 'Host', undefined, 'host', 'the Host field (Group A) to be enabled in Fastly logging.')}
       </div>
+
+      <AnalyticsCard
+        title={
+          <>
+            Subscriber IDs by Distinct IPs{' '}
+            <span className="ml-1 text-xs font-normal text-muted-foreground">(Top {TOP_N})</span>
+          </>
+        }
+        icon={<KeyRound className="h-4 w-4" />}
+        {...cardState}
+        className="h-[380px]"
+        contentClassName="p-2"
+      >
+        {subscriberData.length ? (
+          <>
+            <PlotlyChart
+              data={subscriberData}
+              layout={SUBSCRIBERS_LAYOUT}
+              height={data?.subscribers_masked ? 300 : 320}
+              a11yTitle="Top subscriber IDs ranked by distinct client IPs"
+            />
+            {data?.subscribers_masked && (
+              <p className="px-2 text-[11px] text-muted-foreground">
+                Subscriber IDs are hidden for shared sessions; ranks and counts are exact.
+              </p>
+            )}
+          </>
+        ) : (
+          <ChartEmptyState
+            requires={
+              missing('token_subscriber_id')
+                ? 'the Streaming → Token option (Subscriber ID) to be enabled in Log Settings.'
+                : undefined
+            }
+          />
+        )}
+      </AnalyticsCard>
 
       <AnalyticsCard
         title="Bandwidth: Edge vs Shield"

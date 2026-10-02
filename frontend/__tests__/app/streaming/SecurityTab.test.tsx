@@ -4,7 +4,7 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { NuqsTestingAdapter, type UrlUpdateEvent } from 'nuqs/adapters/testing'
 import React from 'react'
-import SecurityTab from '@/app/streaming/_sections/tabs/SecurityTab'
+import SecurityTab, { subscriberBarTraces } from '@/app/streaming/_sections/tabs/SecurityTab'
 import { client } from '@/lib/api'
 import { createTestQueryClient } from '../../helpers/query'
 import { spyOnConsoleError } from '../../helpers/page-smoke'
@@ -31,9 +31,19 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
   ),
 }))
 
+vi.mock('@/components/PlotlyChart', () => ({
+  PlotlyChart: ({ data, a11yTitle }: { data: { y: string[]; x: number[] }[]; a11yTitle?: string }) => (
+    <div data-testid="subscriber-chart" aria-label={a11yTitle}>
+      {data[0].y.map((id, i) => (
+        <span key={id}>{`${id}: ${data[0].x[i]}`}</span>
+      ))}
+    </div>
+  ),
+}))
+
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cmcd_cid: true },
+  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cmcd_cid: true, ip: true, token_subscriber_id: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -43,6 +53,11 @@ const FULL_RESPONSE = {
   top_countries: [{ value: 'US', requests: 3, bytes: 3072 }],
   top_referers: [{ value: 'https://pirate.example/watch', requests: 3, bytes: 3072 }],
   top_hosts: [{ value: 'pirate.example', requests: 1234, bytes: 1048576 }],
+  top_subscribers: [
+    { subscriber_id: 'acct-shared', distinct_ips: 14, requests: 90 },
+    { subscriber_id: 'acct-home', distinct_ips: 1, requests: 300 },
+  ],
+  subscribers_masked: false,
   bandwidth_ts: [
     { bucket: '2026-01-01 00:00:00', edge_bytes: 3000, shield_bytes: 300 },
     { bucket: '2026-01-01 00:05:00', edge_bytes: 6000, shield_bytes: 0 },
@@ -168,4 +183,50 @@ test('shows the reason when the service is not supported', async () => {
 
   expect(await screen.findByText(/not yet supported for high-scale services/)).toBeInTheDocument()
   expect(screen.queryByTestId('bandwidth-chart')).not.toBeInTheDocument()
+})
+
+test('charts subscriber IDs ranked by distinct IPs', async () => {
+  renderTab()
+
+  const chart = await screen.findByTestId('subscriber-chart')
+  expect(within(chart).getByText('acct-shared: 14')).toBeInTheDocument()
+  expect(within(chart).getByText('acct-home: 1')).toBeInTheDocument()
+  expect(screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === 'Subscriber IDs by Distinct IPs (Top 10)')).toBeInTheDocument()
+  expect(screen.queryByText(/hidden for shared sessions/)).not.toBeInTheDocument()
+})
+
+test('notes masking when the analyst sees rank labels', async () => {
+  postMock.mockResolvedValue({
+    data: {
+      ...FULL_RESPONSE,
+      top_subscribers: [{ subscriber_id: 'Subscriber #1', distinct_ips: 14, requests: 90 }],
+      subscribers_masked: true,
+    },
+  } as never)
+  renderTab()
+
+  expect(await screen.findByText('Subscriber #1: 14')).toBeInTheDocument()
+  expect(screen.getByText(/hidden for shared sessions/)).toBeInTheDocument()
+})
+
+test('explains that the Token option is required for the subscriber chart', async () => {
+  postMock.mockResolvedValue({
+    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, token_subscriber_id: false }, top_subscribers: [] },
+  } as never)
+  renderTab()
+
+  expect(await screen.findByText(/Streaming → Token option \(Subscriber ID\)/)).toBeInTheDocument()
+  expect(screen.queryByTestId('subscriber-chart')).not.toBeInTheDocument()
+})
+
+test('subscriberBarTraces builds one horizontal bar trace in server order', () => {
+  expect(subscriberBarTraces([])).toEqual([])
+  const [trace] = subscriberBarTraces(FULL_RESPONSE.top_subscribers)
+  expect(trace).toMatchObject({
+    type: 'bar',
+    orientation: 'h',
+    y: ['acct-shared', 'acct-home'],
+    x: [14, 1],
+    customdata: [90, 300],
+  })
 })
