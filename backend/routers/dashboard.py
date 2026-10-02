@@ -180,7 +180,25 @@ async def dashboard_bundle(
     # "unhealthy" backend (GCE 2026-10-02 py-spy wedge). Pre-warming here in a
     # worker thread caches the connection on the holder so every downstream
     # ``ctx.con`` read is non-blocking and the loop stays responsive.
-    await asyncio.to_thread(lambda: ctx.con)
+    #
+    # The await MUST be cancellation-guarded. A bare un-shielded
+    # ``to_thread`` prewarm cancelled mid-checkout
+    # (client disconnect on a slow/503 response) raises CancelledError
+    # immediately while the detached worker thread is still inside
+    # ``_ConnectionHolder.__enter__``; the request-context dependency's
+    # ``finally`` then races ``__exit__`` against the still-executing checkout
+    # generator, so the connection is acquired (in_use++) but never released —
+    # permanently stranding a pool slot (4 leaks → every request 503s "pool
+    # saturated at 4" until restart; Local Std 2026-10-02). Mirror the guarded
+    # sub-query pattern below: await the checkout task to completion on
+    # cancellation so the holder records the connection for the finally to
+    # release.
+    _prewarm = asyncio.create_task(asyncio.to_thread(lambda: ctx.con))
+    try:
+        await asyncio.shield(_prewarm)
+    except asyncio.CancelledError:
+        await _prewarm
+        raise
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)

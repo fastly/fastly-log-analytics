@@ -656,6 +656,49 @@ def test_bundle_gather_uses_return_exceptions_true():
     )
 
 
+def test_bundle_primary_prewarm_is_cancellation_guarded():
+    """Regression for the Local Std 2026-10-02 "pool saturated at 4" leak.
+
+    The primary pooled connection is pre-warmed in a worker thread so the
+    BLOCKING checkout (DuckLake attach + Iceberg view rebuild + lock-retry)
+    stays off the event loop. A BARE ``await asyncio.to_thread(lambda: ctx.con)``
+    is NOT cancellation-safe: when the client disconnects mid-checkout (e.g.
+    the browser closes the page on a slow/503 response), the awaiting
+    coroutine raises ``CancelledError`` immediately while the detached worker
+    thread is still inside ``_ConnectionHolder.__enter__``. The request-context
+    dependency's ``finally`` then races ``__exit__`` against the still-executing
+    checkout generator — the connection is acquired (``in_use += 1``) but never
+    released, permanently stranding a pool slot. Four such leaks exhaust
+    ``DUCKDB_POOL_MAX_SIZE`` and every subsequent request 503s with
+    ``pool for <svc> saturated`` until the backend restarts.
+
+    The runtime race is non-deterministic and the single-connection test
+    fixture never exercises it, so pin the structural invariant at the source
+    level (same approach as ``test_bundle_gather_uses_return_exceptions_true``):
+    the pre-warm must be awaited through the guarded
+    ``create_task`` + ``shield`` + ``except CancelledError: await task``
+    pattern, never a bare ``await asyncio.to_thread(lambda: ctx.con)``.
+    """
+    import inspect
+
+    from backend.routers.dashboard import dashboard_bundle
+
+    src = inspect.getsource(dashboard_bundle)
+    assert "await asyncio.to_thread(lambda: ctx.con)" not in src, (
+        "The primary-connection pre-warm must NOT be a bare "
+        "``await asyncio.to_thread(lambda: ctx.con)`` — cancelled mid-checkout "
+        "it leaks a pool slot (pool-saturated 503 until restart). Wrap it in "
+        "the guarded create_task + shield + await-on-cancel pattern."
+    )
+    # The guarded pre-warm must await the detached checkout task to completion
+    # on cancellation so the holder records the connection for the dependency
+    # ``finally`` to release.
+    assert "ctx.con" in src and "asyncio.shield(" in src, (
+        "dashboard_bundle must pre-warm ctx.con through asyncio.shield so a "
+        "mid-checkout cancellation still completes the checkout before unwind."
+    )
+
+
 # ── Parallel execution & Fallback scenarios ─────────────────────────────
 
 
