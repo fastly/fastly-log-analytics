@@ -75,6 +75,10 @@ def _range_value(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _watermark_extent(value: datetime | None) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
 def header_metrics(service: HighScaleService) -> dict[str, Any]:
     """Return visible ClickHouse row counts and event-time extents for the header."""
     totals: dict[str, int] = {}
@@ -282,6 +286,7 @@ def _filtered_aggregates(
 ):
     start = _range_value(start_time)
     end = _range_value(end_time)
+    request_watermark = service.watermark_for("request")
 
     if not req.filters:
         filter_dict = {}
@@ -393,8 +398,8 @@ def _filtered_aggregates(
         metric=req.chart_metric,
         total_rows=total_count,
         total_rows_total=total_count,
-        earliest_log_at=None,
-        latest_log_at=None,
+        earliest_log_at=_watermark_extent(request_watermark.coverage_start),
+        latest_log_at=_watermark_extent(request_watermark.coverage_end),
     )
 
 
@@ -448,8 +453,8 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         metric=req.chart_metric,
         total_rows=total.request_count,
         total_rows_total=total.request_count,
-        earliest_log_at=None,
-        latest_log_at=None,
+        earliest_log_at=_watermark_extent(request_watermark.coverage_start),
+        latest_log_at=_watermark_extent(request_watermark.coverage_end),
     )
 
 

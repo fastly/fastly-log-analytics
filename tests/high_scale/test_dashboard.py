@@ -196,3 +196,48 @@ def test_high_scale_dashboard_reuses_request_watermark_once_per_bundle():
 
     assert response.total_rows == 12
     assert calls["count"] == 1
+
+
+def _service_with_watermark() -> HighScaleService:
+    return HighScaleService(
+        service_id="svc",
+        client=FakeClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+
+def test_high_scale_aggregates_surfaces_watermark_extents():
+    response = aggregates(
+        _service_with_watermark(),
+        AggregatesRequest(fields=["url", "country"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+
+def test_high_scale_filtered_aggregates_surfaces_watermark_extents():
+    response = aggregates(
+        _service_with_watermark(),
+        AggregatesRequest(
+            filters={"host": {"mode": "include", "values": ["example.com"]}},
+            chart_interval="1 minute",
+            chart_metric="requests",
+        ),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+    assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
+    assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
