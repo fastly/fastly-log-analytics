@@ -170,6 +170,24 @@ _config_cache_lock = threading.Lock()
 # get fresh entries because the tmp_path is a different Path object.
 _ensured_dirs: set[Path] = set()
 
+# Cache for list_service_ids(). The configs directory's st_mtime_ns bumps on
+# every file create/delete/rename — exactly the set-of-configs change this
+# cares about (file *content* edits don't matter here) — so one stat()
+# revalidates a cached result and skips the full glob + pathlib stem-parse.
+# telemetry_middleware runs list_service_ids() on the event loop for every
+# request via get_active_service_id(); under shared-host disk contention that
+# glob stalled the loop for seconds (batch-drained health timeouts). Also
+# explicitly invalidated in save_config/delete_config as a backstop for
+# same-microsecond mtime_ns collisions.
+_service_ids_cache: tuple[Path, int, list[str]] | None = None
+_service_ids_cache_lock = threading.Lock()
+
+
+def _invalidate_service_ids_cache() -> None:
+    global _service_ids_cache
+    with _service_ids_cache_lock:
+        _service_ids_cache = None
+
 
 def _seed_configs_if_needed():
     seed_dir_str = os.getenv("CONFIGS_SEED_DIR", "/app/seed_configs")
@@ -360,6 +378,7 @@ def save_config(service_id: str, cfg: dict):
     with _config_cache_lock:
         _config_cache.pop(service_id, None)
     _cdn_service_id_map = None
+    _invalidate_service_ids_cache()
 
 
 def update_status(service_id: str, status: dict):
@@ -392,6 +411,7 @@ def delete_config(service_id: str):
     _cdn_service_id_map = None
     with _config_cache_lock:
         _config_cache.pop(service_id, None)
+    _invalidate_service_ids_cache()
 
 
 _cdn_service_id_map: dict[str, str] | None = None
@@ -413,9 +433,26 @@ def get_cdn_service_id_map() -> dict[str, str]:
 
 
 def list_service_ids() -> list[str]:
-    """Return all configured service IDs (sorted)."""
+    """Return all configured service IDs (sorted).
+
+    Hot path: called per request by telemetry_middleware via
+    get_active_service_id(). Revalidated by the configs dir's mtime so the
+    steady-state call is a single stat() instead of a loop-blocking glob.
+    """
+    global _service_ids_cache
     _ensure_dirs()
-    return sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
+    try:
+        dir_mtime = CONFIGS_DIR.stat().st_mtime_ns
+    except FileNotFoundError:
+        return []
+    with _service_ids_cache_lock:
+        cached = _service_ids_cache
+    if cached is not None and cached[0] == CONFIGS_DIR and cached[1] == dir_mtime:
+        return list(cached[2])
+    ids = sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
+    with _service_ids_cache_lock:
+        _service_ids_cache = (CONFIGS_DIR, dir_mtime, ids)
+    return list(ids)
 
 
 def list_configs() -> list[dict]:

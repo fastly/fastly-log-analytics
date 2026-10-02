@@ -46,9 +46,11 @@ def _isolate_config_dirs(tmp_path, monkeypatch):
     # Clear the in-memory caches between tests
     svcconfig._name_cache.clear()
     svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
     yield
     svcconfig._name_cache.clear()
     svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
 
 
 def _cfg(**overrides) -> dict:
@@ -293,6 +295,43 @@ def test_list_service_ids_returns_sorted_ids():
 def test_list_service_ids_returns_empty_on_missing_dir():
     """Fresh install: no configs dir yet → ``[]``."""
     assert svcconfig.list_service_ids() == []
+
+
+def test_list_service_ids_caches_glob_until_dir_changes(monkeypatch):
+    """The hot per-request path (telemetry_middleware →
+    get_active_service_id → list_service_ids) must not re-glob the configs
+    dir on every call — a synchronous glob on the event loop stalls under
+    shared-host disk contention. Revalidation is by directory mtime, so a
+    save/delete is still reflected immediately."""
+    from pathlib import Path
+
+    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
+
+    real_glob = Path.glob
+    calls = {"n": 0}
+
+    def counting_glob(self, pattern, *a, **k):
+        if pattern == "*.json" and self == svcconfig.CONFIGS_DIR:
+            calls["n"] += 1
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    assert svcconfig.list_service_ids() == ["alpha"]
+    first = calls["n"]
+    assert first >= 1
+    # Repeated calls with an unchanged dir must NOT re-glob.
+    for _ in range(5):
+        svcconfig.list_service_ids()
+    assert calls["n"] == first
+
+    # A newly saved config appears immediately (dir mtime bump + invalidation).
+    svcconfig.save_config("beta", _cfg(service_id="beta"))
+    assert svcconfig.list_service_ids() == ["alpha", "beta"]
+
+    # A deleted config disappears immediately.
+    svcconfig.delete_config("alpha")
+    assert svcconfig.list_service_ids() == ["beta"]
 
 
 def test_list_configs_skips_unparseable_files():
