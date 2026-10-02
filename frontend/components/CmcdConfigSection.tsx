@@ -20,6 +20,8 @@ interface CmcdConfigSectionProps {
   version: number
   onVersionChange: (version: number) => void
   disabled?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }
 
 export function CmcdConfigSection({
@@ -30,8 +32,13 @@ export function CmcdConfigSection({
   version,
   onVersionChange,
   disabled,
+  open,
+  onOpenChange,
 }: CmcdConfigSectionProps) {
-  const [isOpen, setIsOpen] = useState(false)
+  const [innerOpen, setInnerOpen] = useState(false)
+  // Controlled when the parent passes `open` (Streaming opens children that need input).
+  const isOpen = open ?? innerOpen
+  const setIsOpen = (next: boolean) => (onOpenChange ? onOpenChange(next) : setInnerOpen(next))
 
   return (
     <div className="border border-border/60 rounded-lg overflow-hidden bg-card/50" data-testid="cmcd-config-section">

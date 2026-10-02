@@ -129,6 +129,8 @@ interface TokenConfigSectionProps {
   /** When set, each expression is linted against this service's log format. */
   serviceId?: string
   disabled?: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }
 
 export function TokenConfigSection({
@@ -140,8 +142,13 @@ export function TokenConfigSection({
   onContentIdExprChange,
   serviceId,
   disabled,
+  open,
+  onOpenChange,
 }: TokenConfigSectionProps) {
-  const [isOpen, setIsOpen] = useState(false)
+  const [innerOpen, setInnerOpen] = useState(false)
+  // Controlled when the parent passes `open` (Streaming opens children that need input).
+  const isOpen = open ?? innerOpen
+  const setIsOpen = (next: boolean) => (onOpenChange ? onOpenChange(next) : setInnerOpen(next))
   const noneConfigured = enabled && !subscriberIdExpr.trim() && !contentIdExpr.trim()
 
   return (

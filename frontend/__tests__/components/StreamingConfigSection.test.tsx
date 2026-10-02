@@ -19,13 +19,19 @@ beforeEach(() => {
   lint.mockResolvedValue({ valid: true, errors: [], warnings: [] } as never)
 })
 
-function Harness({ serviceId }: { serviceId?: string }) {
-  const [cmcd, setCmcd] = React.useState(false)
+function Harness({
+  serviceId,
+  initial = {},
+}: {
+  serviceId?: string
+  initial?: { cmcd?: boolean; token?: boolean; sub?: string; cid?: string }
+}) {
+  const [cmcd, setCmcd] = React.useState(initial.cmcd ?? false)
   const [mode, setMode] = React.useState('query_string')
   const [version, setVersion] = React.useState(1)
-  const [token, setToken] = React.useState(false)
-  const [expr, setExpr] = React.useState('')
-  const [cid, setCid] = React.useState('')
+  const [token, setToken] = React.useState(initial.token ?? false)
+  const [expr, setExpr] = React.useState(initial.sub ?? '')
+  const [cid, setCid] = React.useState(initial.cid ?? '')
   return (
     <StreamingConfigSection
       cmcdEnabled={cmcd}
@@ -110,4 +116,67 @@ test('tokenConfigError requires at least one id and labels the bad one', () => {
   expect(tokenConfigError('', 'req.http.X-Content')).toBeNull()
   expect(tokenConfigError('req.http.X-Sub', 'a // b')).toBe('Content ID: Must not contain VCL comments (//, /*, or #).')
   expect(tokenConfigError('a; b', 'req.http.X-Content')).toBe('Subscriber ID: Must not contain semicolons (;).')
+})
+
+function renderHarness(props: React.ComponentProps<typeof Harness> = {}) {
+  return render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <Harness {...props} />
+    </QueryClientProvider>,
+  )
+}
+
+const streamingBox = () => screen.getByRole('checkbox', { name: 'Enable Streaming' })
+
+test('the Streaming checkbox reflects both children: off, partial, on', () => {
+  const { unmount } = renderHarness()
+  expect(streamingBox()).not.toBeChecked()
+  expect(streamingBox()).not.toBePartiallyChecked()
+  unmount()
+
+  const partial = renderHarness({ initial: { cmcd: true } })
+  expect(streamingBox()).toBePartiallyChecked()
+  expect(screen.getByText('1 of 2 enabled')).toBeInTheDocument()
+  partial.unmount()
+
+  renderHarness({ initial: { cmcd: true, token: true, sub: 'req.http.X-Sub' } })
+  expect(streamingBox()).toBeChecked()
+  expect(screen.getByText('2 of 2 enabled')).toBeInTheDocument()
+})
+
+test('checking Streaming enables both and opens only the child that needs input', async () => {
+  renderHarness()
+  expect(screen.queryByText('CMCD Metrics')).not.toBeInTheDocument()
+
+  await userEvent.click(streamingBox())
+
+  expect(streamingBox()).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Enable CMCD Metrics' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Enable Token' })).toBeChecked()
+  // Token has no expression yet, so it opens ready for input...
+  const sub = screen.getByRole('textbox', { name: 'Subscriber ID VCL expression' })
+  expect(sub).toBeEnabled()
+  expect(screen.getByRole('alert')).toHaveTextContent('Configure at least one of Subscriber ID or Content ID.')
+  // ...while CMCD, which works with its defaults, stays collapsed.
+  expect(screen.queryByText('CMCD Version')).not.toBeInTheDocument()
+})
+
+test('checking Streaming from partial does not reopen a Token that is already configured', async () => {
+  renderHarness({ initial: { token: false, sub: 'req.http.X-Sub' } })
+
+  await userEvent.click(streamingBox())
+
+  expect(streamingBox()).toBeChecked()
+  expect(screen.queryByText('CMCD Metrics')).not.toBeInTheDocument() // group stays collapsed
+})
+
+test('unchecking Streaming disables both children', async () => {
+  renderHarness({ initial: { cmcd: true, token: true, sub: 'req.http.X-Sub' } })
+
+  await userEvent.click(streamingBox())
+
+  expect(streamingBox()).not.toBeChecked()
+  await userEvent.click(screen.getByRole('button', { name: /streaming/i }))
+  expect(screen.getByRole('checkbox', { name: 'Enable CMCD Metrics' })).not.toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Enable Token' })).not.toBeChecked()
 })
