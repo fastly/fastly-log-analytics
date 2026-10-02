@@ -116,6 +116,60 @@ def test_alerts_table_has_evaluation_scope_column():
 # pinned by tests/routers/test_usage_log.py.
 
 
+# ── usage_log byte columns must be 64-bit (Postgres int4 overflow) ────────────
+
+
+def _column_type(con: sqlite3.Connection, table: str, column: str) -> str:
+    row = con.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+        (table, column),
+    ).fetchone()
+    return row[0] if row else ""
+
+
+def test_usage_log_byte_columns_are_bigint():
+    """``usage_log.bytes`` and ``usage_log_hourly_summary.bytes`` accumulate
+    byte counts (the hourly summary is a running SUM per service/hour). A
+    Postgres ``integer`` (int4) column caps at 2,147,483,647 (~2.1 GB); a
+    busy service's hourly CDN egress blows past that in a single hour,
+    raising ``integer out of range`` and silently dropping every usage row
+    for the rest of that hour. The columns must be 64-bit."""
+    from backend.core.metadata import usage_log_db
+
+    con = usage_log_db.get_con("svc-usage-bigint")
+    for table, column in (
+        ("usage_log", "bytes"),
+        ("usage_log", "count"),
+        ("usage_log_hourly_summary", "bytes"),
+        ("usage_log_hourly_summary", "count"),
+    ):
+        assert _column_type(con, table, column) == "bigint", f"{table}.{column} must be bigint, not int4"
+
+
+def test_log_usage_calls_accepts_bytes_over_int4_max():
+    """Regression for the production ``[metadata_db] Failed to log usage
+    calls: integer out of range`` flood. A single CDN op whose (egress-
+    doubled) byte count exceeds int4 max must round-trip, not get swallowed
+    by ``log_usage_calls``'s broad ``except`` and vanish from the table."""
+    from backend.core.metadata import usage_log, usage_log_db
+
+    sid = "svc-usage-overflow"
+    big = 3_000_000_000  # > int4 max 2_147_483_647, within int8
+    usage_log.log_usage_calls(
+        sid,
+        [{"method": "GET", "service": "FOS", "path": "/big.gz", "bytes": big, "caller": "test"}],
+    )
+
+    con = usage_log_db.get_con(sid)
+    row = con.execute("SELECT bytes FROM usage_log WHERE service_id = ? AND url = ?", (sid, "/big.gz")).fetchone()
+    assert row is not None, "usage row was dropped (int4 overflow swallowed the INSERT)"
+    assert row[0] == big
+
+    hourly = con.execute("SELECT max(bytes) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
+    assert hourly is not None and hourly[0] == big
+
+
 # ── Idempotency: re-running init must not lose data ──────────────────────────
 
 

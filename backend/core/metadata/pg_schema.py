@@ -188,6 +188,23 @@ _INGEST_LEDGER_INDEX_NAMES = (
 _QUARANTINED_FILES_ALTERS = ("ALTER TABLE quarantined_files ADD COLUMN IF NOT EXISTS reason_counts TEXT DEFAULT '{}'",)
 _CRON_RUNS_ALTERS = ("ALTER TABLE cron_runs ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",)
 
+# ``bytes``/``count`` are declared INTEGER in the shared SQLite schema, which
+# ``_to_postgres`` leaves as int4 (max 2,147,483,647 ≈ 2.1 GB). SQLite INTEGER
+# is dynamically 64-bit so it never overflows there, but on Postgres a busy
+# service blows past int4 in a single hour: ``usage_log_hourly_summary.bytes``
+# is a running SUM per (service, hour, op_class, op_type), and per-row
+# ``usage_log.bytes`` doubles for CDN shield-miss egress. The overflow raises
+# ``integer out of range`` inside ``log_usage_calls``' broad except, silently
+# dropping every usage row for the rest of that hour. Widen to BIGINT.
+# ``ALTER COLUMN ... TYPE BIGINT`` is idempotent (a no-op on an already-bigint
+# column), matching the additive, rerunnable pattern of the ALTERs above.
+_USAGE_LOG_WIDEN_ALTERS = (
+    "ALTER TABLE usage_log ALTER COLUMN bytes TYPE BIGINT",
+    "ALTER TABLE usage_log ALTER COLUMN count TYPE BIGINT",
+    "ALTER TABLE usage_log_hourly_summary ALTER COLUMN bytes TYPE BIGINT",
+    "ALTER TABLE usage_log_hourly_summary ALTER COLUMN count TYPE BIGINT",
+)
+
 # SQLSTATEs that mean "a concurrently-booting pod created this first".
 # 42P07 duplicate_table (covers indexes too), 42710 duplicate_object,
 # 23505 unique_violation (the pg_type/pg_class catalog race).
@@ -249,6 +266,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_INGEST_LEDGER_ALTERS)
     statements.extend(_QUARANTINED_FILES_ALTERS)
     statements.extend(_CRON_RUNS_ALTERS)
+    statements.extend(_USAGE_LOG_WIDEN_ALTERS)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
     statements.append(_SEED_INITIAL_TOS_DDL)
