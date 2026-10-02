@@ -91,8 +91,12 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
             return False
         etag = response.headers.get("ETag", "").strip('"')
         return etag == stored_hash
-    except Exception:
-        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
+    except Exception as e:
+        logger.warning(
+            "Faro FOS integrity HEAD check failed, treating as needs-restore: %s: %s",
+            type(e).__name__,
+            e,
+        )
         return False
 
 

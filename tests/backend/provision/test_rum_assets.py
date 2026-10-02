@@ -12,6 +12,7 @@ its own network behavior is already covered by ``test_faro_versions.py``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 
 import httpx
@@ -514,6 +515,29 @@ def test_faro_bundle_intact_is_the_shared_implementation_behind_readiness(mock_f
     mock_fos(lambda request: httpx.Response(200, headers={"ETag": f'"{etag_md5}"'}))
 
     assert faro_bundle_intact(cfg, "2.9.0") is True
+
+
+def test_faro_bundle_intact_transient_head_error_logs_concisely_without_traceback(mock_fos, caplog):
+    """A transient FOS HEAD failure (e.g. ConnectError under CPU contention)
+    self-heals via the caller's restore path, so it must log a concise
+    warning (exception type + message) WITHOUT a full traceback. A rich
+    exc_info traceback for a handled, recovered transient is pure log noise
+    that also trips the deploy log-error monitor on every contended run."""
+    etag_md5 = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
+    cfg = {**FAKE_CFG, "rum": {"faro_fos_etag_md5": etag_md5}}
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed")
+
+    mock_fos(boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = faro_bundle_intact(cfg, "2.9.0")
+
+    assert result is False
+    rec = next(r for r in caplog.records if "integrity HEAD check failed" in r.getMessage())
+    assert rec.exc_info is None, "handled, self-healing transient must not log a full traceback"
+    assert "ConnectError" in rec.getMessage()
 
 
 def test_upload_rum_tracker_js_skips_publish_when_no_faro_version_pinned(monkeypatch):
