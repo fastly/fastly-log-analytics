@@ -720,3 +720,83 @@ def test_bundle_parallel_generic_exception_fallback(client, stub_aggregates, stu
         )
         assert resp.status_code == 200
         mock_checkout.assert_called_once()
+
+
+async def test_bundle_resolves_primary_connection_off_event_loop(monkeypatch):
+    """The first ``ctx.con`` access performs a BLOCKING pool checkout
+    (DuckLake attach + Iceberg view rebuild + up-to-max_wait lock retry).
+    Evaluated as an argument to ``asyncio.to_thread(_run_aggregates,
+    ctx.con)`` it runs ON the asyncio event loop, so under cron-vs-dashboard
+    DuckLake contention it freezes ``/api/health`` and every other request —
+    cascading one slow dashboard query into a fully-"unhealthy" backend
+    (GCE 2026-10-02 py-spy: MainThread blocked in get_connection inside the
+    ASGI request path). ``dashboard_bundle`` must pre-resolve the primary
+    connection in a worker thread so a contended checkout slows only its own
+    request, never the shared event loop.
+    """
+    import asyncio
+    import time as _time
+    from unittest.mock import MagicMock
+
+    import backend.routers.dashboard as dash
+    from backend.core.request_context import RequestContext
+    from backend.models.dashboard import AggregatesRequest
+
+    checkout_block_s = 0.25
+
+    class _BlockingHolder:
+        """Stand-in for ``_ConnectionHolder`` whose ``__enter__`` blocks the
+        calling thread like a real contended pool checkout."""
+
+        def __init__(self, con):
+            self.con = None
+            self._real = con
+            self.enter_calls = 0
+
+        def __enter__(self):
+            self.enter_calls += 1
+            _time.sleep(checkout_block_s)
+            self.con = self._real
+            return self._real
+
+        def __exit__(self, *_a):
+            return False
+
+    holder = _BlockingHolder(MagicMock())
+    ctx = RequestContext(
+        service_id="svc-standard-not-highscale",
+        source={"name": "svc", "service_id": "svc-standard-not-highscale"},
+        telemetry=MagicMock(),
+        _holder=holder,
+    )
+    monkeypatch.setattr(dash.repo, "get_aggregates", lambda **_k: {})
+
+    req = AggregatesRequest(
+        start_time="2026-06-12T00:00:00Z",
+        end_time="2026-06-12T01:00:00Z",
+        filters={},
+        chart_metric="requests",
+        chart_interval="minute",
+        sections=["core"],
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        for _ in range(500):
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    hb = asyncio.create_task(_heartbeat())
+    await dash.dashboard_bundle(req, ctx)
+    hb.cancel()
+
+    assert holder.enter_calls >= 1, "the pool checkout must still happen"
+    # Off-loop, the 5ms heartbeat advances ~45x across the 0.25s checkout.
+    # On-loop (the bug), it cannot tick at all while the loop is blocked.
+    assert ticks >= 10, (
+        f"event loop was blocked during the pool checkout (only {ticks} "
+        "heartbeat ticks observed) — dashboard_bundle must resolve ctx.con "
+        "off the event loop"
+    )

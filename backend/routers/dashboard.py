@@ -164,6 +164,18 @@ async def dashboard_bundle(
 
         return high_scale_bundle(high_scale_service, req, start_time, end_time)
 
+    # Resolve the primary pooled connection OFF the asyncio event loop. The
+    # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake
+    # attach + Iceberg view rebuild + up-to-max_wait lock retry); passed as an
+    # argument to ``asyncio.to_thread(_run_aggregates, ctx.con)`` it is
+    # evaluated ON the loop BEFORE the worker thread runs, so under
+    # cron-vs-dashboard DuckLake contention it freezes /api/health and every
+    # other request — cascading one slow dashboard query into a fully
+    # "unhealthy" backend (GCE 2026-10-02 py-spy wedge). Pre-warming here in a
+    # worker thread caches the connection on the holder so every downstream
+    # ``ctx.con`` read is non-blocking and the loop stays responsive.
+    await asyncio.to_thread(lambda: ctx.con)
+
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
     # ``sections=None`` preserves the pre-selector contract (both branches
