@@ -16,6 +16,58 @@ def table_exists(con, table_name: str) -> bool:
         return False
 
 
+def _rum_raw_latest(con):
+    """MAX(timestamp) across the raw RUM beacon tables, or ``None``."""
+    ts_list = []
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT MAX(timestamp) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        if row and row[0]:
+            ts_list.append(row[0])
+    return max(ts_list) if ts_list else None
+
+
+def rum_count_and_latest(con):
+    """Return ``(beacon_count, latest_timestamp)`` for the RUM store.
+
+    Freshness (``latest_timestamp``) is ALWAYS the raw beacon event-time
+    MAX(timestamp), mirroring the request side (AGENTS.md Trap #39). The
+    precomputed aggregate tables are only a fast *count* path, and only
+    when they actually hold rows — an existing-but-empty aggregate (rollup
+    lag, a failed recompute tick, or a service whose first rollup hasn't
+    run yet) must fall through to a raw distinct-beacon count so the header
+    never reports "Never" over live, queryable beacons.
+    """
+    if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
+        try:
+            v_res = con.execute(
+                "SELECT SUM(event_count) FROM rum_vitals_aggregates "
+                "WHERE dimension = 'total' AND value IN ('pageviews', 'interactions')"
+            ).fetchone()
+            v_cnt = v_res[0] if v_res and v_res[0] is not None else 0
+            e_res = con.execute("SELECT SUM(error_count) FROM rum_error_aggregates").fetchone()
+            e_cnt = e_res[0] if e_res and e_res[0] is not None else 0
+            cnt = int(v_cnt) + int(e_cnt)
+            if cnt > 0:
+                return cnt, _rum_raw_latest(con)
+        except Exception:
+            pass
+
+    # Raw fallback: aggregates missing, empty, or errored. Count distinct
+    # beacons and read freshness straight from the raw tables.
+    distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+    cnt = 0
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        cnt += int(row[0]) if row and row[0] else 0
+    return cnt, _rum_raw_latest(con)
+
+
 def recompute_rum_aggregates(con, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
     """Ensure RUM aggregate tables exist, find active hours, and update them idempotently."""
     logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")

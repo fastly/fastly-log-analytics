@@ -542,81 +542,9 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
                 rum_source = rum_source_for(source)
                 with _ConnectionHolder(rum_source, read_only=True) as rum_con:
+                    from backend.core.rollups.rum import rum_count_and_latest
 
-                    def _query_rum_bootstrap(con):
-                        from backend.core.rollups.rum import table_exists
-
-                        if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
-                            try:
-                                v_cnt_res = con.execute(
-                                    "SELECT SUM(event_count) FROM rum_vitals_aggregates WHERE dimension = 'total' AND value IN ('pageviews', 'interactions')"
-                                ).fetchone()
-                                v_cnt = v_cnt_res[0] if v_cnt_res and v_cnt_res[0] is not None else 0
-
-                                e_cnt_res = con.execute("SELECT SUM(error_count) FROM rum_error_aggregates").fetchone()
-                                e_cnt = e_cnt_res[0] if e_cnt_res and e_cnt_res[0] is not None else 0
-
-                                cnt = v_cnt + e_cnt
-
-                                # Freshness must mirror the request-side
-                                # event-time extent: aggregates carry
-                                # bucket_start = DATE_TRUNC('hour', timestamp),
-                                # so keying latest_log_at on them makes RUM
-                                # look up to ~59 min stale even seconds after a
-                                # beacon lands. Source it from the raw tables'
-                                # real MAX(timestamp) (AGENTS.md Trap #39),
-                                # falling back to bucket_start only if the raw
-                                # tables are unavailable (so the aggregates
-                                # fast-path is never lost to an expensive
-                                # recompute).
-                                try:
-                                    ts_v_res = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
-                                    ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
-                                    ts_e_res = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()
-                                    ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
-                                except Exception:
-                                    ts_v_res = con.execute(
-                                        "SELECT MAX(bucket_start) FROM rum_vitals_aggregates"
-                                    ).fetchone()
-                                    ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
-                                    ts_e_res = con.execute(
-                                        "SELECT MAX(bucket_start) FROM rum_error_aggregates"
-                                    ).fetchone()
-                                    ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
-
-                                ts_list = []
-                                if ts_v:
-                                    ts_list.append(ts_v)
-                                if ts_e:
-                                    ts_list.append(ts_e)
-                                l_ts = max(ts_list) if ts_list else None
-                                return cnt, l_ts
-                            except Exception:
-                                pass
-
-                        distinct_id = (
-                            "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
-                        )
-                        v_cnt = (
-                            con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM client_vitals").fetchone()[0] or 0
-                        )
-                        e_cnt = (
-                            con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM client_errors").fetchone()[0] or 0
-                        )
-                        cnt = v_cnt + e_cnt
-
-                        ts_v = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
-                        ts_e = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()
-
-                        ts_list = []
-                        if ts_v and ts_v[0]:
-                            ts_list.append(ts_v[0])
-                        if ts_e and ts_e[0]:
-                            ts_list.append(ts_e[0])
-                        l_ts = max(ts_list) if ts_list else None
-                        return cnt, l_ts
-
-                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, _query_rum_bootstrap)
+                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, rum_count_and_latest)
 
                 if rum_count > 0:
                     rum_total = rum_count
