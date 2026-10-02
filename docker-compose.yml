@@ -38,6 +38,16 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DUCKDB_MEMORY_LIMIT=2GB
+      # Bound per-op DuckDB parallelism on the shared Colima host. Unset,
+      # DUCKDB_THREADS defaults to min(cpu,8)=6 and the pool to 8, so
+      # in-process ingest/rollup/compaction/insights-prewarmer crons fan out
+      # to ~48 CPU-bound threads; two local stacks then drive load to ~100 on
+      # 6 cores and starve the single-threaded serving loop (health times out
+      # at 20s+). Caps leave headroom so serving stays responsive while crons
+      # grind. (.env sets these but compose uses an explicit env list, not
+      # env_file, so they never reached the container.)
+      - DUCKDB_THREADS=2
+      - DUCKDB_POOL_MAX_SIZE=4
       - DUCKDB_RECYCLE_INTERVAL_MIN=5
       - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=2500
       # Friendly local hostnames added to the backend's Host allowlist

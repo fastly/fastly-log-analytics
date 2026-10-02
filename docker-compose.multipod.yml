@@ -38,6 +38,12 @@ services:
     environment:
     - PYTHONUNBUFFERED=1
     - DUCKDB_MEMORY_LIMIT=2GB
+    # Bound per-op DuckDB parallelism on the shared Colima host — see the
+    # Local Standard backend for the full rationale. Two full stacks share
+    # 6 cores during the parallel verify; unbounded cron thread fan-out
+    # starves this backend's serving loop.
+    - DUCKDB_THREADS=2
+    - DUCKDB_POOL_MAX_SIZE=4
     - LOCAL_HOSTS=fastly.localhost,fastly.analytics
     # Celery/multipod mode REQUIRES a transactional multi-writer DuckLake
     # catalog: worker processes write while the backend reads, which a
@@ -211,6 +217,11 @@ services:
     environment:
     - PYTHONUNBUFFERED=1
     - DUCKDB_MEMORY_LIMIT=4GB
+    # Per-file converts are I/O-bound (FOS GET + parquet PUT), so 1 DuckDB
+    # thread per worker proc is plenty. Unset it defaults to 6 — with
+    # concurrency=6 that is 36 CPU-bound threads on the shared 6-core host,
+    # which starves the co-located backend serving loop.
+    - DUCKDB_THREADS=1
     - CELERY_BROKER_URL=redis://valkey:6379/0
     # Cron/ingest bodies execute here and gate on DEPLOYMENT_MODE; SSE progress
     # events publish through the valkey backplane.
