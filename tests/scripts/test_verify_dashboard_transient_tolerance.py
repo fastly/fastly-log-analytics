@@ -29,10 +29,15 @@ import re
 from pathlib import Path
 
 _VERIFY_JS = Path(__file__).resolve().parents[2] / "scripts" / "verify_dashboard.js"
+_CLASSIFIER_JS = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "console_blip.js"
 
 
 def _src() -> str:
     return _VERIFY_JS.read_text()
+
+
+def _classifier_src() -> str:
+    return _CLASSIFIER_JS.read_text()
 
 
 def test_defines_a_small_bounded_transient_budget() -> None:
@@ -70,4 +75,28 @@ def test_non_503_api_errors_remain_instant_fatal() -> None:
     # every >= 400 as transient (which would mask real auth/5xx regressions).
     assert not re.search(r"status\s*>=\s*400[^\n]*transient\s*=\s*true", src), (
         "all >=400 responses must not be blanket-marked transient; only 503 is"
+    )
+
+
+def test_err_failed_is_treated_as_transient() -> None:
+    # A heavy 30d page load whose in-flight request is aborted/reset during the
+    # parallel-verify load spike surfaces in Chromium as the generic
+    # net::ERR_FAILED rather than ERR_ABORTED/ERR_CONNECTION_REFUSED. It is the
+    # same self-healing class the dashboard path already tolerates; RUM must get
+    # the same bounded tolerance or it alone goes red on an identical blip.
+    classifier = _classifier_src()
+    assert "ERR_FAILED" in classifier, (
+        "console_blip.js isTransientConsoleBlip must recognize net::ERR_FAILED "
+        "so RUM gets the same bounded-transient tolerance as the dashboard path"
+    )
+
+
+def test_verify_js_uses_shared_classifier() -> None:
+    # The classifier is extracted to a single requireable module so the pure
+    # classification can be unit-tested; verify_dashboard.js must consume it
+    # rather than re-inlining a drifting copy of the regex.
+    src = _src()
+    assert "require('./lib/console_blip')" in src or 'require("./lib/console_blip")' in src, (
+        "verify_dashboard.js must import isTransientConsoleBlip from the shared "
+        "scripts/lib/console_blip.js module (single source of truth)"
     )
