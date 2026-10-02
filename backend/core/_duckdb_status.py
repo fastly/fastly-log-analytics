@@ -558,11 +558,31 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
                                 cnt = v_cnt + e_cnt
 
-                                ts_v_res = con.execute("SELECT MAX(bucket_start) FROM rum_vitals_aggregates").fetchone()
-                                ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
-
-                                ts_e_res = con.execute("SELECT MAX(bucket_start) FROM rum_error_aggregates").fetchone()
-                                ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
+                                # Freshness must mirror the request-side
+                                # event-time extent: aggregates carry
+                                # bucket_start = DATE_TRUNC('hour', timestamp),
+                                # so keying latest_log_at on them makes RUM
+                                # look up to ~59 min stale even seconds after a
+                                # beacon lands. Source it from the raw tables'
+                                # real MAX(timestamp) (AGENTS.md Trap #39),
+                                # falling back to bucket_start only if the raw
+                                # tables are unavailable (so the aggregates
+                                # fast-path is never lost to an expensive
+                                # recompute).
+                                try:
+                                    ts_v_res = con.execute("SELECT MAX(timestamp) FROM client_vitals").fetchone()
+                                    ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
+                                    ts_e_res = con.execute("SELECT MAX(timestamp) FROM client_errors").fetchone()
+                                    ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
+                                except Exception:
+                                    ts_v_res = con.execute(
+                                        "SELECT MAX(bucket_start) FROM rum_vitals_aggregates"
+                                    ).fetchone()
+                                    ts_v = ts_v_res[0] if ts_v_res and ts_v_res[0] else None
+                                    ts_e_res = con.execute(
+                                        "SELECT MAX(bucket_start) FROM rum_error_aggregates"
+                                    ).fetchone()
+                                    ts_e = ts_e_res[0] if ts_e_res and ts_e_res[0] else None
 
                                 ts_list = []
                                 if ts_v:

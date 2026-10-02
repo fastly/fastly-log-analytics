@@ -1434,6 +1434,93 @@ def test_get_sync_status_cached_dynamic_storage_mode(in_memory_duckdb, fos_sourc
     assert out["storage_mode"] == "local"
 
 
+# ── RUM freshness: aggregates branch must report real sub-hour latest ──
+
+
+def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
+    """The RUM aggregates fast-path counts from rum_*_aggregates but
+    MUST source latest_log_at from the raw client_vitals/client_errors
+    MAX(timestamp), not MAX(bucket_start). bucket_start is
+    DATE_TRUNC('hour', timestamp) (rollups/rum.py), so keying freshness
+    on it makes RUM look up to ~59 min stale even when a beacon landed
+    seconds ago — the header then falsely reports the pipeline as
+    lagging. Mirrors the request-side event-time extent (AGENTS.md
+    Trap #39). Count stays from the aggregates (authoritative)."""
+    import duckdb as _duckdb
+
+    from backend.core._duckdb_status import refresh_config_status
+
+    con = _duckdb.connect(":memory:")
+    # Aggregates carry hour-truncated bucket_start (top of hour).
+    con.execute(
+        "CREATE TABLE rum_vitals_aggregates(dimension VARCHAR, value VARCHAR, event_count BIGINT, bucket_start TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO rum_vitals_aggregates VALUES "
+        "('total','pageviews',100, TIMESTAMP '2026-10-02 00:00:00'),"
+        "('total','interactions',50, TIMESTAMP '2026-10-02 00:00:00')"
+    )
+    con.execute("CREATE TABLE rum_error_aggregates(error_count BIGINT, bucket_start TIMESTAMP)")
+    con.execute("INSERT INTO rum_error_aggregates VALUES (5, TIMESTAMP '2026-10-02 00:00:00')")
+    # Raw tables carry the real, fresh sub-hour event time.
+    con.execute("CREATE TABLE client_vitals(req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMP)")
+    con.execute("INSERT INTO client_vitals VALUES ('r1','c1', TIMESTAMP '2026-10-02 00:45:30')")
+    con.execute("CREATE TABLE client_errors(req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMP)")
+    con.execute("INSERT INTO client_errors VALUES ('r2','c2', TIMESTAMP '2026-10-02 00:30:00')")
+
+    captured: dict = {}
+
+    class _StubCon:
+        def execute(self, *_a, **_k):
+            class _R:
+                def fetchone(self_inner):
+                    return None
+
+                def fetchall(self_inner):
+                    return []
+
+            return _R()
+
+        def close(self):
+            pass
+
+    class _Holder:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return con
+
+        def __exit__(self, *_a):
+            return False
+
+    src = {"name": "svc", "bucket": "b", "service_id": "svc", "rum_enabled": True}
+
+    with (
+        patch("backend.config.load_config", return_value=src),
+        patch("backend.config.config_to_source", return_value=src),
+        patch("backend.config.update_status", side_effect=lambda sid, status: captured.setdefault("status", status)),
+        patch("backend.core.duckdb.get_connection", return_value=_StubCon()),
+        patch("backend.core.duckdb.get_sync_status", return_value={"ingested": 0, "local_rows": 0}),
+        patch("backend.core.duckdb.rum_source_for", return_value=src),
+        patch("backend.deps._ConnectionHolder", _Holder),
+        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, s, fn: fn(c)),
+        patch("backend.core._duckdb_status.get_schema", return_value=[{"name": "ip", "type": "VARCHAR"}]),
+        patch("backend.core._duckdb_status.update_top_values"),
+        patch("backend.core._duckdb_status._cache_dir", return_value="/tmp/nonexistent-rum-fresh"),
+    ):
+        refresh_config_status("svc")
+
+    rum = captured["status"]["rum"]
+    # Count is the aggregate sum (100 + 50 + 5), unchanged.
+    assert rum["total_rows"] == 155
+    # Freshness is the real raw MAX(timestamp), NOT the hour-bucket.
+    assert rum["latest_log_at"] is not None
+    assert rum["latest_log_at"].startswith("2026-10-02T00:45:30"), (
+        f"RUM latest_log_at must reflect the real sub-hour event time, got {rum['latest_log_at']!r}"
+    )
+
+
 # Silence ruff unused-imports
 _ = MagicMock
 _ = pytest
