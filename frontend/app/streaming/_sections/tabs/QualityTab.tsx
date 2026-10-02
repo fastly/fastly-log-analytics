@@ -69,9 +69,14 @@ export default function QualityTab({
   const queryClient = useQueryClient()
   const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
 
+  // Cancel only THIS tab's in-flight query on unmount. A bare ['cmcd'] prefix
+  // also matched ['cmcd', 'content-security', ...], cancelling the Content
+  // Security tab's first fetch the moment the user switched to it: a cancelled
+  // first fetch reverts to "no data, not loading", so the tab showed empty
+  // cards until its 30 s refetch.
   React.useEffect(() => {
     return () => {
-      queryClient.cancelQueries({ queryKey: ['cmcd'] })
+      queryClient.cancelQueries({ queryKey: ['cmcd', 'aggregates'] })
     }
   }, [queryClient])
 
