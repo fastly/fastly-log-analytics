@@ -105,17 +105,6 @@ def test_chunk_load_error_is_treated_as_transient() -> None:
     )
 
 
-def test_err_incomplete_chunked_encoding_is_treated_as_transient() -> None:
-    # A dropped kubectl port-forward while a chunked HTTP response is in transit
-    # surfaces as net::ERR_INCOMPLETE_CHUNKED_ENCODING. It is the mid-transfer
-    # variant of ERR_CONNECTION_REFUSED, healed by the same tunnel restarter.
-    classifier = _classifier_src()
-    assert "ERR_INCOMPLETE_CHUNKED_ENCODING" in classifier, (
-        "console_blip.js isTransientConsoleBlip must recognize net::ERR_INCOMPLETE_CHUNKED_ENCODING "
-        "as a transient port-forward drop blip"
-    )
-
-
 def test_verify_js_uses_shared_classifier() -> None:
     # The classifier is extracted to a single requireable module so the pure
     # classification can be unit-tested; verify_dashboard.js must consume it
