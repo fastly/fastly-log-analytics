@@ -126,6 +126,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 from datetime import UTC, datetime, timedelta
 
                 from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.iceberg import execute_with_stale_view_retry
                 from backend.core.iceberg._ducklake import _ducklake_attach
                 from backend.core.rollups.rum import recompute_rum_aggregates
 
@@ -163,7 +164,12 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                         pass
 
                     target_hours = list(set(recent_hours)) if recent_hours else None
-                    recompute_rum_aggregates(rum_con, service_id, hours=target_hours)
+                    execute_with_stale_view_retry(
+                        rum_con,
+                        rum_src,
+                        lambda c: recompute_rum_aggregates(c, service_id, hours=target_hours),
+                        table_name="client_vitals",
+                    )
             except Exception as agg_err:
                 logger.warning("[rum_commit] %s: RUM aggregates update failed: %s", service_id, agg_err, exc_info=True)
 
