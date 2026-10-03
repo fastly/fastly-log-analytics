@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { parseAsString, useQueryState } from 'nuqs'
-import { Activity, Check, ChevronsUpDown, Globe, KeyRound, Link2, Server, X } from 'lucide-react'
+import { Activity, Check, ChevronsUpDown, Globe, KeyRound, Link2, Server, ShieldQuestion, VenetianMask, X } from 'lucide-react'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { resolveRangeWire } from '@/lib/range-wire'
@@ -276,12 +276,17 @@ export default function SecurityTab({
     formatValue: ((value: string) => string) | undefined,
     field: string,
     requires: string,
+    capped = true,
   ) => (
     <AnalyticsCard
       title={
-        <>
-          {title} <span className="ml-1 text-xs font-normal text-muted-foreground">(Top {TOP_N})</span>
-        </>
+        capped ? (
+          <>
+            {title} <span className="ml-1 text-xs font-normal text-muted-foreground">(Top {TOP_N})</span>
+          </>
+        ) : (
+          title
+        )
       }
       icon={icon}
       {...cardState}
@@ -322,6 +327,12 @@ export default function SecurityTab({
         {topCard('Countries', <Globe className="h-4 w-4" />, data?.top_countries, 'Country', formatCountry, 'country', 'Geolocation Basic (Group D) fields to be enabled in Fastly logging.')}
         {topCard('Referers', <Link2 className="h-4 w-4" />, data?.top_referers, 'Referer', undefined, 'referer', 'the Referer field (Group A) to be enabled in Fastly logging.')}
         {topCard('Hosts', <Server className="h-4 w-4" />, data?.top_hosts, 'Host', undefined, 'host', 'the Host field (Group A) to be enabled in Fastly logging.')}
+      </div>
+
+      {/* Every proxy type / description, not a top-N: client.geo.proxy_type and proxy_description have only ~10 values each. */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {topCard('Proxy Types', <ShieldQuestion className="h-4 w-4" />, data?.proxy_types, 'Proxy type', undefined, 'p_type', 'the Proxy Type field (Group I) to be enabled in Fastly logging.', false)}
+        {topCard('Proxy Descriptions', <VenetianMask className="h-4 w-4" />, data?.proxy_descriptions, 'Proxy description', undefined, 'p_desc', 'the Proxy Description field (Group I) to be enabled in Fastly logging.', false)}
       </div>
 
       <AnalyticsCard

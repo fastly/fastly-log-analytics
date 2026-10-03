@@ -45689,6 +45689,22 @@
             "title": "Top Subscribers",
             "default": []
           },
+          "proxy_types": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Proxy Types",
+            "default": []
+          },
+          "proxy_descriptions": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Proxy Descriptions",
+            "default": []
+          },
           "subscribers_masked": {
             "type": "boolean",
             "title": "Subscribers Masked",

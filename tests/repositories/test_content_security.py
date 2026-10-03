@@ -262,3 +262,76 @@ def test_leaderboard_users_are_subscriber_ip_pairs_or_ip_alone(in_memory_duckdb,
     assert [(r["value"], r["users"], r["requests"]) for r in res["top_countries"]] == [("US", 5, 7), ("DE", 1, 1)]
     # The same definition applies to every leaderboard.
     assert res["top_hosts"] == []  # host is '' on these rows
+
+
+def _proxy_row(p_desc, ip, *, edge=True, nbytes=1000):
+    return {**_row(10, edge=edge, nbytes=nbytes), "ip": ip, "p_desc": p_desc}
+
+
+def test_proxy_descriptions_list_every_value_uncapped(in_memory_duckdb, test_service_source):
+    """Every p_desc value comes back regardless of top_n; non-proxy ('') and
+    shield lines are excluded; users/requests/bytes match the leaderboards."""
+    _ALL_COLS["p_desc"] = "VARCHAR"
+    try:
+        rows = [
+            _proxy_row("vpn", "203.0.113.1"),
+            _proxy_row("vpn", "203.0.113.1"),
+            _proxy_row("vpn", "203.0.113.2"),
+            _proxy_row("vpn", "203.0.113.3", edge=False, nbytes=500),  # shield: not counted
+            _proxy_row("tor-exit", "198.51.100.1", nbytes=4000),
+            _proxy_row("apple", "192.0.2.1", nbytes=250),
+            _proxy_row("", "192.0.2.99"),  # not a proxy
+            _proxy_row(None, "192.0.2.98"),
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call(in_memory_duckdb, test_service_source, top_n=1)
+    finally:
+        _ALL_COLS.pop("p_desc")
+
+    assert res["fields"]["p_desc"] is True
+    assert res["proxy_descriptions"] == [
+        {"value": "vpn", "users": 2, "requests": 3, "bytes": 3000},
+        {"value": "apple", "users": 1, "requests": 1, "bytes": 250},
+        {"value": "tor-exit", "users": 1, "requests": 1, "bytes": 4000},
+    ]
+    # top_n still caps the leaderboards.
+    assert len(res["top_countries"]) == 1
+
+
+def test_proxy_sections_empty_without_group_i_columns(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, _fixture_rows())
+    res = _call(in_memory_duckdb, test_service_source)
+
+    assert res["fields"]["p_type"] is False
+    assert res["proxy_types"] == []
+    assert res["fields"]["p_desc"] is False
+    assert res["proxy_descriptions"] == []
+
+
+def test_proxy_types_list_every_value_uncapped(in_memory_duckdb, test_service_source):
+    """Every p_type value comes back regardless of top_n, independently of
+    p_desc; non-proxy ('') and shield lines are excluded."""
+    _ALL_COLS["p_type"] = "VARCHAR"
+    try:
+        rows = [
+            {**_row(10), "ip": "203.0.113.1", "p_type": "hosting"},
+            {**_row(10), "ip": "203.0.113.2", "p_type": "hosting"},
+            {**_row(10, edge=False, nbytes=500), "ip": "203.0.113.3", "p_type": "hosting"},  # shield
+            {**_row(10, nbytes=3000), "ip": "198.51.100.1", "p_type": "anonymous"},
+            {**_row(10, nbytes=250), "ip": "192.0.2.1", "p_type": "corporate"},
+            {**_row(10), "ip": "192.0.2.99", "p_type": ""},  # not a proxy
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call(in_memory_duckdb, test_service_source, top_n=1)
+    finally:
+        _ALL_COLS.pop("p_type")
+
+    assert res["fields"]["p_type"] is True
+    assert res["proxy_types"] == [
+        {"value": "hosting", "users": 2, "requests": 2, "bytes": 2000},
+        {"value": "anonymous", "users": 1, "requests": 1, "bytes": 3000},
+        {"value": "corporate", "users": 1, "requests": 1, "bytes": 250},
+    ]
+    # No p_desc column on this table: its section degrades on its own.
+    assert res["fields"]["p_desc"] is False
+    assert res["proxy_descriptions"] == []

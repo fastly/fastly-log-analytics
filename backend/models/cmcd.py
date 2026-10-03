@@ -94,5 +94,8 @@ class ContentSecurityResponse(BaseResponse):
     top_referers: list[ContentSecurityTopRow] = []
     top_hosts: list[ContentSecurityTopRow] = []
     top_subscribers: list[ContentSecuritySubscriberRow] = []
+    # Every p_type / p_desc value (not capped by top_n).
+    proxy_types: list[ContentSecurityTopRow] = []
+    proxy_descriptions: list[ContentSecurityTopRow] = []
     subscribers_masked: bool = False
     bandwidth_ts: list[ContentSecurityBandwidthPoint] = []

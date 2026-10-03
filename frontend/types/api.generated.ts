@@ -7099,6 +7099,16 @@ export interface components {
              */
             top_subscribers: components["schemas"]["ContentSecuritySubscriberRow"][];
             /**
+             * Proxy Types
+             * @default []
+             */
+            proxy_types: components["schemas"]["ContentSecurityTopRow"][];
+            /**
+             * Proxy Descriptions
+             * @default []
+             */
+            proxy_descriptions: components["schemas"]["ContentSecurityTopRow"][];
+            /**
              * Subscribers Masked
              * @default false
              */

@@ -33,7 +33,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true },
+  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true, p_type: true, p_desc: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -46,6 +46,14 @@ const FULL_RESPONSE = {
   top_subscribers: [
     { subscriber_id: 'acct-shared', distinct_ips: 14, distinct_countries: 5, requests: 90, bytes: 2097152, last_seen: '2026-01-01T00:55:00+00:00' },
     { subscriber_id: 'acct-home', distinct_ips: 1, distinct_countries: 1, requests: 300, bytes: 1024, last_seen: '2026-01-01T00:40:00+00:00' },
+  ],
+  proxy_types: [
+    { value: 'hosting', users: 25, requests: 300, bytes: 524288 },
+    { value: 'anonymous', users: 4, requests: 20, bytes: 8192 },
+  ],
+  proxy_descriptions: [
+    { value: 'vpn', users: 40, requests: 500, bytes: 2097152 },
+    { value: 'tor-exit', users: 3, requests: 12, bytes: 4096 },
   ],
   subscribers_masked: false,
   bandwidth_ts: [
@@ -272,4 +280,66 @@ test('leaderboards omit Users when the backend sends none', async () => {
 
   const headers = cardByTitle('Hosts (Top 10)').getAllByRole('columnheader').map((h) => h.textContent)
   expect(headers).toEqual(['Host', 'Requests', 'Bandwidth'])
+})
+
+test('lists every proxy description with users, requests and bandwidth (no top-N cap)', async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ value: `proxy-${i}`, users: 1, requests: 12 - i, bytes: 100 }))
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, proxy_descriptions: many } } as never)
+  renderTab()
+  await screen.findByText('proxy-0')
+
+  const card = cardByTitle('Proxy Descriptions')
+  expect(card.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+    'Proxy description',
+    'Users',
+    'Requests',
+    'Bandwidth',
+  ])
+  // Header row + all 12 values, more than TOP_N.
+  expect(card.getAllByRole('row')).toHaveLength(13)
+})
+
+test('proxy description row shows its metrics', async () => {
+  renderTab()
+  await screen.findByText('vpn')
+
+  const [, vpnRow] = cardByTitle('Proxy Descriptions').getAllByRole('row')
+  expect(within(vpnRow).getAllByRole('cell').map((c) => c.textContent)).toEqual(['vpn', '40', '500', '2 MB'])
+})
+
+test('explains that Group I is required for proxy descriptions', async () => {
+  postMock.mockResolvedValue({
+    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, p_desc: false }, proxy_descriptions: [] },
+  } as never)
+  renderTab()
+
+  expect(await screen.findByText(/Proxy Description field \(Group I\)/)).toBeInTheDocument()
+})
+
+test('lists every proxy type with users, requests and bandwidth (no top-N cap)', async () => {
+  const many = Array.from({ length: 11 }, (_, i) => ({ value: `type-${i}`, users: 1, requests: 11 - i, bytes: 100 }))
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, proxy_types: many } } as never)
+  renderTab()
+  await screen.findByText('type-0')
+
+  const card = cardByTitle('Proxy Types')
+  expect(card.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+    'Proxy type',
+    'Users',
+    'Requests',
+    'Bandwidth',
+  ])
+  // Header row + all 11 values, more than TOP_N.
+  expect(card.getAllByRole('row')).toHaveLength(12)
+  const [, firstRow] = card.getAllByRole('row')
+  expect(within(firstRow).getAllByRole('cell').map((c) => c.textContent)).toEqual(['type-0', '1', '11', '100 B'])
+})
+
+test('explains that Group I is required for proxy types', async () => {
+  postMock.mockResolvedValue({
+    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, p_type: false }, proxy_types: [] },
+  } as never)
+  renderTab()
+
+  expect(await screen.findByText(/Proxy Type field \(Group I\)/)).toBeInTheDocument()
 })

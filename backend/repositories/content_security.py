@@ -1,8 +1,8 @@
 """Streaming content-security repository — who is pulling your content, and from where.
 
 Backs the Streaming → Content Security tab: top countries / referers / hosts, top subscriber ids by distinct
-client IPs (``cs_sub_id``, Streaming → Token), and edge-vs-shield bandwidth, optionally narrowed to one
-content id (``cs_content_id``, Streaming → Token → Content ID).
+client IPs (``cs_sub_id``, Streaming → Token), every proxy type / description (``p_type`` / ``p_desc``, Group I), and
+edge-vs-shield bandwidth, optionally narrowed to one content id (``cs_content_id``, Streaming → Token → Content ID).
 
 Subscriber ids are returned raw; analyst masking happens in the router, after
 this module's response cache (which is shared across roles).
@@ -40,8 +40,26 @@ _TOP_N_SECTIONS = {
     "host": "top_hosts",
 }
 
+# Uncapped breakdown column → response section. client.geo.proxy_type and
+# client.geo.proxy_description each have ~10 possible values, so listing every
+# one is cheap; "" is logged for a non-proxy IP and is excluded.
+_ALL_VALUES_SECTIONS = {
+    "p_type": "proxy_types",
+    "p_desc": "proxy_descriptions",
+}
+
 # Columns the tab can use; each is optional and its section degrades to empty.
-_OPTIONAL_COLS = ("country", "referer", "host", "resp_bytes", "edge", "cs_content_id", "ip", "cs_sub_id")
+_OPTIONAL_COLS = (
+    "country",
+    "referer",
+    "host",
+    "resp_bytes",
+    "edge",
+    "cs_content_id",
+    "ip",
+    "cs_sub_id",
+    *_ALL_VALUES_SECTIONS,
+)
 
 # Cap on the content-id picker's option list.
 _CONTENT_ID_OPTIONS_LIMIT = 100
@@ -183,6 +201,27 @@ def get_content_security(
                 GROUP BY 1
                 ORDER BY requests DESC, value
                 LIMIT {int(top_n)}
+                """
+            ).fetchall()
+            results[section] = [
+                {"value": r[0], "users": r[1], "requests": r[2], "bytes": int(r[3]) if r[3] is not None else None}
+                for r in rows
+            ]
+            timer.mark(section, _t)
+
+        # ── Every proxy type / description (no top-N cap) ───────────────
+        for col, section in _ALL_VALUES_SECTIONS.items():
+            results[section] = []
+            if not fields[col]:
+                continue
+            _t = _time.perf_counter()
+            rows = runner.execute(
+                f"""
+                SELECT "{col}" AS value, {users_agg} AS users, COUNT(*) AS requests, {bytes_agg} AS bytes
+                FROM {t}
+                WHERE {edge_where} AND "{col}" IS NOT NULL AND "{col}" != ''
+                GROUP BY 1
+                ORDER BY requests DESC, value
                 """
             ).fetchall()
             results[section] = [
