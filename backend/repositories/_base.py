@@ -5345,11 +5345,26 @@ class QueryRunner:
         field_order: list[str] = []
         _pfl = per_field_limits or {}
 
+        # Resolve the ACTUAL column types of the temp we're about to query.
+        # schema_types is derived from the durable `logs` view, but the live
+        # active-hour temp (_create_active_hour_temp_direct) reads raw buffer
+        # parquet and preserves its native types — e.g. `status` as INT32 even
+        # when the committed DuckLake schema declares it VARCHAR. Trusting
+        # schema_types applied the VARCHAR-only `!= ''` empty guard to an
+        # INT32 column, which DuckDB rejects ("Could not convert string '' to
+        # INT32"). Prefer the temp's real types; fall back to schema_types.
+        actual_types: dict[str, str] = {}
+        try:
+            for r in self.con.execute(f"DESCRIBE SELECT * FROM {table_name} LIMIT 0").fetchall():
+                actual_types[r[0]] = r[1]
+        except Exception:
+            actual_types = {}
+
         for field in fields:
             if not _is_safe_ident(field):
                 continue
             sql_col = field
-            col_type = schema_types.get(sql_col, "VARCHAR")
+            col_type = actual_types.get(sql_col) or schema_types.get(sql_col, "VARCHAR")
             field_limit = int(_pfl.get(field, limit))
 
             # Escape single quotes defensively on field names

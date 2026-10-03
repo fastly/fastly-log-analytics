@@ -484,6 +484,51 @@ class TestExecuteTopNBatchIntegerAggregation:
         assert buckets.get("0.013") == 2
 
 
+class TestExecuteTopNBatchSchemaDrift:
+    """The live active-hour temp (`_create_active_hour_temp_direct`) reads raw
+    buffer parquet, preserving its native column types — e.g. `status` as
+    INT32. The durable `logs` view that the batch's `schema_types` is derived
+    from can declare the SAME column as VARCHAR (committed DuckLake schema).
+    Trusting schema_types applied the VARCHAR-only `!= ''` empty-string guard
+    to the INT32 temp column, which DuckDB rejects: "Could not convert string
+    '' to INT32" (prod Remote-Standard 2026-10-03). The batch must branch on
+    the temp's ACTUAL column type."""
+
+    def test_numeric_column_with_varchar_schema_type_does_not_crash(self, in_memory_duckdb, test_service_source):
+        # Temp column is INT32, mirroring a fresh buffer parquet.
+        in_memory_duckdb.execute("CREATE TABLE t_drift (status INTEGER)")
+        in_memory_duckdb.execute("INSERT INTO t_drift VALUES (200), (200), (404), (500), (NULL)")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        # schema_types reflects the durable view (VARCHAR) — the drift.
+        rows, order = runner.execute_top_n_batch(
+            fields=["status"],
+            table_name="t_drift",
+            actual_cols=["status"],
+            schema_types={"status": "VARCHAR"},
+        )
+        in_memory_duckdb.execute("DROP TABLE t_drift")
+
+        assert order == ["status"]
+        buckets = {value: count for (_field, value, count) in rows}
+        # NULL excluded; integer values aggregated and rendered as strings.
+        assert buckets == {"200": 2, "404": 1, "500": 1}
+
+    def test_varchar_column_still_excludes_empty_string(self, in_memory_duckdb, test_service_source):
+        """Guard: the fix must keep excluding '' for genuinely text columns."""
+        in_memory_duckdb.execute("CREATE TABLE t_txt (country VARCHAR)")
+        in_memory_duckdb.execute("INSERT INTO t_txt VALUES ('US'), ('US'), (''), (NULL), ('CA')")
+        runner = QueryRunner(in_memory_duckdb, test_service_source)
+        rows, _ = runner.execute_top_n_batch(
+            fields=["country"],
+            table_name="t_txt",
+            actual_cols=["country"],
+            schema_types={"country": "VARCHAR"},
+        )
+        in_memory_duckdb.execute("DROP TABLE t_txt")
+        buckets = {value: count for (_field, value, count) in rows}
+        assert buckets == {"US": 2, "CA": 1}  # '' and NULL excluded
+
+
 class TestExecuteTopNBatchPerFieldLimits:
     """2026-08-03 perf bug: the dashboard bundle's per-field top-N batch
     (this method, run against the live active-hour temp — the exact `19KB
