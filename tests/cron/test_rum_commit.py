@@ -255,3 +255,42 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
     rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
 
     assert recompute_calls["n"] == 2, "recompute must retry once after the stale-lake self-heal"
+
+
+def test_rum_commit_persists_rum_freshness_into_status(monkeypatch):
+    """After a successful commit + aggregate recompute, rum_commit must persist
+    the RUM beacon count + raw MAX(timestamp) into the service status doc so the
+    request-ingest status refresh can read freshness cheaply instead of opening
+    a nested RUM-lake connection (GCE Remote-Standard freeze; AGENTS.md Trap #39).
+    """
+    from datetime import UTC, datetime
+
+    status_calls = []
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1010)
+    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **k: None)
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer", lambda src, table_name: {"files_committed": 1, "rows_committed": 5}
+    )
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: None)
+    monkeypatch.setattr("backend.core.ingest._mark_ledger_published", lambda sid, rum=False: None)
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.config.update_status", lambda sid, status: status_calls.append((sid, status)))
+
+    latest = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr("backend.core.rollups.rum.rum_count_and_latest", lambda con: (60, latest))
+
+    rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
+
+    rum_writes = [s for _, s in status_calls if "rum" in s]
+    assert rum_writes, "rum_commit must persist a 'rum' status block"
+    rum_block = rum_writes[-1]["rum"]
+    assert rum_block["total_rows"] == 60
+    assert rum_block["latest_log_at"] == latest.isoformat()

@@ -919,6 +919,66 @@ def test_refresh_config_status_writes_iceberg_and_edge_ratio_on_happy_path(monke
     assert status["schema"] == [{"name": "ip", "type": "VARCHAR"}]
 
 
+def test_refresh_config_status_reads_persisted_rum_without_nested_lake_scan(tmp_path):
+    """RUM freshness must come from the status doc persisted by rum_commit,
+    NOT a nested RUM-lake connection opened on the request-ingest cron path.
+
+    The old code opened a second ``_ConnectionHolder(rum_source)`` and ran a
+    live ``rum_count_and_latest`` DuckLake scan every refresh tick. A transient
+    DuckLake catalog stall there wedged the whole log_discovery cron (GCE
+    Remote-Standard freeze). Freshness is now persisted at RUM rollup time and
+    read cheaply here, mirroring the request side (AGENTS.md Trap #39)."""
+    from backend.core._duckdb_status import refresh_config_status
+
+    captured: dict = {}
+
+    class _StubCon:
+        def execute(self, *_a, **_k):
+            class _R:
+                def fetchone(self_inner):
+                    return None
+
+                def fetchall(self_inner):
+                    return []
+
+            return _R()
+
+        def close(self):
+            pass
+
+    live_rum = MagicMock(return_value=(0, None))
+
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={
+                "name": "svc",
+                "bucket": "b",
+                "service_id": "svc",
+                "status": {"rum": {"latest_log_at": "2026-10-01T12:00:00Z", "total_rows": 42, "last_sync_at": "S"}},
+            },
+        ),
+        patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b", "rum_enabled": True}),
+        patch(
+            "backend.config.update_status",
+            side_effect=lambda sid, status: captured.setdefault("status", status),
+        ),
+        patch("backend.core.duckdb.get_connection", return_value=_StubCon()),
+        patch("backend.core.duckdb.get_sync_status", return_value={"ingested": 0, "local_rows": 0}),
+        patch("backend.core._duckdb_status.get_schema", return_value=[]),
+        patch("backend.core._duckdb_status.update_top_values"),
+        patch("backend.core.iceberg.get_table_info", return_value={"error": "skip"}),
+        patch("backend.core.rollups.rum.rum_count_and_latest", live_rum),
+    ):
+        refresh_config_status("svc")
+
+    # The request-ingest status path must NOT run a live RUM lake scan.
+    live_rum.assert_not_called()
+    # Freshness/count come straight from the persisted rum block.
+    assert captured["status"]["rum"]["total_rows"] == 42
+    assert captured["status"]["rum"]["latest_log_at"] == "2026-10-01T12:00:00Z"
+
+
 @pytest.mark.parametrize("discovery_time", ["2026-09-08T18:00:00Z", None])
 def test_refresh_config_status_skip_top_values_omits_schema_key(discovery_time):
     """include_top_values=False MUST skip the schema SUMMARIZE
@@ -1519,35 +1579,15 @@ def test_get_sync_status_cached_dynamic_storage_mode(in_memory_duckdb, fos_sourc
 
 
 def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
-    """The RUM aggregates fast-path counts from rum_*_aggregates but
-    MUST source latest_log_at from the raw client_vitals/client_errors
-    MAX(timestamp), not MAX(bucket_start). bucket_start is
-    DATE_TRUNC('hour', timestamp) (rollups/rum.py), so keying freshness
-    on it makes RUM look up to ~59 min stale even when a beacon landed
-    seconds ago — the header then falsely reports the pipeline as
-    lagging. Mirrors the request-side event-time extent (AGENTS.md
-    Trap #39). Count stays from the aggregates (authoritative)."""
-    import duckdb as _duckdb
-
+    """RUM freshness must surface the real sub-hour event time, not the
+    hour-truncated aggregate bucket_start. The raw-vs-bucket distinction is
+    computed at RUM rollup time (rum_count_and_latest → _rum_raw_latest reads
+    raw MAX(timestamp)) and persisted into the status doc by rum_commit; this
+    test pins that refresh_config_status surfaces that persisted real timestamp
+    through to the header WITHOUT re-scanning the RUM lake (GCE Remote-Standard
+    freeze; AGENTS.md Trap #39). The raw-vs-bucket math itself is pinned by
+    tests/core/test_rum_status_freshness.py and tests/core/test_rollups_rum.py."""
     from backend.core._duckdb_status import refresh_config_status
-
-    con = _duckdb.connect(":memory:")
-    # Aggregates carry hour-truncated bucket_start (top of hour).
-    con.execute(
-        "CREATE TABLE rum_vitals_aggregates(dimension VARCHAR, value VARCHAR, event_count BIGINT, bucket_start TIMESTAMP)"
-    )
-    con.execute(
-        "INSERT INTO rum_vitals_aggregates VALUES "
-        "('total','pageviews',100, TIMESTAMP '2026-10-02 00:00:00'),"
-        "('total','interactions',50, TIMESTAMP '2026-10-02 00:00:00')"
-    )
-    con.execute("CREATE TABLE rum_error_aggregates(error_count BIGINT, bucket_start TIMESTAMP)")
-    con.execute("INSERT INTO rum_error_aggregates VALUES (5, TIMESTAMP '2026-10-02 00:00:00')")
-    # Raw tables carry the real, fresh sub-hour event time.
-    con.execute("CREATE TABLE client_vitals(req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMP)")
-    con.execute("INSERT INTO client_vitals VALUES ('r1','c1', TIMESTAMP '2026-10-02 00:45:30')")
-    con.execute("CREATE TABLE client_errors(req_id VARCHAR, cid VARCHAR, timestamp TIMESTAMP)")
-    con.execute("INSERT INTO client_errors VALUES ('r2','c2', TIMESTAMP '2026-10-02 00:30:00')")
 
     captured: dict = {}
 
@@ -1565,17 +1605,17 @@ def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
         def close(self):
             pass
 
-    class _Holder:
-        def __init__(self, *_a, **_k):
-            pass
+    # The persisted rum block carries the real sub-hour MAX(timestamp), as
+    # computed+written by rum_commit, NOT the hour-truncated bucket_start.
+    src = {
+        "name": "svc",
+        "bucket": "b",
+        "service_id": "svc",
+        "rum_enabled": True,
+        "status": {"rum": {"latest_log_at": "2026-10-02T00:45:30", "total_rows": 155, "last_sync_at": "S"}},
+    }
 
-        def __enter__(self):
-            return con
-
-        def __exit__(self, *_a):
-            return False
-
-    src = {"name": "svc", "bucket": "b", "service_id": "svc", "rum_enabled": True}
+    live_rum = MagicMock(return_value=(0, None))
 
     with (
         patch("backend.config.load_config", return_value=src),
@@ -1583,17 +1623,17 @@ def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
         patch("backend.config.update_status", side_effect=lambda sid, status: captured.setdefault("status", status)),
         patch("backend.core.duckdb.get_connection", return_value=_StubCon()),
         patch("backend.core.duckdb.get_sync_status", return_value={"ingested": 0, "local_rows": 0}),
-        patch("backend.core.duckdb.rum_source_for", return_value=src),
-        patch("backend.deps._ConnectionHolder", _Holder),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, s, fn: fn(c)),
+        patch("backend.core.rollups.rum.rum_count_and_latest", live_rum),
         patch("backend.core._duckdb_status.get_schema", return_value=[{"name": "ip", "type": "VARCHAR"}]),
         patch("backend.core._duckdb_status.update_top_values"),
         patch("backend.core._duckdb_status._cache_dir", return_value="/tmp/nonexistent-rum-fresh"),
     ):
         refresh_config_status("svc")
 
+    # No live RUM lake scan on the request-ingest status path.
+    live_rum.assert_not_called()
     rum = captured["status"]["rum"]
-    # Count is the aggregate sum (100 + 50 + 5), unchanged.
+    # Count is the persisted aggregate sum (100 + 50 + 5), unchanged.
     assert rum["total_rows"] == 155
     # Freshness is the real raw MAX(timestamp), NOT the hour-bucket.
     assert rum["latest_log_at"] is not None

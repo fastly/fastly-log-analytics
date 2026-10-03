@@ -170,6 +170,33 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                         lambda c: recompute_rum_aggregates(c, service_id, hours=target_hours),
                         table_name="client_vitals",
                     )
+
+                    # Persist RUM freshness/count into the status doc so the
+                    # request-ingest status refresh reads it cheaply instead of
+                    # opening a nested RUM-lake connection (AGENTS.md Trap #39).
+                    try:
+                        from backend.core.rollups.rum import rum_count_and_latest
+
+                        rum_cnt, rum_latest = execute_with_stale_view_retry(
+                            rum_con, rum_src, rum_count_and_latest, table_name="client_vitals"
+                        )
+                        rum_latest_iso = (
+                            rum_latest.isoformat()
+                            if isinstance(rum_latest, datetime)
+                            else (str(rum_latest) if rum_latest else None)
+                        )
+                        svcconfig.update_status(
+                            service_id,
+                            {
+                                "rum": {
+                                    "latest_log_at": rum_latest_iso,
+                                    "total_rows": int(rum_cnt or 0),
+                                    "last_sync_at": datetime.now(UTC).isoformat(),
+                                }
+                            },
+                        )
+                    except Exception as persist_err:
+                        logger.warning("[rum_commit] %s: RUM freshness persist failed: %s", service_id, persist_err)
             except Exception as agg_err:
                 logger.warning("[rum_commit] %s: RUM aggregates update failed: %s", service_id, agg_err, exc_info=True)
 

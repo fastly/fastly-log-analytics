@@ -607,29 +607,22 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         except Exception:
             pass
 
-        # RUM metrics from DuckDB RUM views
+        # RUM freshness/count is persisted by the rum_commit cron (which already
+        # attaches the RUM lake + scans it during the aggregate recompute). We
+        # read it from the status doc here instead of opening a NESTED RUM
+        # connection + live DuckLake scan on the request-ingest cron critical
+        # path — that nested scan could wedge log_discovery when the RUM catalog
+        # transiently stalled (GCE Remote-Standard freeze; AGENTS.md Trap #39).
+        # RUM data only becomes queryable after a rum_commit, so a value
+        # persisted at commit time is as fresh as the data itself.
         rum_enabled = bool(source.get("rum_enabled", False) or (source.get("rum") or {}).get("enabled", False))
         if rum_enabled:
             try:
-                import datetime
-
-                from backend.core.duckdb import rum_source_for
-                from backend.core.iceberg import execute_with_stale_view_retry
-                from backend.deps import _ConnectionHolder
-
-                rum_source = rum_source_for(source)
-                with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-                    from backend.core.rollups.rum import rum_count_and_latest
-
-                    rum_count, rum_last_dt = execute_with_stale_view_retry(rum_con, rum_source, rum_count_and_latest)
-
-                if rum_count > 0:
-                    rum_total = rum_count
-                    if rum_last_dt:
-                        if isinstance(rum_last_dt, datetime.datetime):
-                            rum_latest = rum_last_dt.isoformat()
-                        else:
-                            rum_latest = str(rum_last_dt)
+                persisted_rum = (src.get("status") or {}).get("rum") or {}
+                rum_total = persisted_rum.get("total_rows", 0) or 0
+                rum_latest = persisted_rum.get("latest_log_at")
+                if persisted_rum.get("last_sync_at"):
+                    rum_last_sync = persisted_rum.get("last_sync_at")
             except Exception:
                 pass
 
