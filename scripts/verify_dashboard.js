@@ -86,29 +86,47 @@ const { isTransientConsoleBlip } = require('./lib/console_blip');
 function failOrTolerate(browser, contextName, label, detail, transient) {
   if (transient) {
     transientErrorsSeen += 1;
-    console.warn(`⚠️ [Playwright] [${contextName}] tolerating transient self-healing blip (${transientErrorsSeen}/${TRANSIENT_ERROR_BUDGET}): ${detail}`);
+    console.warn(`${ts()} ⚠️ [Playwright] [${contextName}] tolerating transient self-healing blip (${transientErrorsSeen}/${TRANSIENT_ERROR_BUDGET}): ${detail}`);
     if (transientErrorsSeen > TRANSIENT_ERROR_BUDGET) {
-      console.error(`❌ [Playwright] [${contextName}] transient-error budget exhausted (${transientErrorsSeen} > ${TRANSIENT_ERROR_BUDGET}) — treating as persistent: ${detail}`);
+      console.error(`${ts()} ❌ [Playwright] [${contextName}] transient-error budget exhausted (${transientErrorsSeen} > ${TRANSIENT_ERROR_BUDGET}) — treating as persistent: ${detail}`);
       browser.close().then(() => process.exit(1));
     }
     return;
   }
-  console.error(`❌ [Playwright] [${contextName}] ${label}: ${detail}`);
+  console.error(`${ts()} ❌ [Playwright] [${contextName}] ${label}: ${detail}`);
   browser.close().then(() => process.exit(1));
+}
+
+// Investigating the Elevation RUM-30d port-forward blips (measured: the bound
+// pod never restarts and the healer never respawns, yet requests reset mid-flight)
+// needs wall-clock timestamps so console/network events here can be lined up
+// against the harness's port-forward stderr logs second-for-second.
+function ts() {
+  return new Date().toISOString();
 }
 
 // Helper to fail the script if any console error or failed network response occurs
 function registerErrorListeners(page, browser, contextName) {
   page.on('console', msg => {
-    console.log(`[Browser Console] [${contextName}] [${msg.type()}] ${msg.text()}`);
+    console.log(`${ts()} [Browser Console] [${contextName}] [${msg.type()}] ${msg.text()}`);
     if (msg.type() === 'error') {
       const text = msg.text();
-      console.error(`[Playwright Console Error] [${contextName}] ${text}`);
+      console.error(`${ts()} [Playwright Console Error] [${contextName}] ${text}`);
       // Only fail on critical application or API request errors, filtering out benign browser preload/favicon warnings
       if (!text.includes('preload') && !text.includes('woff2') && !text.includes('favicon') && !text.includes('React DevTools')) {
         failOrTolerate(browser, contextName, 'Failing E2E verification due to console error', `"${text}"`, isTransientConsoleBlip(text));
       }
     }
+  });
+
+  // Playwright's own request-failure event carries the exact URL and error
+  // code independent of whatever the page's console happens to log, so it is
+  // a cleaner signal for correlating which upstream (3002 frontend vs 8002
+  // backend) actually dropped. Logging only -- does not feed failOrTolerate,
+  // since the console-error listener above already owns pass/fail for these.
+  page.on('requestfailed', request => {
+    const failure = request.failure();
+    console.log(`${ts()} [Request Failed] [${contextName}] ${request.url()} :: ${failure ? failure.errorText : 'unknown error'}`);
   });
 
   page.on('response', response => {
