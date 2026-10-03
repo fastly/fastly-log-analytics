@@ -9,7 +9,10 @@
 // verifier absorbs a BOUNDED number of them (TRANSIENT_ERROR_BUDGET); the
 // positive per-section checks remain the real pass/fail arbiter.
 function isTransientConsoleBlip(text) {
-  return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION|net::ERR_FAILED/i.test(text);
+  // ChunkLoadError / "Failed to load chunk" is Next.js surfacing the SAME dropped
+  // kubectl port-forward that produces ERR_CONNECTION_REFUSED on the chunk fetch;
+  // the healer re-establishes the tunnel within seconds, so it is the same blip.
+  return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION|net::ERR_FAILED|ChunkLoadError|Failed to load chunk/i.test(text);
 }
 
 module.exports = { isTransientConsoleBlip };

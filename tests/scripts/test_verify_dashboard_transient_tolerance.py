@@ -91,6 +91,20 @@ def test_err_failed_is_treated_as_transient() -> None:
     )
 
 
+def test_chunk_load_error_is_treated_as_transient() -> None:
+    # A dropped kubectl port-forward refuses the chunk fetch; Next.js surfaces
+    # that identical network failure as a ChunkLoadError, which the healer's
+    # tunnel re-establish resolves within seconds. It is the same self-healing
+    # class as ERR_CONNECTION_REFUSED (its direct cause), so it must get the same
+    # bounded tolerance instead of instant-failing the whole env.
+    classifier = _classifier_src()
+    assert "ChunkLoadError" in classifier or "Failed to load chunk" in classifier, (
+        "console_blip.js isTransientConsoleBlip must recognize ChunkLoadError / "
+        "'Failed to load chunk' as the same transient port-forward blip as "
+        "ERR_CONNECTION_REFUSED (its direct cause)"
+    )
+
+
 def test_verify_js_uses_shared_classifier() -> None:
     # The classifier is extracted to a single requireable module so the pure
     # classification can be unit-tested; verify_dashboard.js must consume it
