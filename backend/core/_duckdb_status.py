@@ -354,6 +354,26 @@ def get_sync_status(
                 local_rows = view_rows
                 earliest_log_at = stats[1]
                 latest_log_at = stats[2]
+                # A skip_view_update status connection can hold a stale-but-
+                # NON-EMPTY baked view (or a retention-trimmed local data
+                # mirror) whose max(timestamp) lags the committed lake — the
+                # GCE header flap that read an 11-day-old latest while the lake
+                # committed fresh rows every few minutes (trap #33/#35). The
+                # empty-view self-heal below never fires here because view_rows
+                # > 0. The committed DuckLake table is the latest snapshot by
+                # construction, so reconcile the extents against it: never
+                # report a latest older, or an earliest newer, than it holds.
+                # Timestamp-only — the view's non-zero count stays the row
+                # source of truth, and the lake min/max are catalog-stat reads
+                # (no parquet-footer scan), so the split-stats fast path's
+                # perf win is preserved.
+                direct = _authoritative_direct_stats(con, src)
+                if direct is not None:
+                    d_earliest, d_latest = direct[1], direct[2]
+                    if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
+                        latest_log_at = d_latest
+                    if d_earliest is not None and (earliest_log_at is None or d_earliest < earliest_log_at):
+                        earliest_log_at = d_earliest
             else:
                 # Transient empty view (catalog mid-rebuild / "WHERE false").
                 # Before preserving a possibly-ancient prior, read the

@@ -809,6 +809,85 @@ def test_get_sync_status_empty_view_reads_authoritative_lake_over_stale_prior(in
     assert out["earliest_log_at"] == safe_iso(fresh_min)
 
 
+def test_get_sync_status_nonempty_stale_view_reconciles_against_authoritative_lake(in_memory_duckdb, fos_source):
+    """A skip_view_update status connection can hold a stale-but-NON-EMPTY
+    baked view (or a retention-trimmed local data mirror) whose max(timestamp)
+    lags the committed lake. The empty-view self-heal never fires here because
+    view_rows > 0, so the header flapped to an 11-day-old latest while the
+    DuckLake table was committing fresh rows every few minutes — the measured
+    GCE Remote-Standard header flap. The committed lake table is the latest
+    snapshot by construction, so get_sync_status must reconcile the extents
+    against it: never report a latest older (or an earliest newer) than the
+    authoritative lake holds. Row count stays the view's own non-zero value.
+    Pinned: trap #33/#35."""
+    from datetime import datetime
+
+    from backend.core._duckdb_status import get_sync_status
+    from backend.utils.date_utils import safe_iso
+
+    stale_max = datetime(2026, 9, 22, 0, 58, 6)
+    stale_min = datetime(2026, 6, 27, 0, 0, 0)
+    fresh_max = datetime(2026, 10, 2, 20, 31, 27)
+    fresh_min = datetime(2026, 6, 20, 0, 0, 0)
+
+    real_execute = in_memory_duckdb.execute
+
+    def _patched_execute(sql, *args, **kwargs):
+        # Lake existence probe → the lake table exists.
+        if "duckdb_tables()" in sql and "database_name = 'lake'" in sql:
+
+            class _RExists:
+                def fetchone(self_inner):
+                    return (1,)
+
+            return _RExists()
+        # Direct read of the committed lake table → FRESH authoritative stats.
+        if 'FROM lake."' in sql and "count(*)" in sql:
+
+            class _RFresh:
+                def fetchone(self_inner):
+                    return (600, fresh_min, fresh_max)
+
+            return _RFresh()
+        # The baked-view stats query → STALE but NON-ZERO count.
+        if "count(*)" in sql and "min(timestamp)" in sql and "max(timestamp)" in sql:
+
+            class _RStale:
+                def fetchone(self_inner):
+                    return (500, stale_min, stale_max)
+
+            return _RStale()
+        return real_execute(sql, *args, **kwargs)
+
+    class _ConProxy:
+        def execute(self, sql, *args, **kwargs):
+            return _patched_execute(sql, *args, **kwargs)
+
+    summary = {
+        "file_count": 1,
+        "total_rows": 100,
+        "total_bytes": 100,
+        "count_with_bytes": 1,
+        "last_ingested": "2026-10-02T20:31:00",
+        "latest_file_name": "raw/2026-10-02T20:31:00.gz",
+    }
+
+    with (
+        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.config.get_status", return_value=None),
+        patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
+        patch("backend.core.iceberg.buffer_files", return_value=[]),
+    ):
+        out = get_sync_status(_ConProxy(), fos_source, force=True)
+
+    # Row count stays the view's non-zero value — only the extents reconcile.
+    assert out["local_rows"] == 500
+    # The authoritative lake max wins over the stale baked-view max.
+    assert out["latest_log_at"] == safe_iso(fresh_max)
+    # The authoritative (older) lake min widens the earliest extent.
+    assert out["earliest_log_at"] == safe_iso(fresh_min)
+
+
 # ── refresh_config_status remaining branches ─────────────────────────
 
 
