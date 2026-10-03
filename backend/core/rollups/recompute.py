@@ -750,9 +750,8 @@ def _run_per_field_copy(
     PARTITION_BY (field, hour), then publishing each hour-dir under the
     per-service iceberg lock.
     """
-    import duckdb
-
     from backend.core.duckdb import _cache_dir, get_connection
+    from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
 
     cache_root = _cache_dir(source)
@@ -795,8 +794,8 @@ def _run_per_field_copy(
                 "(FORMAT PARQUET, PARTITION_BY (field, hour), OVERWRITE_OR_IGNORE, COMPRESSION ZSTD)"
             )
             try:
-                con.execute(query)
-            except duckdb.Error as e:
+                execute_with_stale_view_retry(con, source, lambda c: c.execute(query))
+            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
                 logger.warning("[rollups] %s: COPY failed for field=%s: %s", service_id, field, e)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue

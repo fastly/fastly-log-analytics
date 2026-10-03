@@ -232,6 +232,76 @@ def test_run_per_field_copy_copy_failure_cleans_tmp_and_continues(tmp_path):
     assert any((cache_root / "rollups" / "hour" / "field=country").glob("hour=*/compacted_*.parquet"))
 
 
+def test_run_per_field_copy_self_heals_stale_view_on_copy(tmp_path):
+    """A transient DuckLake ``schema "lake" does not exist`` (Trap #35) on
+    the per-field COPY must self-heal via ``execute_with_stale_view_retry``
+    and still publish the field — not warn + skip it. Mirrors the
+    ip_spread SELECT self-heal so a cold-start lake detach race (every
+    field's COPY failing in one burst when a concurrent DETACH rips
+    ``lake`` out mid-loop) doesn't drop the rollup or flood the deploy
+    log-error gate with Catalog Errors."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-copy-heal"}
+    _, hour_dt = _past_hour(2)
+    table = "logs_svc_copy_heal"
+    real = _make_table_with_rows(table, hour_dt, [("1.1.1.1", "US"), ("2.2.2.2", "JP")])
+    where_sql = (
+        f"timestamp >= '{(hour_dt - timedelta(minutes=1)).isoformat()}' "
+        f"AND timestamp < '{(hour_dt + timedelta(hours=1)).isoformat()}'"
+    )
+
+    class _FlakyCopyCon:
+        """Delegates to a real con but fails the FIRST COPY with a
+        lake-detach Catalog Error, succeeding on retry."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._failed_once = False
+
+        def execute(self, sql, *a, **k):
+            if "COPY" in sql and not self._failed_once:
+                self._failed_once = True
+                raise duckdb.CatalogException(
+                    'Catalog Error: Table with name "lake.logs_svc_copy_heal" '
+                    'does not exist because schema "lake" does not exist.'
+                )
+            return self._inner.execute(sql, *a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    con = _FlakyCopyCon(real)
+
+    def _retry_double(c, _src, fn):
+        from backend.core.iceberg import is_stale_view_error
+
+        try:
+            return fn(c)
+        except Exception as e:  # noqa: BLE001
+            if not is_stale_view_error(e):
+                raise
+            return fn(c)
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.duckdb.get_connection", return_value=con),
+        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.iceberg.execute_with_stale_view_retry",
+            side_effect=_retry_double,
+        ),
+    ):
+        recompute._run_per_field_copy("svc-copy-heal", src, table, where_sql, ["ip"])
+
+    # The field published despite the first COPY's transient lake error.
+    field_dir = cache_root / "rollups" / "hour" / "field=ip"
+    assert field_dir.exists()
+    assert list(field_dir.glob("hour=*/compacted_*.parquet"))
+
+
 # ── _run_ip_spread_per_field ────────────────────────────────────────────────
 
 
