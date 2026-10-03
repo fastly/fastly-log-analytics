@@ -11,8 +11,9 @@
 function isTransientConsoleBlip(text) {
   // ChunkLoadError / "Failed to load chunk" is Next.js surfacing the SAME dropped
   // kubectl port-forward that produces ERR_CONNECTION_REFUSED on the chunk fetch;
-  // the healer re-establishes the tunnel within seconds, so it is the same blip.
-  return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION|net::ERR_FAILED|ChunkLoadError|Failed to load chunk/i.test(text);
+  // similarly, mid-transfer tunnel drops surface as net::ERR_INCOMPLETE_CHUNKED_ENCODING.
+  // The healer re-establishes the tunnel within seconds, so it is the same blip.
+  return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION|net::ERR_FAILED|ChunkLoadError|Failed to load chunk|ERR_INCOMPLETE_CHUNKED_ENCODING/i.test(text);
 }
 
 module.exports = { isTransientConsoleBlip };
