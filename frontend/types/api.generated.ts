@@ -7128,6 +7128,8 @@ export interface components {
         ContentSecurityTopRow: {
             /** Value */
             value: string;
+            /** Users */
+            users?: number | null;
             /** Requests */
             requests: number;
             /** Bytes */

@@ -83,15 +83,15 @@ def test_leaderboards_count_edge_lines_only(in_memory_duckdb, test_service_sourc
     assert res["available"] is True
     # The shield line (edge=False) is the same client request seen twice — not counted.
     assert res["top_countries"] == [
-        {"value": "US", "requests": 3, "bytes": 3000},
-        {"value": "DE", "requests": 2, "bytes": 4000},
+        {"value": "US", "users": 1, "requests": 3, "bytes": 3000},
+        {"value": "DE", "users": 1, "requests": 2, "bytes": 4000},
     ]
     assert res["top_hosts"] == [
-        {"value": "pirate.example", "requests": 3, "bytes": 3000},
-        {"value": "player.example", "requests": 2, "bytes": 4000},
+        {"value": "pirate.example", "users": 1, "requests": 3, "bytes": 3000},
+        {"value": "player.example", "users": 1, "requests": 2, "bytes": 4000},
     ]
     # Empty referers are excluded rather than reported as a blank row.
-    assert res["top_referers"] == [{"value": "https://pirate.example/watch", "requests": 3, "bytes": 3000}]
+    assert res["top_referers"] == [{"value": "https://pirate.example/watch", "users": 1, "requests": 3, "bytes": 3000}]
 
 
 def test_bandwidth_splits_edge_and_shield(in_memory_duckdb, test_service_source):
@@ -111,7 +111,7 @@ def test_content_id_narrows_metrics_but_not_picker(in_memory_duckdb, test_servic
     res = _call(in_memory_duckdb, test_service_source, content_id="movie-2")
 
     assert res["content_id"] == "movie-2"
-    assert res["top_countries"] == [{"value": "DE", "requests": 2, "bytes": 4000}]
+    assert res["top_countries"] == [{"value": "DE", "users": 1, "requests": 2, "bytes": 4000}]
     assert res["top_referers"] == []
     assert sum(p["edge_bytes"] for p in res["bandwidth_ts"]) == 4000
     # The picker always lists every content id so the user can switch.
@@ -153,7 +153,7 @@ def test_missing_optional_columns_degrade(in_memory_duckdb, test_service_source)
     assert res["top_hosts"] == []
     assert res["content_ids"] == []
     # Without the edge flag every line counts, shield included, and there is no split.
-    assert res["top_countries"][0] == {"value": "US", "requests": 4, "bytes": 3500}
+    assert res["top_countries"][0] == {"value": "US", "users": 1, "requests": 4, "bytes": 3500}
     assert res["has_shield_split"] is False
     assert all(p["shield_bytes"] is None for p in res["bandwidth_ts"])
 
@@ -232,3 +232,33 @@ def test_top_subscribers_empty_without_token_column(in_memory_duckdb, test_servi
 
     assert res["fields"]["cs_sub_id"] is False
     assert res["top_subscribers"] == []
+
+
+def test_leaderboard_users_are_subscriber_ip_pairs_or_ip_alone(in_memory_duckdb, test_service_source):
+    """Users = distinct (subscriber id, IP) pairs; a request without a
+    subscriber id counts by its IP alone."""
+    _ALL_COLS["cs_sub_id"] = "VARCHAR"
+    try:
+        rows = [
+            # US: acct-a on two IPs = 2 users; acct-b on the first IP = 1 more.
+            _sub_row("acct-a", "203.0.113.1"),
+            _sub_row("acct-a", "203.0.113.1"),
+            _sub_row("acct-a", "203.0.113.2"),
+            _sub_row("acct-b", "203.0.113.1"),
+            # No subscriber id: one user per IP (NULL and '' are the same "none").
+            _sub_row("", "198.51.100.9"),
+            _sub_row(None, "198.51.100.9"),
+            _sub_row("", "198.51.100.10"),
+            # Shield line is the same request seen twice — not a user.
+            _sub_row("acct-c", "192.0.2.50", edge=False),
+            # DE: one subscriber, one IP.
+            _sub_row("acct-d", "192.0.2.7", country="DE"),
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call(in_memory_duckdb, test_service_source)
+    finally:
+        _ALL_COLS.pop("cs_sub_id")
+
+    assert [(r["value"], r["users"], r["requests"]) for r in res["top_countries"]] == [("US", 5, 7), ("DE", 1, 1)]
+    # The same definition applies to every leaderboard.
+    assert res["top_hosts"] == []  # host is '' on these rows

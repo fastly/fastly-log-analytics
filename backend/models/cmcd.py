@@ -57,6 +57,8 @@ class ContentSecurityRequest(FilteredRequest):
 
 class ContentSecurityTopRow(BaseModel):
     value: str
+    # Distinct (subscriber id, IP) pairs; IP alone for requests without one.
+    users: int | None = None
     requests: int
     bytes: int | None = None
 

@@ -45771,6 +45771,17 @@
             "type": "string",
             "title": "Value"
           },
+          "users": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Users"
+          },
           "requests": {
             "type": "integer",
             "title": "Requests"

@@ -159,6 +159,15 @@ def get_content_security(
             }
 
         bytes_agg = "SUM(resp_bytes)" if has_bytes else "NULL"
+        # Users = distinct (subscriber id, client IP) pairs; a request with no
+        # subscriber id counts by its IP alone. Without the token column every
+        # request is the IP-only case.
+        if fields["ip"] and fields["cs_sub_id"]:
+            users_agg = "COUNT(DISTINCT (COALESCE(NULLIF(cs_sub_id, ''), ''), ip))"
+        elif fields["ip"]:
+            users_agg = "COUNT(DISTINCT ip)"
+        else:
+            users_agg = "NULL"
 
         # ── Leaderboards ──────────────────────────────────────────────────
         for col, section in _TOP_N_SECTIONS.items():
@@ -168,7 +177,7 @@ def get_content_security(
             _t = _time.perf_counter()
             rows = runner.execute(
                 f"""
-                SELECT "{col}" AS value, COUNT(*) AS requests, {bytes_agg} AS bytes
+                SELECT "{col}" AS value, {users_agg} AS users, COUNT(*) AS requests, {bytes_agg} AS bytes
                 FROM {t}
                 WHERE {edge_where} AND "{col}" IS NOT NULL AND "{col}" != ''
                 GROUP BY 1
@@ -177,7 +186,8 @@ def get_content_security(
                 """
             ).fetchall()
             results[section] = [
-                {"value": r[0], "requests": r[1], "bytes": int(r[2]) if r[2] is not None else None} for r in rows
+                {"value": r[0], "users": r[1], "requests": r[2], "bytes": int(r[3]) if r[3] is not None else None}
+                for r in rows
             ]
             timer.mark(section, _t)
 

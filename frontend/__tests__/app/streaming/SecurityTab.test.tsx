@@ -40,9 +40,9 @@ const FULL_RESPONSE = {
     { content_id: 'movie-1', requests: 3 },
     { content_id: 'movie-2', requests: 2 },
   ],
-  top_countries: [{ value: 'US', requests: 3, bytes: 3072 }],
-  top_referers: [{ value: 'https://pirate.example/watch', requests: 3, bytes: 3072 }],
-  top_hosts: [{ value: 'pirate.example', requests: 1234, bytes: 1048576 }],
+  top_countries: [{ value: 'US', users: 2, requests: 3, bytes: 3072 }],
+  top_referers: [{ value: 'https://pirate.example/watch', users: 2, requests: 3, bytes: 3072 }],
+  top_hosts: [{ value: 'pirate.example', users: 987, requests: 1234, bytes: 1048576 }],
   top_subscribers: [
     { subscriber_id: 'acct-shared', distinct_ips: 14, distinct_countries: 5, requests: 90, bytes: 2097152, last_seen: '2026-01-01T00:55:00+00:00' },
     { subscriber_id: 'acct-home', distinct_ips: 1, distinct_countries: 1, requests: 300, bytes: 1024, last_seen: '2026-01-01T00:40:00+00:00' },
@@ -235,4 +235,41 @@ test('explains that the Token option is required for the subscriber list', async
 
   expect(await screen.findByText(/Streaming → Token option \(Subscriber ID\)/)).toBeInTheDocument()
   expect(screen.queryByText('acct-shared')).not.toBeInTheDocument()
+})
+
+function cardByTitle(title: string) {
+  const el = screen.getByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === title)
+  return within(el.closest('[data-slot="card"]') as HTMLElement)
+}
+
+test('leaderboards show Users as the first metric', async () => {
+  renderTab()
+  await screen.findByText('pirate.example')
+
+  for (const [title, valueHeader] of [
+    ['Countries (Top 10)', 'Country'],
+    ['Referers (Top 10)', 'Referer'],
+    ['Hosts (Top 10)', 'Host'],
+  ]) {
+    const headers = cardByTitle(title).getAllByRole('columnheader').map((h) => h.textContent)
+    expect(headers).toEqual([valueHeader, 'Users', 'Requests', 'Bandwidth'])
+  }
+  const [, hostRow] = cardByTitle('Hosts (Top 10)').getAllByRole('row')
+  expect(within(hostRow).getAllByRole('cell').map((c) => c.textContent)).toEqual([
+    'pirate.example',
+    '987',
+    '1,234',
+    '1 MB',
+  ])
+})
+
+test('leaderboards omit Users when the backend sends none', async () => {
+  postMock.mockResolvedValue({
+    data: { ...FULL_RESPONSE, top_hosts: [{ value: 'pirate.example', requests: 1234, bytes: 1048576 }] },
+  } as never)
+  renderTab()
+  await screen.findByText('pirate.example')
+
+  const headers = cardByTitle('Hosts (Top 10)').getAllByRole('columnheader').map((h) => h.textContent)
+  expect(headers).toEqual(['Host', 'Requests', 'Bandwidth'])
 })

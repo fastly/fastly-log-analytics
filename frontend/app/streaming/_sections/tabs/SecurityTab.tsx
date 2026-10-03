@@ -95,11 +95,14 @@ function TopTable({
   valueHeader: string
   formatValue?: (value: string) => string
 }) {
+  // Users = distinct (subscriber id, IP) pairs, IP alone without a subscriber id.
+  const showUsers = rows.some((r) => r.users != null)
   return (
     <Table>
       <TableHeader>
         <TableRow>
           <TableHead>{valueHeader}</TableHead>
+          {showUsers && <TableHead className="text-right">Users</TableHead>}
           <TableHead className="text-right">Requests</TableHead>
           <TableHead className="text-right">Bandwidth</TableHead>
         </TableRow>
@@ -110,6 +113,9 @@ function TopTable({
             <TableCell className="max-w-[16rem] truncate" title={row.value}>
               {formatValue(row.value)}
             </TableCell>
+            {showUsers && (
+              <TableCell className="text-right tabular-nums font-medium">{row.users?.toLocaleString() ?? '—'}</TableCell>
+            )}
             <TableCell className="text-right tabular-nums">{row.requests.toLocaleString()}</TableCell>
             <TableCell className="text-right tabular-nums">{row.bytes == null ? '—' : formatBytes(row.bytes)}</TableCell>
           </TableRow>
