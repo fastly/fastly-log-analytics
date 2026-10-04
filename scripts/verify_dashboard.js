@@ -105,6 +105,27 @@ function ts() {
   return new Date().toISOString();
 }
 
+// Whether a URL is a data/API path whose failure is a real correctness defect,
+// versus a static, content-hashed asset (JS/CSS chunk, font, image, svg) whose
+// failure is cosmetic -- a dropped font byte proves nothing about whether the
+// page's data is correct. Both the response and requestfailed listeners below
+// key fatality off of this, not off of guessing from console text.
+function isCriticalResourceUrl(url) {
+  return url.includes('/api/') || url.includes('/_next/data/');
+}
+
+// Chrome logs this exact generic line to the console for EVERY failed resource
+// load, API or decorative asset alike, and critically it never includes the
+// URL or filename -- so text-based filtering (the previous approach: skip if
+// the string contains "woff2", "favicon", etc.) silently fails the instant the
+// resource is referenced by a content hash instead of a recognizable name
+// (measured 2026-10-04: a `/_next/static/media/<hash>.woff2` font reset killed
+// an otherwise fully-passing Elevation run on exactly this gap). The
+// requestfailed/response listeners already classify by the actual request URL,
+// so this redundant, URL-blind echo is ignored here entirely; it is not a new
+// source of truth, just a duplicate of what those two already decide correctly.
+const GENERIC_RESOURCE_FAILURE_RE = /^Failed to load resource:/;
+
 // Helper to fail the script if any console error or failed network response occurs
 function registerErrorListeners(page, browser, contextName) {
   page.on('console', msg => {
@@ -112,8 +133,11 @@ function registerErrorListeners(page, browser, contextName) {
     if (msg.type() === 'error') {
       const text = msg.text();
       console.error(`${ts()} [Playwright Console Error] [${contextName}] ${text}`);
+      if (GENERIC_RESOURCE_FAILURE_RE.test(text)) {
+        return;
+      }
       // Only fail on critical application or API request errors, filtering out benign browser preload/favicon warnings
-      if (!text.includes('preload') && !text.includes('woff2') && !text.includes('favicon') && !text.includes('React DevTools')) {
+      if (!text.includes('preload') && !text.includes('favicon') && !text.includes('React DevTools')) {
         failOrTolerate(browser, contextName, 'Failing E2E verification due to console error', `"${text}"`, isTransientConsoleBlip(text));
       }
     }
@@ -121,12 +145,17 @@ function registerErrorListeners(page, browser, contextName) {
 
   // Playwright's own request-failure event carries the exact URL and error
   // code independent of whatever the page's console happens to log, so it is
-  // a cleaner signal for correlating which upstream (3002 frontend vs 8002
-  // backend) actually dropped. Logging only -- does not feed failOrTolerate,
-  // since the console-error listener above already owns pass/fail for these.
+  // the correct signal for a connection-level failure (ERR_CONNECTION_RESET
+  // etc.) that never reaches the 'response' listener below at all. Classified
+  // the same way as 'response': only a critical (data/API) URL can fail the
+  // run; a static asset reset is logged but never fatal.
   page.on('requestfailed', request => {
     const failure = request.failure();
-    console.log(`${ts()} [Request Failed] [${contextName}] ${request.url()} :: ${failure ? failure.errorText : 'unknown error'}`);
+    const errorText = failure ? failure.errorText : 'unknown error';
+    console.log(`${ts()} [Request Failed] [${contextName}] ${request.url()} :: ${errorText}`);
+    if (isCriticalResourceUrl(request.url())) {
+      failOrTolerate(browser, contextName, 'Failed API request', `${request.url()} :: ${errorText}`, isTransientConsoleBlip(errorText));
+    }
   });
 
   page.on('response', response => {
@@ -135,7 +164,7 @@ function registerErrorListeners(page, browser, contextName) {
     // Fail on any API response that returns 4xx or 5xx — except a 503, which is
     // the documented self-healing cold-start/rollout window (Trap #35) and is
     // absorbed under the bounded transient budget.
-    if (status >= 400 && (url.includes('/api/') || url.includes('/_next/data/'))) {
+    if (status >= 400 && isCriticalResourceUrl(url)) {
       failOrTolerate(browser, contextName, 'Failed API call', `${url} returned status ${status}`, status === 503);
     }
   });
