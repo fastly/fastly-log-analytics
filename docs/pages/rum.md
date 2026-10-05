@@ -151,7 +151,9 @@ selected real-data window.
 
 ## 10. Automated Test Suite & Traffic Generation
 
-- **Playwright Test:** `frontend/e2e/pages/rum.spec.ts` (Pending implementation).
+- **Browser verification:** `scripts/verify_dashboard.js` requires finite plotted
+  measurements for the RUM trend charts and is covered by
+  `tests/scripts/test_verify_dashboard_rum_charts.py`.
 - **Synthetic Traffic Profile:** Simulated browser beacons with varied LCP (1.2s to 4.5s) and simulated JS errors.
 
 ### Native producer regression gate

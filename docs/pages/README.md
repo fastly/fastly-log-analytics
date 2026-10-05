@@ -62,7 +62,7 @@ docs/pages/
 | `/insights` | [Insights](insights.md) | 45 automated anomaly detectors across 5 category tabs | **Scaffolded (Pending AI Verification)** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Scaffolded (Pending AI Verification)** |
 | `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Scaffolded (Pending AI Verification)** |
-| `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Scaffolded (Pending AI Verification)** |
+| `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Session graph, threat scoring, suspicious session inspection | **Scaffolded (Pending AI Verification)** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | Real-time session transitions, score escalation alerts | **Scaffolded (Pending AI Verification)** |
 | `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Scaffolded (Pending AI Verification)** |
