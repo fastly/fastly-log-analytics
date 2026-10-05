@@ -7,7 +7,9 @@ exercise the multi-pod Celery/valkey ingest split on Kubernetes.
 ## Two topologies
 
 Optional admin client-mTLS is configured through `adminGateway.enabled`,
-`adminGateway.existingSecret` and `adminGateway.host`; its separate companion
+`adminGateway.existingSecret`, `adminGateway.host` and the required
+`adminGateway.image` (built from `deploy/admin-gateway/Dockerfile`, used by
+the public header-sanitizing proxy); its separate companion
 release and certificate lifecycle are documented in
 [admin-gateway/README.md](../admin-gateway/README.md).
 The public Ingress uses a credential-stripping proxy when this option is on.

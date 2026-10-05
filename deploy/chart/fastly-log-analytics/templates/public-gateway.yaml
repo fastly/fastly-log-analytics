@@ -63,7 +63,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: caddy:2.11.4-alpine
+          image: {{ required "adminGateway.image is required: build deploy/admin-gateway/Dockerfile (upstream caddy cannot exec with all capabilities dropped)" .Values.adminGateway.image | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -95,9 +95,11 @@ spec:
           configMap:
             name: {{ include "fastly-log-analytics.fullname" . }}-public-gateway
         - name: data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
         - name: runtime-config
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service

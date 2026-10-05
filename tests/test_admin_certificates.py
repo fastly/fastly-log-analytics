@@ -378,3 +378,124 @@ def test_stdlib_diagnostic_transport_verifies_real_server_and_client_tls(pki, mo
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+IMAGE_CONTEXT = ROOT / "deploy/admin-gateway"
+# Mirrors docker-compose.admin-mtls.yml and the chart's container securityContext.
+HARDENING = ("--user", "1000:1000", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true")
+
+
+def _docker(*args: str, env=None, stdin: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(["docker", *args], input=stdin, env=env, capture_output=True, timeout=300)
+    assert not check or result.returncode == 0, result.stderr.decode(errors="replace")
+    return result
+
+
+@pytest.fixture(scope="module")
+def gateway_image():
+    if not shutil.which("docker") or _docker("info", check=False).returncode != 0:
+        if os.getenv("ADMIN_MTLS_TEST_REQUIRED") == "1":
+            pytest.fail("Missing validation tool: running docker daemon (start it explicitly)")
+        pytest.skip("Docker daemon unavailable; scripts/validate_admin_gateway.sh requires it")
+    tag = f"fla-admin-gateway-test:{os.getpid()}"
+    _docker("build", "-q", "-t", tag, str(IMAGE_CONTEXT))
+    try:
+        yield tag
+    finally:
+        _docker("rmi", "-f", tag, check=False)
+
+
+def test_upstream_caddy_filecap_cannot_exec_with_all_capabilities_dropped(gateway_image):
+    # Root-cause pin: the official binary's cap_net_bind_service file capability
+    # is outside the empty bounding set, so the kernel refuses exec outright.
+    upstream = _docker("run", "--rm", *HARDENING, "caddy:2.11.4-alpine", "caddy", "version", check=False)
+    assert upstream.returncode != 0
+    assert b"operation not permitted" in upstream.stderr + upstream.stdout
+    stripped = _docker("run", "--rm", *HARDENING, gateway_image, "caddy", "version")
+    assert stripped.stdout.startswith(b"v2.11.4")
+
+
+@pytest.fixture(scope="module")
+def container_gateway(pki, gateway_image):
+    # Stream bundle + shared Caddyfile into a tmpfs instead of bind-mounting, so
+    # the test does not depend on which host paths the Docker VM shares.
+    staging = pki["temp"] / "image-input"
+    staging.mkdir(mode=0o700)
+    (staging / "Caddyfile").write_bytes(CONFIG.read_bytes())
+    for name in ("server.crt", "server.key", "client-ca.crt"):
+        shutil.copyfile(pki["bundle"] / name, staging / name)
+    archive = subprocess.run(["tar", "-c", "-f", "-", "-C", str(staging), "."], capture_output=True, check=True).stdout
+    shutil.rmtree(staging)
+    env = {**os.environ, "ADMIN_GATEWAY_SECRET": (pki["state"] / "gateway-secret").read_text()}
+    name = f"fla-admin-gateway-test-{os.getpid()}"
+    tmpfs = "mode=0700,uid=1000,gid=1000"
+    process = subprocess.Popen(
+        [
+            "docker",
+            "run",
+            "-i",
+            "--name",
+            name,
+            *HARDENING,
+            "--tmpfs",
+            f"/certs:{tmpfs}",
+            "--tmpfs",
+            f"/data:{tmpfs}",
+            "--tmpfs",
+            f"/config:{tmpfs}",
+            "-p",
+            "127.0.0.1::8443",
+            "-e",
+            "ADMIN_GATEWAY_HOST=admin.localhost",
+            "-e",
+            "ADMIN_GATEWAY_BIND=0.0.0.0",
+            "-e",
+            "ADMIN_GATEWAY_PORT=8443",
+            "-e",
+            "ADMIN_GATEWAY_SECRET",
+            "-e",
+            "ADMIN_GATEWAY_FRONTEND=127.0.0.1:9",
+            "-e",
+            "ADMIN_GATEWAY_BACKEND=127.0.0.1:9",
+            "--entrypoint",
+            "sh",
+            gateway_image,
+            "-c",
+            "tar -x -f - -C /certs && exec caddy run --config /certs/Caddyfile --adapter caddyfile",
+        ],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        process.stdin.write(archive)
+        process.stdin.close()
+        deadline = time.monotonic() + 30
+        while _docker("port", name, "8443/tcp", check=False).returncode != 0:
+            assert process.poll() is None and time.monotonic() < deadline, "gateway container exited"
+            time.sleep(0.2)
+        port = int(_docker("port", name, "8443/tcp").stdout.decode().strip().rsplit(":", 1)[1])
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            assert process.poll() is None, _docker("logs", name, check=False).stderr.decode(errors="replace")
+            if b"serving initial configuration" in _docker("logs", name).stderr:
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("containerised gateway readiness timed out")
+        yield port, env
+    finally:
+        logs = _docker("logs", name, check=False)
+        _docker("rm", "-f", name, check=False)
+        process.wait(timeout=30)
+        assert env["ADMIN_GATEWAY_SECRET"].encode() not in logs.stdout + logs.stderr
+
+
+def test_hardened_container_enforces_client_mtls(pki, container_gateway):
+    with pytest.raises((ssl.SSLError, ConnectionResetError)):
+        tls_request(pki, container_gateway)
+    response = tls_request(pki, container_gateway, pki["client"] / "client.crt", pki["client"] / "operator.key")
+    # Unreachable upstream: a 502 proves TLS + client auth succeeded in-container.
+    assert response.startswith(b"HTTP/1.1 502")
+    assert b"forged" not in response

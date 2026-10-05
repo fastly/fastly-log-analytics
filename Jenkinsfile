@@ -2,8 +2,11 @@
 
 @Library('pipeline@v2-stable') _
 
-// Builds and pushes the backend + frontend images for this repo's k8s
-// deployment. Only two images exist: worker/beat/metadata-schema-init all
+// Builds and pushes the backend + frontend + admin-gateway images for this
+// repo's k8s deployment. The admin-gateway image (deploy/admin-gateway) is
+// the client-mTLS admin entrypoint; cluster admission only admits images from
+// the internal registry, so it is published here rather than pulled upstream.
+// App images: worker/beat/metadata-schema-init all
 // reuse the backend image with a different `command` (see
 // docker-compose.multipod.yml and the tracked chart's worker-/
 // beat-deployment.yaml, both pointing at "-backend"). caddy is the
@@ -30,6 +33,7 @@
 // before assuming this is giving the speedup the Dockerfile comments claim.
 def backendImage = env.FLA_BACKEND_IMAGE ?: 'fastly/fastly-log-analytics-backend'
 def frontendImage = env.FLA_FRONTEND_IMAGE ?: 'fastly/fastly-log-analytics-frontend'
+def adminGatewayImage = env.FLA_ADMIN_GATEWAY_IMAGE ?: 'fastly/fastly-log-analytics-admin-gateway'
 
 def cache = true
 def buildContainers = false
@@ -48,8 +52,8 @@ if (ref.name in ['main', 'origin/main', 'release/v3.0.0-beta3', 'origin/release/
 fastlyPipeline(script: this) {
 
   if (buildContainers) {
-    if (!backendImage || !frontendImage) {
-      error('FLA_BACKEND_IMAGE and FLA_FRONTEND_IMAGE must be configured in Jenkins')
+    if (!backendImage || !frontendImage || !adminGatewayImage) {
+      error('FLA_BACKEND_IMAGE, FLA_FRONTEND_IMAGE and FLA_ADMIN_GATEWAY_IMAGE must be configured in Jenkins')
     }
     stage('Build Containers') {
       def commitTag = env.GIT_COMMIT ? env.GIT_COMMIT.take(12) : (env.BUILD_NUMBER ?: 'latest')
@@ -72,6 +76,15 @@ fastlyPipeline(script: this) {
           pushImage: true,
           timeout: 45,
         ],
+        [
+          imageName: adminGatewayImage,
+          dockerFile: 'deploy/admin-gateway/Dockerfile',
+          cache: cache,
+          reproducibleDigest: true,
+          tagImage: commitTag,
+          pushImage: true,
+          timeout: 15,
+        ],
       ]
       fastlyDockerBuild(
         script: this,
@@ -89,10 +102,15 @@ fastlyPipeline(script: this) {
         containerVersion: "${commitTag}-${env.BUILD_NUMBER}",
         containerTag: [commitTag],
       )
+      fastlyTagContainer(script: this,
+        containerName: adminGatewayImage,
+        containerVersion: "${commitTag}-${env.BUILD_NUMBER}",
+        containerTag: [commitTag],
+      )
     }
   } else if (makeRelease) {
-    if (!backendImage || !frontendImage) {
-      error('FLA_BACKEND_IMAGE and FLA_FRONTEND_IMAGE must be configured in Jenkins')
+    if (!backendImage || !frontendImage || !adminGatewayImage) {
+      error('FLA_BACKEND_IMAGE, FLA_FRONTEND_IMAGE and FLA_ADMIN_GATEWAY_IMAGE must be configured in Jenkins')
     }
     stage('Tag Release') {
       def commitTag = env.GIT_COMMIT ? env.GIT_COMMIT.take(12) : env.GIT_COMMIT
@@ -103,6 +121,11 @@ fastlyPipeline(script: this) {
       )
       fastlyTagContainer(script: this,
         containerName: frontendImage,
+        containerVersion: commitTag,
+        containerTag: [ref.name],
+      )
+      fastlyTagContainer(script: this,
+        containerName: adminGatewayImage,
         containerVersion: commitTag,
         containerTag: [ref.name],
       )

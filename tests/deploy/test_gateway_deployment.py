@@ -1,6 +1,8 @@
 """Deployment patches retain Helm ownership and preserve unrelated settings."""
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -110,3 +112,65 @@ def test_frontend_activation_requires_gateway_and_replaces_old_literal_secret():
     assert env["ADMIN_GATEWAY_SECRET"]["valueFrom"]["secretKeyRef"]["name"] == "operator-secret"
     assert "value" not in env["ADMIN_GATEWAY_SECRET"]
     assert env["API_PROXY_URL"]["value"] == "http://backend:8000"
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.example.com/mirror/library/caddy:2.11.4-alpine",
+        "registry.example.com:5000/caddy@sha256:" + "b" * 64,
+        "registry.example.com/mirror/caddy:2.11.4-alpine@sha256:" + "c" * 64,
+    ],
+)
+def test_image_reference_accepts_registry_tag_or_digest(image):
+    assert MODULE.IMAGE_REF.fullmatch(image)
+
+
+@pytest.mark.parametrize("image", ["caddy", "registry.example.com/caddy latest", "Registry/Caddy:1", "x/y:$(id)"])
+def test_image_reference_rejects_malformed(image):
+    assert not MODULE.IMAGE_REF.fullmatch(image)
+
+
+def test_helm_diagnostics_are_redacted(monkeypatch):
+    secret = "s" * 40
+    monkeypatch.setattr(MODULE, "SENSITIVE", [secret])
+    stderr = (
+        "Error: admission webhook denied: emptydir-sizelimit: sizeLimit required\n"
+        f"token={secret}\n-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\n" + "Q" * 60
+    )
+
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    Result.stderr = stderr
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *a, **k: Result())
+    with pytest.raises(ValueError) as caught:
+        MODULE.run("helm", "upgrade", diagnose=True)
+    message = str(caught.value)
+    assert "emptydir-sizelimit" in message
+    assert secret not in message and "MIIabc" not in message and "Q" * 60 not in message
+    with pytest.raises(ValueError) as payload_failure:
+        MODULE.run("kubectl", "apply", payload={"data": secret}, diagnose=True)
+    assert "admission" not in str(payload_failure.value)
+    with pytest.raises(ValueError) as default_failure:
+        MODULE.run("helm", "upgrade")
+    assert "admission" not in str(default_failure.value)
+
+
+def test_gateway_phase_requires_purpose_built_image():
+    # Fails during argument validation, before any cluster access.
+    args = [sys.executable, str(SCRIPT), "--phase", "gateway", "--dry-run", "--namespace", "example"]
+    for flag in (
+        "host",
+        "cert-dir",
+        "backend-upstream",
+        "frontend-upstream",
+        "backend-deployment",
+        "frontend-deployment",
+        "public-virtualserver",
+    ):
+        args += [f"--{flag}", "admin.example.com" if flag == "host" else "placeholder"]
+    result = subprocess.run(args, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "--image is required for gateway" in result.stderr

@@ -14,7 +14,11 @@ services:
       - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:?set the same server-side credential}
       - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:?set 1 for mTLS enforcement}
   admin-gateway:
-    image: caddy:2.11.4-alpine
+    # Purpose-built: strips the upstream binary's file capability, which
+    # otherwise makes exec fail under cap_drop ALL. Distinct local tag; never
+    # reuse a caddy:* tag (see caddy/Dockerfile).
+    build: ./deploy/admin-gateway
+    image: fla-admin-gateway:2.11.4
     # Match the certificate directory owner. Set UID/GID explicitly in the
     # operator's .env on non-1000 hosts; never weaken private-key permissions.
     user: "${ADMIN_GATEWAY_UID:-1000}:${ADMIN_GATEWAY_GID:-1000}"

@@ -46,6 +46,8 @@ def test_public_gateway_strips_both_admin_credentials_and_keeps_analyst_marker(t
             "adminGateway.existingSecret=operator-secret",
             "--set",
             "adminGateway.host=admin.example.com",
+            "--set",
+            "adminGateway.image=registry.example.com/fla-admin-gateway:test",
         ],
         capture_output=True,
         text=True,

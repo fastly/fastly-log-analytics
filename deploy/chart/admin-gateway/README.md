@@ -183,6 +183,27 @@ helm upgrade --install admin-gateway deploy/chart/admin-gateway \
   --set-string backendUpstream=backend-svc:8000 --wait
 ```
 
+### Admission policies and images
+
+Both `emptyDir` volumes (Caddy data and the rendered runtime config) set
+`sizeLimit` from `emptyDirSizeLimit` (default `64Mi`). Rendering fails if it
+is empty, so clusters that require bounded ephemeral storage admit the pod.
+
+`image` is required and must be built from
+[`deploy/admin-gateway/Dockerfile`](../../admin-gateway/Dockerfile). The
+upstream `caddy` image cannot run here: its binary carries the
+`cap_net_bind_service` file capability, and the kernel refuses to exec a
+binary whose file capabilities exceed the bounding set, so the pod
+crash-loops with `exec /usr/bin/caddy: operation not permitted` once the
+container drops `ALL` capabilities. The gateway listens on 8443 and needs no
+capability; the Dockerfile strips it (`setcap -r`) and runs as UID 1000.
+
+Build and publish it to a registry the cluster admits, then pass a tag or,
+preferably, a digest, e.g.
+`--set-string image=REGISTRY/PATH/fla-admin-gateway:TAG@sha256:DIGEST`
+(adapter: `--image`). Do not request a policy exception or add capabilities
+to work around either admission rule.
+
 Default exposure is **ClusterIP, TCP 8443 only**:
 
 ```sh
@@ -283,6 +304,11 @@ canonical deployment harness**. The adapter:
 4. In `activate` phase only, patches existing app Deployment environments,
    preserving unrelated env settings, then waits for their rollouts.
    Gateway-only phase leaves application authorization unchanged.
+
+`--image` sets the companion image (validated reference with a mandatory tag
+or digest; required for `gateway` and `activate`). Helm and rollout failures report the last 20 lines
+of output with registered credentials, PEM blocks and long token-like runs
+redacted; commands that send Secret or patch payloads never echo output.
 
 Unsupported split/redirect routes fail before modification. `LOCAL_HOSTS`
 backed by `valueFrom` must be updated explicitly at its source instead.

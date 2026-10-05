@@ -14,6 +14,7 @@ GATEWAY_VALUES = (
     "existingSecret=operator-gateway",
     "frontendUpstream=frontend:3000",
     "backendUpstream=backend:8000",
+    "image=registry.example.com/fla-admin-gateway:test",
 )
 
 
@@ -97,6 +98,7 @@ def test_app_default_is_unchanged_and_mtls_wires_both_containers():
             "adminGateway.enabled=true",
             "adminGateway.existingSecret=operator-gateway",
             "adminGateway.host=admin.example.com",
+            "adminGateway.image=registry.example.com/fla-admin-gateway:test",
         ),
     )
     for component in ("frontend", "backend"):
@@ -118,3 +120,65 @@ def test_app_default_is_unchanged_and_mtls_wires_both_containers():
     assert "request_header -X-Admin-Gateway-Token" in public["data"]["Caddyfile"]
     assert "request_header -X-Admin-Token" in public["data"]["Caddyfile"]
     assert "-X-Remote-Analyst" not in public["data"]["Caddyfile"]
+
+
+def _empty_dirs(docs):
+    return [
+        volume["emptyDir"]
+        for doc in docs
+        if doc and doc["kind"] == "Deployment"
+        for volume in doc["spec"]["template"]["spec"].get("volumes", [])
+        if "emptyDir" in volume
+    ]
+
+
+def test_every_emptydir_is_size_capped_for_admission_policies():
+    gateway = _empty_dirs(render(GATEWAY, GATEWAY_VALUES))
+    app = _empty_dirs(
+        render(
+            APP,
+            (
+                "adminGateway.enabled=true",
+                "adminGateway.existingSecret=operator-gateway",
+                "adminGateway.host=admin.example.com",
+                "adminGateway.image=registry.example.com/fla-admin-gateway:test",
+            ),
+        )
+    )
+    assert len(gateway) == 2
+    assert all(volume.get("sizeLimit") for volume in gateway + app)
+    assert all(volume["sizeLimit"] == "64Mi" for volume in gateway)
+
+
+def test_gateway_image_override_renders_approved_mirror():
+    image = "registry.example.com/mirror/library/caddy:2.11.4-alpine@sha256:" + "a" * 64
+    docs = render(GATEWAY, (*GATEWAY_VALUES, f"image={image}"))
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    assert deployment["spec"]["template"]["spec"]["containers"][0]["image"] == image
+
+
+def test_gateway_image_is_required_in_both_charts():
+    # The upstream caddy image cannot exec with all capabilities dropped.
+    without = tuple(value for value in GATEWAY_VALUES if not value.startswith("image="))
+    render(GATEWAY, without, success=False)
+    render(
+        APP,
+        (
+            "adminGateway.enabled=true",
+            "adminGateway.existingSecret=operator-gateway",
+            "adminGateway.host=admin.example.com",
+        ),
+        success=False,
+    )
+    assert render(GATEWAY, (*without, "gateway.enabled=false"))
+
+
+def test_jenkins_publishes_gateway_image_alongside_app_images():
+    jenkinsfile = (ROOT / "Jenkinsfile").read_text()
+    assert "dockerFile: 'deploy/admin-gateway/Dockerfile'" in jenkinsfile
+    assert "FLA_ADMIN_GATEWAY_IMAGE" in jenkinsfile
+    # Built, commit-tagged and release-tagged on the same paths as the app images.
+    assert jenkinsfile.count("containerName: adminGatewayImage") == 2
+    dockerfile = (ROOT / "deploy/admin-gateway/Dockerfile").read_text()
+    assert 'test -z "$(getcap /usr/bin/caddy)"' in dockerfile
+    assert "USER 1000:1000" in dockerfile

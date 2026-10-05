@@ -18,10 +18,28 @@ import time
 from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[1] / "deploy/chart/admin-gateway"
+# registry[:port]/path[:tag][@sha256:digest]; a tag or digest is mandatory.
+IMAGE_REF = re.compile(
+    r"[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?"
+)
+PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL)
+LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
+DIAGNOSTIC_LINES = 20
+# Literal credential values, registered once loaded, scrubbed from diagnostics.
+SENSITIVE: list[str] = []
 DNS_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
-def run(*command: str, payload: dict | None = None) -> str:
+def sanitize(text: str) -> str:
+    for value in SENSITIVE:
+        text = text.replace(value, "[REDACTED]")
+    text = PEM_BLOCK.sub("[REDACTED PEM]", text)
+    text = LONG_TOKEN.sub("[REDACTED]", text)
+    return "\n".join(text.strip().splitlines()[-DIAGNOSTIC_LINES:])
+
+
+def run(*command: str, payload: dict | None = None, diagnose: bool = False) -> str:
     result = subprocess.run(
         command,
         input=json.dumps(payload) if payload is not None else None,
@@ -30,8 +48,13 @@ def run(*command: str, payload: dict | None = None) -> str:
         check=False,
     )
     if result.returncode:
-        # kubectl errors can echo request bodies containing Secret data.
-        raise ValueError(f"{command[0]} {command[1]} failed (exit {result.returncode}); inspect cluster events")
+        message = f"{command[0]} {command[1]} failed (exit {result.returncode})"
+        # Commands fed a payload can echo Secret request bodies: never surface
+        # their output. Helm/rollout receive no secret material; still redact.
+        if diagnose and payload is None:
+            detail = sanitize(result.stderr or result.stdout)
+            raise ValueError(f"{message}:\n{detail}" if detail else f"{message}; inspect cluster events")
+        raise ValueError(f"{message}; inspect cluster events")
     return result.stdout
 
 
@@ -117,6 +140,11 @@ def main() -> int:
     parser.add_argument(
         "--callers-ready", action="store_true", help="Confirm canonical callers already use direct client mTLS"
     )
+    parser.add_argument(
+        "--image",
+        default="",
+        help="Image built from deploy/admin-gateway/Dockerfile in a registry the cluster admits, pinned by tag/digest",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     for tool in ("openssl", "helm", "kubectl"):
@@ -137,8 +165,17 @@ def main() -> int:
         for name in required:
             if not getattr(args, name):
                 parser.error(f"--{name.replace('_', '-')} is required for {args.phase}")
+        if not args.image:
+            parser.error(
+                f"--image is required for {args.phase}: publish deploy/admin-gateway/Dockerfile "
+                "(upstream caddy cannot exec with all capabilities dropped)"
+            )
         if not DNS_NAME.fullmatch(args.host):
             parser.error("--host must be one explicit lowercase DNS hostname or IPv4 address")
+    if args.image and (
+        not IMAGE_REF.fullmatch(args.image) or not re.search(r"(:[^/]+|@sha256:[0-9a-f]{64})$", args.image)
+    ):
+        parser.error("--image must be registry/repository with an explicit :tag or @sha256 digest")
     if args.phase == "activate" and not args.callers_ready:
         parser.error("--phase activate requires --callers-ready after transport/browser readiness verification")
     try:
@@ -157,7 +194,7 @@ def main() -> int:
             exposure_args += ("--set-string", f"service.loadBalancerIP={address}")
         if args.phase == "provision":
             provision_args = ("--namespace", args.namespace, "--set", "gateway.enabled=false", *exposure_args)
-            run("helm", "template", args.release, str(CHART), *provision_args)
+            run("helm", "template", args.release, str(CHART), *provision_args, diagnose=True)
             if args.dry_run:
                 print("Validated internal-only Service allocation render; no gateway/app/Secret changes")
                 return 0
@@ -166,7 +203,7 @@ def main() -> int:
             releases = json.loads(run("helm", "list", "-n", args.namespace, "-o", "json"))
             if any(release["name"] == args.release for release in releases):
                 raise ValueError("provision requires a new companion release; existing release must not be downgraded")
-            run("helm", "install", args.release, str(CHART), *provision_args)
+            run("helm", "install", args.release, str(CHART), *provision_args, diagnose=True)
             deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
                 service = json.loads(run("kubectl", "get", "service", args.release, "-n", args.namespace, "-o", "json"))
@@ -186,6 +223,7 @@ def main() -> int:
                 raise ValueError(f"{name} must be owner-only (chmod 600)")
             contents[name] = path.read_bytes()
         credential = contents["ADMIN_GATEWAY_SECRET"].decode().strip()
+        SENSITIVE.extend((credential, base64.b64encode(contents["ADMIN_GATEWAY_SECRET"]).decode()))
         if len(credential) < 32 or not re.fullmatch(r"[A-Za-z0-9_-]+", credential):
             raise ValueError("ADMIN_GATEWAY_SECRET must contain at least 32 URL-safe characters")
         for cert in ("server.crt", "client-ca.crt"):
@@ -222,8 +260,9 @@ def main() -> int:
             "--set-string",
             f"frontendUpstream={args.frontend_upstream}",
             *exposure_args,
+            *(("--set-string", f"image={args.image}") if args.image else ()),
         )
-        run("helm", "template", args.release, str(CHART), *helm_args)
+        run("helm", "template", args.release, str(CHART), *helm_args, diagnose=True)
         if args.dry_run:
             print(f"Validated {args.phase} bundle, companion render, app patches and public sanitizer; no changes made")
             return 0
@@ -248,10 +287,29 @@ def main() -> int:
             "--patch-file=/dev/stdin",
             payload=vs_patch,
         )
-        run("helm", "upgrade", "--install", args.release, str(CHART), *helm_args, "--wait", "--timeout", "300s")
+        run(
+            "helm",
+            "upgrade",
+            "--install",
+            args.release,
+            str(CHART),
+            *helm_args,
+            "--wait",
+            "--timeout",
+            "300s",
+            diagnose=True,
+        )
         if args.phase == "gateway":
             run("kubectl", "rollout", "restart", f"deployment/{args.release}", *namespace)
-            run("kubectl", "rollout", "status", f"deployment/{args.release}", *namespace, "--timeout=300s")
+            run(
+                "kubectl",
+                "rollout",
+                "status",
+                f"deployment/{args.release}",
+                *namespace,
+                "--timeout=300s",
+                diagnose=True,
+            )
             print(
                 "Gateway deployed without app activation; verify direct TLS and migrate canonical callers before --phase activate"
             )
@@ -272,11 +330,11 @@ def main() -> int:
             # backend/frontend environments even when the patch is identical.
             run("kubectl", "rollout", "restart", f"deployment/{deployment}", *namespace)
         for deployment, _ in patches:
-            run("kubectl", "rollout", "status", f"deployment/{deployment}", *namespace, "--timeout=300s")
+            run("kubectl", "rollout", "status", f"deployment/{deployment}", *namespace, "--timeout=300s", diagnose=True)
         # Secret file/env changes require a new Caddy process; existing TLS
         # sessions must also be dropped when replacing a client trust root.
         run("kubectl", "rollout", "restart", f"deployment/{args.release}", *namespace)
-        run("kubectl", "rollout", "status", f"deployment/{args.release}", *namespace, "--timeout=300s")
+        run("kubectl", "rollout", "status", f"deployment/{args.release}", *namespace, "--timeout=300s", diagnose=True)
         print(
             "Gateway rolled out; verify missing/invalid/valid client TLS and analyst ingress before removing legacy access"
         )

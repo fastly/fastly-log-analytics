@@ -13,15 +13,17 @@ vi.mock('next/headers', () => ({
 const secret = 'test-gateway-secret-with-at-least-32-characters'
 let server: Server
 let captured: IncomingHttpHeaders | undefined
+let upstreamBody: object
 
 beforeEach(async () => {
   captured = undefined
+  upstreamBody = {}
   mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
   process.env.ADMIN_GATEWAY_SECRET = secret
   process.env.ADMIN_GATEWAY_REQUIRED = '1'
   server = createServer((request, response) => {
     captured = request.headers
-    response.end('{}')
+    response.end(JSON.stringify(upstreamBody))
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   process.env.API_PROXY_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
@@ -134,5 +136,16 @@ describe('certificate gateway SSR trust', () => {
     mockCookies.mockReturnValue({ toString: () => '', get: () => undefined })
     expect(await fetchBootstrapServerSide()).toEqual({})
     expect(captured).toBeUndefined()
+  })
+
+  it('never caches a bootstrap response marked as analyst-scoped', async () => {
+    const { fetchBootstrapServerSide } = await import('@/lib/ssr/bootstrap')
+    inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret, 'x-service-id': 'analyst-response-cache-test' })
+    upstreamBody = { settings: { is_remote_analyst: true } }
+    expect(await fetchBootstrapServerSide()).toEqual(upstreamBody)
+    captured = undefined
+    upstreamBody = { settings: { is_remote_analyst: false } }
+    expect(await fetchBootstrapServerSide()).toEqual(upstreamBody)
+    expect(captured).toBeDefined()
   })
 })

@@ -131,6 +131,9 @@ adminGateway:
   # This chart ONLY wires the shared server credential into app containers.
   existingSecret: ""
   host: ""
+  # Required when enabled: image built from deploy/admin-gateway/Dockerfile.
+  # Used by the public header-sanitizing proxy (all capabilities dropped).
+  image: ""
 
 config:
   # "standard" — single-node ingest on the backend pod's in-process APScheduler.

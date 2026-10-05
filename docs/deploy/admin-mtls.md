@@ -102,8 +102,17 @@ installation, server trust, renewal and emergency removal of client-CA trust.
   `host`, `existingSecret`, `frontendUpstream` and `backendUpstream`. Its
   default Service is ClusterIP, **TCP 8443 only**. Credentials are referenced
   from an existing Secret, never supplied through Helm values.
+- Companion `emptyDir` volumes are capped by `emptyDirSizeLimit` (`64Mi`)
+  for bounded-storage admission policies. `image` (adapter `--image`,
+  required outside `provision`) must be built from
+  `deploy/admin-gateway/Dockerfile` and published to a registry the cluster
+  admits, digest-pinned. Upstream Caddy cannot exec under `drop: ALL`: its
+  `cap_net_bind_service` file capability exceeds the empty bounding set. The
+  harness reads the image from operator-local `ELEVATION_ADMIN_GATEWAY_IMAGE`
+  (no default). Compose builds the same Dockerfile as `fla-admin-gateway`.
 - The experimental application chart accepts `adminGateway.enabled`,
-  `adminGateway.existingSecret` and `adminGateway.host`. Enabling it wires both
+  `adminGateway.existingSecret`, `adminGateway.host` and the required
+  purpose-built `adminGateway.image`. Enabling it wires both
   application containers and inserts a credential-stripping public proxy.
 - `scripts/deploy_admin_gateway.py --dry-run` validates an existing F5 NGINX
   VirtualServer adapter, gateway bundle and app Deployment patches without

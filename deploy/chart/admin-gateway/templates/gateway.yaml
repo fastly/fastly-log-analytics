@@ -55,7 +55,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: {{ .Values.image | quote }}
+          image: {{ required "image is required: build deploy/admin-gateway/Dockerfile (upstream caddy cannot exec with all capabilities dropped)" .Values.image | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -111,10 +111,14 @@ spec:
                 path: server.key
               - key: client-ca.crt
                 path: client-ca.crt
+        # Bounded scratch for Caddy autosave/runtime state; admission policies
+        # commonly reject unbounded emptyDir volumes.
         - name: data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ required "emptyDirSizeLimit is required" .Values.emptyDirSizeLimit | quote }}
         - name: runtime-config
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ required "emptyDirSizeLimit is required" .Values.emptyDirSizeLimit | quote }}
 ---
 {{- end }}
 apiVersion: v1

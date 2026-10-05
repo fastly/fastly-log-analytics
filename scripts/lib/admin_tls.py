@@ -174,7 +174,7 @@ def main() -> int:
             if not args.discard:
                 sys.stdout.buffer.write(response.read())
     except (OSError, ValueError) as exc:
-        print(f"admin TLS request failed: {type(exc).__name__}", file=sys.stderr)
+        print(f"Admin HTTP request failed: {type(exc).__name__}", file=sys.stderr)
         return 1
     return 0
 
