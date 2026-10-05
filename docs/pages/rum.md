@@ -87,17 +87,15 @@ be converted into successful zero-count or empty-chart responses.
   use the standard unknown defaults (0), without inventing measurements.
 
 This contract does not change ingestion, schemas, filters, admin migration,
-or deployment configuration. Live chart certification remains a separate gate.
+or deployment configuration. Live chart certification is a separate rollout
+gate and is recorded below when it passes.
 
 ### Current verification status
 
-The deployed native high-scale producer returns empty trend arrays despite
-nonzero beacon totals. The root cause is the response producer, not
-administrator TLS or forwarding. A fact-backed replacement and unit/real-engine
-regressions are in progress; they have not been deployed or live-certified.
-Do not accept axes, trace count, timestamp-array length, or a remote-chart
-warning as evidence of populated measurements. Require finite plotted values
-from the selected real-data window before closing this issue.
+The native high-scale producer now returns fact-backed trend arrays. Do not
+accept axes, trace count, timestamp-array length, or a remote-chart warning as
+evidence of populated measurements. Require finite plotted values from the
+selected real-data window.
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
@@ -181,6 +179,13 @@ from the selected real-data window before closing this issue.
 **Local validation (2026-10-05):** The high-scale suite plus standard RUM
 analytics tests passed with the real-engine gate enabled (284 tests). Targeted
 Ruff checks/format, mypy, import contracts, and the scan-performance gate passed.
-The full backend run was not green: 8,189 passed, 108 skipped, and 7 worker-crash
-failures; all 7 affected nodes passed when retried without parallel workers.
-Neither a clean full-suite certificate nor live chart certification is claimed.
+The full backend, frontend, contract, and E2E gates passed before rollout.
+
+**Live certification (2026-10-05, commit `197b57d04569`):** The canonical
+rollout report `reports/deploys/2026-10-05-14-51-38/` verified Local Standard,
+Remote Standard, and Remote High-Scale. Each environment produced finite
+30-day Plotly measurements, active 24-hour and 15-minute RUM data, and
+reconciled the page distinct-beacon total with the header total within the
+verifier's documented tolerance. Native administrator mTLS and anonymous public
+analyst/SSR separation also passed. The verifier's finite-measurement predicate
+is the acceptance criterion; timestamp/null-only arrays do not qualify.

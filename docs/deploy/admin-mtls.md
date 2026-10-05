@@ -159,8 +159,10 @@ Each deployment uses its own client CA and named administrator identity.
 Native administrator browser/data access and public anonymous SSR restrictions
 have been verified. The deployment harness no longer starts dashboard SSH or
 Kubernetes forwards; host-management SSH and Kubernetes deployment/log access
-remain. This does not certify every analytics panel: High-Scale RUM trend
-population remains under investigation in the [RUM contract](../pages/rum.md).
+remain. The canonical rollout also verified finite 30-day High-Scale RUM trend
+measurements, recent-window activity, count reconciliation, and the required
+administrator/public separation. See the [RUM contract](../pages/rum.md) for
+the acceptance details.
 
 Allocation is staged through `scripts/deploy_admin_gateway.py`:
 
