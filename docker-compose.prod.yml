@@ -133,8 +133,16 @@ services:
       # repeated OOM restarts and first-byte timeouts.
       - DUCKDB_POOL_MAX_SIZE=4
       # Cap pooled connections independently; httpfs and object-cache
-      # allocations are not fully represented by DuckDB's memory accounting.
-      - DUCKDB_POOL_CONN_MEMORY_LIMIT=512MB
+      # allocations are not fully represented by DuckDB's memory accounting
+      # (measured 2026-10-05: the configured ceiling reports as ~366MiB
+      # usable against a 512MB cap, ~28% eaten by that unaccounted
+      # overhead). 512MB was too tight for a single wide rollup query
+      # (ip_spread/ngwaf_bots) under dashboard+cron overlap -> real
+      # OutOfMemoryException, even though the container was only at 13% of
+      # its 12GB cap (1.57GB RSS) -- the bottleneck was this per-connection
+      # ceiling, not host/container capacity. 1GB x 4 pooled connections
+      # worst-case = 4GB, still well under the 6/11/12GB budget above.
+      - DUCKDB_POOL_CONN_MEMORY_LIMIT=1GB
       # Existing deployments that have completed the v3 migration can opt
       # out of the boot-time legacy Iceberg adoption sweep. Keep the actual
       # decision in the host-local .env because fresh installs may need it.
