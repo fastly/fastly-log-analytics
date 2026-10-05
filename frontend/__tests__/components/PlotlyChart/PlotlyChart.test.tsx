@@ -36,9 +36,11 @@ vi.mock('next-themes', () => ({
 
 // IntersectionObserver: capture the callback so tests can fire it.
 let lastIOCallback: ((entries: any[]) => void) | null = null
+let lastIOOptions: IntersectionObserverInit | null = null
 class MockIntersectionObserver {
-  constructor(cb: (entries: any[]) => void) {
+  constructor(cb: (entries: any[]) => void, options?: IntersectionObserverInit) {
     lastIOCallback = cb
+    lastIOOptions = options ?? null
   }
   observe() {}
   disconnect() {}
@@ -58,6 +60,7 @@ class MockResizeObserver {
 beforeEach(() => {
   plotCalls.length = 0
   lastIOCallback = null
+  lastIOOptions = null
   vi.stubGlobal('IntersectionObserver', MockIntersectionObserver as any)
   vi.stubGlobal('ResizeObserver', MockResizeObserver as any)
 })
@@ -72,6 +75,15 @@ describe('PlotlyChart', () => {
       lastIOCallback!([{ isIntersecting: true }])
     })
     expect(screen.getByTestId('plot-stub')).toBeInTheDocument()
+  })
+
+  it('uses the nearest scroll container as the observer root', () => {
+    const { container } = render(
+      <div style={{ overflowY: 'auto' }}>
+        <PlotlyChart data={[]} a11yTitle="x" />
+      </div>,
+    )
+    expect(lastIOOptions?.root).toBe(container.firstElementChild)
   })
 
   it('lets caller layout overrides win for legend and xaxis fields', async () => {

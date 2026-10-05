@@ -63,6 +63,18 @@ interface PlotlyChartProps {
   a11yTitle?: string
 }
 
+function findScrollContainer(node: HTMLElement): HTMLElement | null {
+  let parent = node.parentElement
+  while (parent) {
+    const style = window.getComputedStyle(parent)
+    if (/(auto|scroll|overlay)/.test(`${style.overflow}${style.overflowX}${style.overflowY}`)) {
+      return parent
+    }
+    parent = parent.parentElement
+  }
+  return null
+}
+
 export const PlotlyChart = React.memo(function PlotlyChart({
   data,
   layout,
@@ -222,7 +234,7 @@ export const PlotlyChart = React.memo(function PlotlyChart({
           observer.disconnect()
         }
       },
-      { rootMargin: '600px' },
+      { root: findScrollContainer(node), rootMargin: '600px' },
     )
     observer.observe(node)
     return () => observer.disconnect()
