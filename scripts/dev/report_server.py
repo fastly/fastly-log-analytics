@@ -14,7 +14,7 @@ validate_credentials.py last happened to run.
 A request path ending in 'relics/bootstrap_status.json?env=<id>' is answered
 the same way, proxying a live GET to that environment's own '/api/bootstrap'
 server-side. This exists solely because the report page (served from
-localhost:41705) and each environment's backend (127.0.0.1:80/8081/3001/3002)
+localhost:41705) and each environment's backend (local or native mTLS gateway)
 are different origins, and none of those backends send
 Access-Control-Allow-Origin for this origin — a plain browser-side fetch()
 to '/api/bootstrap' is CORS-blocked outright (unlike the no-cors reachability
@@ -65,8 +65,9 @@ from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tl
 ENV_BASE_URLS: dict[str, str] = {
     "local-std": "http://127.0.0.1",
     "local-hs": "http://127.0.0.1:8081",
-    "remote-std": "http://127.0.0.1:3001",
-    "remote-hs": "http://127.0.0.1:3002",
+    # Remotes resolve only through configured native admin mTLS endpoints.
+    "remote-std": "",
+    "remote-hs": "",
 }
 
 # Same source/tag pairing deploy_test_all.sh's background log monitor uses,
@@ -129,6 +130,7 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/reports/deploys/current/index.html")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _serve_live_monitored_errors(self) -> None:
