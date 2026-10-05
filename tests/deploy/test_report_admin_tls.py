@@ -1,13 +1,16 @@
 import io
 import json
+import sys
 import threading
 from http.server import ThreadingHTTPServer
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import pytest
 
-from scripts.dev import report_server
+with patch.dict(sys.modules, {"validate_credentials": Mock(name="operator_credentials")}):
+    from scripts.dev import report_server
 
 
 @pytest.fixture

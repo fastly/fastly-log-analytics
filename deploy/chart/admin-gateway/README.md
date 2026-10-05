@@ -196,7 +196,19 @@ upstream `caddy` image cannot run here: its binary carries the
 binary whose file capabilities exceed the bounding set, so the pod
 crash-loops with `exec /usr/bin/caddy: operation not permitted` once the
 container drops `ALL` capabilities. The gateway listens on 8443 and needs no
-capability; the Dockerfile strips it (`setcap -r`) and runs as UID 1000.
+capability; the Dockerfile rewrites the binary as a new file (dropping the
+capability xattr) and runs as UID 1000.
+
+The Jenkins-published image retained the base layer's capability despite a
+guarded `setcap -r` step and a passing build-time check. Replacing the binary
+avoids depending on capability-only changes being captured by the builder.
+Verify the published digest before deploying it:
+
+```bash
+IMG=REGISTRY/PATH/fla-admin-gateway@sha256:DIGEST
+docker run --rm --entrypoint /bin/sh --user 0:0 "$IMG" -c 'getcap /usr/bin/caddy'   # prints nothing
+docker run --rm --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 "$IMG" caddy version
+```
 
 Build and publish it to a registry the cluster admits, then pass a tag or,
 preferably, a digest, e.g.

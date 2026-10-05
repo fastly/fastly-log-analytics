@@ -108,6 +108,9 @@ installation, server trust, renewal and emergency removal of client-CA trust.
   `deploy/admin-gateway/Dockerfile` and published to a registry the cluster
   admits, digest-pinned. Upstream Caddy cannot exec under `drop: ALL`: its
   `cap_net_bind_service` file capability exceeds the empty bounding set. The
+  Dockerfile rewrites the binary because the Jenkins-published image retained
+  the base layer's capability despite a guarded `setcap -r` step. Verify each
+  published digest with the commands in the companion chart README. The
   harness reads the image from operator-local `ELEVATION_ADMIN_GATEWAY_IMAGE`
   (no default). Compose builds the same Dockerfile as `fla-admin-gateway`.
 - The experimental application chart accepts `adminGateway.enabled`,

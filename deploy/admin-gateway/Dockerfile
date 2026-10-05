@@ -9,8 +9,11 @@
 # Tag the result distinctly; never reuse a caddy:* tag (see caddy/Dockerfile).
 ARG CADDY_IMAGE=caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
 FROM ${CADDY_IMAGE}
-# Idempotent: some builders (e.g. Kaniko) may already drop xattrs on layer
-# extraction, and `setcap -r` exits 1 when there is nothing to remove.
-RUN if [ -n "$(getcap /usr/bin/caddy)" ]; then setcap -r /usr/bin/caddy; fi \
+# The published Jenkins image retained the base layer's file capability
+# despite the guarded strip. Replace the file without preserving xattrs so
+# the change survives layer snapshots; verify the published digest as well.
+RUN cp /usr/bin/caddy /tmp/caddy \
+    && chmod 0755 /tmp/caddy \
+    && mv -f /tmp/caddy /usr/bin/caddy \
     && test -z "$(getcap /usr/bin/caddy)"
 USER 1000:1000

@@ -182,3 +182,18 @@ def test_jenkins_publishes_gateway_image_alongside_app_images():
     dockerfile = (ROOT / "deploy/admin-gateway/Dockerfile").read_text()
     assert 'test -z "$(getcap /usr/bin/caddy)"' in dockerfile
     assert "USER 1000:1000" in dockerfile
+
+
+def test_gateway_dockerfile_rewrites_caddy_binary_unconditionally():
+    """Replace the binary rather than relying on capability-only layer changes."""
+    dockerfile = (ROOT / "deploy/admin-gateway/Dockerfile").read_text()
+    run = " ".join(
+        line.strip().rstrip("\\") for line in dockerfile.split("RUN ", 1)[1].split("USER", 1)[0].splitlines()
+    )
+    assert "setcap" not in run
+    assert 'getcap /usr/bin/caddy)" ]' not in run
+    assert "cp /usr/bin/caddy /tmp/caddy" in run
+    assert "chmod 0755 /tmp/caddy" in run
+    assert "mv -f /tmp/caddy /usr/bin/caddy" in run
+    assert run.index("cp /usr/bin/caddy") < run.index("mv -f /tmp/caddy")
+    assert 'test -z "$(getcap /usr/bin/caddy)"' in run
