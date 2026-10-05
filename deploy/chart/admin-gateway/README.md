@@ -120,11 +120,33 @@ Use a hostname resolving to the private listener. A TLS-preserving localhost
 port-forward can use `admin.localhost` (issue the server leaf for that exact
 name); no wildcard trust or disabled TLS verification is needed.
 
+An IP literal also works (`--host 10.20.30.40` issues an IP SAN). Clients send
+**no SNI** for an IP host, which is why the shared `files/Caddyfile` site is
+hostless (`https://:8443`):
+
+- A host-addressed site (`https://<host>:8443`) attaches client auth only to a
+  TLS policy matching that SNI. A no-SNI handshake fell through to a catch-all
+  policy without client auth: a TLS `internal error` when no certificate
+  matched the listener's local address (containers, LoadBalancer IPs), or a
+  handshake **without** a client certificate when one did.
+- The hostless site produces a single TLS policy with no SNI matcher, so
+  `require_and_verify` applies to every handshake whatever SNI is sent.
+- `strict_sni_host insecure_off` is then safe and required: with one policy
+  there is no SNI-selected site to cross, and strict mode would answer 421 to
+  every IP-origin request (empty SNI never equals the Host header).
+- The Host check moves into the `@admin_host` matcher: requests for any other
+  Host are aborted without proxying or credential injection.
+
+`tests/test_admin_certificates.py` pins this with real TLS against an IP origin
+(no SNI, IP host, foreign SNI) and asserts the adapted config keeps exactly one
+`require_and_verify` policy. Do not add a second site or `default_sni` here.
+
 ## Standard Compose
 
 Set these in the **operator-local `.env`**, not in tracked configuration:
 
-- `ADMIN_GATEWAY_HOST`: the server certificate's explicit DNS hostname.
+- `ADMIN_GATEWAY_HOST`: the server certificate's explicit DNS hostname or IP
+  literal (IP SAN). Requests with any other Host header are aborted.
 - `LOCAL_HOSTS`: existing allowed hosts plus that exact hostname.
 - `ADMIN_GATEWAY_SECRET`: the generated value from the operator-owned
   `gateway-secret` file; keep it server-side.

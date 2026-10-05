@@ -4,6 +4,12 @@
 {
 	admin off
 	auto_https off
+	# Safe ONLY because the site below is hostless: its single TLS policy has
+	# no SNI matcher, so require_and_verify applies to every handshake. Strict
+	# SNI/Host matching would otherwise 421 IP-origin clients, which send no SNI.
+	servers {
+		strict_sni_host insecure_off
+	}
 	# Caddy's HTTP error logger may include request headers even with access
 	# logging disabled. Redact credentials from every default runtime log.
 	log {
@@ -17,7 +23,10 @@
 	}
 }
 
-https://{$ADMIN_GATEWAY_HOST}:{$ADMIN_GATEWAY_PORT:8443} {
+# Hostless on purpose. A host-addressed site gives client auth only to an
+# SNI-matched policy, so a no-SNI ClientHello (every IP origin) fell through to
+# a catch-all policy with no client auth. The Host check lives in @admin_host.
+https://:{$ADMIN_GATEWAY_PORT:8443} {
 	bind {$ADMIN_GATEWAY_BIND:0.0.0.0}
 	tls /certs/server.crt /certs/server.key {
 		protocols tls1.2 tls1.3
@@ -38,21 +47,28 @@ https://{$ADMIN_GATEWAY_HOST}:{$ADMIN_GATEWAY_PORT:8443} {
 		Referrer-Policy no-referrer
 		Cache-Control "no-store"
 	}
-	# These edits precede BOTH upstreams, including SSR page requests.
-	route {
-		request_header -X-Admin-Token
-		request_header -X-Remote-Analyst
-		request_header -X-Proxied-By-Caddy
-		request_header -Fastly-Client-IP
-		request_header X-Admin-Gateway-Token {env.ADMIN_GATEWAY_SECRET}
-		@api path /api/* /js/* /rum-beacon
-		reverse_proxy @api {$ADMIN_GATEWAY_BACKEND:127.0.0.1:8000} {
-			flush_interval -1
-			transport http {
-				response_header_timeout 180s
-				read_timeout 180s
+	@admin_host host {$ADMIN_GATEWAY_HOST}
+	handle @admin_host {
+		# These edits precede BOTH upstreams, including SSR page requests.
+		route {
+			request_header -X-Admin-Token
+			request_header -X-Remote-Analyst
+			request_header -X-Proxied-By-Caddy
+			request_header -Fastly-Client-IP
+			request_header X-Admin-Gateway-Token {env.ADMIN_GATEWAY_SECRET}
+			@api path /api/* /js/* /rum-beacon
+			reverse_proxy @api {$ADMIN_GATEWAY_BACKEND:127.0.0.1:8000} {
+				flush_interval -1
+				transport http {
+					response_header_timeout 180s
+					read_timeout 180s
+				}
 			}
+			reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000}
 		}
-		reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000}
+	}
+	# Any other Host: close without proxying or injecting the credential.
+	handle {
+		abort
 	}
 }

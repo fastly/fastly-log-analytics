@@ -113,6 +113,11 @@ installation, server trust, renewal and emergency removal of client-CA trust.
   published digest with the commands in the companion chart README. The
   harness reads the image from operator-local `ELEVATION_ADMIN_GATEWAY_IMAGE`
   (no default). Compose builds the same Dockerfile as `fla-admin-gateway`.
+- The shared gateway Caddyfile site is hostless (`https://:8443`) so every TLS
+  handshake, including no-SNI handshakes from IP origins such as
+  `127.0.0.1` or a LoadBalancer IP, gets the single `require_and_verify` client
+  policy. The Host check lives in a matcher: any other Host is aborted. See
+  "Client installation is explicit" in the companion chart README.
 - The experimental application chart accepts `adminGateway.enabled`,
   `adminGateway.existingSecret`, `adminGateway.host` and the required
   purpose-built `adminGateway.image`. Enabling it wires both

@@ -1,5 +1,6 @@
 """Real OpenSSL/Caddy TLS contract tests; all PKI/processes are temporary."""
 
+import contextlib
 import hmac
 import json
 import os
@@ -216,8 +217,8 @@ class Echo(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.fixture(scope="module")
-def gateway(pki):
+@contextlib.contextmanager
+def run_gateway(pki, host: str, bundle: Path, name: str):
     if not shutil.which("caddy"):
         if os.getenv("ADMIN_MTLS_TEST_REQUIRED") == "1":
             pytest.fail("Missing validation tool: caddy >=2.8 (install explicitly)")
@@ -228,18 +229,18 @@ def gateway(pki):
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
-    config = pki["temp"] / "Caddyfile"
-    config.write_text(CONFIG.read_text().replace("/certs/", f"{pki['bundle']}/"))
+    config = pki["temp"] / f"{name}.Caddyfile"
+    config.write_text(CONFIG.read_text().replace("/certs/", f"{bundle}/"))
     env = {
         **os.environ,
-        "ADMIN_GATEWAY_HOST": "admin.localhost",
+        "ADMIN_GATEWAY_HOST": host,
         "ADMIN_GATEWAY_PORT": str(port),
         "ADMIN_GATEWAY_BIND": "127.0.0.1",
         "ADMIN_GATEWAY_SECRET": (pki["state"] / "gateway-secret").read_text(),
         "ADMIN_GATEWAY_FRONTEND": f"127.0.0.1:{upstream.server_port}",
         "ADMIN_GATEWAY_BACKEND": f"127.0.0.1:{upstream.server_port}",
-        "XDG_DATA_HOME": str(pki["temp"] / "caddy-data"),
-        "XDG_CONFIG_HOME": str(pki["temp"] / "caddy-config"),
+        "XDG_DATA_HOME": str(pki["temp"] / f"{name}-data"),
+        "XDG_CONFIG_HOME": str(pki["temp"] / f"{name}-config"),
     }
     process = subprocess.Popen(
         ["caddy", "run", "--config", str(config), "--adapter", "caddyfile"],
@@ -270,16 +271,51 @@ def gateway(pki):
         assert env["ADMIN_GATEWAY_SECRET"] not in logs
 
 
-def tls_request(pki, gateway, cert=None, key=None, path="/dashboard"):
+@pytest.fixture(scope="module")
+def gateway(pki):
+    with run_gateway(pki, "admin.localhost", pki["bundle"], "dns") as running:
+        yield running
+
+
+@pytest.fixture(scope="module")
+def ip_gateway(pki):
+    # IP-literal origin (Compose 127.0.0.1, Kubernetes LoadBalancer IP):
+    # browsers, curl and Python send NO SNI for an IP host.
+    server, bundle = pki["temp"] / "ip-gateway-server", pki["temp"] / "ip-gateway-bundle"
+    cli("server", "--out", server, "--state", pki["state"], "--password-file", pki["password"], "--host", "127.0.0.1")
+    cli(
+        "bundle",
+        "--out",
+        bundle,
+        "--state",
+        pki["state"],
+        "--server-cert",
+        server / "server.crt",
+        "--server-key",
+        server / "server.key",
+    )
+    with run_gateway(pki, "127.0.0.1", bundle, "ip") as running:
+        yield running
+
+
+def tls_request(
+    pki, gateway, cert=None, key=None, path="/dashboard", *, sni="admin.localhost", host=None, check_hostname=True
+):
+    """``sni=None`` sends no SNI. ``check_hostname=False`` is test-only: the
+    server chain is still verified against the test CA so a failure isolates
+    the server's client-auth decision from the client's name check."""
     context = ssl.create_default_context(cafile=str(pki["state"] / "server-ca.crt"))
+    if sni is None or not check_hostname:
+        context.check_hostname = False
     if cert:
         context.load_cert_chain(str(cert), str(key))
     port, _ = gateway
+    host = host or sni or "admin.localhost"
     with socket.create_connection(("127.0.0.1", port), timeout=3) as raw:
-        with context.wrap_socket(raw, server_hostname="admin.localhost") as connection:
+        with context.wrap_socket(raw, server_hostname=sni) as connection:
             connection.sendall(
                 (
-                    f"GET {path} HTTP/1.1\r\nHost: admin.localhost:{port}\r\n"
+                    f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
                     "Connection: close\r\nX-Admin-Gateway-Token: forged\r\nX-Admin-Token: forged\r\n"
                     "X-Remote-Analyst: true\r\nX-Proxied-By-Caddy: true\r\n\r\n"
                 ).encode()
@@ -290,16 +326,87 @@ def tls_request(pki, gateway, cert=None, key=None, path="/dashboard"):
             return b"".join(parts)
 
 
-@pytest.mark.parametrize("client_type", ["missing", "untrusted", "expired", "wrong-purpose"])
-def test_mtls_rejects_bad_clients_before_http(pki, gateway, client_type):
-    choices = {
+def bad_client(pki, client_type):
+    return {
         "missing": (None, None),
         "untrusted": (pki["wrong"] / "client.crt", pki["wrong"] / "rogue.key"),
         "expired": (pki["client"] / "expired.crt", pki["client"] / "operator.key"),
         "wrong-purpose": (pki["client"] / "wrong-purpose.crt", pki["client"] / "operator.key"),
-    }
+    }[client_type]
+
+
+@pytest.mark.parametrize("client_type", ["missing", "untrusted", "expired", "wrong-purpose"])
+def test_mtls_rejects_bad_clients_before_http(pki, gateway, client_type):
     with pytest.raises((ssl.SSLError, ConnectionResetError)):
-        tls_request(pki, gateway, *choices[client_type])
+        tls_request(pki, gateway, *bad_client(pki, client_type))
+
+
+# Regression: with a host-addressed site Caddy only attached client auth to an
+# SNI-matched policy, so a no-SNI ClientHello fell through to a catch-all
+# policy (TLS internal error, or a handshake WITHOUT client auth when a cert
+# matched the local address).
+@pytest.mark.parametrize("sni", [None, "127.0.0.1", "evil.example"], ids=["no-sni", "ip-host", "foreign-sni"])
+@pytest.mark.parametrize("client_type", ["missing", "untrusted", "expired", "wrong-purpose"])
+def test_ip_origin_rejects_bad_clients_for_every_sni(pki, ip_gateway, client_type, sni):
+    # Hostname check off so a foreign SNI cannot fail client-side first; a
+    # client-side verification error would make this a false positive.
+    with pytest.raises((ssl.SSLError, ConnectionResetError)) as excinfo:
+        tls_request(pki, ip_gateway, *bad_client(pki, client_type), sni=sni, host="127.0.0.1", check_hostname=False)
+    assert not isinstance(excinfo.value, ssl.SSLCertVerificationError)
+
+
+def test_ip_origin_valid_client_with_foreign_sni_reaches_upstream(pki, ip_gateway):
+    # Positive control for the rejection matrix: the same foreign SNI with a
+    # valid client certificate and the exact admin Host is served.
+    response = tls_request(
+        pki,
+        ip_gateway,
+        pki["client"] / "client.crt",
+        pki["client"] / "operator.key",
+        "/api/bootstrap",
+        sni="evil.example",
+        host="127.0.0.1",
+        check_hostname=False,
+    )
+    assert response.startswith(b"HTTP/1.1 200")
+    headers = {k.lower(): v for k, v in json.loads(response.split(b"\r\n\r\n", 1)[1])["headers"].items()}
+    assert hmac.compare_digest(headers["x-admin-gateway-token"], ip_gateway[1]["ADMIN_GATEWAY_SECRET"])
+
+
+def test_ip_origin_client_still_verifies_server_name(pki, ip_gateway):
+    # Production clients keep hostname verification: the IP-SAN server cert
+    # does not satisfy a foreign name.
+    with pytest.raises(ssl.SSLCertVerificationError):
+        tls_request(pki, ip_gateway, pki["client"] / "client.crt", pki["client"] / "operator.key", sni="evil.example")
+
+
+@pytest.mark.parametrize("sni", [None, "127.0.0.1"], ids=["no-sni", "ip-host"])
+def test_ip_origin_without_sni_serves_valid_client(pki, ip_gateway, sni):
+    # server_hostname="127.0.0.1" is an IP literal: CPython sends no SNI but
+    # still verifies the server certificate's IP SAN.
+    response = tls_request(
+        pki,
+        ip_gateway,
+        pki["client"] / "client.crt",
+        pki["client"] / "operator.key",
+        "/api/bootstrap",
+        sni=sni,
+        host="127.0.0.1",
+    )
+    assert response.startswith(b"HTTP/1.1 200")
+    headers = {k.lower(): v for k, v in json.loads(response.split(b"\r\n\r\n", 1)[1])["headers"].items()}
+    assert hmac.compare_digest(headers["x-admin-gateway-token"], ip_gateway[1]["ADMIN_GATEWAY_SECRET"])
+    assert b"forged" not in response
+
+
+@pytest.mark.parametrize("host", ["evil.example", "localhost", "127.0.0.2"])
+def test_valid_client_with_foreign_host_header_gets_no_upstream(pki, ip_gateway, host):
+    response = tls_request(
+        pki, ip_gateway, pki["client"] / "client.crt", pki["client"] / "operator.key", sni=None, host=host
+    )
+    assert not response.startswith(b"HTTP/1.1 200")
+    assert ip_gateway[1]["ADMIN_GATEWAY_SECRET"].encode() not in response
+    assert b"x-admin-gateway-token" not in response.lower()
 
 
 @pytest.mark.parametrize("path", ["/dashboard", "/api/bootstrap", "/api/admin/system-metrics"])
@@ -317,10 +424,23 @@ def test_mtls_overwrites_credentials_and_removes_analyst_markers(pki, gateway, p
 
 
 def test_runtime_config_does_not_embed_gateway_credential(pki, gateway):
-    config = pki["temp"] / "Caddyfile"
+    config = pki["temp"] / "dns.Caddyfile"
     result = subprocess.run(["caddy", "adapt", "--config", str(config)], env=gateway[1], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert gateway[1]["ADMIN_GATEWAY_SECRET"] not in result.stdout
+
+
+def test_every_tls_handshake_shares_one_client_auth_policy(pki, gateway):
+    # A second (catch-all) policy is exactly what let no-SNI handshakes skip
+    # client auth; strict_sni_host may only be off while this holds.
+    result = subprocess.run(
+        ["caddy", "adapt", "--config", str(CONFIG)], env=gateway[1], capture_output=True, text=True, check=True
+    )
+    (server,) = json.loads(result.stdout)["apps"]["http"]["servers"].values()
+    (policy,) = server["tls_connection_policies"]
+    assert "match" not in policy
+    assert policy["client_authentication"]["mode"] == "require_and_verify"
+    assert server["strict_sni_host"] is False
 
 
 def test_upstream_error_logs_do_not_contain_gateway_credential(pki, gateway):
@@ -495,7 +615,19 @@ def container_gateway(pki, gateway_image):
 def test_hardened_container_enforces_client_mtls(pki, container_gateway):
     with pytest.raises((ssl.SSLError, ConnectionResetError)):
         tls_request(pki, container_gateway)
-    response = tls_request(pki, container_gateway, pki["client"] / "client.crt", pki["client"] / "operator.key")
-    # Unreachable upstream: a 502 proves TLS + client auth succeeded in-container.
-    assert response.startswith(b"HTTP/1.1 502")
-    assert b"forged" not in response
+    with pytest.raises((ssl.SSLError, ConnectionResetError)):
+        tls_request(pki, container_gateway, sni=None)
+    for sni in ("admin.localhost", None):
+        # sni=None reproduces the live IP-origin failure: the container's local
+        # address matches no certificate, so the catch-all policy had none.
+        response = tls_request(
+            pki,
+            container_gateway,
+            pki["client"] / "client.crt",
+            pki["client"] / "operator.key",
+            sni=sni,
+            host="admin.localhost",
+        )
+        # Unreachable upstream: a 502 proves TLS + client auth succeeded in-container.
+        assert response.startswith(b"HTTP/1.1 502")
+        assert b"forged" not in response
