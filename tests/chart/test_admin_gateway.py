@@ -40,6 +40,7 @@ def test_gateway_secret_reference_and_tls_only_service():
     pod = next(doc for doc in docs if doc["kind"] == "Deployment")["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     env = {item["name"]: item for item in pod["containers"][0]["env"]}
+    assert env["ADMIN_GATEWAY_PORT"]["value"] == "8443"
     assert env["ADMIN_GATEWAY_SECRET"]["valueFrom"]["secretKeyRef"] == {
         "name": "operator-gateway",
         "key": "ADMIN_GATEWAY_SECRET",

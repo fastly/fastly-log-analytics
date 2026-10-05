@@ -62,6 +62,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
+            - name: ADMIN_GATEWAY_PORT
+              value: "8443"
             - name: ADMIN_GATEWAY_HOST
               value: {{ .Values.host | quote }}
             - name: ADMIN_GATEWAY_FRONTEND

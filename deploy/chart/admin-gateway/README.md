@@ -141,6 +141,10 @@ hostless (`https://:8443`):
 (no SNI, IP host, foreign SNI) and asserts the adapted config keeps exactly one
 `require_and_verify` policy. Do not add a second site or `default_sni` here.
 
+The chart explicitly sets `ADMIN_GATEWAY_PORT=8443`. Without this override,
+Kubernetes service links for a Service named `admin-gateway` inject that variable
+as a `tcp://...` URL, not a numeric listener port.
+
 ## Standard Compose
 
 Set these in the **operator-local `.env`**, not in tracked configuration:
