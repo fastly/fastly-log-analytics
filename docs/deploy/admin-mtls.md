@@ -156,6 +156,11 @@ ClusterIP unless a reviewed provider-specific internal adapter is selected.
 Direct certificate-authenticated gateways have been provisioned and exercised
 on local Compose, single-VM Standard and Kubernetes High-Scale deployments.
 Each deployment uses its own client CA and named administrator identity.
+Native administrator browser/data access and public anonymous SSR restrictions
+have been verified. The deployment harness no longer starts dashboard SSH or
+Kubernetes forwards; host-management SSH and Kubernetes deployment/log access
+remain. This does not certify every analytics panel: High-Scale RUM trend
+population remains under investigation in the [RUM contract](../pages/rum.md).
 
 Allocation is staged through `scripts/deploy_admin_gateway.py`:
 

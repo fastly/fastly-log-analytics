@@ -48,8 +48,56 @@ The **Real User Monitoring (RUM)** page captures browser-side telemetry delivere
 ## 5. Backend APIs & Telemetry Attribution
 
 ### Endpoints Hit:
-1. `GET /api/rum/bundle` (or composite bundle):
+1. `GET /api/rum/analytics`:
    - Returns 75th percentile ratings for LCP, INP, CLS, FCP, TTFB, browser distributions, and recent JS error clusters.
+
+### Native high-scale analytics contract
+
+`backend/high_scale/rum.py::rum_analytics` must read the service's **visible**
+`rum_vitals_facts` and `rum_error_facts` through the instrumented
+`service.client.execute`. Aggregate counts/sums cannot supply p75 percentiles.
+Query failures propagate to the existing API error handling; they must not
+be converted into successful zero-count or empty-chart responses.
+
+- Bounds are inclusive event timestamps, normalized to UTC. Missing bounds
+  use the standard producer's defaults (now minus 24 hours / now).
+- `trends` contains aligned, ascending ISO UTC `timestamps`, `lcp`, `cls`,
+  `error_rate`, `pageviews`, `interactions`, and `errors` arrays. Windows of
+  at most 48 hours use hour boundaries; longer windows use day boundaries,
+  including both endpoint buckets. Daily measurements aggregate the whole
+  selected day's facts, not the last hourly row written into a daily slot.
+- Empty buckets have null measurements/rates and zero counts; populated
+  errors-only buckets have null LCP/CLS and a 100% error rate. Missing metric
+  types remain null, never synthetic zero measurements.
+- Beacon identity follows the standard raw producer: request event ID when
+  present, otherwise client ID plus event timestamp rounded to seconds.
+  Multiple metrics from one beacon count once. Pageviews exclude `event_%`
+  metric names; interactions include them. `beacon_count` is the distinct
+  union across vitals and errors, not the sum of overlapping categories.
+- Bucket error rate is distinct errors / (distinct vitals + distinct errors)
+  × 100. Percentiles use continuous/interpolated p75. LCP/FCP/TTFB follow the
+  standard wire conversion (values >20 divided by 1000, rounded to 2 decimal
+  places), CLS rounds to 3 decimals, and INP is integer milliseconds.
+- `no_data` means neither visible fact table has any data for this service.
+  An empty selected range with older data still returns the full empty axis
+  and zero summary counts. Errors-only services are not treated as no-data.
+- Worst pages (maximum 5) and exceptions (maximum 3) use available facts.
+  The current high-scale schema has no browser/OS/device or exception
+  line/column columns: environment maps stay empty; exception line/column
+  use the standard unknown defaults (0), without inventing measurements.
+
+This contract does not change ingestion, schemas, filters, admin migration,
+or deployment configuration. Live chart certification remains a separate gate.
+
+### Current verification status
+
+The deployed native high-scale producer returns empty trend arrays despite
+nonzero beacon totals. The root cause is the response producer, not
+administrator TLS or forwarding. A fact-backed replacement and unit/real-engine
+regressions are in progress; they have not been deployed or live-certified.
+Do not accept axes, trace count, timestamp-array length, or a remote-chart
+warning as evidence of populated measurements. Require finite plotted values
+from the selected real-data window before closing this issue.
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
@@ -94,6 +142,12 @@ The **Real User Monitoring (RUM)** page captures browser-side telemetry delivere
 - [ ] **5. Unconfigured State:** Disabling RUM renders the onboarding helper gracefully.
 - [ ] **6. Role Verification:** Confirm Analyst Path B observes expected view without administrative buttons.
 - [ ] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries.
+- [ ] **8. High-scale positive chart gate:** On a service with real visible RUM
+  facts in the selected 30-day range, verify both trend charts have finite
+  plotted points (not merely traces or a nonempty zero-filled axis), the
+  summary/bucket counts reconcile with facts, and ClickHouse query telemetry
+  is attributed to the page load. No synthetic traffic or fabricated values
+  may be used to claim this production gate.
 
 ---
 
@@ -101,3 +155,32 @@ The **Real User Monitoring (RUM)** page captures browser-side telemetry delivere
 
 - **Playwright Test:** `frontend/e2e/pages/rum.spec.ts` (Pending implementation).
 - **Synthetic Traffic Profile:** Simulated browser beacons with varied LCP (1.2s to 4.5s) and simulated JS errors.
+
+### Native producer regression gate
+
+- `uv run pytest tests/high_scale/test_rum.py` exercises populated chart arrays,
+  aligned empty buckets, absent data versus an empty selected range, UTC/default
+  bounds, null measurements, and propagation of each query-stage failure.
+- `RUN_RUM_CLICKHOUSE_INTEGRATION=1 uv run pytest tests/high_scale/test_rum_integration.py`
+  executes the producer's SQL on real ClickHouse through the instrumented
+  `ClickHouseClient`. It uses an already-installed
+  `clickhouse/clickhouse-server:25.8.4.13` Docker image in disposable
+  `clickhouse-local` processes; `RUM_CLICKHOUSE_TEST_IMAGE` can select another
+  installed compatible image. No listening ports, deployed services, production
+  writes, or new Python dependencies are required.
+- The real-engine fixture preserves canonical fact columns/types, replacing
+  only the replicated engine with local MergeTree (no Keeper). It covers
+  distinct union counts, visible/service fencing, inclusive sub-hour bounds,
+  hourly/daily/30-day axes, whole-day continuous p75, errors-only and
+  interactions-only buckets, zero versus missing metrics, units, and available
+  page/exception fields.
+- These regressions validate the native producer, not replication, ingestion
+  freshness, HTTP routing/mTLS, or browser rendering. The live positive chart
+  gate above must still pass after the operator's approved rollout.
+
+**Local validation (2026-10-05):** The high-scale suite plus standard RUM
+analytics tests passed with the real-engine gate enabled (284 tests). Targeted
+Ruff checks/format, mypy, import contracts, and the scan-performance gate passed.
+The full backend run was not green: 8,189 passed, 108 skipped, and 7 worker-crash
+failures; all 7 affected nodes passed when retried without parallel workers.
+Neither a clean full-suite certificate nor live chart certification is claimed.

@@ -82,6 +82,18 @@ let transientErrorsSeen = 0;
 // actually render (returns the instant they paint) rather than blind-sleeping.
 const RUM_RENDER_SETTLE_MS = 12000;
 
+function hasPopulatedRumChart() {
+  return Array.from(document.querySelectorAll('main .js-plotly-plot')).some(chart => {
+    const rect = chart.getBoundingClientRect();
+    const hasFiniteMeasurement = values =>
+      Array.isArray(values) && values.some(value => typeof value === 'number' && Number.isFinite(value));
+    return rect.width > 100 && rect.height > 100
+      && chart.data?.some(trace =>
+        hasFiniteMeasurement(trace.y) || hasFiniteMeasurement(trace.values)
+      );
+  });
+}
+
 const { isTransientConsoleBlip } = require('./lib/console_blip');
 
 function failOrTolerate(browser, contextName, label, detail, transient) {
@@ -607,26 +619,22 @@ function registerErrorListeners(page, browser, contextName) {
       console.log(`[RUM 30d] Warning: timed out waiting for RUM loading overlays to clear, proceeding...`);
     }
 
-    // Wait for at least one Plotly chart to become visible on the RUM page (Positive Case per GEMINI.md Mandate #4)
     try {
-      await rumPage.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 90000 });
-      console.log(`[RUM 30d] Verified: RUM Plotly charts are fully rendered and visible! 🟢`);
+      await rumPage.waitForFunction(hasPopulatedRumChart, null, { timeout: 90000 });
+      console.log(`[RUM 30d] Verified: Full-sized RUM Plotly charts contain data points! 🟢`);
     } catch (e) {
-      console.log(`⚠️ [RUM 30d] Warning: timed out waiting for RUM Plotly charts to become visible.`);
+      console.error(`[RUM 30d] Verification Failed: No populated full-sized RUM chart: ${e.message}`);
+      await browser.close();
+      process.exit(1);
     }
 
     const rumBodyText30d = await rumPage.evaluate(() => document.body.innerText);
 
     // Strict RUM Panel Loading Verification: Assert that panels have successfully finished loading and contain real data
     if (rumBodyText30d.includes("Crunching logs") || rumBodyText30d.includes("Initializing")) {
-      const isLocal = process.argv[5] === "local";
-      if (isLocal) {
-        console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels are stuck on "Crunching logs..." or "Initializing..." loading state!`);
-        await browser.close();
-        process.exit(1);
-      } else {
-        console.log(`⚠️ [Playwright RUM Panel Verification] Warning: RUM panels are still loading on remote cloud environment (${process.argv[5]}), proceeding...`);
-      }
+      console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels are stuck on "Crunching logs..." or "Initializing..." loading state!`);
+      await browser.close();
+      process.exit(1);
     }
     if (rumBodyText30d.includes("No data available") || rumBodyText30d.includes("No data in this time range yet") || rumBodyText30d.includes("Waiting for real-time")) {
       console.error(`❌ [Playwright RUM Panel Verification] Verification Failed: RUM panels successfully loaded but have no data ("No data available")!`);
@@ -634,24 +642,6 @@ function registerErrorListeners(page, browser, contextName) {
       process.exit(1);
     }
 
-    // Verify that at least one Plotly chart is rendered and visible on standard RUM page
-    const isRumChartVisible = await rumPage.evaluate(() => {
-      const el = document.querySelector('.js-plotly-plot, .plotly');
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    });
-    if (!isRumChartVisible) {
-      const isLocal = process.argv[5] === "local";
-      if (isLocal) {
-        await rumPage.screenshot({ path: '../rum-screenshot.png', fullPage: true });
-        console.error(`❌ [Playwright RUM Chart Verification] Verification Failed: No visible Plotly charts found on the RUM page! Screenshot saved to rum-screenshot.png`);
-        await browser.close();
-        process.exit(1);
-      } else {
-        console.log(`⚠️ [Playwright RUM Chart Verification] Warning: No visible Plotly charts found on the RUM page for remote cloud environment (${process.argv[5]}), proceeding...`);
-      }
-    }
     console.log(`[RUM Panel Verification] Verified: All RUM panels finished loading, metrics are positive, and Plotly charts are visible! 🟢`);
 
     // Extract Header RUM Total
