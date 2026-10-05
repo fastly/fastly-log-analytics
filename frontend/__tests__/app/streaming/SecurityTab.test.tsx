@@ -343,3 +343,25 @@ test('explains that Group I is required for proxy types', async () => {
 
   expect(await screen.findByText(/Proxy Type field \(Group I\)/)).toBeInTheDocument()
 })
+
+test('leaderboard values open the filter / copy menu keyed to their log field', async () => {
+  const user = userEvent.setup()
+  const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+  renderTab()
+
+  const cases: [string, string][] = [
+    ['US', 'filter_country=US'],
+    ['https://pirate.example/watch', `filter_referer=${encodeURIComponent('https://pirate.example/watch')}`],
+    ['pirate.example', 'filter_host=pirate.example'],
+    ['hosting', 'filter_p_type=hosting'],
+    ['vpn', 'filter_p_desc=vpn'],
+  ]
+  for (const [value, qs] of cases) {
+    await user.click(await screen.findByRole('button', { name: `Filter actions for ${value}` }))
+    expect(await screen.findByText('Filter streaming page')).toBeInTheDocument()
+    expect(screen.getByText('Copy value')).toBeInTheDocument()
+    await user.click(screen.getByText('Open in dashboard'))
+    expect(openSpy).toHaveBeenLastCalledWith(`/dashboard?${qs}`, '_blank', 'noopener,noreferrer')
+  }
+  openSpy.mockRestore()
+})

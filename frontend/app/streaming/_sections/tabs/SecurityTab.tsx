@@ -11,6 +11,7 @@ import { formatBytes, resolveCountryName } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
+import { FilterValueCell } from '@/components/FilterValueCell'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
@@ -88,10 +89,13 @@ export function SubscriberTable({
 
 function TopTable({
   rows,
+  column,
   valueHeader,
   formatValue = (v) => v,
 }: {
   rows: TopRow[]
+  /** Log field the values come from — clicking a value offers it as a filter on that column. */
+  column: string
   valueHeader: string
   formatValue?: (value: string) => string
 }) {
@@ -110,8 +114,8 @@ function TopTable({
       <TableBody>
         {rows.map((row) => (
           <TableRow key={row.value}>
-            <TableCell className="max-w-[16rem] truncate" title={row.value}>
-              {formatValue(row.value)}
+            <TableCell className="max-w-[16rem]" title={row.value}>
+              <FilterValueCell filters={[{ column, value: row.value }]} display={formatValue(row.value)} />
             </TableCell>
             {showUsers && (
               <TableCell className="text-right tabular-nums font-medium">{row.users?.toLocaleString() ?? '—'}</TableCell>
@@ -293,7 +297,7 @@ export default function SecurityTab({
       className="min-h-[200px]"
     >
       {rows?.length ? (
-        <TopTable rows={rows} valueHeader={valueHeader} formatValue={formatValue} />
+        <TopTable rows={rows} column={field} valueHeader={valueHeader} formatValue={formatValue} />
       ) : (
         <ChartEmptyState requires={missing(field) ? requires : undefined} />
       )}

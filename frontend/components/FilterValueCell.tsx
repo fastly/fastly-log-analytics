@@ -42,6 +42,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/charts': 'charts',
   '/usage': 'usage',
   '/query': 'query',
+  '/streaming': 'streaming',
 }
 
 function pageLabelFor(pathname: string | null): string {
