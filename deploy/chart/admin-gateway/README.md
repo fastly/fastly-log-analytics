@@ -116,6 +116,30 @@ browser/OS prompts deliberately; do not globally trust the client CA as a
 general-purpose server issuer. The client PKCS#12 contains the client identity,
 not the gateway credential or CA signing key.
 
+### macOS Keychain rejects the default PKCS#12
+
+OpenSSL 3 exports PKCS#12 with PBES2/AES-256-CBC, PBKDF2 and an HMAC-SHA256 MAC.
+Some macOS Keychain versions cannot read that format and report a wrong password
+or MAC verification failure even when OpenSSL verifies the password.
+Export a Keychain-compatible copy directly from the original client key and
+certificate, without creating an additional unencrypted key file:
+
+```sh
+openssl pkcs12 -export \
+  -inkey "$ADMIN_CLIENT/operator.key" -passin pass: \
+  -in "$ADMIN_CLIENT/client.crt" -certfile "$ADMIN_PKI/client-ca.crt" \
+  -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
+  -passout "file:$CA_PASSWORD_FILE" -out "$ADMIN_CLIENT/client-macos.p12"
+```
+
+For an encrypted client key, replace `-passin pass:` with
+`-passin "file:$KEY_PASSWORD_FILE"`. Do not use the same file for both
+`-passin` and `-passout`: OpenSSL reads them as consecutive lines of that file.
+SHA1-3DES is weaker at rest than the default, so keep `client-macos.p12`
+owner-only and delete it after importing. Import it interactively, without
+`security import -P`, so the password never appears in `argv`. The TLS
+handshake and server verification do not change.
+
 Use a hostname resolving to the private listener. A TLS-preserving localhost
 port-forward can use `admin.localhost` (issue the server leaf for that exact
 name); no wildcard trust or disabled TLS verification is needed.
