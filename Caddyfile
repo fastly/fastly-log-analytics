@@ -29,6 +29,15 @@
 	# Disable automatic HTTP-to-HTTPS redirects. We serve HTTP explicitly on port 80
 	# behind Fastly, but manage TLS for other explicit blocks (port 8443).
 	auto_https disable_redirects
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
+	}
 
 	# Rate limit module (provided by custom Caddy image, see caddy/Dockerfile).
 	# 5 share-login attempts / minute per Fastly client IP.
@@ -72,6 +81,10 @@
 }
 
 :80 {
+	# Public ingress must never accept either admin credential from a client.
+	# Keep X-Remote-Analyst intact: it is the legitimate analyst marker.
+	request_header -X-Admin-Gateway-Token
+	request_header -X-Admin-Token
 	# Compress responses, but NOT Server-Sent Events (SSE) or other streaming/POST progress streams.
 	# Compressing SSE/streaming responses corrupts chunk boundaries and causes ERR_INVALID_CHUNKED_ENCODING.
 	@compressible {
@@ -364,7 +377,13 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	#   docker compose -f ... logs caddy | jq 'select(.status >= 400)'
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
 		level INFO
 	}
 }
@@ -382,6 +401,9 @@ https://localhost:8443, https://127.0.0.1:8443 {
 	# listener itself to loopback so the X-Forwarded-For pin below can't be
 	# reached by anything but a genuine same-host connection.
 	bind 127.0.0.1 ::1
+	# Legacy SSH-only entry stays until the replacement is live-verified.
+	request_header -X-Admin-Gateway-Token
+	request_header -X-Admin-Token
 
 	tls internal
 
@@ -412,7 +434,13 @@ https://localhost:8443, https://127.0.0.1:8443 {
 
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
 		level INFO
 	}
 }

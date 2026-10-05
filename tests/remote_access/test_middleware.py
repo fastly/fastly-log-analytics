@@ -439,6 +439,21 @@ def test_admin_shared_secret_does_not_apply_to_analyst_branch(client, monkeypatc
     assert "admin_token" not in r.text
 
 
+@pytest.mark.security_regression
+def test_gateway_required_keeps_authenticated_analyst_restrictions(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
+    monkeypatch.setenv("ADMIN_GATEWAY_SECRET", "test-gateway-secret-with-at-least-32-characters")
+    _start_share()
+    invite = _seed_invite(service_ids=["svcA"])
+    _login_analyst(client, invite)
+    headers = {"X-Remote-Analyst": "1", "Host": "testserver"}
+    allowed = client.get("/api/dashboard", headers=headers, params={"service_id": "svcA"})
+    assert allowed.status_code == 200
+    denied = client.get("/api/admin/share/status", headers=headers)
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "admin_only"
+
+
 # ── Analyst path ───────────────────────────────────────────────────────────
 
 

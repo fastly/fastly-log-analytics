@@ -54,7 +54,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import validate_credentials as vc  # noqa: E402
+
+from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 
 # Must mirror the `envsMapping` URLs baked into the report's <script> block
 # (deploy_test_all.sh's save_deploy_report) — this is the server-side half of
@@ -170,7 +173,8 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(status, body)
 
     def _serve_live_bootstrap_status(self, env_id: str) -> None:
-        base_url = ENV_BASE_URLS.get(env_id)
+        base_url = admin_origin(env_id) if env_id in ENV_BASE_URLS else None
+        base_url = base_url or ENV_BASE_URLS.get(env_id)
         if not base_url:
             self._send_json(400, json.dumps({"error": f"unknown env '{env_id}'"}).encode("utf-8"))
             return
@@ -179,7 +183,7 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
                 f"{base_url}/api/bootstrap",
                 headers={"Accept": "application/json"},
             )
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with admin_urlopen(request, timeout=3) as response:
                 payload = response.read()
                 body = json.dumps({"ok": True, "status": response.status, "data": json.loads(payload)}).encode("utf-8")
         except urllib.error.HTTPError as exc:
@@ -201,6 +205,7 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    validate_admin_tls_config()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 41705
     server = ThreadingHTTPServer(("127.0.0.1", port), ReportRequestHandler)
     server.serve_forever()

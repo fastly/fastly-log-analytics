@@ -31,6 +31,11 @@ from starlette.responses import JSONResponse, Response
 
 from backend.core import share_db
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.utils.admin_gateway import (
+    ADMIN_GATEWAY_HEADER,
+    admin_gateway_required,
+    authenticated_admin_gateway,
+)
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -415,6 +420,9 @@ def _is_private_or_loopback(ip_str: str) -> bool:
 def is_request_remote(request: Request) -> bool:
     """Decide whether this request is from a remote analyst.
 
+    An authenticated mTLS gateway credential selects the admin branch.
+    Required gateway mode disables the legacy socket-based admin branch.
+
     Production topology:
       Fastly edge → Caddy on this VM → uvicorn on 127.0.0.1.
       Caddy rewrites X-Forwarded-For to the authoritative Fastly-Client-IP
@@ -427,9 +435,8 @@ def is_request_remote(request: Request) -> bool:
         (admin SSH-tunnel, container-internal healthcheck, TestClient stub).
       * otherwise — Caddy-proxied request and the value is the real client IP.
 
-    We never trust the ``Host`` header or any other client-supplied header for
-    this classification — the Host header was the source of the critical
-    auth bypass.
+    Host and asserted identity headers never select the administrator branch.
+    The gateway credential is verified separately, not accepted as a marker.
 
     The ``X-Remote-Analyst: 1`` fallback is honored ONLY when the TCP peer is
     loopback AND tunnel sharing is active. This exists for two legitimate
@@ -447,6 +454,10 @@ def is_request_remote(request: Request) -> bool:
     # prod this is unreachable (Caddy is the sole ingress and always populates
     # the peer — see ADR-03 / prod-network-topology), so this only hardens the
     # abnormal ASGI case; TestClient always presents a "testclient" peer.
+    if authenticated_admin_gateway(request):
+        return False
+    if admin_gateway_required() or ADMIN_GATEWAY_HEADER in request.headers:
+        return True
     if request.client is None:
         return True
 
@@ -1129,6 +1140,19 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
         host_header = request.headers.get("host", "")
 
+        gateway_authenticated = authenticated_admin_gateway(request)
+        if ADMIN_GATEWAY_HEADER in request.headers and not gateway_authenticated:
+            logger.warning("[remote_access] rejected invalid admin gateway credential")
+            return JSONResponse(status_code=401, content={"error": "admin_gateway_invalid"})
+        request.state.admin_gateway_authenticated = gateway_authenticated
+        if gateway_authenticated:
+            request.scope["headers"] = [
+                (key, value)
+                for key, value in request.scope["headers"]
+                if key.lower() != ADMIN_GATEWAY_HEADER.lower().encode()
+            ]
+            if hasattr(request, "_headers"):
+                del request._headers
         is_remote = is_request_remote(request)
         request.state.is_remote = is_remote
         request.state.analyst_session = None
@@ -1150,6 +1174,18 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         elif host_header and not _local_host_allowed(host_header):
             return JSONResponse(status_code=400, content={"error": "host_not_allowed", "host": host_header})
 
+        if gateway_authenticated:
+            origin = request.headers.get("origin")
+            cross_site = request.headers.get("sec-fetch-site") == "cross-site"
+            unsafe_origin = (
+                method not in ("GET", "HEAD", "OPTIONS")
+                and origin is not None
+                and origin.lower() != f"https://{host_header.lower()}"
+            )
+            if cross_site or unsafe_origin:
+                logger.warning("[remote_access] rejected cross-origin admin gateway request")
+                return JSONResponse(status_code=403, content={"error": "admin_origin_not_allowed"})
+
         if not is_remote:
             # Pure-local request — no analyst gating. Hardening headers still
             # apply: the admin tunnel (uvicorn on :3001 over SSH) bypasses
@@ -1167,7 +1203,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             # here — every OPTIONS that does is a deliberate caller and
             # must still carry the token.
             secret = _admin_shared_secret()
-            if secret and path not in _ADMIN_TOKEN_EXEMPT_PATHS:
+            if secret and not gateway_authenticated and path not in _ADMIN_TOKEN_EXEMPT_PATHS:
                 supplied = request.headers.get(ADMIN_TOKEN_HEADER, "")
                 # Constant-time compare so the token length / prefix doesn't
                 # leak through CPU-cache timing on a short-circuit mismatch.

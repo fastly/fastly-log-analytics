@@ -55,6 +55,15 @@ spec:
               containerPort: 8000
               protocol: TCP
           env:
+            {{- if .Values.adminGateway.enabled }}
+            - name: ADMIN_GATEWAY_REQUIRED
+              value: "1"
+            - name: ADMIN_GATEWAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminGateway.existingSecret }}
+                  key: ADMIN_GATEWAY_SECRET
+            {{- end }}
             {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
             - name: SSE_BACKPLANE
               value: {{ .Values.config.sseBackplane | quote }}
@@ -97,7 +106,7 @@ spec:
             # added. Bare "backend" stays covered by the code default for
             # anyone hairpinning through a plain hostname.
             - name: LOCAL_HOSTS
-              value: {{ if .Values.config.localHosts }}{{ printf "%s-backend,%s-frontend,%s" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) .Values.config.localHosts | quote }}{{ else }}{{ printf "%s-backend,%s-frontend" (include "fastly-log-analytics.fullname" .) (include "fastly-log-analytics.fullname" .) | quote }}{{ end }}
+              value: {{ list (printf "%s-backend" (include "fastly-log-analytics.fullname" .)) (printf "%s-frontend" (include "fastly-log-analytics.fullname" .)) .Values.config.localHosts (ternary .Values.adminGateway.host "" .Values.adminGateway.enabled) | compact | join "," | quote }}
             - name: OTEL_EXPORTER
             {{- if .Values.observability.enabled }}
               value: "otlp"

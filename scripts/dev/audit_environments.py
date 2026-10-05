@@ -35,7 +35,13 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
+# Direct path invocation and python -m both resolve the shared project helper.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
 
 # ANSI Color codes for clean terminal output
 RESET = "\033[0m"
@@ -118,6 +124,11 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         is_high_scale=True,
     ),
 }
+
+for _environment_name, _environment_config in ENVIRONMENTS.items():
+    if _configured_origin := admin_origin(_environment_name):
+        _environment_config.backend_url = _configured_origin
+        _environment_config.frontend_url = f"{_configured_origin}/dashboard"
 
 
 def auto_resolve_remote_admin_token() -> str | None:
@@ -237,7 +248,7 @@ def http_get_json(url: str, headers: dict[str, str] | None = None, timeout: floa
         req_headers.update(headers)
     req = urllib.request.Request(url, headers=req_headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with admin_urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return resp.status, data
     except urllib.error.HTTPError as e:
@@ -265,7 +276,7 @@ def http_post_json(
     req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with admin_urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return resp.status, data
         except urllib.error.HTTPError as e:
@@ -331,7 +342,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     )
 
     req_headers: dict[str, str] = {}
-    if env.admin_token:
+    if env.admin_token and not is_admin_url(env.backend_url):
         req_headers["X-Admin-Token"] = env.admin_token
 
     # 1. Ping /api/health first — every other probe depends on the backend
@@ -717,7 +728,10 @@ def run_audit(
         envs_to_check = [e for e in envs_to_check if e.name != "local-standard"]
 
     # Configure tokens
-    remote_token = admin_token or auto_resolve_remote_admin_token()
+    needs_remote_token = any(
+        env.name == "remote-standard" and not is_admin_url(env.backend_url) for env in envs_to_check
+    )
+    remote_token = admin_token or (auto_resolve_remote_admin_token() if needs_remote_token else None)
     for env in envs_to_check:
         if env.name == "remote-standard" and remote_token:
             env.admin_token = remote_token
@@ -746,6 +760,7 @@ def run_audit(
 
 
 def main() -> int:
+    validate_admin_tls_config()
     parser = argparse.ArgumentParser(
         description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit",
         formatter_class=argparse.RawDescriptionHelpFormatter,

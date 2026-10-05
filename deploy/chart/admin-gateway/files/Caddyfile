@@ -1,0 +1,58 @@
+# Shared unchanged by Compose and Helm. No access logging: credentials must
+# never appear in log headers. Runtime env placeholder avoids embedding the
+# credential in Caddy's adapted config.
+{
+	admin off
+	auto_https off
+	# Caddy's HTTP error logger may include request headers even with access
+	# logging disabled. Redact credentials from every default runtime log.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
+	}
+}
+
+https://{$ADMIN_GATEWAY_HOST}:{$ADMIN_GATEWAY_PORT:8443} {
+	bind {$ADMIN_GATEWAY_BIND:0.0.0.0}
+	tls /certs/server.crt /certs/server.key {
+		protocols tls1.2 tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file {
+				pem_file /certs/client-ca.crt
+			}
+		}
+	}
+	request_body {
+		max_size 25MB
+	}
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Cache-Control "no-store"
+	}
+	# These edits precede BOTH upstreams, including SSR page requests.
+	route {
+		request_header -X-Admin-Token
+		request_header -X-Remote-Analyst
+		request_header -X-Proxied-By-Caddy
+		request_header -Fastly-Client-IP
+		request_header X-Admin-Gateway-Token {env.ADMIN_GATEWAY_SECRET}
+		@api path /api/* /js/* /rum-beacon
+		reverse_proxy @api {$ADMIN_GATEWAY_BACKEND:127.0.0.1:8000} {
+			flush_interval -1
+			transport http {
+				response_header_timeout 180s
+				read_timeout 180s
+			}
+		}
+		reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000}
+	}
+}

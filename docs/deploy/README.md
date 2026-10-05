@@ -4,6 +4,12 @@ The application runs on **any Linux VM with Docker**. Storage stays on **Fastly 
 
 ## Platform runbooks
 
+- [Optional admin mTLS gateway](../../deploy/chart/admin-gateway/README.md) —
+  shared standard Compose/Kubernetes gateway, operator-owned certificates,
+  explicit client installation, expiry and emergency CA rotation. The
+  gateway is opt-in; retain legacy dashboard SSH access until live replacement
+  verification completes, and retain host-management SSH afterward.
+
 - [aws_ec2.md](aws_ec2.md) — Amazon Linux 2023 + Docker, IMDSv2 session-token note, SG rules, EBS volume mount, optional systemd unit.
 - [gce.md](gce.md) — Debian/Ubuntu + Docker, persistent-disk mount, formalized `restart.sh` flow.
 - [azure_vm.md](azure_vm.md) — Ubuntu 22.04 + Docker, NSG rules, managed-identity secrets pattern with Key Vault.

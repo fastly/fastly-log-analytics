@@ -1,0 +1,113 @@
+{{- if .Values.adminGateway.enabled }}
+# A controller-independent header sanitizer. Public Ingress MUST point here,
+# never directly to either app service when the admin gateway is enabled.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-public-gateway
+data:
+  Caddyfile: |
+    {
+      admin off
+      auto_https off
+      log {
+        format filter {
+          wrap json
+          fields {
+            request>headers>X-Admin-Gateway-Token delete
+            request>headers>X-Admin-Token delete
+          }
+        }
+      }
+    }
+    :8080 {
+      route {
+        request_header -X-Admin-Gateway-Token
+        request_header -X-Admin-Token
+        request_header X-Proxied-By-Caddy true
+        @api path /api/* /js/* /rum-beacon
+        reverse_proxy @api {{ include "fastly-log-analytics.fullname" . }}-backend:8000 {
+          flush_interval -1
+          transport http {
+            response_header_timeout 180s
+            read_timeout 180s
+          }
+        }
+        reverse_proxy {{ include "fastly-log-analytics.fullname" . }}-frontend:3000
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-public-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: public-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: public-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: caddy:2.11.4-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/caddy
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: runtime-config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fastly-log-analytics.fullname" . }}-public-gateway
+        - name: data
+          emptyDir: {}
+        - name: runtime-config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-public-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: public-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: 8080
+      targetPort: http
+{{- end }}

@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
 const { execSync } = require('child_process');
 const baseUrl = process.argv[2];
 const expectedCommit = process.argv[3];
@@ -174,10 +175,12 @@ function registerErrorListeners(page, browser, contextName) {
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
+    const adminTlsOptions = adminGatewayContextOptions(baseUrl);
+    const certificateAdmin = Boolean(adminTlsOptions.clientCertificates);
 
     // Create a completely isolated incognito browser context for Stage 1 to prevent domain/port caching conflicts
-    const dashboardContext = await browser.newContext();
-    if (expectedArch === "standard" && expectedEnv === "gce") {
+    const dashboardContext = await browser.newContext(adminTlsOptions);
+    if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
       await dashboardContext.addCookies([
         {
           name: 'fla.activeAdminToken',
@@ -445,8 +448,8 @@ function registerErrorListeners(page, browser, contextName) {
     const rumBaseUrl = baseUrl.replace('/dashboard', '/rum');
 
     // Create a completely clean, isolated incognito browser context for Stage 2 to prevent any cookie or storage conflicts
-    const rumContext = await browser.newContext();
-    if (expectedArch === "standard" && expectedEnv === "gce") {
+    const rumContext = await browser.newContext(adminTlsOptions);
+    if (!certificateAdmin && expectedArch === "standard" && expectedEnv === "gce") {
       await rumContext.addCookies([
         {
           name: 'fla.activeAdminToken',
@@ -689,7 +692,7 @@ function registerErrorListeners(page, browser, contextName) {
     const networkBaseUrl = baseUrl.replace('/dashboard', '/network');
 
     // Create a completely clean, isolated incognito browser context for Stage 3
-    const networkContext = await browser.newContext();
+    const networkContext = await browser.newContext(adminTlsOptions);
     if (expectedArch === "standard" && expectedEnv === "gce") {
       await networkContext.addCookies([
         {

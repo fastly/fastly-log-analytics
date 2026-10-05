@@ -1,0 +1,6 @@
+apiVersion: v2
+name: admin-gateway
+description: Optional portable client-mTLS gateway for Fastly Log Analytics
+type: application
+version: 0.1.0
+appVersion: "2.11.4"

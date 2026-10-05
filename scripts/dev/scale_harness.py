@@ -8,6 +8,7 @@ import asyncio
 import json
 import math
 import random
+import sys
 import time
 import uuid
 from collections import Counter
@@ -17,9 +18,14 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 import aiohttp
+
+# Keep documented `python scripts/dev/scale_harness.py` invocations working.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.admin_tls import admin_urlopen, validate_admin_tls_config  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -237,7 +243,7 @@ def _percentiles(values: list[int]) -> dict[str, int | None]:
 def _json_get(url: str, headers: dict[str, str]) -> dict[str, Any] | None:
     try:
         request = Request(url, headers=headers, method="GET")
-        with urlopen(request, timeout=10) as response:
+        with admin_urlopen(request, timeout=10) as response:
             payload = json.loads(response.read())
         return payload if isinstance(payload, dict) else None
     except (OSError, URLError, TimeoutError, json.JSONDecodeError):
@@ -361,7 +367,7 @@ def probe_analytics_endpoints(backend: str, service_id: str, start_time: str, en
         started = time.perf_counter()
         status = 0
         try:
-            with urlopen(request, timeout=60) as response:
+            with admin_urlopen(request, timeout=60) as response:
                 response.read()
                 status = response.status
         except HTTPError as exc:
@@ -439,6 +445,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    validate_admin_tls_config()
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run")

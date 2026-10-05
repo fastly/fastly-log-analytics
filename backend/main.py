@@ -551,6 +551,7 @@ async def _application_lifespan(app: FastAPI):
     # --forwarded-allow-ips flag). Without it, IP-based gates become
     # ineffective and the Host-spoof admin bypass returns.
     _enforce_proxy_headers_configured()
+    validate_admin_gateway_config()
 
     # Ensure the Postgres metadata schema BEFORE anything issues a metadata
     # query. SQLite self-initialises via the pool's schema_fn; Postgres had
@@ -965,6 +966,7 @@ async def telemetry_middleware(request: Request, call_next):
 # reach the telemetry layer so blocked analyst hits don't pollute
 # usage_log with admin-scoped rows AND sets analyst_session early so
 # the inner telemetry middleware can attribute correctly.
+from backend.utils.admin_gateway import validate_admin_gateway_config  # noqa: E402
 from backend.utils.remote_access import RemoteAccessMiddleware  # noqa: E402
 
 app.add_middleware(RemoteAccessMiddleware)

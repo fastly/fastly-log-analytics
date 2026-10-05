@@ -30,6 +30,15 @@ spec:
     - host: {{ .host | quote }}
       http:
         paths:
+          {{- if $.Values.adminGateway.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "fastly-log-analytics.fullname" $ }}-public-gateway
+                port:
+                  number: 8080
+          {{- else }}
           # Backend paths — mirrors the Caddyfile @api matcher
           # (/api/* /js/* ). /docs and /openapi.json are
           # deliberately NOT exposed publicly.
@@ -61,5 +70,6 @@ spec:
                 name: {{ include "fastly-log-analytics.fullname" $ }}-frontend
                 port:
                   number: 3000
+          {{- end }}
     {{- end }}
 {{- end }}

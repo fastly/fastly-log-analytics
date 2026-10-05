@@ -44,6 +44,15 @@ spec:
               containerPort: 3000
               protocol: TCP
           env:
+            {{- if .Values.adminGateway.enabled }}
+            - name: ADMIN_GATEWAY_REQUIRED
+              value: "1"
+            - name: ADMIN_GATEWAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminGateway.existingSecret }}
+                  key: ADMIN_GATEWAY_SECRET
+            {{- end }}
             # SSR talks to the backend service directly, never through the
             # public ingress path.
             - name: API_PROXY_URL

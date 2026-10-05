@@ -59,6 +59,8 @@ services:
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
       # /etc/hosts entry (see README). See backend/utils/remote_access.py.
       - LOCAL_HOSTS=${LOCAL_HOSTS:-fastly.localhost,fastly.analytics}
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:-}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:-}
       # Caddy is the single ingress and connects to the backend over loopback
       # (shared netns, 127.0.0.1:8000) — same posture as docker-compose.prod.yml.
       # uvicorn's default --proxy-headers/--forwarded-allow-ips=127.0.0.1 already
@@ -107,6 +109,8 @@ services:
       # Loopback in the shared namespace (NOT backend:8000 — a service-name
       # address would resolve to the bridge IP and be classified remote → 400).
       - API_PROXY_URL=http://127.0.0.1:8000
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:-}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:-}
       - COMMIT_HASH=${COMMIT_HASH:-unknown}
       - ENV_NAME=local-standard
     depends_on:

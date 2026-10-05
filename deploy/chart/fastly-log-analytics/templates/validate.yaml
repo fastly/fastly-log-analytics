@@ -31,3 +31,11 @@ Template-time coherence gates for the deployment topology.
 {{- $_ := required "config.deploymentMode=high_throughput requires a broker; set secrets.celeryBrokerUrl or secrets.existingSecret." .Values.secrets.celeryBrokerUrl -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.adminGateway.enabled }}
+{{- if not .Values.adminGateway.existingSecret }}
+{{- fail "adminGateway.existingSecret is required when adminGateway.enabled=true" }}
+{{- end }}
+{{- if or (not (regexMatch "^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$" .Values.adminGateway.host)) (gt (len .Values.adminGateway.host) 253) }}
+{{- fail "adminGateway.host must be one explicit DNS hostname without wildcard, scheme or port" }}
+{{- end }}
+{{- end }}

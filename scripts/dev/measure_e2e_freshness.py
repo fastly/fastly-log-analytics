@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -38,6 +39,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Direct path invocation and python -m share the same explicit repo root.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
 
 ENVIRONMENTS = {
     "local-std": "Local Standard",
@@ -53,6 +59,8 @@ def load_environment_config(env_key: str, environ: dict[str, str] | None = None)
     settings = {
         key.lower(): env.get(f"{prefix}{key}", "").strip() for key in ("SERVICE_ID", "BACKEND_URL", "CDN_DOMAIN")
     }
+    if environ is None and (origin := admin_origin(env_key)):
+        settings["backend_url"] = origin
     missing = [key for key, value in settings.items() if not value]
     if missing:
         variable_names = ", ".join(f"{prefix}{key.upper()}" for key in missing)
@@ -180,7 +188,7 @@ def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 8
         req_headers.update(headers)
     req = urllib.request.Request(url, headers=req_headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with admin_urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
@@ -204,7 +212,7 @@ def http_post(
     payload = json.dumps(body if body is not None else {}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers=req_headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with admin_urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
@@ -287,7 +295,9 @@ def measure_environment(
     sid = env_info["service_id"]
     be_url = env_info["backend_url"]
     cdn = env_info["cdn_domain"]
-    auth_headers = {"x-admin-token": admin_token, "x-fastly-service-id": sid}
+    auth_headers = {"x-fastly-service-id": sid}
+    if not is_admin_url(be_url):
+        auth_headers["x-admin-token"] = admin_token
 
     print(f"\n{'=' * 78}", flush=True)
     print(f"  TARGET: {name}", flush=True)
@@ -595,6 +605,7 @@ def measure_environment(
 
 
 def main():
+    validate_admin_tls_config()
     parser = argparse.ArgumentParser(description="Measure edge-probe-to-active-serving visibility and delay")
     parser.add_argument("--env", choices=["all", "local-std", "local-hs", "remote-std", "remote-hs"], default="all")
     parser.add_argument("--requests", type=int, default=10, help="Number of edge requests to send")
@@ -606,7 +617,7 @@ def main():
     targets = list(ENVIRONMENTS.keys()) if args.env == "all" else [args.env]
     results = []
     try:
-        admin_token = admin_token_from_environment()
+        admin_token = "" if all(admin_origin(target) for target in targets) else admin_token_from_environment()
     except ValueError as exc:
         parser.error(str(exc))
 

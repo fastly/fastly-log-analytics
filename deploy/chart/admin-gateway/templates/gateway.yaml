@@ -1,0 +1,177 @@
+{{- if .Values.gateway.enabled }}
+{{- if or (not (regexMatch "^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$" .Values.host)) (gt (len .Values.host) 253) }}
+{{- fail "admin gateway host must be one explicit DNS hostname (no wildcard, scheme or port)" }}
+{{- end }}
+{{- if not .Values.existingSecret }}
+{{- fail "admin gateway existingSecret is required; create it out-of-band, never pass secret material through Helm values" }}
+{{- end }}
+{{- if or (not .Values.frontendUpstream) (not .Values.backendUpstream) }}
+{{- fail "admin gateway frontendUpstream and backendUpstream are required (host:port)" }}
+{{- end }}
+{{- end }}
+{{- if not (has .Values.service.type (list "ClusterIP" "LoadBalancer")) }}
+{{- fail "admin gateway service.type must be ClusterIP or an operator-configured private LoadBalancer" }}
+{{- end }}
+{{- if and (eq .Values.service.type "LoadBalancer") (ne .Values.service.internalProvider "gke-internal") }}
+{{- fail "LoadBalancer requires service.internalProvider=gke-internal; no external LoadBalancer is permitted" }}
+{{- end }}
+{{- if and (eq .Values.service.type "LoadBalancer") (hasKey .Values.service.annotations "cloud.google.com/load-balancer-type") (ne (index .Values.service.annotations "cloud.google.com/load-balancer-type") "Internal") }}
+{{- fail "LoadBalancer annotation must remain Internal" }}
+{{- end }}
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+data:
+  Caddyfile: |
+{{ .Files.Get "files/Caddyfile" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admin-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ .Files.Get "files/Caddyfile" | sha256sum }}
+      labels:
+        app.kubernetes.io/name: admin-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ .Values.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: ADMIN_GATEWAY_HOST
+              value: {{ .Values.host | quote }}
+            - name: ADMIN_GATEWAY_FRONTEND
+              value: {{ .Values.frontendUpstream | quote }}
+            - name: ADMIN_GATEWAY_BACKEND
+              value: {{ .Values.backendUpstream | quote }}
+            - name: ADMIN_GATEWAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: ADMIN_GATEWAY_SECRET
+          ports:
+            - name: mtls
+              containerPort: 8443
+          # A TCP probe does not bypass client authentication or expose HTTP.
+          readinessProbe:
+            tcpSocket:
+              port: mtls
+          livenessProbe:
+            tcpSocket:
+              port: mtls
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/caddy
+              readOnly: true
+            - name: certificates
+              mountPath: /certs
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: runtime-config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+        - name: certificates
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: server.crt
+                path: server.crt
+              - key: server.key
+                path: server.key
+              - key: client-ca.crt
+                path: client-ca.crt
+        - name: data
+          emptyDir: {}
+        - name: runtime-config
+          emptyDir: {}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  {{- if or .Values.service.annotations (eq .Values.service.type "LoadBalancer") }}
+  annotations:
+{{- if eq .Values.service.type "LoadBalancer" }}
+{{ toYaml (merge (dict "cloud.google.com/load-balancer-type" "Internal" "networking.gke.io/internal-load-balancer-allow-global-access" "true") .Values.service.annotations) | indent 4 }}
+{{- else }}
+{{ toYaml .Values.service.annotations | indent 4 }}
+{{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP | quote }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: admin-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: mtls
+      port: 8443
+      targetPort: mtls
+{{- if and .Values.gateway.enabled .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: admin-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8443
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+{{ toYaml . | indent 8 }}
+      {{- end }}
+  egress:
+    - to:
+{{ toYaml .Values.networkPolicy.upstreamTo | indent 8 }}
+      ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 8000
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

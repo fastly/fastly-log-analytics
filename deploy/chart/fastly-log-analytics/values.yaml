@@ -125,6 +125,13 @@ persistence:
     - ReadWriteOnce
   size: 20Gi
 
+adminGateway:
+  enabled: false
+  # Companion chart deploy/chart/admin-gateway owns the TLS listener.
+  # This chart ONLY wires the shared server credential into app containers.
+  existingSecret: ""
+  host: ""
+
 config:
   # "standard" — single-node ingest on the backend pod's in-process APScheduler.
   #            Needs no Postgres, no broker, no worker/beat pods. This is the

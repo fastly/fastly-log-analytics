@@ -23,6 +23,13 @@
 	auto_https off
 	log {
 		level ERROR
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-Admin-Token delete
+			}
+		}
 	}
 }
 
@@ -31,6 +38,9 @@
 # user maps in /etc/hosts (e.g. fastly.analytics). The friendly names must also
 # be in the backend's Host allowlist — see LOCAL_HOSTS in docker-compose.yml.
 :80 {
+	# Even the optional local public entry cannot impersonate the mTLS gateway.
+	request_header -X-Admin-Gateway-Token
+	request_header -X-Admin-Token
 	# /api/* → backend (loopback in the shared netns). flush_interval -1 keeps
 	# SSE streams (e.g. /api/cron-runs/stream) unbuffered; the timeouts cover
 	# the occasional slow analytics query.

@@ -285,6 +285,29 @@ The route uses `RequestContext` tenancy and analyst time clamping, masks
 `client_ip` under the existing invite PII policy, and returns signed keyset
 pagination plus `QueryResponseMetadata`.
 
+### Certificate-authenticated administrator connection
+
+The optional mTLS gateway is a separate administrator access surface for Compose
+and Kubernetes. Its dedicated client CA is not the analyst login system or a
+platform-wide client CA. See [docs/deploy/admin-mtls.md](docs/deploy/admin-mtls.md).
+
+`ADMIN_GATEWAY_SECRET` is a server-only credential injected into
+`X-Admin-Gateway-Token` after client-certificate authentication. Backend
+`backend/utils/admin_gateway.py` and frontend SSR independently verify it.
+Never put it in bootstrap, browser code or logs. Public proxies must strip it.
+Requests carrying the public `X-Proxied-By-Caddy` marker cannot be promoted with
+this credential.
+
+`ADMIN_GATEWAY_REQUIRED=1` removes implicit administrator access from loopback
+and `LOCAL_ADMIN_CIDRS`; unauthenticated requests keep analyst restrictions.
+Cheap liveness remains available, but deep health requires authentication.
+Set required mode on both backend and frontend runtimes. SSR bootstrap caching
+uses the shared transport trust decision and bypasses shared caching whenever
+an `analyst_session_id` cookie is present; even a loopback request can produce
+an analyst-scoped bootstrap. Never cache a response marked `is_remote_analyst`.
+Legacy configurations without required mode retain their existing behavior.
+Do not remove host-management SSH when retiring dashboard tunnel scaffolding.
+
 ### Live Query Monitor ([backend/core/query_registry.py](backend/core/query_registry.py), [backend/routers/admin_queries.py](backend/routers/admin_queries.py), [frontend/app/admin/queries/](frontend/app/admin/queries/))
 Real-time view of every executing DuckDB + PostgreSQL query — attribution (analyst / admin / cron / system), caller `file:line`, pool slot, duration ticking up live, kind-aware Kill button that calls `con.interrupt()`. Page at `/admin/queries`, admin-only via `RemoteAccessMiddleware`. Polling at 300 ms; the Active panel promotes "completed in the last 10 s" rows as faded entries with an outcome badge so typical-traffic (p50 ≈ 0.2 ms, max ≈ 29 ms) queries are visible. Notable Slow Queries panel filters the completed-history ring buffer by threshold (100ms / 500ms / 1s / 2s / 5s), sorted slowest first. Queries above the persistence threshold are also written to a `slow_queries` table ([backend/core/metadata/slow_queries.py](backend/core/metadata/slow_queries.py), in PostgreSQL metadata) stamped with the request correlation id (`rid`, also emitted in the access log), so the panel can answer "what was slow yesterday?" across restarts.
 

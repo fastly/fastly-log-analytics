@@ -25,7 +25,10 @@
 // special-cases 401 → 'unauthenticated', alerts.ts wants the admin
 // shared-secret injected on the loopback path. Both are expressible as
 // arguments + post-call branching.
+// Required mTLS gateway mode replaces the loopback Host shortcut with an
+// independently verified server-only credential; public traffic stays analyst.
 
+import { timingSafeEqual } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 
@@ -49,6 +52,40 @@ export function isLoopbackHost(host: string): boolean {
     : host.split(':', 1)[0]
   const lc = bare.toLowerCase()
   return lc === 'localhost' || lc === '127.0.0.1' || lc === '::1'
+}
+
+export function classifySsrRequest(headerBag: Pick<Headers, 'get'>): {
+  admin: boolean
+  gatewayAuthenticated: boolean
+  refusal: string | null
+} {
+  const proxiedByCaddy = headerBag.get('x-proxied-by-caddy')
+  const inboundHost = headerBag.get('host')
+  const gatewayToken = headerBag.get('x-admin-gateway-token')
+  const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || ''
+  const suppliedGateway = Buffer.from(gatewayToken || '')
+  const expectedGateway = Buffer.from(gatewaySecret)
+  const gatewayAuthenticated = !proxiedByCaddy
+    && gatewaySecret.length >= 32
+    && suppliedGateway.length === expectedGateway.length
+    && timingSafeEqual(suppliedGateway, expectedGateway)
+  let refusal: string | null = null
+  if (gatewayToken !== null && !gatewayAuthenticated) {
+    refusal = 'invalid admin gateway credential'
+  } else if (gatewayAuthenticated && !inboundHost) {
+    refusal = 'admin gateway request without Host'
+  } else if (gatewayAuthenticated && (
+    headerBag.get('sec-fetch-site') === 'cross-site'
+    || (headerBag.get('origin') !== null
+      && headerBag.get('origin')?.toLowerCase() !== `https://${inboundHost?.toLowerCase()}`)
+  )) {
+    refusal = 'cross-origin admin gateway request'
+  } else if (process.env.ADMIN_GATEWAY_REQUIRED === '1' && !gatewayAuthenticated && !proxiedByCaddy) {
+    refusal = 'authenticated admin gateway required'
+  } else if (!gatewayAuthenticated && !proxiedByCaddy && (!inboundHost || !isLoopbackHost(inboundHost))) {
+    refusal = `no X-Proxied-By-Caddy marker and non-loopback/absent Host=${inboundHost ?? '<none>'}`
+  }
+  return { admin: !refusal && !proxiedByCaddy, gatewayAuthenticated, refusal }
 }
 
 export interface SSRUpstreamResponse {
@@ -142,35 +179,17 @@ export async function ssrUpstreamGet({
     const cookieHeader = cookieJar.toString()
     const proxiedByCaddy = headerBag.get('x-proxied-by-caddy')
     const inboundHost = headerBag.get('host')
+    const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || ''
+    const { gatewayAuthenticated, refusal } = classifySsrRequest(headerBag)
+    if (refusal) {
+      console.warn(`[${logPrefix}] refusal: ${refusal} — falling back to client fetch`)
+      return null
+    }
     // DiagnosticsPanel writes this when either debug toggle is on, so SSR's
     // own upstream fetch can carry x-debug-responses too — otherwise the
     // Query Debugging panel never sees queries that ran during SSR (see
     // lib/debug-cookie.ts). Read here, applied on the admin branch below.
     const debugResponsesRequested = cookieJar.get(DEBUG_RESPONSES_COOKIE)?.value === '1'
-
-    // Caddy-marker trust gate (finding-015). Caddy stamps X-Proxied-By-Caddy
-    // on every public request unconditionally, so its absence means the
-    // request did NOT come through Caddy. Two no-marker shapes can reach the
-    // loopback Next.js port:
-    //   - the legitimate admin SSH-tunnel — always presents a LOOPBACK Host
-    //     (localhost:<tunnel-port>); forwarded as admin (no X-Remote-Analyst)
-    //     so admin pages keep their SSR pre-render.
-    //   - Caddy-config drift on a public request (non-loopback Host) OR an
-    //     SSRF / direct hit that omits the Host entirely — refuse, else the
-    //     backend's loopback-peer admin classification leaks operator-only
-    //     data into the server-rendered HTML.
-    // So: forward only when the marker is present (analyst) OR the inbound
-    // Host is explicitly loopback (admin). A missing or non-loopback Host
-    // without the marker fails closed → client fetch. (The narrow residual —
-    // an SSRF that both reaches :3000 AND spoofs Host: localhost — is
-    // accepted to preserve admin SSR; the realistic drift-on-public-Host and
-    // no-Host vectors are both refused.)
-    if (!proxiedByCaddy && (!inboundHost || !isLoopbackHost(inboundHost))) {
-      console.warn(
-        `[${logPrefix}] refusal: no X-Proxied-By-Caddy marker and non-loopback/absent Host=${inboundHost ?? '<none>'} — falling back to client fetch`,
-      )
-      return null
-    }
 
     const upstreamHeaders: Record<string, string> = {
       Accept: 'application/json',
@@ -182,7 +201,16 @@ export async function ssrUpstreamGet({
     if (platform) upstreamHeaders['sec-ch-ua-platform'] = platform
 
     // Caller-supplied non-trust headers first; the trust headers below win.
-    if (extraHeaders) Object.assign(upstreamHeaders, extraHeaders)
+    if (extraHeaders) {
+      const trustHeaders = new Set(['host', 'x-remote-analyst', 'x-admin-token', 'x-admin-gateway-token'])
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (!trustHeaders.has(key.toLowerCase())) upstreamHeaders[key] = value
+      }
+    }
+    if (gatewayAuthenticated) {
+      upstreamHeaders['X-Admin-Gateway-Token'] = gatewaySecret
+      if (inboundHost) upstreamHeaders.Host = inboundHost
+    }
     if (proxiedByCaddy) {
       // Inbound came through Caddy → remote visitor. Promote the
       // loopback SSR fetch to remote-analyst classification so the
@@ -197,7 +225,7 @@ export async function ssrUpstreamGet({
     // Admin shared-secret pickup on the loopback admin branch only.
     // The Caddy-proxied branch is by definition analyst-classified and
     // the backend reads X-Admin-Token only on the admin classification.
-    if (injectAdminToken && !proxiedByCaddy) {
+    if (injectAdminToken && !proxiedByCaddy && !gatewayAuthenticated) {
       const adminToken = (process.env.ADMIN_SHARED_SECRET || '').trim()
       if (adminToken) {
         upstreamHeaders['X-Admin-Token'] = adminToken

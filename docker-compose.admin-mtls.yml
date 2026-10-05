@@ -1,0 +1,38 @@
+# Optional standard Compose overlay (base shared-network namespace).
+# docker compose -f docker-compose.yml -f docker-compose.admin-mtls.yml up -d
+# Set ADMIN_GATEWAY_REQUIRED=1 in the operator's .env for enforced admin mTLS.
+services:
+  backend:
+    ports:
+      - "${ADMIN_GATEWAY_LISTEN_IP:-127.0.0.1}:${ADMIN_GATEWAY_PORT:-9443}:8443"
+    environment:
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:?set a random credential of at least 32 characters}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:?set 1 for mTLS enforcement}
+      - LOCAL_HOSTS=${LOCAL_HOSTS:?include the explicit admin gateway hostname}
+  frontend:
+    environment:
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:?set the same server-side credential}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:?set 1 for mTLS enforcement}
+  admin-gateway:
+    image: caddy:2.11.4-alpine
+    # Match the certificate directory owner. Set UID/GID explicitly in the
+    # operator's .env on non-1000 hosts; never weaken private-key permissions.
+    user: "${ADMIN_GATEWAY_UID:-1000}:${ADMIN_GATEWAY_GID:-1000}"
+    restart: unless-stopped
+    network_mode: "service:backend"
+    environment:
+      - ADMIN_GATEWAY_HOST=${ADMIN_GATEWAY_HOST:?set one explicit hostname}
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:?set the same server-side credential}
+    volumes:
+      - ./deploy/chart/admin-gateway/files/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${ADMIN_GATEWAY_CERT_DIR:?set an operator-owned certificate directory}:/certs:ro
+    depends_on:
+      - frontend
+    read_only: true
+    tmpfs:
+      - /data:mode=1777
+      - /config:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
