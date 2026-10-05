@@ -140,6 +140,24 @@ owner-only and delete it after importing. Import it interactively, without
 `security import -P`, so the password never appears in `argv`. The TLS
 handshake and server verification do not change.
 
+### Distinguishing deployments in the browser
+
+Keep a separate client CA and administrator identity for each deployment.
+Use a descriptive CSR name, such as `--name FLA-Production-Admin`, instead of
+`operator`; the certificate's subject then identifies the deployment in the
+browser picker. Use that name for the generated `.csr` and `.key` filenames
+in the signing and export commands above.
+
+For a readable Keychain label, add `-name "FLA Production Admin"` to the
+`openssl pkcs12 -export` command. Import the new identity and verify
+administrator access before removing the old certificate from the browser
+keychain. Removing a local certificate is not server-side revocation.
+
+Browsers may remember a selection for a site. Managed automatic selection is
+browser-specific and should match only the exact administrator origin and
+the intended certificate subject. Do not install a wildcard selection rule
+or share one private key across deployments merely to avoid the picker.
+
 Use a hostname resolving to the private listener. A TLS-preserving localhost
 port-forward can use `admin.localhost` (issue the server leaf for that exact
 name); no wildcard trust or disabled TLS verification is needed.

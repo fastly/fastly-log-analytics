@@ -153,7 +153,9 @@ existing platform internal ingress LoadBalancer is directly reachable from
 the workstation. The GKE adapter uses its observed internal-only annotations,
 never an external LoadBalancer by default. Generic Kubernetes retains
 ClusterIP unless a reviewed provider-specific internal adapter is selected.
-A new gateway endpoint has not yet been provisioned or live-verified.
+Direct certificate-authenticated gateways have been provisioned and exercised
+on local Compose, single-VM Standard and Kubernetes High-Scale deployments.
+Each deployment uses its own client CA and named administrator identity.
 
 Allocation is staged through `scripts/deploy_admin_gateway.py`:
 
@@ -187,10 +189,9 @@ per-environment origins from `ADMIN_GATEWAY_ENDPOINTS` (operator-local JSON
 objects containing `origin`, `cert`, `key` and `ca`). Only exact configured
 HTTPS origins receive client certificates; authenticated cross-origin
 redirects fail. The canonical opt-in disables legacy Elevation forwarding and
-uses direct URLs throughout checks and reports. The report-server owner still
-must integrate its bootstrap proxy using this helper before diagnostics are
-considered
-verified with `ADMIN_GATEWAY_REQUIRED=1`. Do not remove legacy dashboard SSH
+uses direct URLs throughout checks and reports. The report-server bootstrap
+proxy uses the same exact-origin certificate helper in required mode.
+Do not remove legacy dashboard SSH
 or Kubernetes forwarding scaffolding until both deployments satisfy the full
 acceptance criteria; retain host-management SSH afterward.
 

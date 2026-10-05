@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import sys
@@ -58,3 +59,23 @@ def test_report_rejects_unknown_environment_before_certificate_selection(report)
     error.value.close()
     assert not requests
     assert not origins
+
+
+@pytest.mark.parametrize("path", ["/", "/reports", "/reports/"])
+def test_report_root_redirect_is_bodyless_and_keeps_connection_usable(report, path):
+    origin, _, _ = report
+    host, port = origin.removeprefix("http://").split(":")
+    connection = http.client.HTTPConnection(host, int(port), timeout=2)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        assert response.status == 302
+        assert response.getheader("Location") == "/reports/deploys/current/index.html"
+        assert response.getheader("Content-Length") == "0"
+        assert response.read() == b""
+        connection.request("GET", "/relics/bootstrap_status.json?env=remote-hs")
+        follow_up = connection.getresponse()
+        assert follow_up.status == 200
+        follow_up.read()
+    finally:
+        connection.close()
