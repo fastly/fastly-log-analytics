@@ -1137,6 +1137,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cmcd/content-security/subscriber": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cmcd Content Security Subscriber
+         * @description Streaming → Content Security drill-down: every client IP one subscriber id was seen from.
+         *
+         *     Admin-only. Analysts only ever see rank labels for subscriber ids, and a
+         *     lookup keyed by a raw id would be an oracle for which ids exist (and their
+         *     IPs). Also blocked for analysts in ``remote_access``; this check is the
+         *     second layer.
+         */
+        post: operations["cmcd_content_security_subscriber_api_cmcd_content_security_subscriber_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/rum/enable": {
         parameters: {
             query?: never;
@@ -13483,6 +13508,88 @@ export interface components {
             /** Last Sync At */
             last_sync_at?: string | null;
         };
+        /** SubscriberIpRow */
+        SubscriberIpRow: {
+            /** Ip */
+            ip: string;
+            /** Country */
+            country?: string | null;
+            /** Host */
+            host?: string | null;
+            /** Requests */
+            requests: number;
+            /** Bytes */
+            bytes?: number | null;
+            /** Last Seen */
+            last_seen?: string | null;
+        };
+        /** SubscriberIpsRequest */
+        SubscriberIpsRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /** Subscriber Id */
+            subscriber_id: string;
+            /** Content Id */
+            content_id?: string | null;
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
+        };
+        /** SubscriberIpsResponse */
+        SubscriberIpsResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Available */
+            available: boolean;
+            /** Subscriber Id */
+            subscriber_id: string;
+            /**
+             * Fields
+             * @default {}
+             */
+            fields: {
+                [key: string]: boolean;
+            };
+            /**
+             * Ips
+             * @default []
+             */
+            ips: components["schemas"]["SubscriberIpRow"][];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
         /**
          * SummaryResponse
          * @description Cheap counts that power the live-monitor tab badge.
@@ -20850,6 +20957,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContentSecurityResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    cmcd_content_security_subscriber_api_cmcd_content_security_subscriber_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubscriberIpsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubscriberIpsResponse"];
                 };
             };
             /** @description Bad request */

@@ -99,3 +99,29 @@ class ContentSecurityResponse(BaseResponse):
     proxy_descriptions: list[ContentSecurityTopRow] = []
     subscribers_masked: bool = False
     bandwidth_ts: list[ContentSecurityBandwidthPoint] = []
+
+
+class SubscriberIpsRequest(FilteredRequest):
+    subscriber_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    content_id: Annotated[str, StringConstraints(max_length=512)] | None = None
+    range_token: str | None = None
+    anchor: str | None = None
+
+
+class SubscriberIpRow(BaseModel):
+    # One row per distinct (ip, country, host) combination.
+    ip: str
+    country: str | None = None
+    host: str | None = None
+    requests: int
+    bytes: int | None = None
+    last_seen: str | None = None
+
+
+class SubscriberIpsResponse(BaseResponse):
+    available: bool
+    subscriber_id: str
+    fields: dict[str, bool] = {}
+    ips: list[SubscriberIpRow] = []
+    # More IPs exist than the list carries (capped, most recent first).
+    truncated: bool = False

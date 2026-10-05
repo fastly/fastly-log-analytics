@@ -122,6 +122,8 @@ _ANALYST_BLOCKED_SUBPATHS = (
     "/api/download-folder",  # H-2: folder-level raw object download
     "/api/cron-schedule",  # H-3: exposes per-service cron cadence config
     "/api/sync-status",  # N-3: leaks ngwaf_workspace_id + active cron task state
+    # Raw subscriber id → IPs; analysts only see subscriber rank labels (PII).
+    "/api/cmcd/content-security/subscriber",
     # L7: the OpenAPI surface leaks the full admin/provision/debug API map.
     # Blocked for analysts (401 unauth / 403 authed); admin reaches it over
     # loopback (not is_remote), as does the build-time codegen hook.

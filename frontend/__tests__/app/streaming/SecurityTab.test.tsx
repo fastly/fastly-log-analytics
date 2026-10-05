@@ -5,6 +5,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { NuqsTestingAdapter, type UrlUpdateEvent } from 'nuqs/adapters/testing'
 import React from 'react'
 import SecurityTab from '@/app/streaming/_sections/tabs/SecurityTab'
+import { recencyOf } from '@/app/streaming/_sections/tabs/SubscriberIpsDialog'
 import { client } from '@/lib/api'
 import { createTestQueryClient } from '../../helpers/query'
 import { spyOnConsoleError } from '../../helpers/page-smoke'
@@ -364,4 +365,66 @@ test('leaderboard values open the filter / copy menu keyed to their log field', 
     expect(openSpy).toHaveBeenLastCalledWith(`/dashboard?${qs}`, '_blank', 'noopener,noreferrer')
   }
   openSpy.mockRestore()
+})
+
+const SUBSCRIBER_IPS = {
+  available: true,
+  subscriber_id: 'acct-shared',
+  fields: {},
+  truncated: false,
+  ips: [
+    { ip: '203.0.113.3', country: 'DE', host: 'b.example', requests: 3, bytes: 300, last_seen: '2026-01-01T00:58:00+00:00' },
+    // Same IP from a second country: its own row.
+    { ip: '203.0.113.3', country: 'FR', host: 'b.example', requests: 1, bytes: 100, last_seen: '2026-01-01T00:57:00+00:00' },
+    { ip: '203.0.113.2', country: 'US', host: 'a.example', requests: 2, bytes: 200, last_seen: '2026-01-01T00:50:00+00:00' },
+    { ip: '203.0.113.1', country: null, host: null, requests: 1, bytes: null, last_seen: '2026-01-01T00:30:00+00:00' },
+  ],
+}
+
+test('recencyOf buckets last-seen into green / yellow / red', () => {
+  const now = Date.parse('2026-01-01T01:00:00Z')
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString()
+  expect(recencyOf(ago(0), now)).toBe('active')
+  expect(recencyOf(ago(5), now)).toBe('active')
+  expect(recencyOf(ago(5.5), now)).toBe('recent')
+  expect(recencyOf(ago(20), now)).toBe('recent')
+  expect(recencyOf(ago(21), now)).toBe('stale')
+  expect(recencyOf(null, now)).toBe('stale')
+})
+
+test('clicking a subscriber opens a dialog listing its IPs with recency dots', async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-01-01T01:00:00Z') })
+  try {
+    postMock.mockImplementation(((path: string) =>
+      Promise.resolve({
+        data: path === '/api/cmcd/content-security/subscriber' ? SUBSCRIBER_IPS : FULL_RESPONSE,
+      })) as never)
+    const user = userEvent.setup()
+    renderTab('?content=movie-1')
+
+    await user.click(await screen.findByRole('button', { name: 'Show IP addresses for acct-shared' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText('Germany (DE)')).toBeInTheDocument()
+    expect(within(dialog).getAllByText('203.0.113.3')).toHaveLength(2)
+    expect(within(dialog).getAllByText('b.example')).toHaveLength(2)
+    expect(within(dialog).getByText('Germany (DE)')).toBeInTheDocument()
+    expect(within(dialog).getByText('France (FR)')).toBeInTheDocument()
+    const dots = Array.from(dialog.querySelectorAll('[data-recency]')).map((el) => el.getAttribute('data-recency'))
+    expect(dots).toEqual(['active', 'active', 'recent', 'stale'])
+
+    const call = postMock.mock.calls.find((c) => c[0] === '/api/cmcd/content-security/subscriber')
+    const body = (call?.[1] as unknown as { body: Record<string, unknown> }).body
+    expect(body).toMatchObject({ subscriber_id: 'acct-shared', content_id: 'movie-1' })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('masked subscriber ids are not clickable', async () => {
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, subscribers_masked: true } } as never)
+  renderTab()
+
+  expect(await screen.findByText('acct-shared')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Show IP addresses/ })).not.toBeInTheDocument()
 })

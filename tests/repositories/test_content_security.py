@@ -8,7 +8,7 @@ import pytest
 
 from backend.models.common import FilterSpec
 from backend.repositories._base import _safe_table
-from backend.repositories.content_security import _response_cache, get_content_security
+from backend.repositories.content_security import _response_cache, get_content_security, get_subscriber_ips
 
 _NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 _START = (_NOW - timedelta(hours=1)).isoformat()
@@ -335,3 +335,88 @@ def test_proxy_types_list_every_value_uncapped(in_memory_duckdb, test_service_so
     # No p_desc column on this table: its section degrades on its own.
     assert res["fields"]["p_desc"] is False
     assert res["proxy_descriptions"] == []
+
+
+def _call_subscriber_ips(con, src, subscriber_id, **kw):
+    args = {"start_time": _START, "end_time": _END, "filters": {}}
+    args.update(kw)
+    return get_subscriber_ips(con=con, src=src, subscriber_id=subscriber_id, **args)
+
+
+def test_subscriber_ips_one_row_per_ip_country_host(in_memory_duckdb, test_service_source):
+    _ALL_COLS["cs_sub_id"] = "VARCHAR"
+    try:
+        rows = [
+            {**_sub_row("sub-shared", "203.0.113.1", minutes_ago=30), "host": "a.example"},
+            # .3 from DE twice on b.example, once from FR on b.example: two rows, not one.
+            {**_sub_row("sub-shared", "203.0.113.3", minutes_ago=8, country="DE"), "host": "b.example"},
+            {**_sub_row("sub-shared", "203.0.113.3", minutes_ago=2, country="DE"), "host": "b.example"},
+            {**_sub_row("sub-shared", "203.0.113.3", minutes_ago=4, country="FR"), "host": "b.example"},
+            # Same IP + country on another host is its own row too.
+            {**_sub_row("sub-shared", "203.0.113.3", minutes_ago=6, country="DE"), "host": "c.example"},
+            # Shield line is the same request seen twice — not counted.
+            {**_sub_row("sub-shared", "203.0.113.9", minutes_ago=1, edge=False), "host": "a.example"},
+            # Another subscriber's IP is not listed.
+            _sub_row("sub-other", "198.51.100.7", minutes_ago=1),
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call_subscriber_ips(in_memory_duckdb, test_service_source, "sub-shared")
+    finally:
+        _ALL_COLS.pop("cs_sub_id")
+
+    def _ip(ip, country, host, requests, minutes_ago):
+        return {
+            "ip": ip,
+            "country": country,
+            "host": host,
+            "requests": requests,
+            "bytes": requests * 100,
+            "last_seen": (_NOW - timedelta(minutes=minutes_ago)).isoformat(),
+        }
+
+    assert res["available"] is True
+    assert res["truncated"] is False
+    assert res["ips"] == [
+        _ip("203.0.113.3", "DE", "b.example", 2, 2),
+        _ip("203.0.113.3", "FR", "b.example", 1, 4),
+        _ip("203.0.113.3", "DE", "c.example", 1, 6),
+        _ip("203.0.113.1", "US", "a.example", 1, 30),
+    ]
+
+
+def test_subscriber_ips_blank_country_and_host_are_null(in_memory_duckdb, test_service_source):
+    _ALL_COLS["cs_sub_id"] = "VARCHAR"
+    try:
+        rows = [
+            _sub_row("sub-shared", "203.0.113.1", country=""),
+            _sub_row("sub-shared", "203.0.113.1", country=None),
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call_subscriber_ips(in_memory_duckdb, test_service_source, "sub-shared")
+    finally:
+        _ALL_COLS.pop("cs_sub_id")
+
+    assert [(r["ip"], r["country"], r["host"], r["requests"]) for r in res["ips"]] == [("203.0.113.1", None, None, 2)]
+
+
+def test_subscriber_ips_narrowed_by_content_id(in_memory_duckdb, test_service_source):
+    _ALL_COLS["cs_sub_id"] = "VARCHAR"
+    try:
+        rows = [
+            _sub_row("sub-shared", "203.0.113.1"),
+            {**_sub_row("sub-shared", "203.0.113.2"), "cs_content_id": "movie-2"},
+        ]
+        _make_table(in_memory_duckdb, test_service_source, rows)
+        res = _call_subscriber_ips(in_memory_duckdb, test_service_source, "sub-shared", content_id="movie-2")
+    finally:
+        _ALL_COLS.pop("cs_sub_id")
+
+    assert [r["ip"] for r in res["ips"]] == ["203.0.113.2"]
+
+
+def test_subscriber_ips_unavailable_without_token_column(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, _fixture_rows())
+    res = _call_subscriber_ips(in_memory_duckdb, test_service_source, "sub-shared")
+
+    assert res["available"] is False
+    assert res["ips"] == []

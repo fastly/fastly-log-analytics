@@ -294,6 +294,78 @@ def get_content_security(
     return results
 
 
+# Cap on the per-subscriber (IP, country, host) list; a heavily shared credential
+# can fan out to thousands of IPs, and the dialog only needs the most recent ones.
+_SUBSCRIBER_IPS_LIMIT = 500
+
+
+def get_subscriber_ips(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    subscriber_id: str,
+    content_id: str | None = None,
+) -> dict[str, Any]:
+    """Return every (client IP, country, host) combination one subscriber id was seen from, most recent first.
+
+    One row per distinct combination, so an IP seen from two countries (or on
+    two hosts) is two rows. Edge log lines only, as in
+    :func:`get_content_security`. Returns the raw subscriber id and IPs — the
+    route is admin-only.
+    """
+    runner = QueryRunner(con, src)
+    actual_cols = runner.get_schema_cols()
+    fields = {col: bool(actual_cols) and col in actual_cols for col in _OPTIONAL_COLS}
+    base = {"subscriber_id": subscriber_id, "fields": fields, "ips": [], "truncated": False}
+    if not (fields["cs_sub_id"] and fields["ip"]):
+        return {**base, "available": False, **runner.telemetry()}
+
+    # Subscriber + content ids go through build_where_clause like any other filter, so they are escaped there.
+    scoped_filters: FiltersDict = dict(filters)
+    scoped_filters["cs_sub_id"] = FilterSpec(mode="include", values=[subscriber_id])
+    if content_id:
+        scoped_filters["cs_content_id"] = FilterSpec(mode="include", values=[content_id])
+    params, where_clause = build_where_clause(start_time, end_time, scoped_filters, actual_cols, inline_params=True)
+
+    edge_where = "edge = true" if fields["edge"] else "1=1"
+    # '' and NULL are the same "unknown" value — one row, not two.
+    country_col = """NULLIF("country", '')""" if fields["country"] else "NULL"
+    host_col = """NULLIF("host", '')""" if fields["host"] else "NULL"
+    bytes_agg = "SUM(resp_bytes)" if fields["resp_bytes"] else "NULL"
+    rows = runner.execute(
+        f"""
+        SELECT ip, {country_col} AS country, {host_col} AS host, COUNT(*) AS requests, {bytes_agg} AS bytes,
+               MAX(timestamp) AS last_seen
+        FROM {_safe_table(src["name"])}
+        WHERE {where_clause} AND {edge_where} AND ip IS NOT NULL AND ip != ''
+        GROUP BY 1, 2, 3
+        ORDER BY last_seen DESC, requests DESC, ip, country NULLS LAST, host NULLS LAST
+        LIMIT {_SUBSCRIBER_IPS_LIMIT + 1}
+        """,
+        params or None,
+    ).fetchall()
+    return {
+        **base,
+        "available": True,
+        "ips": [
+            {
+                "ip": r[0],
+                "country": r[1],
+                "host": r[2],
+                "requests": r[3],
+                "bytes": int(r[4]) if r[4] is not None else None,
+                # TIMESTAMPTZ comes back in the session zone; send UTC.
+                "last_seen": r[5].astimezone(_dt.UTC).isoformat() if r[5] is not None else None,
+            }
+            for r in rows[:_SUBSCRIBER_IPS_LIMIT]
+        ],
+        "truncated": len(rows) > _SUBSCRIBER_IPS_LIMIT,
+        **runner.telemetry(),
+    }
+
+
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("content_security._response_cache", _response_cache)

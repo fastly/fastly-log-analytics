@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from tests.conftest import MOCK_SERVICE_ID
 
 
@@ -172,3 +174,85 @@ def test_content_security_analyst_gets_rank_labels(client, in_memory_duckdb, tes
     ]
     assert data["subscribers_masked"] is True
     assert _SUBSCRIBERS_RET["top_subscribers"][0]["subscriber_id"] == "acct-123"
+
+
+_SUBSCRIBER_IPS_RET = {
+    "available": True,
+    "subscriber_id": "acct-123",
+    "fields": {"cs_sub_id": True, "ip": True},
+    "ips": [
+        {
+            "ip": "203.0.113.5",
+            "country": "US",
+            "host": "pirate.example",
+            "requests": 4,
+            "bytes": 400,
+            "last_seen": "2026-08-19T12:59:00+00:00",
+        }
+    ],
+    "truncated": False,
+}
+
+
+def _post_subscriber_ips(c, **body):
+    return c.post(
+        "/api/cmcd/content-security/subscriber",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={
+            "filters": {},
+            "start_time": "2026-08-19T12:00:00Z",
+            "end_time": "2026-08-19T13:00:00Z",
+            "subscriber_id": "acct-123",
+            **body,
+        },
+    )
+
+
+def test_subscriber_ips_admin_gets_raw_rows(client):
+    with patch(
+        "backend.repositories.content_security.get_subscriber_ips", return_value=_SUBSCRIBER_IPS_RET
+    ) as mock_get:
+        resp = _post_subscriber_ips(client, content_id="movie-1")
+
+    assert resp.status_code == 200
+    assert resp.json()["ips"] == _SUBSCRIBER_IPS_RET["ips"]
+    assert mock_get.call_args.kwargs["subscriber_id"] == "acct-123"
+    assert mock_get.call_args.kwargs["content_id"] == "movie-1"
+
+
+def test_subscriber_ips_rejects_blank_subscriber_id(client):
+    assert _post_subscriber_ips(client, subscriber_id="").status_code == 422
+
+
+@pytest.mark.security_regression
+def test_subscriber_ips_forbidden_for_analysts(client, in_memory_duckdb, test_service_source):
+    """Analysts only see subscriber rank labels; a raw-id lookup would leak
+    which ids exist and the IPs behind them. The route must 403 at the handler
+    even if the remote_access blocklist entry were dropped."""
+    from types import SimpleNamespace
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from tests.conftest import override_request_context
+
+    session = SimpleNamespace(pii_policy={}, service_ids=[test_service_source["service_id"]])
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source, _con_override=in_memory_duckdb, session=session
+    )
+    try:
+        with patch("backend.repositories.content_security.get_subscriber_ips") as mock_get:
+            resp = _post_subscriber_ips(client)
+    finally:
+        app.dependency_overrides.pop(build_request_context, None)
+
+    assert resp.status_code == 403
+    mock_get.assert_not_called()
+
+
+@pytest.mark.security_regression
+def test_subscriber_ips_blocklisted_for_analysts_in_middleware():
+    from backend.utils.remote_access import _is_blocked_path
+
+    assert _is_blocked_path("/api/cmcd/content-security/subscriber")
+    # The tab's own aggregate query stays analyst-reachable.
+    assert not _is_blocked_path("/api/cmcd/content-security")

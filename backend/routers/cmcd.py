@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
@@ -14,12 +14,14 @@ from backend.models.cmcd import (
     CmcdSectionName,
     ContentSecurityRequest,
     ContentSecurityResponse,
+    SubscriberIpsRequest,
+    SubscriberIpsResponse,
 )
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import cmcd as repo
 from backend.repositories import content_security as content_security_repo
 from backend.utils.auth import mask_ips_for
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.router_utils import make_error, make_section_expander, query_errors
 from backend.utils.time_window import is_valid_range_token, resolve_window
 
 logger = logging.getLogger(__name__)
@@ -111,3 +113,43 @@ def cmcd_content_security(
             "subscribers_masked": True,
         }
     return ContentSecurityResponse.with_telemetry(**res)
+
+
+@router.post("/cmcd/content-security/subscriber", response_model=SubscriberIpsResponse)
+@query_errors()
+def cmcd_content_security_subscriber(
+    req: SubscriberIpsRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    """Streaming → Content Security drill-down: every client IP one subscriber id was seen from.
+
+    Admin-only. Analysts only ever see rank labels for subscriber ids, and a
+    lookup keyed by a raw id would be an oracle for which ids exist (and their
+    IPs). Also blocked for analysts in ``remote_access``; this check is the
+    second layer.
+    """
+    if ctx.analyst_session is not None:
+        raise HTTPException(status_code=403, detail=make_error("admin_only", "Subscriber drill-down is admin-only"))
+
+    if is_valid_range_token(req.range_token):
+        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
+        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
+        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
+    else:
+        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(ctx.service_id) is not None:
+        return SubscriberIpsResponse(available=False, subscriber_id=req.subscriber_id)
+
+    res = content_security_repo.get_subscriber_ips(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
+        filters=req.filters,
+        subscriber_id=req.subscriber_id,
+        content_id=req.content_id or None,
+    )
+    return SubscriberIpsResponse.with_telemetry(**res)

@@ -19,6 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import type { components } from '@/types/api.generated'
 import type { StreamingTabProps } from './QualityTab'
+import { SubscriberIpsDialog } from './SubscriberIpsDialog'
 
 type ContentSecurityData = components['schemas']['ContentSecurityResponse']
 type TopRow = components['schemas']['ContentSecurityTopRow']
@@ -43,10 +44,13 @@ export function SubscriberTable({
   rows,
   showCountries,
   timezone,
+  onSelect,
 }: {
   rows: SubscriberRow[]
   showCountries: boolean
   timezone: string
+  /** Opens the per-IP drill-down; omitted when ids are masked (analysts). */
+  onSelect?: (subscriberId: string) => void
 }) {
   const showBytes = rows.some((r) => r.bytes != null)
   return (
@@ -64,10 +68,29 @@ export function SubscriberTable({
       </TableHeader>
       <TableBody>
         {rows.map((row, i) => (
-          <TableRow key={row.subscriber_id}>
+          <TableRow
+            key={row.subscriber_id}
+            className={cn(onSelect && 'cursor-pointer')}
+            onClick={onSelect ? () => onSelect(row.subscriber_id) : undefined}
+          >
             <TableCell className="text-right tabular-nums text-muted-foreground">{i + 1}</TableCell>
             <TableCell className="max-w-[20rem] truncate font-mono text-xs" title={row.subscriber_id}>
-              {row.subscriber_id}
+              {onSelect ? (
+                // The row is the click target; this button is its keyboard / screen-reader handle.
+                <button
+                  type="button"
+                  className="max-w-full truncate text-left hover:underline focus-visible:underline focus-visible:outline-none"
+                  aria-label={`Show IP addresses for ${row.subscriber_id}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onSelect(row.subscriber_id)
+                  }}
+                >
+                  {row.subscriber_id}
+                </button>
+              ) : (
+                row.subscriber_id
+              )}
             </TableCell>
             <TableCell className="text-right tabular-nums font-medium">{row.distinct_ips.toLocaleString()}</TableCell>
             {showCountries && (
@@ -203,6 +226,7 @@ export default function SecurityTab({
   bucketSeconds,
 }: SecurityTabProps) {
   const [contentId, setContentId] = useQueryState('content', contentParser)
+  const [selectedSubscriber, setSelectedSubscriber] = React.useState<string | null>(null)
   const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
 
   const query = useServiceQuery<ContentSecurityData | undefined>(
@@ -352,7 +376,12 @@ export default function SecurityTab({
       >
         {data?.top_subscribers?.length ? (
           <>
-            <SubscriberTable rows={data.top_subscribers} showCountries={!missing('country')} timezone={timezone} />
+            <SubscriberTable
+              rows={data.top_subscribers}
+              showCountries={!missing('country')}
+              timezone={timezone}
+              onSelect={data.subscribers_masked ? undefined : setSelectedSubscriber}
+            />
             {data.subscribers_masked && (
               <p className="px-2 pt-2 text-[11px] text-muted-foreground">
                 Subscriber IDs are hidden for shared sessions; ranks and counts are exact.
@@ -390,6 +419,20 @@ export default function SecurityTab({
           <ChartEmptyState />
         )}
       </AnalyticsCard>
+
+      <SubscriberIpsDialog
+        subscriberId={selectedSubscriber}
+        contentId={contentId}
+        onClose={() => setSelectedSubscriber(null)}
+        activeServiceId={activeServiceId}
+        filterPayload={filterPayload}
+        startTime={startTime}
+        endTime={endTime}
+        relativeRange={relativeRange}
+        isAutoRange={isAutoRange}
+        anchor={anchor}
+        timezone={timezone}
+      />
     </div>
   )
 }
