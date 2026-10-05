@@ -64,7 +64,6 @@ from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tl
 # that same per-environment URL list.
 ENV_BASE_URLS: dict[str, str] = {
     "local-std": "http://127.0.0.1",
-    "local-hs": "http://127.0.0.1:8081",
     # Remotes resolve only through configured native admin mTLS endpoints.
     "remote-std": "",
     "remote-hs": "",
@@ -79,8 +78,6 @@ _CURRENT_REPORT_LINK = _REPO_ROOT / "reports" / "deploys" / "current"
 _LOG_SOURCES: list[tuple[str, str]] = [
     ("local_std_backend.log", "Local Standard/backend"),
     ("local_std_frontend.log", "Local Standard/frontend"),
-    ("local_hs_backend.log", "Local High-Scale/backend"),
-    ("local_hs_frontend.log", "Local High-Scale/frontend"),
     ("remote_std_backend.log", "Remote Standard/backend"),
     ("remote_std_frontend.log", "Remote Standard/frontend"),
     ("remote_hs_backend.log", "Remote High-Scale/backend"),
