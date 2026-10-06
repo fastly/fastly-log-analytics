@@ -65,7 +65,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
     if (service && open) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset the controlled settings form on open.
       setSyncIntervalMins(String(service.cron_sync?.interval_mins ?? 2))
-      setPollingMode(service.cron_sync?.polling_mode ?? 'regular')
+      setPollingMode(service.cron_sync?.polling_mode ?? 'adaptive')
       setSyncEnabled(service.cron_sync?.enabled ?? false)
       setDeleteAfter(service.cron_sync?.delete_after ?? false)
       setCommitInterval(String(service.cron_sync?.commit_interval_mins ?? 5))

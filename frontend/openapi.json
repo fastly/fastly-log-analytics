@@ -60521,7 +60521,7 @@
               "adaptive"
             ],
             "title": "Polling Mode",
-            "default": "regular"
+            "default": "adaptive"
           },
           "interval_mins": {
             "anyOf": [

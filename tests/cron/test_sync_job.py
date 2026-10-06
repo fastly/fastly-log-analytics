@@ -132,7 +132,7 @@ def stub_load_config(monkeypatch):
     cfg = {
         "service_id": "svc-1",
         "name": "svc-1",
-        "provisioning": {"cron_sync": {"enabled": True}},
+        "provisioning": {"cron_sync": {"enabled": True, "polling_mode": "regular"}},
     }
     load = MagicMock(return_value=cfg)
     save = MagicMock()

@@ -79,15 +79,15 @@ def test_admin_token_uses_environment_only_and_rejects_missing_token():
         (
             {"log_period": 60, "cron_sync": {"interval_seconds": 0}},
             {
-                "mode": "regular",
+                "mode": "adaptive",
                 "interval_seconds": 30,
                 "interval_source": "log_period",
-                "adaptive_followup_interval_seconds": None,
-                "adaptive_max_followups": 0,
+                "adaptive_followup_interval_seconds": 3,
+                "adaptive_max_followups": 2,
             },
         ),
         (
-            {"log_period": 1, "cron_sync": {"interval_seconds": 2}},
+            {"log_period": 1, "cron_sync": {"polling_mode": "regular", "interval_seconds": 2}},
             {
                 "mode": "regular",
                 "interval_seconds": 5,

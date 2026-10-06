@@ -96,7 +96,7 @@ def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any
         cron_sync = {}
     if not isinstance(cron_sync, dict):
         raise ValueError("service cron_sync settings are invalid")
-    mode = cron_sync.get("polling_mode", "regular")
+    mode = cron_sync.get("polling_mode", "adaptive")
     if mode not in {"regular", "adaptive"}:
         raise ValueError("service polling_mode must be regular or adaptive")
 
@@ -520,7 +520,7 @@ def measure_environment(
 
     # 4. Probe All Analytics Pages for End-to-End Freshness Comparison
     print("\n📊 Probing All Analytics Pages to measure freshness & query latency...", flush=True)
-    page_probes = {
+    page_probes: dict[str, tuple[str, str, dict[str, Any] | None]] = {
         "Header Badge": (f"{be_url}/api/log-extents?service_id={sid}", "GET", None),
         "Dashboard Bundle": (f"{be_url}/api/dashboard/bundle?service_id={sid}", "POST", {"range_token": "24h"}),
         "Performance / RUM": (f"{be_url}/api/performance/aggregates", "POST", {"filters": {}}),

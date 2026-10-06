@@ -12659,7 +12659,7 @@ export interface components {
             enabled: boolean;
             /**
              * Polling Mode
-             * @default regular
+             * @default adaptive
              * @enum {string}
              */
             polling_mode: "regular" | "adaptive";

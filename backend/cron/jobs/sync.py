@@ -15,6 +15,7 @@ them at ``backend.cron.jobs.sync.<name>``.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -225,7 +226,7 @@ def _run_log_discovery_cron(
             discovery_started = time.time()
             try:
                 discovered = 0
-                adaptive = sync_cfg.get("polling_mode", "regular") == "adaptive" and not is_manual
+                adaptive = sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual
                 poll_started = time.monotonic()
                 for poll_index in range(3):
                     if poll_index:
@@ -316,14 +317,20 @@ def _run_log_discovery_cron(
         inserted_rows = 0
         corrupt_rows = 0
 
+        # Max files per pass: 250 on incremental ticks to bound pass latency to <= 5s,
+        # allowing adaptive re-poll passes and scheduler ticks to stay responsive without starving.
+        max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
+        pass_max_files = max_incremental_files if not is_manual else 5000
+        pass_max_seconds = 20 if not is_manual else 240
+
         try:
             for event in _ingest_with_adaptive_followups(
                 ingest,
-                adaptive=sync_cfg.get("polling_mode", "regular") == "adaptive" and not is_manual,
+                adaptive=sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual,
                 source=src,
                 delete_after=delete_after,
-                max_files=5000,
-                max_seconds=240,
+                max_files=pass_max_files,
+                max_seconds=pass_max_seconds,
                 start_time=start_time,
                 end_time=end_time,
                 incremental_only=not is_manual,

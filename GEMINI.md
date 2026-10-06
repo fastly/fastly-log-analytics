@@ -28,3 +28,6 @@ These instructions govern all coding, debugging, provisioning, deployment, and v
 - Playwright E2E tests inside `verify_dashboard.js` must strictly verify standard positive-case:
   1. Use Playwright's `locator.waitFor` to wait for standard Plotly charts (`.js-plotly-plot, .plotly`) to become visible, ensuring standard generic page skeletons have fully cleared.
   2. Verify that standard aggregates metrics are non-zero, time-series charts are fully populated, and standard requests/RUM counts are 100% consistent and in-sync.
+
+### 5. Mandatory Request Lag Reporting
+- **ALWAYS** extract and explicitly report the request log lag (recency / ingestion latency delta) at the end of each deployment and verification run, comparing the real-time ingest monitor and browser dashboard headers across all active environments (Local Standard, Remote Standard GCE, Remote High-Scale Elevation).

@@ -9,7 +9,7 @@ from backend.models.common import BaseResponse
 
 class ServiceCronSync(BaseModel):
     enabled: bool
-    polling_mode: Literal["regular", "adaptive"] = "regular"
+    polling_mode: Literal["regular", "adaptive"] = "adaptive"
     interval_mins: int | None = None
     # Persisted sync configs use interval_seconds (the scheduler reads it, with
     # interval_mins winning when both are present). Modelled here so this full
