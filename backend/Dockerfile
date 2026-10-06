@@ -6,12 +6,7 @@ FROM python:3.13-slim-bookworm AS builder
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    cmake \
     curl \
-    git \
-    pkg-config \
-    unzip \
-    zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -24,10 +19,6 @@ WORKDIR /app
 # silences the warning (behavior is already copy-fallback today).
 ENV UV_LINK_MODE=copy
 ENV UV_HTTP_TIMEOUT=300
-
-ARG DUCKLAKE_BASE_COMMIT=d318a545571d7d46eb751fa2aa5f6f4389285d3c
-ARG DUCKDB_154_COMMIT=08e34c447bae34eaee3723cac61f2878b6bdf787
-ARG VCPKG_COMMIT=84bab45d415d22042bd0b9081aea57f362da3f35
 
 # Copy dependency files first
 COPY pyproject.toml uv.lock ./
@@ -44,45 +35,11 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
-# Build the DuckLake #1495 backport against the DuckDB release used by uv.lock.
-COPY backend/ducklake-1495-duckdb-1.5.4.patch /tmp/ducklake-1495-duckdb-1.5.4.patch
-COPY scripts/verify_ducklake_issue_1495.py /tmp/verify_ducklake_issue_1495.py
-RUN set -eux; \
-    git clone --filter=blob:none --no-checkout https://github.com/duckdb/ducklake.git /tmp/ducklake; \
-    git -C /tmp/ducklake checkout --detach "$DUCKLAKE_BASE_COMMIT"; \
-    git -C /tmp/ducklake submodule update --init duckdb; \
-    git -C /tmp/ducklake/duckdb fetch origin "$DUCKDB_154_COMMIT"; \
-    git -C /tmp/ducklake/duckdb checkout --detach "$DUCKDB_154_COMMIT"; \
-    git -C /tmp/ducklake/duckdb submodule update --init --recursive; \
-    git -C /tmp/ducklake apply /tmp/ducklake-1495-duckdb-1.5.4.patch; \
-    git clone --filter=blob:none --no-checkout https://github.com/microsoft/vcpkg.git /tmp/vcpkg; \
-    git -C /tmp/vcpkg checkout --detach "$VCPKG_COMMIT"; \
-    /tmp/vcpkg/bootstrap-vcpkg.sh -disableMetrics; \
-    case "$(dpkg --print-architecture)" in \
-        amd64) vcpkg_triplet=x64-linux ;; \
-        arm64) vcpkg_triplet=arm64-linux ;; \
-        *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    cmake -S /tmp/ducklake/duckdb -B /tmp/ducklake/build/release \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_TOOLCHAIN_FILE=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake \
-        -DVCPKG_BUILD=1 \
-        -DVCPKG_TARGET_TRIPLET="$vcpkg_triplet" \
-        -DVCPKG_HOST_TRIPLET="$vcpkg_triplet" \
-        -DVCPKG_MANIFEST_DIR=/tmp/ducklake \
-        -DEXTENSION_STATIC_BUILD=1 \
-        -DDUCKDB_EXTENSION_CONFIGS=/tmp/ducklake/extension_config.cmake \
-        -DENABLE_UNITTEST_CPP_TESTS=FALSE; \
-    cmake --build /tmp/ducklake/build/release --target ducklake_loadable_extension --parallel 2; \
-    test -s /tmp/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension; \
-    DUCKLAKE_EXTENSION_PATH=/tmp/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension \
-        /app/.venv/bin/python /tmp/verify_ducklake_issue_1495.py
-
 # Pre-install DuckDB's platform-specific extensions while the build
 # environment has network access. Runtime pods may not be able to reach
 # extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
 RUN /app/.venv/bin/python -c \
-    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('iceberg', 'avro', 'httpfs', 'parquet')]; con.close()"
+    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('ducklake', 'iceberg', 'avro', 'httpfs', 'parquet')]; con.close()"
 
 # Falco — Fastly VCL static analyser (github.com/ysugimoto/falco).
 # Download and unpack in builder so the runtime runner stage remains minimal
@@ -155,13 +112,12 @@ RUN groupadd --gid 1000 app \
 # Without this, the first request fails with PermissionError because
 # docker creates the bind-mount directories owned by root before the
 # mount is applied, and our entrypoint can't write under them.
-RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer /opt/ducklake \
+RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer \
  && chown -R app:app /app
 
 # Copy the virtual environment from the builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
-COPY --from=builder --chown=app:app /tmp/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension /opt/ducklake/ducklake.duckdb_extension
 
 # Copy static assets, configuration, and helper scripts first.
 # Placing these before backend/ preserves Docker layer caching across application code changes.
@@ -184,8 +140,7 @@ COPY --chown=app:app backend/ ./backend/
 # steps above don't run under a not-yet-installed preload.
 # Bare soname (arch-portable via ldconfig — see the build-time check above).
 ENV LD_PRELOAD=libjemalloc.so.2 \
-    MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000 \
-    DUCKLAKE_EXTENSION_PATH=/opt/ducklake/ducklake.duckdb_extension
+    MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
 USER app
 

@@ -94,3 +94,52 @@ def test_bundled_ducklake_path_is_sql_escaped(monkeypatch):
 
     assert ducklake._ducklake_attach(Connection(), {"service_id": "svc"}) is False
     assert statements == ["LOAD '/opt/duck''lake/ducklake.duckdb_extension';"]
+
+
+def test_ducklake_attach_configures_data_inlining_row_limit_zero(monkeypatch):
+    statements = []
+
+    class Connection:
+        def execute(self, statement):
+            statements.append(statement)
+            if "duckdb_databases" in statement:
+                return Mock(fetchone=Mock(return_value=None))
+            return Mock(fetchone=Mock(return_value=None))
+
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", "postgres:dbname=test")
+    monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
+    monkeypatch.delenv("DUCKDB_EXTENSION_DIRECTORY", raising=False)
+
+    attached = ducklake._ducklake_attach(Connection(), {"service_id": "svc"})
+
+    assert attached is True
+    attach_stmts = [s for s in statements if s.startswith("ATTACH 'ducklake:")]
+    assert len(attach_stmts) == 1
+    assert "DATA_INLINING_ROW_LIMIT 0" in attach_stmts[0]
+
+
+def test_ducklake_attach_disables_inlined_tables_and_writes_parquet_directly(tmp_path, monkeypatch):
+    catalog_path = tmp_path / "lake.ducklake"
+    data_path = tmp_path / "data"
+    source = {"service_id": "test_direct_parquet", "name": "test_direct_parquet"}
+
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", f"ducklake:{catalog_path}")
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(data_path))
+    monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
+
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        assert ducklake._ducklake_attach(con, source, read_only=False) is True
+        con.execute("CREATE TABLE lake.t (id INT)")
+        con.execute("INSERT INTO lake.t VALUES (1), (2)")
+        file_count = con.execute("SELECT file_count FROM ducklake_table_info('lake')").fetchone()[0]
+        assert file_count > 0, "DATA_INLINING_ROW_LIMIT 0 must write parquet immediately without inlining"
+        snapshots = con.execute("SELECT * FROM lake.snapshots()").fetchall()
+        for snap in snapshots:
+            changes = snap[3]
+            if isinstance(changes, dict):
+                assert "inlined_insert" not in changes, "no inlined insert changes should occur"
+    finally:
+        con.close()

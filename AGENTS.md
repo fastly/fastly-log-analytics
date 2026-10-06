@@ -29,14 +29,14 @@ The canonical reference for any contributor or AI agent working on this project.
 
 ## Overview
 
-FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + Apache Iceberg and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
+FastAPI + Next.js dashboard for Fastly Real-Time VCL logs streamed to Fastly Object Storage (FOS). Continuously ingests `.gz` log files into DuckDB + DuckLake (formerly PyIceberg) using a Celery/Valkey architecture and exposes per-service analytics, alerts, NGWAF bot detection, custom log fields, and a live-share feature for read-only analyst access.
 
 User-facing pitch + features list lives in [README.md](README.md). This file documents *how it works internally*.
 
 **Stack:**
-- Backend: FastAPI, DuckDB, PyIceberg, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
+- Backend: FastAPI, DuckDB, DuckLake, PostgreSQL 16, Celery, Valkey, APScheduler, boto3 (S3-compatible FOS), `uv`, `ruff`, `mypy`, `pytest`
 - Frontend: Next.js 16, React 19, TanStack Query v5, Zustand, shadcn/ui, openapi-fetch, vitest
-- Storage: FOS (S3-compatible), per-service DuckDB + SQLite (operational metadata), global SQLite for NGWAF bot cache + live-share
+- Storage: FOS (S3-compatible), per-service DuckDB (analytical querying), unified PostgreSQL 16 (operational metadata, state tracking, and DuckLake catalogs per ADR-22)
 - Optional: [`falco`](https://github.com/ysugimoto/falco) VCL linter — detected via `shutil.which("falco")`, degrades gracefully to regex checks when absent
 
 **VCL editing:** when you write or edit a log format string, a custom field `vcl_log_expression`, or any VCL snippet, it must pass `falco lint`. Use `+` for string concatenation; wrap literals in heredoc strings (`{"literal"}`). Call sites: [backend/utils/vcl_utils.py](backend/utils/vcl_utils.py), [backend/provision/fastly_api.py](backend/provision/fastly_api.py), [backend/routers/services/core.py](backend/routers/services/core.py).
@@ -47,18 +47,20 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 
 | Layer | Location | Purpose |
 |---|---|---|
-| Raw logs | `s3://{bucket}/{prefix}/raw/**/*.gz` | Immutable gzipped JSON from Fastly |
-| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and Iceberg commit |
-| Iceberg table | `s3://{bucket}/{prefix}/iceberg/` | Durable long-term storage, hour-partitioned |
-| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance) |
+| Raw logs | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON from Fastly; v3 services use these roots exclusively |
+| Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and commit |
+| DuckLake table | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required across all deployment modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)); data: `s3://{bucket}/{prefix}/ducklake/` for cloud-backed sources | Durable long-term storage. Replaced Apache Iceberg/pyiceberg as the commit-path catalog in v3.0.0-beta1 — see [ADR-14](docs/adr/14-ducklake-replacement.md). |
+| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Path predates the DuckLake cutover; unaffected since it was never part of the Iceberg/DuckLake commit-path catalog. |
 | DuckDB | `data/services/{service_id}.duckdb` | Per-service analytical engine **only**: session-scoped `logs` view + temp tables |
-| Service metadata DB | `data/services/{service_id}.metadata.db` | Per-service SQLite (WAL): `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries` |
-| Usage-log DB | `data/services/{service_id}.usage_log.db` | Per-service SQLite (WAL): `usage_log` + `usage_log_hourly_summary`, split out of `metadata.db` so the cron writer's lock never blocks admin readers |
-| NGWAF bot cache | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite for VERIFIED-BOT enrichment |
-| Live-share DB | `data/system/remote_share.db` | Singleton SQLite (WAL): invites, sessions, audit, TOS, lockouts |
+| Metadata & State DB | PostgreSQL 16 (`METADATA_DSN`, mandatory across all modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)) | Unified relational store: `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `usage_log`, `usage_log_hourly_summary`, `remote_invites`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `share_tos_versions`, `ngwaf_bots`, and `rdns` |
 | Service configs | `configs/{logging_service_id}.json` | Credentials, settings, log_fields config |
 
-The DuckDB `logs` view stitches the Iceberg table and the local Parquet buffer so queries always see all data without callers caring which layer holds which row.
+The DuckDB `logs` view stitches the DuckLake table and the local Parquet buffer
+so queries always see all data without callers caring which layer holds which
+row. In the explicit `DEPLOYMENT_MODE=high_throughput` Celery/Postgres topology, serving
+connections are ephemeral in-memory DuckDB instances and the view reads only
+the durable DuckLake table; native service files and local buffers are not
+opened by the serving path. Sync/file mode retains the local-buffer behavior.
 
 ### Package layout (post v2.0 carve-ups)
 
@@ -83,8 +85,8 @@ Other new modules introduced by the cleanup:
 - [`backend/core/field_registry.py`](backend/core/field_registry.py) — Phase 7 (shipped, including step 13) typed registry that owns per-field declarations (code, display name, type, valid aggregations, valid filter ops, derivations, security-regex hooks). All readers migrated (dashboard CTE generator, rollup spec builder, top_n logic, SQL validator, scoring matrix labels, plus 8 step-13 callers: `services/core.py`, `provision/orchestrator.py`, `provision/fastly_api.py`, `provision/cli.py`, `iceberg/_core.py`, `ingest.py`, `models/custom_fields.py`, `state_sync.py`). Same-identity re-exports of every helper + constant preserve `from log_fields import X` callers.
 - [`backend/core/request_context.py`](backend/core/request_context.py) — Phase 2 single FastAPI dependency that bundles `service_id`, `source`, `con`, `telemetry`, `analyst_session`, `cached_temps`. Replaces the v1 `AnalyticsDeps` bundle (deleted at the v2.0 cut — Phase 8.1/8.2) and folds `require_service_access` into context construction (there is no path that builds a context without enforcing tenancy). 23 analytics endpoints across 8 routers (dashboard / query / sessions / security / network / origin / performance / insights) now take `ctx: RequestContext = Depends(build_request_context)` directly.
 - [`backend/core/request_telemetry.py`](backend/core/request_telemetry.py) — Phase 1 thin wrapper around the OTel tracer that owns section spans, query attribution, call log, cache state, and the `app.thread_wait_ms` custom metric instrumented at `_Pool.acquire`. Lives on `RequestContext`.
-- [`backend/core/sqlite_pool.py`](backend/core/sqlite_pool.py) — `ThreadLocalPool`, the generic thread-local SQLite pool extracted from the three previously-duplicated pools in `metadata/base.py`, `metadata/usage_log_db.py`, and `share_db/connection.py`. Each is now a thin wrapper configuring `path_fn` / `schema_fn` / `connect_fn` / `on_borrow_fn` around the one shared implementation; `share_db` queries flow through `InstrumentedConnection` for the first time and appear in the Live Query Monitor under `service=__global_share__`.
-- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py).
+- [`backend/core/metadata/pg_connection.py`](backend/core/metadata/pg_connection.py) — PostgreSQL 16 connection pooling (`psycopg_pool.ConnectionPool`), thread-local connection reuse, autocommit statement execution, and instrumented profiling via `sqlite_profiler.record_statement` (see [ADR-22](docs/adr/22-postgres-only-metadata.md)).
+- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py). `DEPLOYMENT_MODE=standard` preserves synchronous ingest and file-backed serving; `DEPLOYMENT_MODE=high_throughput` requires Postgres DuckLake and serves from ephemeral read-only connections. Both require `METADATA_DSN` and `DUCKLAKE_CATALOG`.
 - [`backend/core/iceberg/_core.py`](backend/core/iceberg/_core.py) `execute_with_stale_view_retry(con, src, fn)` — self-heal wrapper for code paths that open raw DuckDB connections instead of going through `QueryRunner`. On stale-buffer "No files found" errors, busts `_view_cache` via `clear_source_caches(keep_snapshot_cache=True)` + `update_iceberg_view(force=True)` then retries `fn` once. Used by `rdns_cache` discovery, `rollups` DESCRIBE sites, and `/api/query`. Pre-fix prod incidents: ~8h of 100%-failing rdns runs + analyst-visible query errors on the same buffer-deletion race.
 
 ### Personas (where the two onboarding paths live)
@@ -92,25 +94,29 @@ Other new modules introduced by the cleanup:
 The README explains the two collaboration modes for end users. Implementation pointers:
 
 - **Admin** (`access_level: "read_write"`) — full ingest/management surface. Config: `configs/{logging_service_id}.json`.
-- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode.
+- **Analyst Path A — independent instance** (durable, JSON-config join). Read-only FOS credentials, runs its own copy of the app. Components: `POST /api/services/{service_id}/generate-viewer-key` → [`api_invite_analyst()`](backend/routers/services/core.py), `GET /api/provision/join` (SSE), [`InviteAnalystDialog`](frontend/components/InviteAnalystDialog/), ProvisionWizard "join" mode. **Known gap as of v3.0.0-beta1**: this flow was never updated for the DuckLake cutover — pyiceberg's catalog was reconstructible purely from FOS-resident `metadata.json` pointers, which is what let a Path-A instance with only bucket credentials work standalone; DuckLake's catalog (Postgres or a local file) is not FOS-resident, so a Path-A analyst against a DuckLake/celery-mode service currently has no way to discover committed table state. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md) (Proposed, unimplemented) before touching this flow for such a service.
 - **Analyst Path B — live shared instance** (direct-mode against an HTTPS public_endpoint; the SSH-tunnel-to-localhost.run option was deleted in v2.0). No FOS credentials, uses admin's running process. See [Live Dashboard Sharing](#live-dashboard-sharing) below for components.
 
 **Both paths must keep working.** Don't remove either. Don't introduce a "unified" replacement without keeping the JSON-config flow intact — it's the only option when the admin's instance can't stay running.
 
 ## Ingest Pipeline
 
-APScheduler runs the core sync-family jobs per service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note):
+Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous ingest, while `high_throughput` uses the Celery ledger data plane. Both commit to the same DuckLake table and the same unified `logs` view; see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design.
+
+**Default (`sync`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0-beta1 rework — grep history for the old names if you're reading pre-v3 code or logs:
 
 | Job | Schedule | Function |
 |---|---|---|
-| `sync_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
-| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → Iceberg table, flush usage log |
+| `log_discovery_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
+| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → DuckLake table, flush usage log |
 | `local_compact_{id}` | every 2 min | Compact local-only hourly/daily Parquet files, flush usage log |
 | `rollup_heal_{id}` | hourly at :05 | Re-run the idempotent `backfill_missing_hour_bundles` (1-day lookback) so closed hours the per-sync recompute missed get their top-N rollups within ~1 h; local-only writes |
 | `rollup_compact_{id}` | daily 02:00 UTC | Consolidate closed-day per-hour rollup parquet into per-day files (30-day deep pass); local-only writes |
-| `optimize_{id}` | daily 03:00 UTC | Compact small Iceberg data files, flush usage log |
-| `expire_{id}` | weekly Sun 04:00 UTC | Expire old Iceberg snapshots, flush usage log |
+| `optimize_{id}` | daily 03:00 UTC | DuckLake-native (`db_iceberg.optimize_table` → `_optimize_table_impl`): `CALL ducklake_flush_inlined_data('lake')` **then** `CALL ducklake_rewrite_data_files('lake')`. The flush is a DURABILITY step, not an optimization — DuckLake inlines small commits into the metadata catalog, and neither `ducklake_rewrite_data_files` nor `ducklake_merge_adjacent_files` promotes inlined rows (both only touch already-materialized files), so without it a table stays at `file_count = 0` forever and the catalog DB holds the only copy of the data (the raw `.gz` is deleted after ingest). Complements celery mode's `ducklake_merge_adjacent_files` (called from `commit_batch`). |
+| `expire_{id}` | weekly Sun 04:00 UTC | DuckLake-native since v3.0.0-beta1 (`db_iceberg.run_cloud_maintenance` → `_run_cloud_maintenance_impl`). Four steps, each isolated so one failure records its own `*_error` result key (→ `warning` cron run) and the rest proceed: **(1)** retention delete — `DELETE FROM lake.<table> WHERE timestamp < ?` for `data_retention_days`, plus `rum_retention_days` over `client_vitals`/`client_errors` (RUM telemetry lives in those tables keyed by `cid`; `logs.rum_cid` is only the CDN-side correlation key, present solely when RUM provisioning injected that log field). **`0` means keep forever for BOTH knobs** — the pyiceberg original would have resolved `data_retention_days=0` + `rum_retention_days>0` to a "delete everything from now backwards" cutoff; that is now gated on `data_retention_days > 0`. **(2)** `ducklake_expire_snapshots('lake', older_than => ?)` for `keep_snapshot_days`, then a `ducklake_cleanup_old_files('lake', older_than => ?)` sweep. Expiry reclaims NO bytes on its own; it queues unreferenced parquet, and because a file is queued at expiry time a LATER run unlinks it — which is why the sweep is unconditional, not gated on "this run expired something". Never call `ducklake_delete_orphaned_files` here: it sweeps the data path by listing and would eat local-compaction output. Also note a snapshot cannot be expired while a live data file still anchors to it, so reclamation mostly follows the daily `optimize` rewrite. **(3)/(4)** filesystem-only purges of the local `data/` cache and `rollups/` (`cache_retention_days`, `rollup_retention_months`) — untouched by the DuckLake port. Under a shared Postgres `DUCKLAKE_CATALOG` the snapshot log is catalog-WIDE, so `snapshots_before`/`snapshots_after` and the expiry itself span every tenant, not just the one service. No CAS-retry loop: there is no metadata-pointer race to lose, the job holds the per-service write lock, and the pyiceberg exception shapes it keyed on cannot be raised. |
 | `metadata_sync_{id}` | varies | Sync admin state to FOS, flush usage log |
+
+**`DEPLOYMENT_MODE=high_throughput` mode** — discovery and conversion fan out across Celery workers instead of running in one pod's scheduler loop, backed by the `ingest_ledger` state machine (`discovered → claimed → committed`/`quarantined`/`dead_letter`). `log_discovery_{id}`/`commit_{id}` still exist as job names but run inline on a RedBeat-scheduled worker rather than the backend's APScheduler, plus a new `ledger_sweep_{id}` job (crash-net recovery: reclaims stuck claims, re-dispatches lost messages with a queue-depth guard, catches up via an FOS-diff). Requires a Postgres `DUCKLAKE_CATALOG` and `METADATA_DSN` (enforced at boot by `config.validate_deployment_mode()`) — a file-based catalog cannot serve concurrent worker writers. RUM beacon ingest is ported to this mode too (`rum_discovery_{id}` + `ledger_rum_sweep_{id}` in [backend/cron/jobs/rum_ledger.py](backend/cron/jobs/rum_ledger.py), both in `_REDBEAT_JOB_PREFIXES`); the v2 `rum_sync_{id}`/`rum_commit_{id}` pair remains the sync-mode path. **Ingest scales horizontally; the SERVING tier does not — it is single-pod, see [ADR-18](docs/adr/18-serving-tier-single-pod.md).**
 
 Teardown removes jobs on the next `_sync_jobs()` reload. The `config not found, skipping` warning during teardown is normal — a job fired after the config was deleted; harmless.
 
@@ -138,7 +144,7 @@ The window between `iceberg.write_to_buffer` and `metadata_db.insert_ingested_fi
 
 ### Health probe
 
-`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `sync` cron run per service; returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last sync errored, or a sync row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition — or the latest `commit` / `metadata_sync` cron errored). SQLite-only, never FOS or Fastly. Safe to wire into a load balancer.
+`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness: reads `max(ingested_at) FROM ingested_files` and the latest terminal `log_discovery` cron run per service (queries match both `'log_discovery'` and the pre-v3.0.0-beta1 `'sync'` name — `cron_runs` history predates the rename); returns 503 when any service is `degraded` (last ingest older than `stale_minutes` — default 30, but SRE-22 widens it per-service to that service's own historical p95 gap between non-empty ingests before degrading, so a low-traffic service's organic quiet periods don't false-positive — or last discovery errored, or a discovery row is stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS` — the orphaned-sync-row condition, name unchanged since it's an internal constant, not a job name — or the latest `commit` / `metadata_sync` cron errored). Celery mode additionally derives freshness straight from `ingest_ledger` (`max(committed_at)`, oldest non-committed row age, worker count vs. queue depth) rather than relying on `cron_runs` timing alone — see [ADR-16](docs/adr/16-ingest-ledger.md). Postgres-only, never FOS or Fastly. Safe to wire into a load balancer.
 
 ## VCL Log Format & Custom Fields
 
@@ -189,21 +195,21 @@ Brief summaries; click through to source for details.
 Single `BackgroundScheduler` owned by [backend/cron/scheduler.py](backend/cron/scheduler.py). `_sync_jobs()` adds/removes per-service jobs on `reload()`. The `@cron_task` decorator (telemetry context + usage-log flush + watchdog hard-cap) lives in [backend/cron/decorators.py](backend/cron/decorators.py). Per-job bodies live under [backend/cron/jobs/](backend/cron/jobs/) (`sync`, `commit`, `compaction`, `optimize`, `expire`, `metadata`, `insights_prewarmer`, plus the process-global `duckdb_recycle` and `metric_snapshot`). `duckdb_recycle` (bounds the DuckDB object-cache leak) and `metric_snapshot` (SRE sampler feeding `metric_history`) register once for the process, not per service. Per-run progress events tracked in [backend/cron_progress.py](backend/cron_progress.py) and streamed via SSE. (The flat `backend/scheduler.py` compat shim was retired 2026-07-06; import from the `backend.cron.*` homes directly.)
 
 ### NGWAF Bot Detection ([backend/utils/ngwaf.py](backend/utils/ngwaf.py), [backend/utils/ngwaf_bot_cache.py](backend/utils/ngwaf_bot_cache.py))
-Syncs VERIFIED-BOT requests from `GET https://api.fastly.com/ngwaf/v1/workspaces/{id}/requests`. JSON:API pagination via `meta.next_cursor`. Shared SQLite cache at `data/ngwaf/ngwaf_bot_cache.db`. Enriches log rows with `waf_req_id` + `waf_sig LIKE '%VERIFIED-BOT%'`.
+Syncs VERIFIED-BOT requests from `GET https://api.fastly.com/ngwaf/v1/workspaces/{id}/requests`. JSON:API pagination via `meta.next_cursor`. Stored in PostgreSQL `ngwaf_bots` table (ADR-22). Enriches log rows with `waf_req_id` + `waf_sig LIKE '%VERIFIED-BOT%'`.
 
 NGWAF workspace listing (`GET /api/provision/ngwaf-workspaces`): response key is `"data"`. **Don't `or`-chain** with `data.get("workspaces", [])` — an empty list is falsy and falls through. Use `if "data" in data` explicitly. (See Trap #3.)
 
 ### Alerts / Saved Views ([backend/routers/alerts.py](backend/routers/alerts.py), [backend/routers/views.py](backend/routers/views.py))
-Both stored in per-service `metadata.db` (SQLite). Alerts are threshold-based with webhook fire. Views capture filter set + time range.
+Both stored in PostgreSQL metadata schemas (`alerts`, `views`). Alerts are threshold-based with webhook fire. Views capture filter set + time range.
 
 ### Insights ([backend/repositories/insights/](backend/repositories/insights/), `INSIGHT_DEFINITIONS` in [backend/core/_log_fields_data.py](backend/core/_log_fields_data.py))
 Availability is declared in `INSIGHT_DEFINITIONS` (`required_fields` + `required_groups`); the Insights page renders each card generically. Every definition MUST declare a `category` ([backend/repositories/insights/registry.py](backend/repositories/insights/registry.py) `InsightCategory`: security/origin/edge/network/traffic — a registration without one fails Pydantic at import time); the page tabs by that key with labels/icons/triage order in [frontend/lib/insight-sections.ts](frontend/lib/insight-sections.ts), so a new insight in an EXISTING category needs no frontend change, but a new category needs a section entry there. Set `required_groups=[]` when the gate should be only core fields — declaring a group grays the card out in LogSettings / ProvisionWizard previews even if it would run (e.g. `repeated_patterns` needs only client IP + timestamp). Definitions, row processors, and severity logic live in [backend/repositories/insights/definitions.py](backend/repositories/insights/definitions.py); SQL templates in [backend/repositories/_sql/insights.py](backend/repositories/_sql/insights.py). The repository's `sql.count("?")` placeholder heuristic means any regex literal in a template must be `?`-free (no `(?i)` — pass the `'i'` flag to `regexp_matches` instead). The default window/baseline adapts to the available history (a young service compares the last hour against the previous hour instead of showing "not enough data"). Analyst insight results are warmed via a stable invite-keyed cache + the `insights_prewarmer` cron. PARITY CONTRACT: the prewarmer must warm EXACTLY the adaptive default (window, baseline) pair the page will pick — [backend/utils/insights_defaults.py](backend/utils/insights_defaults.py) mirrors `pickInsightsDefault` in [frontend/lib/insights-defaults.ts](frontend/lib/insights-defaults.ts) band-for-band; the `/api/insights` cache key folds in both hour values, so warming any other pair is a guaranteed cold compute (~20 s on a long-history service). `tests/utils/test_insights_defaults.py` parses the TS source so the two sides can't drift silently.
 
 ### State Sync ([backend/state_sync.py](backend/state_sync.py))
-`export_admin_state` writes `audit_logs` + `views` from per-service SQLite, plus `log_format_history` + `custom_fields` from the config JSON, to `{prefix}/iceberg/meta/admin_state.json`. **Alerts are not synced** — each instance maintains its own. Only `read_write` services export.
+`export_admin_state` writes `audit_logs` + `views` from PostgreSQL metadata, plus `log_format_history` + `custom_fields` from the config JSON, to `{prefix}/iceberg/meta/admin_state.json`. **Alerts are not synced** — each instance maintains its own. Only `read_write` services export.
 
 ### FOS Usage Logging ([backend/utils/usage_logger.py](backend/utils/usage_logger.py), [backend/core/metadata/usage_log.py](backend/core/metadata/usage_log.py))
-Every FOS Class A/B op and CDN download recorded to per-service `usage_log` SQLite for cost analysis.
+Every FOS Class A/B op and CDN download recorded to PostgreSQL `usage_log` table for cost analysis.
 - Global toggle: `data/system/usage_logging.json`
 - Process-context tagging via `set_process_context()` in [backend/utils/telemetry.py](backend/utils/telemetry.py) — tags entries with `cron:sync:svc1` or `api:GET /api/...`
 - Each cron handler calls `flush_usage_log(service_id)` at completion (the `@cron_task` decorator wires this).
@@ -269,10 +275,43 @@ Precomputes per-hour Top-N aggregates for the dashboard's most-asked fields (ip,
 ### Response Telemetry Middleware ([backend/utils/telemetry_response_middleware.py](backend/utils/telemetry_response_middleware.py))
 Backstop for endpoints that return a plain `dict` instead of going through `BaseResponse.with_telemetry`. Inspects JSON object responses, injects `_debug_queries` / `_debug_calls` / `_debug_sqlite` / `_is_cached` from the contextvar collectors if missing (`_debug_sqlite` is snapshot-copied BEFORE `get_tracked_calls()`, which can itself run a SQLite SELECT that would append mid-injection). **Must be added INNER to `CompressMiddleware`** (i.e. `add_middleware(TelemetryResponseBodyMiddleware)` BEFORE `add_middleware(CompressMiddleware)`) so it sees the raw JSON, not br/zstd/gzip-encoded bytes. Skips streaming responses, non-dict bodies, and already-instrumented responses. Debug keys are per-request opt-in: the frontend API client sends `x-debug-responses: 1` when the DiagnosticsPanel toggle is on (keys are STRIPPED otherwise), and SSR's own upstream fetch mirrors the toggle via the `fla.debugResponses` cookie ([frontend/lib/debug-cookie.ts](frontend/lib/debug-cookie.ts), read in [frontend/lib/ssr/_transport.ts](frontend/lib/ssr/_transport.ts)) — the Debug Panel's SQLite/DuckDB views are page-scoped per-response captures, not global ring buffers. Gated on `DEBUG_RESPONSES`; failure modes are silent + non-blocking.
 
-### Live Query Monitor ([backend/core/query_registry.py](backend/core/query_registry.py), [backend/routers/admin_queries.py](backend/routers/admin_queries.py), [frontend/app/admin/queries/](frontend/app/admin/queries/))
-Real-time view of every executing DuckDB + SQLite query — attribution (analyst / admin / cron / system), caller `file:line`, pool slot, duration ticking up live, kind-aware Kill button that calls `con.interrupt()`. Page at `/admin/queries`, admin-only via `RemoteAccessMiddleware`. Polling at 300 ms; the Active panel promotes "completed in the last 10 s" rows as faded entries with an outcome badge so typical-traffic (p50 ≈ 0.2 ms, max ≈ 29 ms) queries are visible. Notable Slow Queries panel filters the completed-history ring buffer by threshold (100ms / 500ms / 1s / 2s / 5s), sorted slowest first. Queries above the persistence threshold are also written to a per-service `slow_queries` table ([backend/core/metadata/slow_queries.py](backend/core/metadata/slow_queries.py), in `metadata.db`) stamped with the request correlation id (`rid`, also emitted in the access log), so the panel can answer "what was slow yesterday?" across restarts.
+### Isolated High-Scale Request Facts ([backend/routers/high_scale.py](backend/routers/high_scale.py))
+`POST /api/high-scale/services/{service_id}/request-facts` is an explicit
+high-scale-only read surface backed by `backend/high_scale/query_service.py`.
+It is not selected by `DEPLOYMENT_MODE` and does not alter standard or
+high-throughput routing. A service must be explicitly bound through the
+injectable `HighScaleServiceRegistry`; unregistered services are refused.
+The route uses `RequestContext` tenancy and analyst time clamping, masks
+`client_ip` under the existing invite PII policy, and returns signed keyset
+pagination plus `QueryResponseMetadata`.
 
-Instrumentation lives at two seams: SQLite `InstrumentedCursor` ([backend/utils/sqlite_profiler.py](backend/utils/sqlite_profiler.py)) registers/deregisters around `execute*`; DuckDB `InstrumentedDuckDBConnection` + `_InstrumentedResult` ([backend/core/query_instrumentation.py](backend/core/query_instrumentation.py)) wraps the connection returned from `checkout_connection` so deregistration happens at terminal-fetch time (fetchdf, arrow, etc.) rather than at `execute()` — DuckDB's execute returns in ~ms while fetch can run for seconds. Per-query overhead measured ~21 µs (~0.3% of dashboard bundle wall time). Cancel path is safe under pool reuse: a stamped `_conn_to_query[id(con)]` is verified under lock before `interrupt()` so a stale UI click never cancels a different query that's checked out the same physical connection later.
+### Certificate-authenticated administrator connection
+
+The optional mTLS gateway is a separate administrator access surface for Compose
+and Kubernetes. Its dedicated client CA is not the analyst login system or a
+platform-wide client CA. See [docs/deploy/admin-mtls.md](docs/deploy/admin-mtls.md).
+
+`ADMIN_GATEWAY_SECRET` is a server-only credential injected into
+`X-Admin-Gateway-Token` after client-certificate authentication. Backend
+`backend/utils/admin_gateway.py` and frontend SSR independently verify it.
+Never put it in bootstrap, browser code or logs. Public proxies must strip it.
+Requests carrying the public `X-Proxied-By-Caddy` marker cannot be promoted with
+this credential.
+
+`ADMIN_GATEWAY_REQUIRED=1` removes implicit administrator access from loopback
+and `LOCAL_ADMIN_CIDRS`; unauthenticated requests keep analyst restrictions.
+Cheap liveness remains available, but deep health requires authentication.
+Set required mode on both backend and frontend runtimes. SSR bootstrap caching
+uses the shared transport trust decision and bypasses shared caching whenever
+an `analyst_session_id` cookie is present; even a loopback request can produce
+an analyst-scoped bootstrap. Never cache a response marked `is_remote_analyst`.
+Legacy configurations without required mode retain their existing behavior.
+Do not remove host-management SSH when retiring dashboard tunnel scaffolding.
+
+### Live Query Monitor ([backend/core/query_registry.py](backend/core/query_registry.py), [backend/routers/admin_queries.py](backend/routers/admin_queries.py), [frontend/app/admin/queries/](frontend/app/admin/queries/))
+Real-time view of every executing DuckDB + PostgreSQL query — attribution (analyst / admin / cron / system), caller `file:line`, pool slot, duration ticking up live, kind-aware Kill button that calls `con.interrupt()`. Page at `/admin/queries`, admin-only via `RemoteAccessMiddleware`. Polling at 300 ms; the Active panel promotes "completed in the last 10 s" rows as faded entries with an outcome badge so typical-traffic (p50 ≈ 0.2 ms, max ≈ 29 ms) queries are visible. Notable Slow Queries panel filters the completed-history ring buffer by threshold (100ms / 500ms / 1s / 2s / 5s), sorted slowest first. Queries above the persistence threshold are also written to a `slow_queries` table ([backend/core/metadata/slow_queries.py](backend/core/metadata/slow_queries.py), in PostgreSQL metadata) stamped with the request correlation id (`rid`, also emitted in the access log), so the panel can answer "what was slow yesterday?" across restarts.
+
+Instrumentation lives at two seams: PostgreSQL `PgCursorWrapper` / profiler ([backend/utils/sqlite_profiler.py](backend/utils/sqlite_profiler.py)) registers/deregisters around `execute*`; DuckDB `InstrumentedDuckDBConnection` + `_InstrumentedResult` ([backend/core/query_instrumentation.py](backend/core/query_instrumentation.py)) wraps the connection returned from `checkout_connection` so deregistration happens at terminal-fetch time (fetchdf, arrow, etc.) rather than at `execute()` — DuckDB's execute returns in ~ms while fetch can run for seconds. Per-query overhead measured ~21 µs (~0.3% of dashboard bundle wall time). Cancel path is safe under pool reuse: a stamped `_conn_to_query[id(con)]` is verified under lock before `interrupt()` so a stale UI click never cancels a different query that's checked out the same physical connection later.
 
 Audit log fires on every successful cancel (`audit_log` in [backend/utils/structlog_config.py](backend/utils/structlog_config.py)) with the actor + full target attribution. OTel histograms: `app.active_queries.count`, `app.query_duration_ms`, `app.queries_cancelled_total`. Kill switches: `QUERY_MONITOR_ENABLED=0` hides the endpoints (404), `QUERY_REGISTRY_DISABLED=1` bypasses the hot path entirely for zero overhead.
 
@@ -315,7 +354,7 @@ Components:
 
 - [backend/utils/tunnel/](backend/utils/tunnel/) — package split: `manager.py` owns the `TunnelManager` singleton (direct-mode lifecycle, sever-all panic), `session.py` holds `AnalystSession`, `rate_limiter.py` is the sliding-window `_LoginRateLimiter`, `state.py` persists `tunnel_state.json`, `fingerprint.py` computes the session fingerprint hash. Process singleton via `get_tunnel_manager()`; `reset_for_tests()` for pytest.
 - [backend/utils/remote_access.py](backend/utils/remote_access.py) — `RemoteAccessMiddleware` does DNS-rebinding gate (Host/Origin allow-lists, including `testclient`/`testserver` for pytest), blocks admin paths on remote requests, applies response hardening (CSP, X-Frame-Options DENY, no-store, no-referrer). `_StaticAssetLimiter` rate-limits static assets to blunt scrapes. **Idle-timeout activity model:** the middleware refreshes an analyst session's 2-hour idle deadline only on genuine interaction — requests carry an `X-User-Active: 1|0` header (set from real DOM activity, not background react-query refetches), SSE streams (`/api/log-extents/stream`) are exempt so a backgrounded tab can't keep itself alive, an IP change updates the session's recorded address without bumping the clock, and the `/api/share/heartbeat` beat doubles as the activity channel for an otherwise-quiet dashboard. The access log records `act` + `idle_touch` per request for observability.
-- [backend/core/share_db/](backend/core/share_db/) — package split: `connection.py` (pool + corruption self-heal with quarantine), `schema.py` (own MIGRATIONS dict + `apply_pending` + `PRAGMA user_version`, plus `_reconcile_additive_columns` — self-heal that re-asserts additive columns when `user_version` is ahead of the actual DDL; `remote_invites.allow_concurrent_sessions`, migration 003, backs the per-invite "allow shared logins" toggle via `PATCH /api/admin/share/invites/{invite_id}/sharing`), `invites.py`, `sessions.py`, `audit.py`, `passcode.py` (argon2id current default; scrypt verify branch stays for transparent rehash-on-login upgrade), `tos.py`, `settings.py`, `validation.py`. Singleton SQLite at `data/system/remote_share.db`: `remote_invites`, `invite_services`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `remote_invite_claim_tokens`, `share_tos_versions`. WAL mode, per-IP/per-email lockout.
+- [backend/core/share_db/](backend/core/share_db/) — package split: `connection.py` (PostgreSQL connection and session management), `schema.py` (table DDL and versioning), `invites.py`, `sessions.py`, `audit.py`, `passcode.py` (argon2id current default; scrypt verify branch stays for transparent rehash-on-login upgrade), `tos.py`, `settings.py`, `validation.py`. Stored in PostgreSQL metadata schemas (`pg_schema.py`): `remote_invites`, `invite_services`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `remote_invite_claim_tokens`, `share_tos_versions`. Per-IP/per-email lockout.
 - [backend/routers/share_auth.py](backend/routers/share_auth.py) (`/api/share/*`) — analyst-facing: `auth-config` (unauth — tells /share-login which login modes to render; the frontend fails OPEN to passcode on fetch error), `login`, `logout`, `acknowledge`, `heartbeat`, `claim/{token}`. Tagged so middleware lets them through the tunnel.
 - **Analyst OAuth/OIDC login** (opt-in alternative to passcode): [backend/routers/share_oauth.py](backend/routers/share_oauth.py) — `GET /api/share/oauth/authorize` + `GET /api/share/oauth/callback` are TOP-LEVEL browser navigations, every outcome a 302 (never JSON); converges on the SAME `TunnelManager` session as passcode so RBAC/masking/TOS/boot are inherited. Provider registry in [backend/core/oauth/](backend/core/oauth/): gitignored `data/system/oauth_providers.json` (`OAUTH_PROVIDERS_CONFIG_PATH` override), creds via `OAUTH_<KEY>_CLIENT_ID/_CLIENT_SECRET`, inert unless `OAUTH_FLOW_STATE_SECRET` is set; `SHARE_PASSCODE_LOGIN_ENABLED=0` disables passcode for SSO-exclusive deployments (enforced at the endpoint, not just the UI); prod env passthrough in docker-compose.prod.yml. Invites carry `auth_method` / `oauth_provider` / `oauth_subject` (migration 004); optional JIT invite auto-provisioning for trusted org-restricted providers. E2E/dev mock IdP [backend/routers/mock_idp.py](backend/routers/mock_idp.py) mounts ONLY when `OAUTH_MOCK_IDP=1`.
 - [backend/routers/share_admin.py](backend/routers/share_admin.py) (`/api/admin/share/*`, **blocked over tunnel**) — admin-facing: tunnel lifecycle, invite CRUD, session evict, panic/sever-all, backup export/import, GDPR erase, settings.
@@ -512,7 +551,40 @@ re-renders triggered by store subscriptions. The trace shows which.
 
 ## Testing
 
-**The Rule:** before committing, run `make ci`. It runs the full gate in parallel (`-j2`): backend pytest + frontend vitest + frontend typecheck (with OpenAPI type regen) + frontend ESLint ceiling (`lint-frontend`) + ruff check + ruff format check + mypy + import-contracts + VCL lint tests (`vcl-test`) + Rust scorer cargo tests (`scorer-test`) + frontend dep resolution (`verify-deps`) + secret scan + OSV scan + OTEL console-exporter guard (`otel-guard`). Add or update tests for every change; if a change is not testable in isolation, document why.
+### Testing Philosophy & Speed (The 3-Tier Workflow)
+
+The project tests ~8,000 backend test cases, ~1,400 frontend test cases, Playwright E2E suites, and 18 security/static gates. Running the entire suite takes several minutes. **Never run `make ci` on every incremental code edit during active development.** Instead, adopt the 3-tier workflow:
+
+1. **Inner Loop (Active Coding — 1 to 3 seconds):**
+   Run only the specific test file or test selector matching the code you are touching:
+   ```bash
+   # Backend: target a single test file or function name
+   uv run pytest tests/routers/test_dashboard_router.py
+   uv run pytest -k "test_specific_feature"
+
+   # Frontend: target a single test spec
+   cd frontend && npx vitest hooks/useDashboardData.test.ts
+   ```
+2. **Intermediate Smoke Loop (`make fast-ci` — ~1 to 2 minutes):**
+   A fast local smoke check run before switching tasks, context switching, or taking a break. It runs OpenAPI drift checks, typechecks, linters, frontend contract tests, and core unit tests across backend and frontend in parallel (`-j4`).
+   *Note: `fast-ci` is strictly a developer convenience check. It skips >80% of backend tests (all DB engines, rollups, API routers, and cron tasks), skips all UI component tests, and skips Playwright E2E. It is NOT a substitute for `make ci`.*
+3. **Outer Loop Gate (`make ci` — Final Pre-Push / Pre-Deploy Gate):**
+   Mirrors every gating GitHub Actions workflow (`ci.yml` and `e2e.yml`). Run once when feature work is complete before pushing to origin or opening a PR:
+   - **Stage 1 (Fail-Fast Static Gates, ~10–15s):** Runs `gen-types` followed by 17 static and security checks in parallel (`-j4`: `typecheck-frontend`, `lint-frontend`, `lint`, `format-check`, `typecheck`, `import-contracts`, `vcl-test`, `scorer-test`, `scorer-audit`, `verify-deps`, `secret-scan`, `osv`, `otel-guard`, `security-regression`, `openapi-drift`, `deploy-validate`, `stray-file-gate`). Syntax errors, lint/format issues, and type mismatches fail immediately.
+   - **Stage 2 (Backend Suite):** Runs `test-ci` (`pytest -n auto` + `--cov-fail-under=85`).
+   - **Stage 3 (Frontend Suite):** Runs `test-frontend-ci` (`vitest` with 4-way coverage gates). Pytest and Vitest run sequentially to prevent CPU-core exhaustion and memory swap thrashing.
+   - **Stage 4 (Load Gate):** Runs `perf-ci` (100k synthetic load benchmark).
+   - **Stage 5 (E2E):** Runs `e2e` (Playwright cross-browser matrix).
+
+### Test Preservation Policy (Never Delete Tests)
+
+**Do NOT remove or delete tests to speed up CI runs.**
+- **The test count is not the bottleneck:** Profiling proves that individual test assertions take negligible time (<10% of total runtime). Over 70% of Vitest's runtime is runner infrastructure overhead (JSDOM environment spinning up and tear down, plus module bundling per worker thread). Pytest's collection alone takes ~33s. Deleting tests buys virtually no speedup while introducing severe regression blind spots.
+- **Coverage ratchets and floors:** Strict coverage gates fail CI if coverage drops:
+  - Backend: `--cov-fail-under=85` in `test-ci` and CI.
+  - Frontend: strict 4-way thresholds for lines (66%), statements (65%), functions (54%), and branches (52%).
+  - Security regressions: Monotonic floor of 24 dedicated regression tests (`scripts/check_security_regression_count.sh`).
+- **Production safety:** Tests protect critical invariants (multi-tenant isolation, real-time log ingestion, DuckLake commits, Rust session scoring, and edge VCL generation). Add or update tests for every change; if a change is not testable in isolation, document why.
 
 ### Backend (`tests/`, mirrors source tree)
 
@@ -578,6 +650,123 @@ bash scripts/perf_gate.sh
 # then update the relevant scenario in baseline.json with headroom
 ```
 
+### Unified Synthetic Traffic & Log Generation ([scripts/load_test/generate_synthetic_traffic.py](scripts/load_test/generate_synthetic_traffic.py))
+
+For all synthetic test data generation, traffic simulation, and performance benchmarking, use the single authoritative unified generator script:
+
+```bash
+uv run python scripts/load_test/generate_synthetic_traffic.py [args]
+```
+
+It supports the following multi-tier targets:
+- `--target local` (default): Writes synthetic Parquet batches directly into `cache/{bucket}/buffer/` and calls `commit_buffer` to materialize local DuckLake snapshots immediately. Extremely fast, zero cost, and 100% reproducible for local test runs.
+- `--target fos`: Generates and uploads gzipped NDJSON chunks directly to Fastly Object Storage to test the full discovery, ledger, and commit crons.
+- `--target clickhouse` (or `--with-clickhouse` alongside another target): Directly seeds ClickHouse fact tables (`request_facts`) and registers publication batches for high-scale serving verification.
+
+Scenario Profiles:
+- `--scenario diurnal` (default): Standard 24h day/night curve with normal CDN performance (~82% CHR).
+- `--scenario ddos-spike`: A 15-minute attack spike with concentrated IPs, JA3 signatures, and 429/503 errors.
+- `--scenario origin-5xx-outage`: A 30-minute backend database outage (502/503/504 MISSes, high OTTFB).
+- `--scenario bot-scrape`: High-volume automated crawler activity simulating Googlebot, SEO tools, and scrapers.
+- `--scenario slow-network`: High RTT, elevated TLS handshakes, and slow mobile connections.
+
+Examples:
+```bash
+# Generate 100k rows over 24 hours directly to local DuckLake buffer and commit it:
+uv run python scripts/load_test/generate_synthetic_traffic.py --target local --scenario diurnal --rows 100000 --commit
+
+# Directly seed ClickHouse with 50k rows of diurnal traffic for high-scale:
+uv run python scripts/load_test/generate_synthetic_traffic.py --target clickhouse --scenario diurnal --rows 50000
+
+# Full E2E Pipeline (Upload 50k rows of diurnal logs to FOS and seed ClickHouse in parallel):
+uv run python scripts/load_test/generate_synthetic_traffic.py --config configs/<logging-service-id>.json --target fos --with-clickhouse --rows 50000
+```
+
+### Edge-Load Client Traffic Simulation & Pipeline Lag Testing ([scripts/dev/scale_harness.py](scripts/dev/scale_harness.py))
+
+While the synthetic traffic generator (`generate_synthetic_traffic.py`) seeds logs directly to bypass CDN fees, you must use `scripts/dev/scale_harness.py` to send real concurrency-controlled HTTP client requests to a deployed CDN edge endpoint to test the full live **VCL -> Fastly CDN -> FOS -> Discovery/Ingest -> Serving** pipeline.
+
+It performs the following:
+1. **Client Concurrency-Staged Requests:** Fires concurrent async requests using `aiohttp` to the specified `--url` based on stage profiles (defaults to stages of `100:10,500:10,1000:10` target RPS:seconds). Rates over 1,000 RPS require `--allow-high-rate`.
+2. **Telemetry Checkpoints:** Queries Prometheus to measure p95 serving and pool wait latencies.
+3. **Freshness Lag Sampling:** Periodically queries the backend's `/api/log-extents` to calculate the exact freshness lag (delay between the edge request event time and backend ingestion completion).
+4. **Settle Window:** Settles for 60 seconds (customizable via `--settle-seconds`) after the load stages complete to allow delayed FOS log delivery to catch up before taking the final checkpoint.
+
+Run the scale harness from the project root:
+```bash
+uv run python scripts/dev/scale_harness.py run \
+  --url "$LOADTEST_URL" \
+  --service-id "$FASTLY_SERVICE_ID" \
+  --stages 100:30,500:30,1000:30 \
+  --start-time "$START_UTC" --end-time "$END_UTC" \
+  --output performance-report/scale-harness.json
+```
+
+### Multi-Environment Health Verification ([scripts/check_environment_health.py](scripts/check_environment_health.py))
+
+To quickly check the three active target environments (Local Standard, GCE VM Standard, and Elevation K8s High-Scale) are up and listening correctly on their forwarded ports, use the `scripts/check_environment_health.py` script. Local High-Scale is retired; High-Scale verification runs in Elevation. The script is verified continuously by the `tests/test_environment_connectivity.py` integration test.
+
+It performs the following checks:
+1. **Connectivity:** Asserts that each environment is reachable on its designated ports.
+2. **Health Endpoints:** Verifies that `/api/health` returns HTTP 200 within a 50ms latency budget and correct application version (`3.0.0-beta1`).
+3. **Tenancy:** Resolves each environment's designated Fastly service ID and ensures multi-tenant isolation (i.e. invalid or unauthorized service IDs are strictly rejected).
+4. **RBAC:** Verifies that unauthenticated requests to protected analytics endpoints are correctly blocked (returning HTTP 401).
+
+Run it from the repo root:
+```bash
+uv run python scripts/check_environment_health.py
+```
+
+### Parallel Multi-Environment Deployment ([scripts/dev/deploy_test_all.sh](scripts/dev/deploy_test_all.sh))
+
+For rapid, parallelized deployment of local and remote environments, use the local-only `deploy_test_all.sh` script in the `scripts/dev/` folder of the project (which is gitignored to secure environment credentials).
+
+This script performs the following steps in parallel:
+1. **Pre-flight Pushed-Commit Verification:** Verifies that your active HEAD commit has already been intentionally committed and pushed to upstream origin (`git push origin HEAD`). It does NOT blindly commit or push pending code; any other work-in-progress files in your working directory are left untouched.
+2. **Prompts for Image Tags:** Prompts you for the latest frontend/backend Jenkins image tags so it can deploy to Elevation.
+3. **Deploys Parallel Groups:**
+   - **Local Standard:** Rebuilds and launches local standard containerized services (`docker compose up -d --build`).
+   - **GCE Standard:** Connects over SSH, pulls the latest commit, runs `~/restart.sh --no-wait`, and automatically establishes port forwards for ports `3001` and `8001`.
+   - **Elevation High-Scale:** Deploys the frontend, backend, and worker images to GKE with the provided Jenkins tags, injects the current `COMMIT_HASH` environment variable into the frontend pods, waits for rolling rollouts to succeed, and establishes port forwards for ports `3002` and `8002`.
+4. **Validates Commit Footer on Dashboards:** Executes `scripts/verify_dashboard.js` against all 3 active forwarded URLs to assert that the active dashboards successfully loaded and display the exact expected commit hash.
+5. **Post-Deployment Real-Time System & Pipeline Monitoring:** Invokes `scripts/dev/audit_environments.py` across the 3 active environments in watch mode (`--watch --duration 5 --interval 10`) for 5 minutes by default to guarantee stability and catch resource or scheduler anomalies post-rollout. Can be customized with `MONITOR_MINUTES=N`, or skipped for rapid iterations via `--no-monitor` / `MONITOR_MINUTES=0`.
+
+Run the parallel flow from the project root:
+```bash
+bash scripts/dev/deploy_test_all.sh
+# Or skip the 5-minute audit watch for fast iterations:
+bash scripts/dev/deploy_test_all.sh --no-monitor
+```
+
+### Multi-Environment Auditing & Pipeline Monitoring ([scripts/dev/audit_environments.py](scripts/dev/audit_environments.py))
+
+Comprehensive system, resource, and pipeline diagnostic tool designed to verify operational health across the three active deployment tiers (**Local Standard**, **GCE Standard**, and **Elevation High-Scale**). Local High-Scale is retired; High-Scale verification runs in Elevation.
+
+**Audited Dimensions:**
+- **System Vitals:** CPU load averages (1m / 5m / 15m) normalized against total vCPUs, RAM usage percentages, and root/data mount disk saturation.
+- **Scheduler Health:** APScheduler / RedBeat heartbeat tick age, flagging schedulers lagging beyond threshold (>30s) or in-flight job freezes.
+- **Cron History & Failures:** Scans the last 24h of task execution logs in metadata DBs, alerting on failed jobs (e.g. read-only constraint violations, sync timeouts).
+- **Ingestion Currency vs FOS State:** Compares latest request/RUM timestamps to wall clock. Accurately distinguishes between genuine bucket idle states (0 raw `.gz` files in FOS bucket) and stalled ingest pipelines.
+- **Parquet Storage & Compaction:** Monitors hourly partition sprawl in local cache, daily/weekly rollup tier status, and durable DuckLake/Iceberg data file count and byte footprint.
+- **Pool Latency & Saturation:** Tracks DuckDB connection pool p95/p99 wait latencies and rejected acquisitions.
+- **High-Scale Worker & Broker Health:** Audits Celery worker node counts, active queue depths, and ClickHouse ingestion pipeline status.
+
+**Usage:**
+```bash
+# Point-in-time snapshot check across all 3 active environments:
+python3 scripts/dev/audit_environments.py
+# Or via Makefile:
+make audit
+
+# Continuous real-time monitoring watch (e.g. 5 minutes, 10s interval):
+python3 scripts/dev/audit_environments.py --watch --duration 5 --interval 10
+# Or via Makefile:
+make audit-watch
+
+# Deep audit chained after connectivity & tenancy verification:
+python3 scripts/check_environment_health.py --audit --watch
+```
+
 ### Stateful + property tests
 
 Hypothesis `RuleBasedStateMachine` pattern at [tests/core/test_ingest_stateful.py](tests/core/test_ingest_stateful.py) — first example in the repo. The `@initialize()` rule MUST `metadata_db.teardown(service_id)` because Hypothesis runs many instances per pytest function and the per-test SQLite file is shared across instances (otherwise: `FlakyStrategyDefinition`).
@@ -624,8 +813,8 @@ A job fired after the config was deleted. The next `reload()` evicts the stale j
 ### 11. All configs are schema v2
 `lf = cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []}` — always.
 
-### 12. NGWAF bot cache is SQLite, ATTACHed to DuckDB
-`data/ngwaf/ngwaf_bot_cache.db` is SQLite, accessed via DuckDB `ATTACH ... TYPE SQLITE`. Shared across services (unlike per-service `.metadata.db`). Cross-engine bridges via `attach_ngwaf_cache` / `attach_metadata_db` in [backend/repositories/_base.py](backend/repositories/_base.py).
+### 12. NGWAF bot cache lives in PostgreSQL, materialized into DuckDB temp table
+`ngwaf_bots` is stored in PostgreSQL (`pg_schema.py`) and materialized in DuckDB via `CREATE OR REPLACE TEMP TABLE {alias}_ngwaf_bots` (see `attach_ngwaf_cache` in [backend/repositories/_base.py](backend/repositories/_base.py)).
 
 ### 13. Next.js startup crash on restricted macOS
 `ERR_SYSTEM_ERROR: uv_interface_addresses returned Unknown system error 1` on some hardened systems. `frontend/package.json` `dev` script binds `-H 127.0.0.1` to bypass interface enumeration. Don't drop the flag.
@@ -633,8 +822,8 @@ A job fired after the config was deleted. The next `reload()` evicts the stale j
 ### 14. VCL regex right-hand side must be a string literal
 The RHS of `~` or `!~` must be a literal. No variables, no concatenation. Use `regsub()` / `regsuball()` for dynamic logic.
 
-### 15. Operational metadata lives in per-service SQLite, not DuckDB
-Alerts, views, audit, cron history, ingested-file dedup, ASN names, source registration, slow-query history → `data/services/{id}.metadata.db` (WAL); usage telemetry (`usage_log` + `usage_log_hourly_summary`) now lives in the separate `data/services/{id}.usage_log.db` file so the cron writer's lock can't block admin readers. Read/write via [backend/core/metadata/](backend/core/metadata/) (legacy `from backend.core import metadata as metadata_db` call sites resolve through the package's `_ShimModule` proxy) — never via DuckDB. JOINs against log data: ATTACH the SQLite read-only as `meta` via `attach_metadata_db()`, or pre-fetch and inline as a parameterised IN list (see `dashboard.py` ASN search). SQLite connections open in WAL mode with `synchronous=NORMAL`, which lets writers and readers proceed without blocking each other under contention.
+### 15. Operational metadata lives in PostgreSQL 16, not DuckDB
+Alerts, views, audit, cron history, ingested-file dedup, ASN names, source registration, slow-query history, usage telemetry, live share, and NGWAF bot cache live in PostgreSQL 16 via `METADATA_DSN` ([ADR-22](docs/adr/22-postgres-only-metadata.md)). Read/write via [backend/core/metadata/](backend/core/metadata/) (legacy `from backend.core import metadata as metadata_db` call sites resolve through the package's `_ShimModule` proxy) — never via DuckDB. PostgreSQL MVCC guarantees that background cron writers never block reader queries or cause file locking deadlocks.
 
 ### 16. Monkeypatches → catalog in [MONKEYPATCHES.md](MONKEYPATCHES.md)
 Historically we patched six s3fs methods + one PyIceberg `SqlCatalog.load_table` at import time. Phase 4 of the v2.0 carve-up replaced the s3fs patches with `FosS3FileSystem` / `CachedS3FileSystem` subclasses in [backend/core/iceberg/fs.py](backend/core/iceberg/fs.py) registered as a pyiceberg `FileIO`. Whatever remains is documented in MONKEYPATCHES.md with site, motivating incident, and cleanup path. Update that file in the same commit when you add/modify/remove a patch.
@@ -681,14 +870,14 @@ The omission is not cosmetic: `reconcile_vcl_state` regenerates the Fastly log f
 
 Two incidents, same root cause:
 - **2026-06-02** — `state_sync` overwrote scoring's 8 fields on every ~30 s metadata_sync tick.
-- **2026-08-12** — the SE-demo service lost all 14 `cmcd_*` fields. CMCD had been enabled since 2026-07-13 and never collected a single value; the cache-key probe (`?CMCD=` vs a control param) proved the snippet was still stripping CMCD from `req.url` the whole time. The trigger was `update_logging_endpoint` assigning `cfg["log_fields"]` **wholesale** with no merge guard, unlike its `cli.py` / `api_service_log_fields_set` siblings.
+- **2026-08-12** — a production demo service lost all 14 `cmcd_*` fields. CMCD had been enabled since 2026-07-13 and never collected a single value; the cache-key probe (`?CMCD=` vs a control param) proved the snippet was still stripping CMCD from `req.url` the whole time. The trigger was `update_logging_endpoint` assigning `cfg["log_fields"]` **wholesale** with no merge guard, unlike its `cli.py` / `api_service_log_fields_set` siblings.
 
-Route every such write through `reconcile_system_custom_fields` / `reconcile_cfg_system_custom_fields` in [backend/provision/system_fields.py](backend/provision/system_fields.py), and key it on the **current** feature state, never on a state transition — a reconcile that says nothing about the feature must still re-assert its fields, and a disable must strip them. The transition-only guard in `update_service_config` is exactly what let the SE-demo config stay broken across a month of reconciles. **If you add a third system-managed feature, add its flag to `system_feature_flags` — do not add a fourth re-injection block.**
+Route every such write through `reconcile_system_custom_fields` / `reconcile_cfg_system_custom_fields` in [backend/provision/system_fields.py](backend/provision/system_fields.py), and key it on the **current** feature state, never on a state transition — a reconcile that says nothing about the feature must still re-assert its fields, and a disable must strip them. The transition-only guard in `update_service_config` is exactly what let the affected config stay broken across a month of reconciles. **If you add a third system-managed feature, add its flag to `system_feature_flags` — do not add a fourth re-injection block.**
 
 ### 28. Never resolve the Iceberg metadata pointer from an unpaginated listing
 `list_objects_v2` caps a single response at **1000 keys**, and pyiceberg names metadata files `<zero-padded-version>-<uuid>.metadata.json`. So the lexicographically-first page holds the **oldest** versions — and `sorted(metadata_files)[-1]` over that page resolves an ancient snapshot while presenting as "latest".
 
-**2026-08 SE-demo incident.** The service's `metadata/` held 9,314 metadata.json objects. The truncated first page ended at `00952-…`; current was `08999-…`. `_read_metadata_pointer`'s discovery fallback resolved **v952**, the table committed forward from that stale base (reaching v1247), and every data file referenced only by v953…v8999 became unreachable — **41 days, 2026-07-01 → 2026-08-10, ~1.05 GB of July parquet alone**. Ingest kept reporting success the whole time because the buffer→commit path was healthy; only the *base* was wrong. The parquet was never deleted, just dereferenced, so it stayed fully recoverable.
+**2026-08 production incident.** The service's `metadata/` held 9,314 metadata.json objects. The truncated first page ended at `00952-…`; current was `08999-…`. `_read_metadata_pointer`'s discovery fallback resolved **v952**, the table committed forward from that stale base (reaching v1247), and every data file referenced only by v953…v8999 became unreachable — **41 days, 2026-07-01 → 2026-08-10, ~1.05 GB of July parquet alone**. Ingest kept reporting success the whole time because the buffer→commit path was healthy; only the *base* was wrong. The parquet was never deleted, just dereferenced, so it stayed fully recoverable.
 
 The trigger was cheap: both pointer-key candidates in `_read_metadata_pointer` are wrapped in `except Exception: continue`, so **one transient CDN 5xx or timeout** on `metadata_location.txt` is enough to drop into discovery. Note the pointer is CDN-fronted with a 10 s TTL + `stale_while_revalidate` (see the iceberg-metadata snippet), so transient misses are normal operation, not an exotic failure.
 
@@ -713,7 +902,7 @@ The invariant is pinned by [tests/utils/test_cmcd_capture_ordering.py](tests/uti
 ### 30. The log-line budget silently truncates late custom fields
 `generate_log_format` tracks an aggregate `budget` (`FASTLY_LOG_LINE_DELIVER_MAX`) and clamps each variable-length field to what's left: `cf_limit = max(0, min(cf_limit, budget))`, allocated greedily in `custom_fields` list order. Once the budget runs dry, later fields get `substr(x, 0, 0)` and **log null forever** with no warning.
 
-On the SE-demo service (groups A–M + 23 custom fields) this squeezed `cmcd_sid` to `substr(..., 0, 26)` — truncating 36-char UUID session ids to 26 chars and breaking session-level joins. Values logged before the squeeze are full length, so the same column holds both 26- and 40-char ids, which reads like a client quirk rather than a config effect.
+On the affected service (groups A–M + 23 custom fields) this squeezed `cmcd_sid` to `substr(..., 0, 26)` — truncating 36-char UUID session ids to 26 chars and breaking session-level joins. Values logged before the squeeze are full length, so the same column holds both 26- and 40-char ids, which reads like a client quirk rather than a config effect.
 
 **Do not "fix" this by adding `byte_limit` to individual fields without measuring.** `byte_limit` only ever *lowers* a cap — it cannot create budget — and shifting the allocation moved other fields to zero when tried. Check the real generated format first:
 ```python
@@ -731,32 +920,266 @@ Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/tes
 
 Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read ``Deleting CDN service '<customer-domain>'`` while actually deleting a different service id entirely — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
 
-### 32. Single-host deploys: three compose files, and host bind-mounts must be owned `1000:1000`
+### 32. DuckLake inlines small commits — only `ducklake_flush_inlined_data` makes them durable
+
+All DuckLake attachments configure `DATA_INLINING_ROW_LIMIT 0` (`_ducklake_attach()`
+in `backend/core/iceberg/_ducklake.py`). By default, DuckLake inlines small
+inserts (≤10 rows) into the metadata catalog rather than writing parquet files
+immediately. Setting `DATA_INLINING_ROW_LIMIT 0` ensures every insert writes
+directly to Parquet data files at commit time. This guarantees immediate
+durability, prevents rows from being trapped in the metadata catalog, and natively
+eliminates upstream bug duckdb/ducklake#1495 (stale cached inlined tables across
+multiple attaches) without requiring custom binaries or unverified extension patches.
+
+DuckLake does not write parquet for a small INSERT. It **inlines** the rows straight into the metadata catalog (Postgres, or the `.ducklake` file), visible as `changes: {'inlined_insert': [...]}` in `ducklake_snapshots`. `ducklake_table_info` then honestly reports `file_count = 0` for a table holding real committed rows.
+
+**Neither compaction primitive promotes inlined rows.** Verified empirically on a throwaway catalog: `ducklake_merge_adjacent_files` (celery path) and `ducklake_rewrite_data_files` (default path, via `optimize_table`) both leave `file_count = 0` with zero parquet on disk, because both operate on already-materialized files. A table whose every commit was inlined stays inlined forever no matter how often compaction runs. `ducklake_flush_inlined_data` is the ONLY primitive that promotes them.
+
+This was a live bug on this branch and it is a **durability** bug, not a layout preference: `finalize_committed_raw` deletes the raw `.gz` once its ledger row has been committed for `RAW_DELETE_GRACE_S`, so with no flush the only copy of every ingested row is the catalog itself. Observed on the live test service before the fix: 27,613 committed files, 27,615 catalog snapshots, FOS `ducklake/` prefix **empty**, and 4 raw files left in the bucket. Losing the Postgres volume would have been total data loss with nothing to re-ingest.
+
+Both compaction paths now flush first — `merge_lake_files` (celery) and `_optimize_table_impl` (default). **If you add a third write path, it needs the flush too**, and setting `DATA_PATH` to FOS is not a substitute: DATA_PATH only says where parquet goes *once written*. Pinned by `test_merge_lake_files_flushes_inlined_rows_to_parquet` and `test_optimize_table_flushes_inlined_rows_to_parquet` — both assert the durability property (`file_count > 0` after a run that starts at 0), never just that the call happens.
+
+Corollary for readers: any code inferring "is there data?" from file count alone is wrong under DuckLake. Count rows, or consult inlined state. This is what broke `get_table_info` (see [ADR-14](docs/adr/14-ducklake-replacement.md)).
+
+### 33. A catalog swap fails SILENTLY on the read side
+When the v3 DuckLake cutover moved the write path off pyiceberg, every reader still built on pyiceberg's Table API kept working — it just reported an empty, frozen catalog forever, with no error. `get_table_info` / `get_snapshot_calendar`, the post-commit `table_summary.json` writer, `lake_info.py`'s fallback, and `_run_cloud_maintenance_impl`'s retention deletion were all found in this state at different times, each discovered separately.
+
+The retention one was the worst: it is the ONLY enforcement of `data_retention_days` / `rum_retention_days`, so customer data retention silently never ran against DuckLake data. It also concealed a latent wipe — the original entered its conditional-prune branch whenever `rum_retention_days > data_retention_days` *including when `data_retention_days == 0`*, which resolves the cutoff to *now* and deletes every non-RUM row. That never fired only because the whole function was dead; making it live without gating on `> 0` would have shipped a data wipe.
+
+**When you migrate a storage backend, audit every caller of the OLD backend's read API before calling the cutover done — not just the write path.** A grep of the cron job file is not enough; read the function it calls. `optimize_{id}` and `expire_{id}` sit side by side, look identical from the scheduler, and only one of them had been migrated.
+
+### 34. `cache/.../data/` is a MIRROR — never adopt it alongside the FOS manifests
+The legacy-parquet adopter (`iceberg/_ducklake_migration.py`) has two candidate sources and they are **alternatives, not a union**. `sync_data` downloads the Iceberg table's FOS data files into `cache/{bucket}/data/` (see `_cloud_uri_to_local_path`), and local compaction rewrites subsets of that mirror into `compacted_*.parquet` / `daily/` / `weekly/` files holding the same rows again. Registering both would double-count every row inside the cache window — on default settings (`cache_retention_days` 90 ⊇ `data_retention_days` 30) that is the entire table. So the legacy Iceberg table wins whenever it yields ≥1 live data file, and the local tree is only the fallback for a service whose legacy table is genuinely absent.
+
+Adopting the local tree *alone* is the mirror-image bug and was the shipped behaviour: any operator keeping more history than their local cache (`data_retention_days: 365` against the default 90-day cache) migrated and silently lost visibility of everything older than the cache window. Trap #33's shape again — quiet, not loud.
+
+Two mechanical traps in the same code:
+- **`ducklake_add_data_files` is not idempotent** — re-adding a path duplicates its rows, for `s3://` URIs as much as for local paths. Callers MUST dedupe against `ducklake_list_files`.
+- **`ducklake_list_files` echoes an object-storage URI back verbatim.** `os.path.abspath("s3://b/k")` yields `/cwd/s3:/b/k`, so abspath-ing the registry makes the dedupe never match and every re-run duplicates the whole table. Normalise by scheme (`_normalize_data_path`).
+
+Boot-time adoption is guarded by a terminal `success` `cron_runs` row under task `ducklake_adopt` — durable under SQLite *and* shared Postgres, and the surface an operator already reads. `FLA_SKIP_LEGACY_ADOPTION=1` opts out; `POST /api/admin/ducklake/migrate` forces a run.
+
+### 35. Concurrent `ATTACH ... AS lake` on different connections silently corrupts the catalog
+`_ducklake_attach` had no synchronization. Two or more connections in the *same process* independently attaching the DuckLake catalog under the alias `lake` — which happens routinely, not just at boot: any burst of concurrent requests that need a fresh pooled connection (`duckdb_pool._Pool.acquire`'s "build fresh" branch) triggers this — race and corrupt each other's local catalog metadata. Every racing connection's `ATTACH` statement reports success (no exception), but `ducklake_snapshots('lake')` — and therefore the Iceberg-compat view rebuild, and therefore `earliest_log_at`/`latest_log_at`/`total_rows_total`/the Traffic-over-Time chart — then fails FOREVER on that connection with `Catalog "__ducklake_metadata_lake" does not exist`. Because pooled connections are long-lived, one bad race at connection-build time poisons that connection for its entire life in the pool; nothing ever retries or re-verifies the attach on reuse.
+
+Verified empirically (`tests/core/test_ducklake_attach_concurrency.py`): 6-8 threads each opening their own connection and calling `_ducklake_attach` concurrently reproduced the corruption on 100% of the racing connections, every run — including against a purely local (non-Postgres) DuckLake catalog, so this is not a Postgres-catalog-specific race. A single ad-hoc connection, or connections serialized with a lock, never reproduced it.
+
+**The fix is a process-wide lock around the ENTIRE `_ducklake_attach` body, including `INSTALL/LOAD ducklake`.** Locking only the `ATTACH` statements (not the extension load) fixed the corruption but introduced an intermittent hang under repeated concurrent test runs — extension loading isn't safe to race either. `INSTALL ducklake; LOAD ducklake;` must be inside the same critical section as the `ATTACH`, not run outside it.
+
+A companion bug fed the same race: `_update_iceberg_view_locked` unconditionally called `_ducklake_attach(con, source, read_only=False)` even when `lake` was already attached READ_ONLY on that connection (the common case — `get_connection()` always attaches `lake` read-only for pooled connections; this function also runs on those SAME read-only request connections via the slow-path view rebuild, not only on cron's dedicated write connections). The mode-mismatched re-attach throws `database with name "lake" already exists`, which `_ducklake_attach`'s broad "already exists → return True" match swallows as a harmless no-op — but the re-attach ATTEMPT itself is what triggers the corruption. **Check whether `lake` is already attached (`SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake'`) before calling `_ducklake_attach` again on the same connection; if it must attach, match the connection's actual read-only mode** — don't hardcode either value.
+
+Trap #33's shape again: a swallowed "already exists"/"already attached" is not proof the catalog is functional. If you add a new caller that re-attaches `lake` on a connection that might already have it, verify with a real query (`ducklake_snapshots('lake')`), not by trusting that `ATTACH` didn't raise.
+
+**A third instance of the same race, found in production (2026-09-22 GCE Remote Standard incident): raw, unlocked `con.execute("DETACH lake")` calls.** DETACH mutates the exact same shared/racy catalog state ATTACH does, but three call sites issued it directly instead of through the locked path: `duckdb_pool.py`'s `release()` (detaches `lake` from every connection returned to the pool — the highest-traffic of the three), `buffer.py`'s `_ducklake_write_connection()` (detaches the pool's read-only attach before re-attaching read-write for a commit), and `_ducklake_migration.py`'s legacy adoption. A raw DETACH from any one of these can rip `lake` out from under another connection concurrently inside a locked `_ducklake_attach` call, which observed production as `Catalog Error: Schema with name lake does not exist!` on connections that had attached and were already mid-transaction — dozens of per-file commit retries failing identically in the same batch, since they all shared the one now-poisoned connection. **Every DETACH of `lake` (or `__ducklake_metadata_lake`) must go through `_ducklake_detach()` in `_ducklake.py`, which wraps the same `_attach_lock`** — never call `con.execute("DETACH lake")` directly. Pinned by `test_ducklake_detach_is_serialized_by_the_attach_lock` in `tests/core/test_ducklake_attach_concurrency.py`.
+
+**A fourth instance (2026-09-22 GCE cold-start incident): a read-only reader evicting a live writer's read-write attach on mode mismatch.** `_ducklake_attach`'s existing-attach handling used to detach unconditionally on ANY mode mismatch, symmetric in both directions. But a read-write attach already satisfies a read-only caller's needs (SELECT works fine against it) — there is no reason for a `get_connection(read_only=True)` reader that races a live writer (ingest/buffer/commit, or the startup Iceberg-view pre-warm, both of which need `read_only=False`) to force a downgrade. Doing so ripped the writer's in-flight attach out from under it mid-use, reproducing DuckDB core's `ResourceInUseException`: "Unique file handle conflict ... in the process of being detached" — and, once the writer's attach was gone, the follow-on `Binder Error: Failed to find attached database "lake"` seen in `ducklake_current_snapshot_id()`'s probe (that probe's `except Exception: return None` fallback is why the symptom self-heals rather than hard-failing — see `_ducklake_view_token()`'s "return None on failure, caller rebuilds" contract in `view.py`). This is not a transient timing race the existing `_attach_lock` retry budget can absorb — it's the reader *itself* destroying the writer's still-needed attach, deterministically, on any mode mismatch.
+
+Fix: a read-only caller finding `lake` already attached read-write now reuses it as-is (verified live via `ducklake_snapshots('lake')`) instead of detaching it. Only a genuine write caller finding a read-only attach still needs to force the upgrade — DuckDB has no in-place "upgrade" primitive, so that direction still detaches+reattaches. Pinned by `test_readonly_attach_reuses_live_readwrite_attach_without_detaching` in `tests/core/test_ducklake_attach_concurrency.py`, using `_ducklake_write_connection()` (the real commit-path mechanism) to hold a genuine read-write attach open while a concurrent reader races it.
+
+**A fifth instance (2026-09-23 GCE ~40-minute stall + live-recurring "Unique file handle conflict"): the fourth-instance fix didn't help because the writer itself was holding the attach far longer than any retry budget assumes.** `_commit_buffer_impl` (`backend/core/iceberg/buffer.py`) defined `_BUFFER_COMMIT_CHUNK_SIZE = 50` with a docstring claiming buffer files are committed in bounded chunks "to avoid OOM" — but the constant was dead code, never referenced anywhere in the function. The real implementation opened ONE `_ducklake_write_connection` (an exclusive DuckLake write-attach) and passed the ENTIRE buffered file list — potentially thousands of files representing hours of backlog — into a single `read_parquet([...])` commit, all inside that one continuously-held attach. Under a large backlog this single write-hold ran for minutes, far past the `_attach_lock`'s 20-attempt/~30s retry budget every other connection depends on (pooled readers via `get_connection()`, RUM's own commit/aggregate connections, other services' ticks) — so those callers exhausted their retries and failed with "Unique file handle conflict" / "retries exhausted" / "zombie lock timeout", cascading into 300s cron watchdog timeouts across `log_discovery`, `insights_prewarmer`, `commit`, `local_compact`, and `gap_heal`.
+
+Fix: `_commit_buffer_impl` now iterates `files` in `_BUFFER_COMMIT_CHUNK_SIZE`-sized batches via a new `_commit_one_chunk()` helper, opening and detaching a **fresh** `_ducklake_write_connection` per chunk instead of one spanning the whole backlog — restoring the write-hold duration to roughly what the retry budget was designed to tolerate. The existing full-batch-then-per-file-fallback-with-quarantine logic is preserved, applied per chunk. If a later chunk's attach fails (transient contention), rows already committed by earlier chunks are kept — the function stops rather than discarding prior progress. Pinned by `TestCommitBufferChunking` in `tests/core/test_ducklake_layer.py` (asserts N/chunk_size attach cycles for a large backlog, and that partial progress survives a later-chunk attach failure). **Any future "read/process/commit the whole buffer in one shot" code path needs the same bounded-chunk treatment — an unbounded single write-hold defeats every lock-fairness mechanism above it, no matter how well-tuned the retry budget is.**
+
+Separately investigated and NOT fixed: a writer's `finally: _ducklake_detach()` in `_ducklake_write_connection()` can still evict `lake` out from under a concurrently-open reader at commit-end (reproduced empirically, ~1/16 runs under 15 racing readers). This is intentionally left as a self-healing degradation, not a bug — the probe that would fail returns `None` and its caller rebuilds the view. Don't "fix" this with a broader lock; the existing graceful-fallback contract already covers it, and the observed production symptom (a single non-recurring INFO log line at cold start) confirms it self-heals in practice. Also verified separately: DuckDB's own `duckdb.connect()` never races on a brand-new file path in isolation (0 failures across repeated 8-thread tests with no ATTACH involved) — the race is specific to the ducklake extension's ATTACH/catalog-creation path, not general file-open contention, and is already fully covered by `_attach_lock`'s existing retry loop.
+
+### 36. Single-host deploys: three compose files, and host bind-mounts must be owned `1000:1000`
 On a single-VM Docker Compose deployment, bring-up must run **all three** compose files, in order: `docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.deploy.yml up -d --build`. Omitting `docker-compose.prod.yml` silently drops `network_mode: host`, the loopback-only binds, and the anti-XFF-spoofing hardening (`TRUSTED_PROXY_IPS`, `REQUIRE_PROXY_HEADERS`) — the stack still comes up, just unhardened and without port 443 published (site becomes unreachable over HTTPS while looking "fine" in `docker compose ps`).
 
-Separately: the backend Dockerfile creates and runs as `app` (UID/GID 1000) and documents that bind-mount targets must be owned by that user (`RUN mkdir -p /app/configs /app/data /app/cache ... && chown -R app:app /app`), but this is only enforced *inside* the image — nothing enforces it on the **host-side** bind-mount sources (`data/`, `configs/`, `cache/` next to the compose files). If those directories drift to a different UID:GID, the container starts, then crash-loops on the first write with `PermissionError` / `OperationalError: attempt to write a readonly database` — it can sit like this for weeks if no write path is exercised until a restart forces one. Before restarting containers, verify `stat -c '%u:%g' data configs cache` reads `1000:1000`; `sudo chown -R 1000:1000` them if not.
+Separately: the backend Dockerfile creates and runs as `app` (UID/GID 1000) and documents that bind-mount targets must be owned by that user (`RUN mkdir -p /app/configs /app/data /app/cache ... && chown -R app:app /app`), but this is only enforced **inside** the image — nothing enforces it on the **host-side** bind-mount sources (`data/`, `configs/`, `cache/` next to the compose files). If those directories drift to a different UID:GID, the container starts, then crash-loops on the first write with `PermissionError` / `OperationalError: attempt to write a readonly database` — it can sit like this for weeks if no write path is exercised until a restart forces one. Before restarting containers, verify `stat -c '%u:%g' data configs cache` reads `1000:1000`; `sudo chown -R 1000:1000` them if not.
+
+### 37. Map prewarming must configure the worker before constructing any map
+
+MapLibre shares its worker pool across map instances. `MapPrewarm` can run
+before any visible map module, so it must call
+`setWorkerUrl('/maplibre-gl-worker.mjs')` immediately after its lazy import and
+before constructing a map. Otherwise it creates a worker with an empty URL:
+the browser fetches the current page's HTML as a module, fails MIME checking,
+and subsequent maps inherit the broken pool. Configuring the visible map later
+does not repair workers already created.
+
+Do not treat an attached canvas as proof that a map works. The hidden prewarm
+canvas is 1px and can exist even when no country geometry is loaded. The map
+E2E test supplies country data and requires rendered `countries` features on
+the full-sized dashboard map; the unit test runs prewarm without another map
+component to pin configuration-before-construction.
+
+### 38. NGWAF dashboard cards require a configured workspace
+
+`bootstrap.ngwaf_configured` is the active service's attachment flag, available
+to both admin and analyst without exposing the workspace ID. `useDashboardCards`
+excludes NGWAF Verified Bots and NGWAF Signals from the available card list when
+it is false. Virtual fields must not bypass this gate: persisted card selections,
+"Show all", or leftover WAF log fields do not establish that NGWAF is configured.
+The header counts only available selected cards; saved preferences remain intact
+when switching back to a service where NGWAF is configured.
+
+### 39. Header freshness is request-event time, not a log-file timestamp
+
+The REQUEST header uses `request.latest_log_at`, the request table's event-time
+extent. A raw object's filename timestamp belongs in `latest_ingested_file_at`
+or `latest_available_file_at`; it must never overwrite that extent in a cached
+status overlay. Otherwise REST and SSE can report an older request than
+`log-extents` and the persisted request metrics, and the header falsely looks
+stalled. Bootstrap cache hits and misses must preserve the same meaning.
+
+Use the current snapshot's request metrics, with a flat extent fallback only
+when the request group is absent. Keep RUM separate. Explicit nulls clear
+metrics; omitted fields in a partial SSE update retain their prior values.
+Never choose the maximum of old and new timestamps: a reset or replacement
+can legitimately move the extent backward.
+
+In durable/Celery mode, `request_metrics_observer` owns a single backend
+reconciliation loop: observe the durable serving view, persist, then publish
+changed status through SSE. It waits 15 seconds after each completed pass;
+connection/query time is additional. This is serving work and remains enabled
+with development ingestion crons paused. It never starts an ingestion writer.
+Sync/file mode keeps its post-batch refresh. See ADR-18 for the ownership rule.
+
+### 40. METRICS-group catalog fields have no real column — exclude them from every per-field rollup writer
+
+`LOG_FIELD_CATALOG` entries in the `METRICS` group (`requests`, `hit_rate`,
+`5xx`, `4xx`, `p50_latency`, `p95_latency`, `p99_latency`, `throughput`,
+`req_size`, `ttfb_ms`) all have `vcl=None` — they are chart-metric-only
+synthetic concepts (`LogField.is_derived`), never a real per-row ingested
+column. `FIELDS` in `backend/repositories/dashboard.py` includes them anyway
+(no group-based filter), so anything that iterates `FIELDS` to build a
+per-field rollup `SELECT <field>` ends up asking DuckDB to bind a column
+that doesn't exist in the raw/buffer parquet.
+
+Live incident (2026-09-14): `backend/cron/jobs/partial_hour.py`'s 30-second
+merge tick hit this — `Binder Error: Referenced column "requests" not found
+in FROM clause!` on every tick, for every service, immediately after a
+deploy. `backend/core/rollups/_common.py::_get_fields` (the standard hourly
+per-field rollup writer's field list) had the identical gap and would have
+failed the same way on its next touched-hour tick; it just hadn't fired yet.
+
+Fix: derive the exclusion from the registry itself
+(`{f.code for f in in_group(Group.METRICS)}`), not a hand-maintained literal
+list — `_LIVE_TOPN_SKIP_FIELDS` (`backend/repositories/_base.py`) and
+`_get_fields` both fold this set in now. **Any new per-field rollup/merge
+writer that iterates `FIELDS` directly must exclude this same set** — a
+hand-curated skip-list will drift the moment a new METRICS field is added to
+the catalog, which is exactly how this incident happened.
+
+### 41. Incremental ingest must attempt one batch after an expensive LIST
+
+The standard-mode `log_discovery` budget includes both FOS discovery and file
+processing. On a high-object-count bucket, the four-hour incremental lookback
+can consume the full 240-second budget before `ingest()` reaches its chunk loop.
+Checking `max_seconds` before the first chunk then creates a permanent stall:
+every tick lists the same backlog, processes zero files, and reports "No new log
+files found" even while newer objects exist in FOS.
+
+Always allow the first bounded chunk to run, then enforce the time limit before
+subsequent chunks. This guarantees forward progress without removing the
+per-tick bound. The regression is pinned in
+`tests/core/test_ingest_timing.py::TestIngestMaxSeconds::test_expired_listing_budget_still_attempts_first_batch`.
+
+### Bounded ClickHouse diagnostic index (ADR-20)
+
+`backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements
+explicit pinned DuckLake snapshot export to immutable Fastly Object Storage
+artifacts, with six Postgres control relations. It is not an ingest mirror.
+Task 12 rejected this prototype for dashboard serving after Task 10's measured
+latency/error/saturation failures; Task 11 Kubernetes packaging was not executed.
+Both dashboard endpoints call the existing DuckLake repository directly,
+regardless of `CLICKHOUSE_ENABLED`. That flag enables diagnostic index/replay
+tooling, not dashboard routing; do not add a separate serving flag.
+`repositories/clickhouse_dashboard.py` is an archived experimental evaluator
+for direct offline library comparisons, never imported by a live endpoint.
+Run `make clickhouse-prototype-schema`
+and `python -m scripts.clickhouse_replay`; see
+[the runbook](docs/runbooks/clickhouse-prototype.md).
+
+Use real psycopg pool transactions, not the SQLite-shaped metadata wrapper
+whose `commit()` is a no-op. All fact reads require `FINAL`. Only complete,
+content-verified generations may activate; rebuilds allocate a new generation
+and load every artifact, including previously published ones. Expired datasets
+and unverified targets are ineligible. The archived hybrid evaluator must pass
+the snapshot actually pinned to its DuckLake view into `readiness`; a separate
+current-version probe is not proof. The adapter builds a unique request view
+using `AT VERSION` and the existing normalization helper, never replaces the
+pooled service view, and rolls back its read transaction on exit. Readiness
+re-verifies the entire target on every request (intentionally costly).
+Unsupported requests log a DuckLake fallback reason; transport failures
+raise `HybridUnavailable` in direct evaluation. No dashboard HTTP route handles
+that exception anymore. Raw deletion and the ingest ledger remain unchanged.
+
+Task 8 instrumentation lives in `clickhouse_metrics.py` and
+`clickhouse_observer.py`. Use multipod + observability + ClickHouse overlays
+together: the existing OTLP exporter feeds Prometheus, with a recording alias
+for its byte-counter naming difference. Enabled backend callbacks share a
+bounded authenticated disk probe and a Postgres actionable-backlog aggregate;
+never run full generation readiness in a metric callback. Unknown lag/disk
+is not zero. Physical inserted-row counters include acknowledged retries.
+Query IDs belong in logs, never metric labels; Active Queries entries have
+`con=None` and cannot interrupt the shared HTTP client. Replay commands
+force-flush before exit; SDK resource instance IDs isolate concurrent
+cumulative streams. See the runbook for live names and verification evidence.
+
+Task 9 adds API-only admin controls in `routers/admin/clickhouse.py`:
+`GET /api/admin/clickhouse/status?service_id=...` and
+`POST /api/admin/clickhouse/replay`. Both remain behind the existing admin
+prefix block; never allow them through the analyst middleware. Status reports
+service-scoped publication history and actionable backlog age. Disabled or
+unavailable measurements are null, not zero; enabled dependency failures return
+503. An expired active generation remains visible with `expired=true`; health
+is connectivity/schema health, not a fresh-data guarantee.
+
+Replay requires a configured read-write service and exactly one `dataset_id`
+(new generation) or `generation` (resume). `dry_run=true` validates retained
+metadata references without FOS access, audit writes, or manifest mutations.
+The HTTP cap is 100 artifacts per request **and per dataset**, since activation
+verifies the whole dataset even after a small final replay batch. Work runs
+synchronously in a request thread with bounded Postgres waits; larger datasets
+use the explicit CLI. Apply uses only `FosArtifacts.load`, never export, and
+audits requested/completed/failed operations with safe counts. Responses,
+including debug-opted-in errors, must not disclose artifact URLs or credentials.
 
 ## AI Agent Directives
 
 These apply to every change, regardless of scope.
 
+### Operational Protocol: Inquire, Clarify, and Document Before Execution (Never Guess)
+
+Before beginning implementation, testing, or refactoring on any page, background job (cron), API, or architectural feature:
+1. **Read & Synthesize First:** Thoroughly read the specific page or cron specification (`docs/pages/{page}.md`, `docs/cron/jobs/{cron}.md`), supporting architecture documents (`docs/ARCHITECTURE.md`, `AGENTS.md`), deployment runbooks, and test suites.
+2. **Interactive Inquiry Mandate:** Ask the operator as many clarifying questions as necessary about requirements, ambiguous behaviors, traffic profiles, edge cases, role permissions, or architecture-specific expectations. **Never make unvalidated assumptions or guess intent** when details can be confirmed.
+3. **Document First, Then Execute:** Incorporate all answers, clarifications, and design decisions directly back into the authoritative documentation (`docs/pages/`, `docs/cron/`, etc.) before executing code changes or test suites.
+4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_throughput`) and all user roles (Admin vs Analyst Path B vs Analyst Path A), verifying 100% query and API call telemetry attribution.
+
+### Canonical Multi-Tier Deployment Mandate (Never Deploy or Test by Hand)
+
+1. **Always use `scripts/dev/deploy_test_all.sh` after committing and pushing**: NEVER deploy, restart, refresh port-forwards, or test environments manually by hand (e.g. running ad-hoc `docker compose up`, `kubectl set image`, or manual background port-forwards). The project provides `scripts/dev/deploy_test_all.sh` as the single canonical, robust, and repeatable deployment script. You MUST craft an intentional commit for your change and push it to upstream origin (`git push origin HEAD`) BEFORE invoking `deploy_test_all.sh`. The script will NEVER auto-commit or auto-push, and will leave any other uncommitted work-in-progress files in the working directory untouched.
+2. **Three-Tier Parallelism & Drift Prevention**: The script concurrently builds, updates, establishes tunnels/port-forwards, and verifiably tests across the 3 active environments:
+   - **Local Standard** (Docker Compose, `http://localhost:3000` / `http://127.0.0.1/dashboard`)
+   - **GCE Standard** (Remote VM via SSH tunnel, `http://localhost:3001`)
+   - **Remote High-Scale** (Kubernetes cluster via port-forward, `http://localhost:3002` / operator-configured analyst URL)
+3. **No Interactive Blocking in Automation**: The script automatically defaults Jenkins tags to the short 12-char commit hash (`$COMMIT_HASH`) and bypasses interactive `read` prompts when running in non-interactive/automated agent shells (`! -t 0`) or when `BACKEND_TAG` / `FRONTEND_TAG` are pre-set in the environment.
+4. **Mandatory Post-Deploy Verification**: Every run executes `scripts/verify_dashboard.js` against all 3 active endpoints to guarantee commit parity and live rendering before work is deemed complete.
+5. **Mandatory 5-Minute Stability Monitoring**: Following successful dashboard verification, `deploy_test_all.sh` invokes `scripts/dev/audit_environments.py` to continuously monitor CPU, memory, scheduler tick rate, DuckDB connection pool latency, and ingestion health across the 3 active environments in real time for 5 minutes (`--watch --duration 5 --interval 10`) to confirm zero post-rollout regressions (customizable via `MONITOR_MINUTES=N`, skippable for rapid iterations via `--no-monitor` / `MONITOR_MINUTES=0`).
+
 ### Testing
 
-1. **Run `make ci` after every code change.** Fix all errors and warnings. Never report success without running CI.
-2. **Add tests for every non-trivial change.** New endpoint → router test. New utility → unit test. Bug fix → regression test that would have caught it.
-3. **Prefer integration tests over pure mocks** for backend behavior. The `in_memory_duckdb` + `client` fixture pattern tests real SQL while staying fast.
-4. **Test error paths.** Missing config, external 4xx/5xx, empty DB.
-5. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
-6. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
-7. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
+1. **Adopt the 3-Tier Testing Workflow:**
+   - **Inner Loop (1–3s):** Run focused, targeted tests while coding (`uv run pytest tests/... -k ...` or `cd frontend && npx vitest ...`). Do not run the multi-minute `make ci` on every small edit.
+   - **Intermediate Smoke Loop (~1–2m):** Use `make fast-ci` for smoke checks across contracts, typechecking, linters, and core unit tests before taking a break or context switching.
+   - **Outer Loop Gate:** Run `make ci` once after the coherent change set is complete before pushing to upstream origin.
+2. **Never delete or weaken existing tests:** Do not remove test cases to speed up CI runs. The ~8,000 backend and ~1,400 frontend tests protect mission-critical data integrity, multi-tenant isolation, and production regression history. Coverage floors (`--cov-fail-under=85`, Vitest 4-way thresholds, and the 24-test security regression floor) are strictly enforced ratchets. Test execution assertions account for <10% of runtime; deleting tests introduces regression blind spots without providing meaningful speedup.
+3. **Add tests for every non-trivial change:** New endpoint → router test. New utility → unit test. Bug fix → regression test that would have caught it.
+4. **Prefer integration tests over pure mocks** for backend behavior. The `in_memory_duckdb` + `client` fixture pattern tests real SQL while staying fast.
+5. **Test error paths:** Missing config, external 4xx/5xx, empty DB.
+6. **Frontend tests live in `frontend/__tests__/`** mirroring source structure (`app/`, `components/`, `hooks/`, `lib/`).
+7. **Verify in the real app when you can.** Start the server, drive the UI, watch the logs (we log every query and FOS call). Don't rely on green tests alone for feature correctness.
+8. **Run the Playwright suite as part of the dev-verify checklist.** Alongside the `verify-dev-first` flow (`./run.sh --dev` on 18002/13002), run `cd frontend && npx playwright test --project=chromium` for any change touching the admin shell, dashboard, provision wizard, custom-field drawer, or share-login. The suite spawns its own backend on 18004 + frontend on 13004 via [frontend/playwright.config.ts](frontend/playwright.config.ts) so it doesn't collide with the dev shell on 18002/13002. Use `--project=chromium,firefox,webkit` before pushing if the change touches browser-only interactions (DnD, popovers, chart hover).
 
 ### Code Changes
 
-7. **No backward-compatibility shims.** Fields like `stats_token` and `cdn_domain` do not exist in the schema — do not add fallbacks for absent fields.
-8. **Never interpolate user-controlled values into SQL.** `_safe_table()` for table names, parameterised queries (`con.execute("... WHERE x = ?", [value])`) for filter values.
-9. **Handle `openapi-fetch` errors explicitly.** Never `.then((r) => r.data?.x || fallback)` without checking `r.error`.
-10. **Keep Python imports at module level.** Conditional mid-function imports trigger `UnboundLocalError` (Trap #2).
-11. **Run `ruff format` before committing** (or rely on `make ci`).
+9. **No backward-compatibility shims.** Fields like `stats_token` and `cdn_domain` do not exist in the schema — do not add fallbacks for absent fields.
+10. **Never interpolate user-controlled values into SQL.** `_safe_table()` for table names, parameterised queries (`con.execute("... WHERE x = ?", [value])`) for filter values.
+11. **Handle `openapi-fetch` errors explicitly.** Never `.then((r) => r.data?.x || fallback)` without checking `r.error`.
+12. **Keep Python imports at module level.** Conditional mid-function imports trigger `UnboundLocalError` (Trap #2).
+13. **Run `ruff format` before committing** (or rely on `make ci`).
 
 ### Secrets & sensitive data
 
@@ -819,3 +1242,45 @@ Update this file in the same commit that introduces:
 - Workflow changes that affect the user personas
 
 If a section here describes code or behavior that no longer exists, fix or delete it immediately. Stale docs are worse than missing docs — they actively mislead.
+
+<!-- graft:start -->
+## Graft — repo context graph
+
+This repo is indexed in `graft/`: small linked markdown nodes that explain each
+system and carry exact file:line spans, kept in sync with the code through git.
+
+For ANY task here — understanding how something works, finding where code lives,
+or scoping a change — get context from the graph before grepping or opening
+source files. Re-ask freely (it's cheap) and reuse literal identifiers you
+already have (symbol, error string, file name) as the query. New to this repo?
+Run `graft map` first — a token-budgeted orientation (dir clusters, hubs,
+hotspots), no LLM, no key.
+
+- Run `graft ask "<your question>" --source` → ranked nodes with the relevant
+  code spans inlined (each hit's ≤8-line crux by default; `--full` for whole
+  definitions when the crux isn't enough). Match the tool to the task shape:
+  for understanding or editing, the top node IS the answer — cite its
+  `covers:` file:line spans and edit straight from `--source`. For
+  exhaustive tasks ("every occurrence / every caller of this pattern"), ranked
+  results are top-N, not complete — run `graft grep "<literal>"` instead
+  (exhaustive over indexed files, grouped by enclosing symbol), falling back
+  to raw `grep -rn` only for unindexed files.
+- `graft skeleton <file>` → every definition's signature + span, ~10× cheaper
+  than reading the file; use it to skim an API surface.
+- `graft callers <symbol>` gives precomputed, exact edges — who calls this.
+  Add `--direction out` for what it calls, or `--depth N` to walk
+  transitively for the full blast radius. For structural questions, skip
+  ranking and use this directly.
+- Or browse: `graft/INDEX.md` lists every node; follow the links.
+- Monorepos and folders of multiple repos rank fairly across sub-projects —
+  hits carry `[scope/]` labels naming which one they're from. Narrow with
+  `graft ask "<task>" --in <scope>/` once you know where you're working.
+
+If a returned span is truncated ("+N more lines"), open the file at that exact
+range before finalizing. Only open source files when a node genuinely lacks a
+needed detail, and then at the exact file:line the node points to — never
+re-read whole files.
+
+After big code changes, refresh the graph with `graft build` (deterministic,
+no API key, $0).
+<!-- graft:end -->

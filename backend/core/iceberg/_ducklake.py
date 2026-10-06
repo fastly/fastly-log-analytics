@@ -339,7 +339,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
         ro = ", READ_ONLY" if read_only else ""
         attach_sql = (
             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
-            f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE);"
+            f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0);"
         )
         for attempt in range(_ATTACH_CONFLICT_RETRY_ATTEMPTS):
             try:
@@ -354,7 +354,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                     try:
                         con.execute(
                             f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
-                            f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE);"
+                            f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0);"
                         )
                         con.execute("DETACH __lake_init")
                         continue

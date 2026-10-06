@@ -31,9 +31,10 @@ Standard and High-Scale are separate commit paths. Do not route High-Scale
 through `commit_buffer` or treat its worker-side ledger writes as equivalent
 to Standard buffer commits.
 
-Both paths load the same pinned DuckLake extension in backend images. Its build
-is gated by the duckdb/ducklake#1495 inlined-table regression scenario; extension load
-failure is fatal to the attach rather than falling back to the official binary.
+Both paths configure `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach. This ensures
+that small inserts write directly to Parquet data files at commit time rather than
+remaining inlined in the metadata catalog, guaranteeing immediate data durability and
+natively preventing upstream duckdb/ducklake#1495 across concurrent attachments.
 
 ## 3. Scheduling and eligibility
 
