@@ -970,6 +970,59 @@ def test_cleanup_old_rollups_deletes_hours_below_cutoff(tmp_path):
     assert (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").exists()
 
 
+def test_cleanup_old_rollups_sweeps_all_trees(tmp_path):
+    """Verifies that cleanup_old_rollups sweeps ip_spread, day, day_bundled,
+    and hour_bundled trees."""
+    from backend.core.rollups import recompute
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+
+    now = datetime.now(UTC)
+    old = (now - timedelta(days=30)).strftime("%Y-%m-%d-%H")
+    old_day = old[:10]
+    young = (now - timedelta(days=1)).strftime("%Y-%m-%d-%H")
+    young_day = young[:10]
+
+    # Create old and young entries across trees
+    (cache_root / "rollups" / "hour" / "field=ip" / f"hour={old}").mkdir(parents=True)
+    (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").mkdir(parents=True)
+
+    (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={old}").mkdir(parents=True)
+    (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={young}").mkdir(parents=True)
+
+    (cache_root / "rollups" / "day" / "field=ip" / f"day={old_day}").mkdir(parents=True)
+    (cache_root / "rollups" / "day" / "field=ip" / f"day={young_day}").mkdir(parents=True)
+
+    old_db = cache_root / "rollups" / "day_bundled" / f"day={old_day}"
+    old_db.mkdir(parents=True)
+    (old_db / "all_fields.parquet").write_bytes(b"x")
+
+    young_db = cache_root / "rollups" / "day_bundled" / f"day={young_day}"
+    young_db.mkdir(parents=True)
+    (young_db / "all_fields.parquet").write_bytes(b"x")
+
+    old_hb = cache_root / "rollups" / "hour_bundled" / f"hour={old}"
+    old_hb.mkdir(parents=True)
+    (old_hb / "all_fields.parquet").write_bytes(b"x")
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        deleted = recompute.cleanup_old_rollups("svc", {"name": "svc"}, max_age_days=7, hour_bundle_max_age_days=7)
+
+    # 1 from hour, 1 from hour_ip_spread, 1 from day_bundled, 1 from day, 1 from hour_bundled
+    assert deleted >= 5
+    assert not (cache_root / "rollups" / "hour" / "field=ip" / f"hour={old}").exists()
+    assert not (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={old}").exists()
+    assert not (cache_root / "rollups" / "day" / "field=ip" / f"day={old_day}").exists()
+    assert not (cache_root / "rollups" / "day_bundled" / f"day={old_day}").exists()
+    assert not (cache_root / "rollups" / "hour_bundled" / f"hour={old}").exists()
+
+    # Young preserved
+    assert (cache_root / "rollups" / "hour" / "field=ip" / f"hour={young}").exists()
+    assert (cache_root / "rollups" / "hour_ip_spread" / "field=ip" / f"hour={young}").exists()
+    assert (cache_root / "rollups" / "day_bundled" / f"day={young_day}").exists()
+
+
 def test_cleanup_old_rollups_no_root_returns_zero(tmp_path):
     from backend.core.rollups import recompute
 

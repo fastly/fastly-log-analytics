@@ -8,6 +8,7 @@ import os
 import random
 import re
 import tempfile
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -329,21 +330,53 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
         logger.warning("Bulk delete failed, falling back to individual", exc_info=True)
         deleted_count = 0
         individual_failures: set[str] = set()
-        for index, k in enumerate(keys):
+
+        if len(keys) <= 4:
+            for index, k in enumerate(keys):
+                try:
+                    fos_client.delete_object(Bucket=bucket, Key=k)
+                    deleted_count += 1
+                except Exception as individual_err:
+                    ind_err_str = str(individual_err)
+                    if "AccessDenied" in ind_err_str or "UnauthorizedAccess" in ind_err_str:
+                        logger.warning(
+                            "Individual delete failed due to missing permissions: %s. Stopping further deletes.",
+                            ind_err_str,
+                        )
+                        individual_failures.update(keys[index:])
+                        break
+                    logger.warning("Failed to delete object %s", k, exc_info=True)
+                    individual_failures.add(k)
+            return deleted_count, individual_failures
+
+        # For larger batches, delete concurrently using ThreadPoolExecutor to prevent WAN timeouts
+        access_denied_event = threading.Event()
+
+        def _delete_single_key(k: str) -> tuple[str, bool, str | None]:
+            if access_denied_event.is_set():
+                return k, False, "AccessDenied_aborted"
             try:
                 fos_client.delete_object(Bucket=bucket, Key=k)
-                deleted_count += 1
+                return k, True, None
             except Exception as individual_err:
                 ind_err_str = str(individual_err)
                 if "AccessDenied" in ind_err_str or "UnauthorizedAccess" in ind_err_str:
-                    logger.warning(
-                        "Individual delete failed due to missing permissions: %s. Stopping further deletes.",
-                        ind_err_str,
-                    )
-                    individual_failures.update(keys[index:])
-                    break
-                logger.warning("Failed to delete object %s", k, exc_info=True)
-                individual_failures.add(k)
+                    access_denied_event.set()
+                return k, False, ind_err_str
+
+        workers = min(32, len(keys))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fos_del") as del_ex:
+            del_futures = {del_ex.submit(_delete_single_key, k): k for k in keys}
+            for fut in concurrent.futures.as_completed(del_futures):
+                k, ok, err_s = fut.result()
+                if ok:
+                    deleted_count += 1
+                else:
+                    if err_s and ("AccessDenied" in err_s or "UnauthorizedAccess" in err_s):
+                        logger.warning("Individual delete permission error on %s: %s", k, err_s)
+                    else:
+                        logger.warning("Failed to delete object %s: %s", k, err_s)
+                    individual_failures.add(k)
         return deleted_count, individual_failures
 
 
@@ -396,13 +429,13 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
         try:
             resp = fos_client.get_object(Bucket=bucket, Key=key)
             with open(local_path, "wb") as f:
-                for piece in iter(lambda: resp["Body"].read(65536), b""):
-                    f.write(piece)
+                f.write(resp["Body"].read())
         finally:
             _BOTO3_CALLER_HINT.reset(token)
         return s3_path, local_path
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=32, thread_name_prefix="ingest_dl") as ex:
+    workers = min(64, max(16, len(s3_paths)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest_dl") as ex:
         futures = {ex.submit(_download_one, p): p for p in s3_paths}
         for fut in concurrent.futures.as_completed(futures):
             try:

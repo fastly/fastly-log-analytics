@@ -540,6 +540,26 @@ def _run_rollup_compact_daily(service_id: str) -> None:
                 e,
             )
             overview_compacted = 0
+
+        # Retention and historical compaction cleanup pass:
+        # Purge rollups older than retention (rollup_retention_months * 30 days)
+        # and prune hourly rollups older than 14 days that already have day_bundled files.
+        cleaned_entries = 0
+        try:
+            from backend.core.rollups.recompute import cleanup_old_rollups
+
+            retention_months = int(src.get("rollup_retention_months", 12))
+            max_age_days = int(src.get("rollups_days", retention_months * 30))
+            if max_age_days > 0:
+                cleaned_entries = cleanup_old_rollups(
+                    service_id,
+                    src,
+                    max_age_days=max_age_days,
+                    hour_bundle_max_age_days=14,
+                )
+        except Exception as e:
+            logger.warning("[rollup-compact] %s: cleanup pass failed: %s", _display, e)
+
         duration = time.time() - start_time
         # Pass run_id so log_cron_run UPDATEs the 'running' row that
         # start_cron_run inserted (instead of orphaning it and inserting

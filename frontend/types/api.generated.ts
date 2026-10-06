@@ -2165,6 +2165,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/consolidate-rollups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Consolidate Rollups
+         * @description Consolidate historical fragmented rollup files into daily bundles and prune obsolete files.
+         *
+         *     Sweeps hour_ip_spread, compacts closed days into day_bundled files, and prunes
+         *     per-field and obsolete hourly files older than 14 days.
+         */
+        post: operations["consolidate_rollups_api_admin_consolidate_rollups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/compact/{service_id}": {
         parameters: {
             query?: never;
@@ -7043,6 +7066,32 @@ export interface components {
             requests: number;
             /** Bytes */
             bytes: number;
+        };
+        /**
+         * ConsolidateRollupsResponse
+         * @description Result from POST /admin/consolidate-rollups.
+         */
+        ConsolidateRollupsResponse: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Files Before */
+            files_before?: number | null;
+            /** Files After */
+            files_after?: number | null;
+            /** Files Deleted */
+            files_deleted?: number | null;
+            /** Hours Ip Bundled */
+            hours_ip_bundled?: number | null;
+            /** Days Compacted */
+            days_compacted?: number | null;
+            /** Days Bundled */
+            days_bundled?: number | null;
+            /** Cleaned Entries */
+            cleaned_entries?: number | null;
+            /** Duration S */
+            duration_s?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** CorrelateRequest */
         CorrelateRequest: {
@@ -26787,6 +26836,113 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackfillBundleRollupsResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    consolidate_rollups_api_admin_consolidate_rollups_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsolidateRollupsResponse"];
                 };
             };
             /** @description Bad request */

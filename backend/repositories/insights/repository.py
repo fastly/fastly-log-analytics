@@ -505,6 +505,7 @@ def get_insights(
     mask_ips: bool = False,
     clamp_cache_key: str | None = None,
     force_refresh: bool = False,
+    max_workers: int = 4,
 ) -> dict:
     """Compute the insight cards for ``src`` over the window/baseline ranges.
 
@@ -946,7 +947,10 @@ def get_insights(
                 )
                 return {}
 
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="insights-coalesce") as _coalesce_pool:
+        max_coalesce_workers = max(1, min(max_workers, 4))
+        with ThreadPoolExecutor(
+            max_workers=max_coalesce_workers, thread_name_prefix="insights-coalesce"
+        ) as _coalesce_pool:
             _fut_waf = _coalesce_pool.submit(_task_waf)
             _fut_city = _coalesce_pool.submit(_task_city)
             _fut_url = _coalesce_pool.submit(_task_url)
@@ -1136,8 +1140,8 @@ def get_insights(
         # and leaves headroom for the main-thread Python work that runs
         # around the SQL.
         if tasks:
-            max_workers = min(4, len(tasks))
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="insights") as pool:
+            pool_workers = max(1, min(max_workers, len(tasks)))
+            with ThreadPoolExecutor(max_workers=pool_workers, thread_name_prefix="insights") as pool:
                 for res in pool.map(_safe_run, tasks):
                     if res:
                         insights_list.append(res)

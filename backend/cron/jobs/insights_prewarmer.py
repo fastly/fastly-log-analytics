@@ -124,7 +124,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
     from backend.cron.jobs.metadata import _log_and_add_progress
     from backend.repositories.insights import get_insights
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.active_requests import should_defer_cron, yield_to_api
     from backend.utils.insights_defaults import history_hours_from_earliest, pick_insights_default
     from backend.utils.remote_access import resolve_analyst_insights_clamp
     from backend.utils.tunnel import get_tunnel_manager
@@ -166,14 +166,16 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
 
-        # OOM fix: Prewarmer is a solitary background task and shouldn't exceed container memory limits.
-        # Enforcing a safe ceiling (like 384MB) and limiting execution threads to 2 prevents parallel
-        # thread-memory bloat, keeping standard execution extremely fast without OOM-killer crashes.
+        # CPU & Memory guard: Prewarmer is a background maintenance task and should not saturate
+        # host CPUs or exceed container memory limits on 4-vCPU systems. Limiting DuckDB threads to 1
+        # and max_workers to 2 keeps standard execution steady without blocking user queries or streaming crons.
         try:
             con.execute("SET memory_limit = '384MB';")
-            con.execute("SET threads = 2;")
+            con.execute("SET threads = 1;")
         except Exception:
             pass
+
+        yield_to_api(max_wait_secs=1.0)
 
         # 1) Admin / unclamped default selection.
         get_insights(
@@ -183,6 +185,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
             baseline_hours=baseline_hours,
             service_id=service_id,
             force_refresh=True,
+            max_workers=2,
         )
 
         # 2) Analyst clamp shapes — only meaningful while sharing is live (no
@@ -192,6 +195,13 @@ def _run_insights_prewarmer(service_id: str) -> None:
         analyst_warmed = 0
         if _analyst_prewarm_enabled() and get_tunnel_manager().is_sharing_active():
             for qs, qe, qwh, mask in _active_analyst_shapes(service_id):
+                if should_defer_cron("insights_prewarmer", service_id):
+                    logger.info(
+                        "[insights-prewarmer] %s: deferring remaining analyst prewarms due to active API requests",
+                        service_id,
+                    )
+                    break
+                yield_to_api(max_wait_secs=0.5)
                 try:
                     cs, ce, ck = resolve_analyst_insights_clamp(
                         qs,
@@ -213,6 +223,7 @@ def _run_insights_prewarmer(service_id: str) -> None:
                     mask_ips=mask,
                     clamp_cache_key=ck,
                     force_refresh=True,
+                    max_workers=2,
                 )
                 analyst_warmed += 1
 

@@ -11,7 +11,7 @@ import threading
 import time
 
 _DIR_SIZE_CACHE: dict[str, tuple[float, int]] = {}
-_DIR_SIZE_TTL_S = 30.0
+_DIR_SIZE_TTL_S = 120.0
 
 # Coalescing primitives (mirrors service_manager._get_dir_stats). The walk is
 # O(files-in-tree) — ~700ms over the ~19k-file parquet cache — so a burst of

@@ -555,6 +555,20 @@ class BackfillBundleRollupsResponse(_AdminMaintRead):
     rum: int | None = None
 
 
+class ConsolidateRollupsResponse(_AdminMaintRead):
+    """Result from POST /admin/consolidate-rollups."""
+
+    service_id: str | None = None
+    files_before: int | None = None
+    files_after: int | None = None
+    files_deleted: int | None = None
+    hours_ip_bundled: int | None = None
+    days_compacted: int | None = None
+    days_bundled: int | None = None
+    cleaned_entries: int | None = None
+    duration_s: float | None = None
+
+
 class LocalCompactNowResponse(_AdminMaintRead):
     """``compact_local_partitions`` result dict."""
 

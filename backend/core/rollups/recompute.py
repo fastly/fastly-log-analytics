@@ -26,7 +26,10 @@ from ._common import (
     _build_copy_query,
     _build_ip_spread_select_query,
     _build_virtual_field_copy_query,
+    _day_bundled_root,
+    _day_rollups_root,
     _get_fields,
+    _hour_bundled_root,
     _ip_spread_root,
     _is_safe_ident,
     _load_markers,
@@ -698,42 +701,149 @@ def backfill_missing_hour_ip_spread(
     return {"missing": len(missing), "rebuilt": len(missing)}
 
 
-def cleanup_old_rollups(service_id: str, source: dict, max_age_days: int) -> int:
-    """Delete per-hour rollup directories older than ``max_age_days``.
+def cleanup_old_rollups(
+    service_id: str,
+    source: dict,
+    max_age_days: int,
+    *,
+    hour_bundle_max_age_days: int | None = None,
+) -> int:
+    """Delete per-hour and per-day rollup directories older than retention limits.
 
     ``max_age_days <= 0`` disables cleanup (keep everything). Returns the
-    number of hour-dirs deleted. Safe to call concurrently with the
-    writers because we only ever delete hours STRICTLY older than the
-    cutoff — current and just-written hours are never candidates.
+    number of directories deleted. Safe to call concurrently with the
+    writers because we only ever delete hours/days STRICTLY older than the
+    cutoff — current and just-written hours/days are never candidates.
     """
     if max_age_days <= 0:
         return 0
-    rollup_root = _rollups_root(source)
-    if not os.path.isdir(rollup_root):
-        return 0
 
     cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).strftime("%Y-%m-%d-%H")
+    day_cutoff = cutoff[:10]
+    if hour_bundle_max_age_days and hour_bundle_max_age_days > 0:
+        hour_cutoff = (datetime.now(UTC) - timedelta(days=hour_bundle_max_age_days)).strftime("%Y-%m-%d-%H")
+    else:
+        hour_cutoff = cutoff
+
     deleted = 0
-    try:
-        for field_entry in os.listdir(rollup_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(rollup_root, field_entry)
-            for hour_entry in os.listdir(field_dir):
+
+    # 1. rollups/hour/field=*/hour=*
+    rollup_root = _rollups_root(source)
+    if os.path.isdir(rollup_root):
+        try:
+            for field_entry in os.listdir(rollup_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(rollup_root, field_entry)
+                try:
+                    for hour_entry in os.listdir(field_dir):
+                        if not hour_entry.startswith("hour="):
+                            continue
+                        hour = hour_entry[len("hour=") :]
+                        # String compare works because fixed-width YYYY-MM-DD-HH sorts lexicographically
+                        if hour < hour_cutoff:
+                            hour_dir = os.path.join(field_dir, hour_entry)
+                            try:
+                                shutil.rmtree(hour_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (hour): %s", service_id, e)
+
+    # 2. rollups/hour_ip_spread/field=*/hour=*
+    ip_spread_root = _ip_spread_root(source)
+    if os.path.isdir(ip_spread_root):
+        try:
+            for field_entry in os.listdir(ip_spread_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(ip_spread_root, field_entry)
+                try:
+                    for hour_entry in os.listdir(field_dir):
+                        if not hour_entry.startswith("hour="):
+                            continue
+                        hour = hour_entry[len("hour=") :]
+                        if hour < hour_cutoff:
+                            hour_dir = os.path.join(field_dir, hour_entry)
+                            try:
+                                shutil.rmtree(hour_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (ip_spread): %s", service_id, e)
+
+    # 3. rollups/day_bundled/day=*
+    day_bundled_root = _day_bundled_root(source)
+    if os.path.isdir(day_bundled_root):
+        try:
+            for day_entry in os.listdir(day_bundled_root):
+                if not day_entry.startswith("day="):
+                    continue
+                day = day_entry[len("day=") :]
+                if day < day_cutoff:
+                    day_dir = os.path.join(day_bundled_root, day_entry)
+                    try:
+                        shutil.rmtree(day_dir)
+                        deleted += 1
+                    except OSError as e:
+                        logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day_bundled): %s", service_id, e)
+
+    # 4. rollups/day/field=*/day=* (per-field day files redundant when day_bundled exists)
+    day_root = _day_rollups_root(source)
+    if os.path.isdir(day_root):
+        try:
+            for field_entry in os.listdir(day_root):
+                if not field_entry.startswith("field="):
+                    continue
+                field_dir = os.path.join(day_root, field_entry)
+                try:
+                    for day_entry in os.listdir(field_dir):
+                        if not day_entry.startswith("day="):
+                            continue
+                        day = day_entry[len("day=") :]
+                        day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
+                        has_day_bundle = os.path.isfile(day_bundle_file)
+                        if has_day_bundle or day < day_cutoff:
+                            day_dir = os.path.join(field_dir, day_entry)
+                            try:
+                                shutil.rmtree(day_dir)
+                                deleted += 1
+                            except OSError as e:
+                                logger.warning("[rollups] could not delete %s: %s", day_dir, e)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day): %s", service_id, e)
+
+    # 5. rollups/hour_bundled/hour=*
+    hour_bundled_root = _hour_bundled_root(source)
+    if os.path.isdir(hour_bundled_root):
+        try:
+            for hour_entry in os.listdir(hour_bundled_root):
                 if not hour_entry.startswith("hour="):
                     continue
                 hour = hour_entry[len("hour=") :]
-                # String compare works because the format is fixed-width
-                # YYYY-MM-DD-HH which sorts lexicographically by time.
-                if hour < cutoff:
-                    hour_dir = os.path.join(field_dir, hour_entry)
+                day = hour[:10]
+                day_bundle_file = os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet")
+                has_day_bundle = os.path.isfile(day_bundle_file)
+                if (has_day_bundle and hour < hour_cutoff) or hour < cutoff:
+                    hour_dir = os.path.join(hour_bundled_root, hour_entry)
                     try:
                         shutil.rmtree(hour_dir)
                         deleted += 1
                     except OSError as e:
                         logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
-    except OSError as e:
-        logger.warning("[rollups] cleanup walk failed for %s: %s", service_id, e)
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (hour_bundled): %s", service_id, e)
+
     return deleted
 
 

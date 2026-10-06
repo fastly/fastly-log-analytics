@@ -467,7 +467,10 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
         return web.Response(status=400, text="Missing X-Fos-Target header")
 
     service_id = request.headers.get("X-Telemetry-Service-Id")
-    if service_id and request.method in ("PUT", "POST", "DELETE"):
+    caller = request.headers.get("X-Telemetry-Caller", "")
+    is_mutation = request.method in ("PUT", "POST", "DELETE")
+    is_raw_log = (caller == "ingest_download") or ("/raw/" in request.path_qs)
+    if service_id and (is_mutation or is_raw_log):
         _cfg = _load_config_cached(service_id)
         if _cfg:
             _fos_native = (_cfg.get("fos_native_endpoint") or _cfg.get("fos_endpoint") or "").strip()
@@ -886,7 +889,11 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             ctx = ""
         op = event_name.rsplit(".", 1)[-1].lower() if event_name else "unknown"
 
-        if cdn_target and op in _CDN_OPS:
+        hint = _BOTO3_CALLER_HINT.get()
+        req_url = getattr(request, "url", "") or ""
+        is_raw_log = (hint == "ingest_download") or ("/raw/" in req_url)
+
+        if cdn_target and op in _CDN_OPS and not is_raw_log:
             request.headers["X-Fos-Target"] = cdn_target
             if cdn_secret:
                 request.headers["x-fastly-key"] = cdn_secret
@@ -896,12 +903,11 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             request.headers["X-Fos-Target"] = native_target
 
         # Force cache-bypassing on downloads to prevent Varnish stale cache hits
-        if op in _CDN_OPS:
+        if op in _CDN_OPS and not is_raw_log:
             request.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             request.headers["Pragma"] = "no-cache"
 
         request.headers["X-Telemetry-Service-Id"] = service_id
-        hint = _BOTO3_CALLER_HINT.get()
         request.headers["X-Telemetry-Caller"] = hint if hint else f"boto3.{op}"
         # Always tag context: fall back to thread name so untagged work is
         # at least attributable to *some* thread instead of dropping into

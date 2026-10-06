@@ -363,9 +363,15 @@ class Scheduler:
         import os
 
         self.mode = os.environ.get("SCHEDULER_MODE", "inprocess")
+        from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
         from apscheduler.schedulers.background import BackgroundScheduler
 
-        self._sched = BackgroundScheduler(timezone=UTC)
+        executors = {
+            "default": APSThreadPoolExecutor(10),
+            "streaming": APSThreadPoolExecutor(10),
+            "maintenance": APSThreadPoolExecutor(3),
+        }
+        self._sched = BackgroundScheduler(timezone=UTC, executors=executors)
         # Track per-service job IDs so we can replace them when settings change.
         self._job_ids: dict[str, str] = {}  # job_id -> job_id
 
@@ -552,7 +558,7 @@ class Scheduler:
         if not cron_ip.get("enabled", True):
             return
 
-        interval_seconds = int(cron_ip.get("interval_seconds", 240))
+        interval_seconds = int(cron_ip.get("interval_seconds", 300))
         ip_job_id = f"insights_prewarmer_{service_id}"
         seen_ids.add(ip_job_id)
         if ip_job_id in self._job_ids:
@@ -1535,6 +1541,28 @@ class Scheduler:
     def _add_job(self, func, trigger=None, **kwargs):
         job_id = kwargs.pop("id", None)
         args = kwargs.pop("args", [])
+
+        if "executor" not in kwargs and job_id:
+            jid = str(job_id)
+            if jid.startswith(("log_discovery_", "rum_discovery_", "rum_sync_", "commit_", "sync_")):
+                kwargs["executor"] = "streaming"
+            elif jid.startswith(
+                (
+                    "insights_prewarmer_",
+                    "local_compact_",
+                    "rollup_compact_",
+                    "rollup_heal_",
+                    "metric_snapshot",
+                    "reconcile_fastly_",
+                    "metadata_cleanup",
+                    "rdns_refresh",
+                    "bot_data_refresh",
+                    "optimize_",
+                )
+            ):
+                kwargs["executor"] = "maintenance"
+            else:
+                kwargs["executor"] = "default"
 
         if self.mode == "external" and not self._routes_to_redbeat(job_id):
             # Pod-local job in external mode: schedule on this process's

@@ -9,6 +9,7 @@ from backend.deps import get_source
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
     CompactionStatsResponse,
+    ConsolidateRollupsResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
     MetadataStorageResponse,
@@ -229,6 +230,91 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
         "network_summary": n_netsumm,
         "rum": n_rum,
     }
+
+
+@router.post(
+    "/admin/consolidate-rollups",
+    response_model=ConsolidateRollupsResponse,
+    response_model_exclude_unset=True,
+)
+def consolidate_rollups(source: dict = Depends(get_source)) -> ConsolidateRollupsResponse:
+    """Consolidate historical fragmented rollup files into daily bundles and prune obsolete files.
+
+    Sweeps hour_ip_spread, compacts closed days into day_bundled files, and prunes
+    per-field and obsolete hourly files older than 14 days.
+    """
+    import os
+    import time
+
+    from backend.core.rollups import (
+        _rollups_root,
+        backfill_day_bundles,
+        compact_closed_days_to_daily,
+    )
+    from backend.core.rollups._common import _ip_spread_root
+    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+    from backend.core.rollups.recompute import cleanup_old_rollups
+
+    sid = source.get("service_id") or source.get("name") or ""
+    t0 = time.time()
+
+    def _count_files(root: str) -> int:
+        if not os.path.isdir(root):
+            return 0
+        cnt = 0
+        try:
+            for _, _, fnames in os.walk(root):
+                cnt += len(fnames)
+        except OSError:
+            pass
+        return cnt
+
+    cache_dir = os.path.dirname(_rollups_root(source))
+    files_before = _count_files(cache_dir)
+
+    # 1. Enumerate and bundle all hour_ip_spread hours
+    ip_spread_root = _ip_spread_root(source)
+    hours_to_bundle: set[str] = set()
+    if os.path.isdir(ip_spread_root):
+        try:
+            for fe in os.listdir(ip_spread_root):
+                if not fe.startswith("field="):
+                    continue
+                fpath = os.path.join(ip_spread_root, fe)
+                try:
+                    for he in os.listdir(fpath):
+                        if he.startswith("hour="):
+                            hours_to_bundle.add(he[5:])
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    ip_rebuilt = bundle_hours_ip_spread(sid, source, sorted(hours_to_bundle)) if hours_to_bundle else 0
+
+    # 2. Compact all closed days to daily per-field and then bundle days
+    days_compacted = compact_closed_days_to_daily(sid, source)
+    days_bundled = backfill_day_bundles(sid, source)
+
+    # 3. Retention & historical hourly prune
+    retention_months = int(source.get("rollup_retention_months", 12))
+    max_age_days = int(source.get("rollups_days", retention_months * 30))
+    cleaned_entries = cleanup_old_rollups(sid, source, max_age_days=max_age_days, hour_bundle_max_age_days=14)
+
+    files_after = _count_files(cache_dir)
+    duration_s = round(time.time() - t0, 3)
+
+    return ConsolidateRollupsResponse(
+        service_id=sid,
+        files_before=files_before,
+        files_after=files_after,
+        files_deleted=max(0, files_before - files_after),
+        hours_ip_bundled=ip_rebuilt,
+        days_compacted=days_compacted,
+        days_bundled=days_bundled,
+        cleaned_entries=cleaned_entries,
+        duration_s=duration_s,
+    )
 
 
 @router.post(
