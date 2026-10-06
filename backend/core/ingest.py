@@ -605,7 +605,12 @@ def list_fos_files(
 
         now_utc = datetime.now(UTC)
         use_minute_prefixes = (
-            incremental_only and not st_dt and not et_dt and prefix_subpath == "raw/request/" and bool(already)
+            incremental_only
+            and not st_dt
+            and not et_dt
+            and prefix_subpath == "raw/request/"
+            and bool(already)
+            and any("year=" in f for f in already)
         )
 
         scan_batches: list[dict[str, Any]] = []
@@ -623,10 +628,15 @@ def list_fos_files(
                 kwargs["StartAfter"] = start_after_key
             scan_batches.append(kwargs)
 
-        def _process_contents(contents: list[dict[str, Any]]) -> None:
+        seen_keys: set[str] = set()
+
+        def _process_contents(contents: list[dict[str, Any]]):
             nonlocal total_listed, skipped_already
             for obj in contents:
                 key = obj["Key"]
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 if not key.endswith(".gz"):
                     continue
 
@@ -639,9 +649,7 @@ def list_fos_files(
 
                 total_listed += 1
                 if total_listed % 10000 == 0:
-                    msg = f"{elapsed_fn()} Discovered {total_listed:,} new files..."
-                    yield_msg = {"type": "status", "message": msg}
-                    # Yielding from inner helper is not needed since total_listed is small
+                    yield {"type": "status", "message": f"{elapsed_fn()} Discovered {total_listed:,} new files..."}
 
                 fname = key.split("/")[-1]
                 file_dt = _parse_fastly_filename_dt(fname)
@@ -663,7 +671,7 @@ def list_fos_files(
         for scan_kw in scan_batches:
             pages = paginator.paginate(**scan_kw)
             for page in pages:
-                _process_contents(page.get("Contents", []))
+                yield from _process_contents(page.get("Contents", []))
                 if max_files and len(new_files) >= max_files:
                     break
             if max_files and len(new_files) >= max_files:
@@ -676,7 +684,7 @@ def list_fos_files(
             if start_after_key:
                 fb_kwargs["StartAfter"] = f"{prefix_path}/{start_after_key}" if prefix_path else start_after_key
             for page in paginator.paginate(**fb_kwargs):
-                _process_contents(page.get("Contents", []))
+                yield from _process_contents(page.get("Contents", []))
                 if max_files and len(new_files) >= max_files:
                     break
 

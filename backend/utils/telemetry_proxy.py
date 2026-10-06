@@ -407,6 +407,20 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
         )
         return headers
 
+    # S3 bulk delete (POST /<bucket>?delete) requires Content-MD5. When unsigned
+    # boto3 sends this request, Content-MD5 may be missing from client headers.
+    # Compute and add it before signing so SigV4 covers it and FOS accepts bulk delete.
+    if (
+        ("?delete" in url or b"<Delete" in body)
+        and body
+        and "Content-MD5" not in headers
+        and "content-md5" not in headers
+    ):
+        import base64
+        import hashlib
+
+        headers["Content-MD5"] = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
+
     credentials = Credentials(access_key, secret_key)
     aws_req = AWSRequest(method=method, url=url, headers=headers, data=body)
     # S3SigV4Auth (not bare SigV4Auth) adds X-Amz-Content-SHA256, which
@@ -467,10 +481,8 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
         return web.Response(status=400, text="Missing X-Fos-Target header")
 
     service_id = request.headers.get("X-Telemetry-Service-Id")
-    caller = request.headers.get("X-Telemetry-Caller", "")
     is_mutation = request.method in ("PUT", "POST", "DELETE")
-    is_raw_log = (caller == "ingest_download") or ("/raw/" in request.path_qs)
-    if service_id and (is_mutation or is_raw_log):
+    if service_id and is_mutation:
         _cfg = _load_config_cached(service_id)
         if _cfg:
             _fos_native = (_cfg.get("fos_native_endpoint") or _cfg.get("fos_endpoint") or "").strip()
@@ -750,6 +762,7 @@ async def _create_session() -> aiohttp.ClientSession:
     # third line of defense for the residual race.
     return aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(
+            limit=256,
             limit_per_host=_POOL_PER_HOST,
             enable_cleanup_closed=True,
             keepalive_timeout=_UPSTREAM_KEEPALIVE_S,
@@ -889,11 +902,7 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             ctx = ""
         op = event_name.rsplit(".", 1)[-1].lower() if event_name else "unknown"
 
-        hint = _BOTO3_CALLER_HINT.get()
-        req_url = getattr(request, "url", "") or ""
-        is_raw_log = (hint == "ingest_download") or ("/raw/" in req_url)
-
-        if cdn_target and op in _CDN_OPS and not is_raw_log:
+        if cdn_target and op in _CDN_OPS:
             request.headers["X-Fos-Target"] = cdn_target
             if cdn_secret:
                 request.headers["x-fastly-key"] = cdn_secret
@@ -902,12 +911,8 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             # is not attached — see the note in _sign_request.
             request.headers["X-Fos-Target"] = native_target
 
-        # Force cache-bypassing on downloads to prevent Varnish stale cache hits
-        if op in _CDN_OPS and not is_raw_log:
-            request.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-            request.headers["Pragma"] = "no-cache"
-
         request.headers["X-Telemetry-Service-Id"] = service_id
+        hint = _BOTO3_CALLER_HINT.get()
         request.headers["X-Telemetry-Caller"] = hint if hint else f"boto3.{op}"
         # Always tag context: fall back to thread name so untagged work is
         # at least attributable to *some* thread instead of dropping into

@@ -261,19 +261,19 @@ def test_install_boto3_proxy_hook_routes_get_object_to_cdn():
     assert headers["x-fastly-key"] == "cdn-secret-abc"
 
 
-def test_install_boto3_proxy_hook_ingest_download_stays_native():
+def test_install_boto3_proxy_hook_ingest_download_uses_cdn():
     client = _FakeBoto3Client()
     telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
     token = telemetry_proxy._BOTO3_CALLER_HINT.set("ingest_download")
     try:
         headers = client.invoke(method="GET", event_name="before-send.s3.GetObject")
-        assert headers["X-Fos-Target"] == "us-east.object.fastlystorage.app"
-        assert "x-fastly-key" not in headers
+        assert headers["X-Fos-Target"] == "fos-streamj-logs.global.ssl.fastly.net"
+        assert headers["x-fastly-key"] == "cdn-secret-abc"
     finally:
         telemetry_proxy._BOTO3_CALLER_HINT.reset(token)
 
 
-def test_install_boto3_proxy_hook_raw_logs_stay_native():
+def test_install_boto3_proxy_hook_raw_logs_use_cdn():
     client = _FakeBoto3Client()
     telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
     headers = client.invoke(
@@ -281,8 +281,31 @@ def test_install_boto3_proxy_hook_raw_logs_stay_native():
         event_name="before-send.s3.GetObject",
         url="http://127.0.0.1:8000/bucket/raw/request/year=2026/file.gz",
     )
-    assert headers["X-Fos-Target"] == "us-east.object.fastlystorage.app"
-    assert "x-fastly-key" not in headers
+    assert headers["X-Fos-Target"] == "fos-streamj-logs.global.ssl.fastly.net"
+    assert headers["x-fastly-key"] == "cdn-secret-abc"
+
+
+def test_sign_request_adds_content_md5_for_bulk_delete(monkeypatch):
+    monkeypatch.setattr(
+        telemetry_proxy,
+        "_load_config_cached",
+        lambda sid: {
+            "fos_access_key_id": "test-key",
+            "fos_secret_access_key": "test-secret",
+            "fos_region": "us-east-1",
+        },
+    )
+    headers = {}
+    body = b"<Delete><Object><Key>foo</Key></Object></Delete>"
+    signed = telemetry_proxy._sign_request(
+        "POST",
+        "https://us-east-1.object.fastlystorage.app/my-bucket?delete",
+        headers,
+        body,
+        "svc-test",
+    )
+    assert "Content-MD5" in signed or "content-md5" in signed
+    assert "Authorization" in signed
 
 
 def test_install_boto3_proxy_hook_routes_head_object_to_cdn():
