@@ -105,7 +105,7 @@ def test_load_vcl_x_amz_date_rounds_seconds_to_minute_boundary():
     "region,expected",
     [
         ("us-east-1", "us-east-1.object.fastlystorage.app"),
-        ("eu-central", "eu-central.object.fastlystorage.app"),
+        ("eu-central-1", "eu-central-1.object.fastlystorage.app"),
     ],
 )
 def test_region_endpoint(region, expected):

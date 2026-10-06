@@ -13,8 +13,9 @@ SHIELD_MAP = {
     "us-east-1": "iad-va-us",  # Ashburn, VA
     "us-west": "bfi-wa-us",  # Seattle, WA (BFI)
     "us-central-1": "chi-il-us",  # Chicago, IL (CHI)
-    "eu-central": "frankfurt-de",  # Frankfurt, Germany
+    "eu-central-1": "frankfurt-de",  # Frankfurt, Germany
     "eu-south-1": "mxp-milan-it",  # Milan, Italy
+    "eu-west-1": "mxp-paris-fr",  # Paris, France
     "uk-east-1": "london-uk",  # London, UK
     "jp-central-1": "nrt-tokyo-jp",  # Tokyo, Japan (NRT)
     "au-east-1": "sydney-au",  # Sydney, Australia

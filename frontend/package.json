@@ -1,6 +1,6 @@
 {
-  "name": "fastly-log-analytics",
-  "version": "3.0.0-beta3",
+  "name": "fastly-log-analysis-frontend",
+  "version": "2.4.1",
   "private": true,
   "engines": {
     "node": ">=24"
@@ -37,13 +37,12 @@
     "date-fns": "^4.2.1",
     "date-fns-tz": "^3.2.0",
     "lucide-react": "^1.31.0",
-    "maplibre-gl": "^6.8.0",
-    "next": "^16.3.7",
+    "maplibre-gl": "6.5.0",
+    "next": "16.3.6",
     "next-themes": "^0.4.6",
     "nuqs": "^2.9.5",
     "openapi-fetch": "^0.17.0",
-    "plotly.js": "^4.1.0",
-    "plotly.js-cartesian-dist-min": "^4.1.0",
+    "plotly.js-cartesian-dist-min": "^3.7.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -56,11 +55,13 @@
     "zustand": "^5.0.15"
   },
   "overrides": {
-    "ip-address": "10.4.0",
-    "postcss": "^8.5.23",
-    "hono": "^4.13.9",
-    "js-yaml": "^4.3.2",
-    "maplibre-gl": "$maplibre-gl"
+    "ip-address": "10.2.0",
+    "maplibre-gl": "6.5.0",
+    "next": "16.3.6",
+    "postcss": "8.5.14",
+    "proxy-addr": "2.0.8",
+    "hono": "^4.12.25",
+    "js-yaml": "^4.3.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
@@ -75,9 +76,9 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/topojson-client": "^3.1.5",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9",
-    "eslint-config-next": "16.3.1",
+    "eslint-config-next": "16.3.6",
     "jsdom": "^30.0.1",
     "knip": "^6.32.2",
     "msw": "^2.15.0",
@@ -85,7 +86,7 @@
     "tailwindcss": "^4.2.4",
     "topojson-server": "^3.0.1",
     "typescript": "^5.9",
-    "vitest": "^4.1.11",
+    "vitest": "^4.0.0",
     "vitest-axe": "^0.1.0"
   }
 }

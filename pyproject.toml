@@ -32,6 +32,9 @@ dependencies = [
     "pyarrow>=23.0.1",
     "pandas>=2.3.3",
     "httpx>=0.28.1",
+    # Floor at 4.14.2 to clear GHSA-82r6-8w77-94w6 (TLSStream IDNA
+    # certificate-spoofing vulnerability).
+    "anyio>=4.14.2",
     # pytz is loaded at RUNTIME by DuckDB's icu_collations / TIMESTAMP WITH
     # TIME ZONE handling. An earlier dedup pass dropped this thinking it
     # was unused (no direct `import pytz` in Python sources) — that broke
