@@ -69,6 +69,14 @@ def partial_hour_merge_enabled() -> bool:
     return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
+def partial_hour_merge_interval_sec() -> int:
+    try:
+        val = int(os.environ.get("PARTIAL_HOUR_MERGE_INTERVAL_SEC", "30"))
+        return max(10, min(120, val))
+    except (ValueError, TypeError):
+        return 30
+
+
 def dev_local_crons_enabled() -> bool:
     return os.environ.get("FLA_DEV_LOCAL_CRONS", "true").lower() in ("1", "true", "yes")
 
@@ -683,15 +691,16 @@ class Scheduler:
                 )
 
             # partial_hour_merge — local-only partial-hour rollup merge,
-            # always-on, every 30s. Same local-only safety profile as
-            # local_compact (never touches the shared FOS bucket), so it
-            # belongs in the dev-safe allowlist too. Matches _sync_jobs.
+            # always-on, every 30s (or PARTIAL_HOUR_MERGE_INTERVAL_SEC). Same local-only
+            # safety profile as local_compact (never touches the shared FOS bucket),
+            # so it belongs in the dev-safe allowlist too. Matches _sync_jobs.
             ph_job_id = f"partial_hour_merge_{service_id}"
             if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
+                ph_interval_sec = partial_hour_merge_interval_sec()
                 self._add_job(
                     _run_partial_hour_merge,
                     "interval",
-                    seconds=30,
+                    seconds=ph_interval_sec,
                     jitter=5,
                     args=[service_id],
                     id=ph_job_id,
@@ -700,7 +709,11 @@ class Scheduler:
                     misfire_grace_time=60,
                 )
                 self._job_ids[ph_job_id] = ph_job_id
-                logger.info("⚡ [scheduler] (dev-local) Registered %s (every 30s, local-only).", ph_job_id)
+                logger.info(
+                    "⚡ [scheduler] (dev-local) Registered %s (every %ds, local-only).",
+                    ph_job_id,
+                    ph_interval_sec,
+                )
 
             # rollup_compact — local-only per-day rollup compaction, daily
             # 02:00 UTC, gated on cron_compact.enabled + read-write.
@@ -1225,10 +1238,11 @@ class Scheduler:
             if partial_hour_merge_enabled():
                 seen_ids.add(ph_job_id)
             if partial_hour_merge_enabled() and ph_job_id not in self._job_ids:
+                ph_interval_sec = partial_hour_merge_interval_sec()
                 self._add_job(
                     _run_partial_hour_merge,
                     "interval",
-                    seconds=30,
+                    seconds=ph_interval_sec,
                     jitter=5,
                     args=[service_id],
                     id=ph_job_id,
@@ -1237,7 +1251,11 @@ class Scheduler:
                     misfire_grace_time=60,
                 )
                 self._job_ids[ph_job_id] = ph_job_id
-                logger.info("⚡ [scheduler] Registered partial_hour_merge job %s (every 30s, local-only).", ph_job_id)
+                logger.info(
+                    "⚡ [scheduler] Registered partial_hour_merge job %s (every %ds, local-only).",
+                    ph_job_id,
+                    ph_interval_sec,
+                )
 
             # ── Insights cache prewarmer (perf #76) ───────────────────────────
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)

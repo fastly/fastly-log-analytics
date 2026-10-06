@@ -587,6 +587,29 @@ class LocalCompactNowResponse(_AdminMaintRead):
     dry_run: bool | None = None
 
 
+class PartialHourMergeResponse(_AdminMaintRead):
+    """``merge_partial_hour`` result dict from ``POST /admin/partial-hour-merge``."""
+
+    service_id: str | None = None
+    hour: str | None = None
+    new_files: int | None = None
+    duration_ms: float | None = None
+    gc_hours_removed: int | None = None
+    status: str | None = None
+    error: str | None = None
+
+
+class PartialHourStatusResponse(_AdminMaintRead):
+    """Partial-hour rollup status from ``GET /admin/partial-hour-status``."""
+
+    service_id: str | None = None
+    hour: str | None = None
+    watermark: float | None = None
+    watermark_iso: str | None = None
+    file_exists: bool | None = None
+    total_rows: int | None = None
+
+
 class MetadataRetentionValues(_AdminMaintRead):
     """Resolved retention days (defaults merged with per-service cfg)."""
 

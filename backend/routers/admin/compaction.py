@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime
+
 from fastapi import Depends, Query
 from sse_starlette.sse import EventSourceResponse
 
@@ -14,6 +17,8 @@ from backend.models.admin import (
     MetadataRetentionResponse,
     MetadataStorageResponse,
     OptimizeNowResponse,
+    PartialHourMergeResponse,
+    PartialHourStatusResponse,
 )
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
@@ -368,6 +373,84 @@ def compaction_stats(service_id: str | None = None, source: dict = Depends(get_s
     from backend.core import local_compaction as _lc
 
     return CompactionStatsResponse(**_lc.compaction_stats(source))
+
+
+@router.post(
+    "/admin/partial-hour-merge",
+    response_model=PartialHourMergeResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/partial-hour-merge/{service_id}",
+    response_model=PartialHourMergeResponse,
+    response_model_exclude_unset=True,
+)
+def partial_hour_merge_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+):
+    """Trigger an immediate partial-hour merge tick for the active UTC hour.
+
+    Folds newly-arrived buffer parquets into the active hour's partial-hour rollup.
+    Local-only operation; zero FOS egress.
+    """
+    sid = service_id or source.get("service_id", source.get("name", ""))
+    from backend.core.field_registry import derived
+    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+    from backend.repositories.dashboard import FIELDS
+
+    derived_fields = {f.code for f in derived()}
+    merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS and f not in derived_fields]
+
+    stats = merge_partial_hour(sid, source, merge_fields)
+    removed = gc_stale_partial_hours(source)
+    return {
+        "service_id": sid,
+        "hour": stats.get("hour"),
+        "new_files": stats.get("new_files", 0),
+        "duration_ms": stats.get("duration_ms", 0.0),
+        "gc_hours_removed": removed,
+        "status": "success",
+    }
+
+
+@router.get(
+    "/admin/partial-hour-status",
+    response_model=PartialHourStatusResponse,
+    response_model_exclude_unset=True,
+)
+@router.get(
+    "/admin/partial-hour-status/{service_id}",
+    response_model=PartialHourStatusResponse,
+    response_model_exclude_unset=True,
+)
+def partial_hour_status(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+):
+    """Inspect the status of the current active hour's partial rollup."""
+    from backend.core.rollups.partial_hour import (
+        _all_fields_path,
+        read_partial_hour_total,
+        read_partial_hour_watermark,
+    )
+
+    sid = service_id or source.get("service_id", source.get("name", ""))
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    watermark = read_partial_hour_watermark(source, active_hour)
+    file_exists = os.path.isfile(_all_fields_path(source, active_hour))
+    total_rows = read_partial_hour_total(source, active_hour)
+    watermark_iso = datetime.fromtimestamp(watermark, tz=UTC).isoformat() if watermark > 0 else None
+
+    return {
+        "service_id": sid,
+        "hour": active_hour,
+        "watermark": watermark,
+        "watermark_iso": watermark_iso,
+        "file_exists": file_exists,
+        "total_rows": total_rows,
+    }
 
 
 @router.patch(

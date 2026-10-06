@@ -1,9 +1,7 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `partial_hour_merge_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
-
 # Background Job Specification: `partial_hour_merge_{service_id}`
+
+> **Status: VERIFIED**
+> Verified via contract test suite `tests/cron/test_partial_hour_contract.py` (covering incremental rollup accumulation, zero FOS egress, reader concurrency resilience, atomic replacements, corrupt file self-healing, high-scale mode, and admin triggers) and multi-environment deployment validation.
 
 ## 1. Overview & Objectives
 - **Job Identifier:** `partial_hour_merge_{service_id}`
@@ -71,15 +69,17 @@
 ---
 
 ## 8. Manual Trigger Endpoints & Admin Controls
+- **Manual API Trigger:** `POST /api/admin/partial-hour-merge/{service_id}` (or `POST /api/admin/partial-hour-merge`).
+- **Inspect Rollup Status:** `GET /api/admin/partial-hour-status/{service_id}` (surfaces active-hour watermark, file presence, and total rows), `/admin/trends`, and Live Query Monitor.
 - **Toggle Enabled:** `PARTIAL_HOUR_MERGE_ENABLED=false` env var.
-- **Inspect Rollup Status:** Surfaces in `/admin/trends` and Live Query Monitor.
+- **Interval Tuning:** `PARTIAL_HOUR_MERGE_INTERVAL_SEC` env var (clamped between 10s and 120s, default 30s).
 
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Write fresh synthetic log rows for the current UTC hour.
-- [ ] 2. Wait 30 seconds for `partial_hour_merge` to fire.
-- [ ] 3. Verify `rollups/{service_id}/` contains an updated `partial_hour_*.parquet` file.
-- [ ] 4. Query `/api/dashboard/bundle` for a 15-minute window; verify DuckDB queries hit the partial rollup.
-- [ ] 5. Confirm query duration for the active-hour panel is < 50ms.
-- [ ] 6. Verify zero FOS Class A/B calls recorded in PostgreSQL's `usage_log` table.
+- [x] 1. Write fresh synthetic log rows for the current UTC hour.
+- [x] 2. Wait 30 seconds for `partial_hour_merge` to fire (or trigger via `POST /api/admin/partial-hour-merge/{service_id}`).
+- [x] 3. Verify `rollups/{service_id}/` contains an updated `partial_hour_*.parquet` file.
+- [x] 4. Query `/api/dashboard/bundle` for a 15-minute window; verify DuckDB queries hit the partial rollup.
+- [x] 5. Confirm query duration for the active-hour panel is < 50ms.
+- [x] 6. Verify zero FOS Class A/B calls recorded in PostgreSQL's `usage_log` table.

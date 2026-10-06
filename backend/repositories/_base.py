@@ -1484,9 +1484,21 @@ class QueryRunner:
         # advanced watermark atomically. That bound matches the feature's
         # own designed latency floor and needs no additional narrowing
         # margin to be correct.
+        try:
+            partial_rows = read_partial_hour_all_fields(self.src, active_hour_token, con=self.con)
+            partial_total = read_partial_hour_total(self.src, active_hour_token, con=self.con)
+        except Exception as e:
+            _logger.warning(
+                "[partial_hour] Failed reading partial hour for %s: %s; falling back to full live scan",
+                active_hour_token,
+                e,
+            )
+            return naive_live_start, [], 0
+
+        if not partial_rows and partial_total == 0:
+            return naive_live_start, [], 0
+
         adjusted = max(naive_live_start, watermark_dt)
-        partial_rows = read_partial_hour_all_fields(self.src, active_hour_token, con=self.con)
-        partial_total = read_partial_hour_total(self.src, active_hour_token, con=self.con)
         return adjusted, partial_rows, partial_total
 
     @contextlib.contextmanager
