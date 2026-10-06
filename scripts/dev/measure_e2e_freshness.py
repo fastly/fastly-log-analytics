@@ -182,7 +182,7 @@ def parse_iso(ts_str: str | None) -> datetime | None:
         return None
 
 
-def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 8.0) -> tuple[int, Any]:
+def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 35.0) -> tuple[int, Any]:
     req_headers = {"Accept": "application/json", "User-Agent": "FLA-FreshnessProbe/1.0"}
     if headers:
         req_headers.update(headers)
@@ -200,7 +200,7 @@ def http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 8
 
 
 def http_post(
-    url: str, body: dict | None = None, headers: dict[str, str] | None = None, timeout: float = 12.0
+    url: str, body: dict | None = None, headers: dict[str, str] | None = None, timeout: float = 35.0
 ) -> tuple[int, Any]:
     req_headers = {
         "Content-Type": "application/json",
@@ -357,7 +357,7 @@ def measure_environment(
         print(f"  [Baseline] Visible RUM beacons: {base_rum_beacons}", flush=True)
 
     d_status, d_data = http_post(
-        f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=10.0
+        f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=30.0
     )
     if d_status != 200 or not isinstance(d_data, dict):
         raise ValueError(f"dashboard baseline failed with HTTP {d_status}: {d_data}")
@@ -417,8 +417,8 @@ def measure_environment(
         now_utc = datetime.now(UTC)
 
         # Check Header Extents & Sync Status (<0.5s response)
-        s_le, data_le = http_get(f"{be_url}/api/log-extents?service_id={sid}", auth_headers, timeout=4.0)
-        s_ss, data_ss = http_get(f"{be_url}/api/sync-status?service_id={sid}", auth_headers, timeout=4.0)
+        s_le, data_le = http_get(f"{be_url}/api/log-extents?service_id={sid}", auth_headers, timeout=8.0)
+        s_ss, data_ss = http_get(f"{be_url}/api/sync-status?service_id={sid}", auth_headers, timeout=8.0)
 
         cur_ts = parse_iso(data_le.get("latest_log_at") if s_le == 200 and isinstance(data_le, dict) else None)
         cur_rows = int(data_ss.get("local_rows") or 0) if s_ss == 200 and isinstance(data_ss, dict) else base_local_rows
