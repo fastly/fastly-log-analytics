@@ -1,8 +1,8 @@
-> [!TODO]
-> **Cron Specification Status: PENDING POST-DEPLOYMENT VERIFICATION**
-> The behavior below is the Cron 2 contract. Keep this status pending until the
-> canonical verification has passed on Local Standard, GCE Standard, and
-> Elevation High-Scale, and the verification-window freshness report is saved.
+> [!NOTE]
+> **Cron Specification Status: VERIFIED**
+> The canonical verification passed on Local Standard, GCE Standard, and
+> Elevation High-Scale. The verification-window freshness report is archived
+> with the local deployment artifacts.
 
 # Background Job Specification: `commit_{service_id}`
 
@@ -133,24 +133,24 @@ Usage records are written to PostgreSQL `usage_log`. There is no SQLite
 
 ### Automated tests
 
-- [ ] Standard success, empty input, lock skip, and concurrent service commits.
-- [ ] Per-file fallback reports actual Parquet row counts.
-- [ ] Later-chunk and individual-file failures retain completed work, report
+- [x] Standard success, empty input, lock skip, and concurrent service commits.
+- [x] Per-file fallback reports actual Parquet row counts.
+- [x] Later-chunk and individual-file failures retain completed work, report
   errors, and retry only still-pending files on a later invocation.
-- [ ] Quarantined files appear in summaries and make the Standard commit run
+- [x] Quarantined files appear in summaries and make the Standard commit run
   `error`.
-- [ ] Request and RUM cron callers preserve partial counts and do not publish
+- [x] Request and RUM cron callers preserve partial counts and do not publish
   incomplete RUM ledger progress.
-- [ ] High-Scale merge flushes inlined rows before raw finalization and keeps
+- [x] High-Scale merge flushes inlined rows before raw finalization and keeps
   its separate failure/retry path.
 
 ### Deployment verification
 
-- [ ] Use the canonical `scripts/dev/deploy_test_all.sh` flow only after the
+- [x] Use the canonical `scripts/dev/deploy_test_all.sh` flow only after the
   change is tested, intentionally committed, and pushed.
-- [ ] Verify only Local Standard, GCE Standard, and Elevation High-Scale.
-- [ ] Capture commit outcomes and freshness/lag observations throughout the
+- [x] Verify only Local Standard, GCE Standard, and Elevation High-Scale.
+- [x] Capture commit outcomes and freshness/lag observations throughout the
   verification window for each environment; report maximum and p95 values
   wherever samples support them, not only a point-in-time snapshot.
-- [ ] Mark this specification verified only after all three environments and
+- [x] Mark this specification verified only after all three environments and
   the windowed report pass.
