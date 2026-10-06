@@ -552,9 +552,11 @@ def _ducklake_write_connection(source: dict):
                 pass
 
 
-def _commit_one_chunk(source: dict, lake_ident: str, files: list[str], table_name: str) -> tuple[int, list[str], int]:
+def _commit_one_chunk(
+    source: dict, lake_ident: str, files: list[str], table_name: str
+) -> tuple[int, list[str], int, list[str]]:
     """Commit a single bounded chunk of buffer files under one DuckLake
-    write-attach. Returns (rows_committed, committed_paths, quarantined_files).
+    write-attach. Returns committed rows, paths, quarantine count, and errors.
 
     Split out of ``_commit_buffer_impl`` so each chunk opens + detaches its
     own ``_ducklake_write_connection`` (see ``_BUFFER_COMMIT_CHUNK_SIZE``) —
@@ -574,10 +576,11 @@ def _commit_one_chunk(source: dict, lake_ident: str, files: list[str], table_nam
     rows_committed = 0
     committed_paths: list[str] = []
     quarantined_files = 0
+    file_errors: list[str] = []
 
     with _ducklake_write_connection(source) as con:
 
-        def _commit_paths(paths: list[str]) -> int:
+        def _commit_paths(paths: list[str]) -> None:
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
             con.execute(
                 f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0"
@@ -610,14 +613,14 @@ def _commit_one_chunk(source: dict, lake_ident: str, files: list[str], table_nam
                     f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
                 )
                 con.execute("COMMIT")
-                return len(paths)
             except Exception as e:
                 con.execute("ROLLBACK")
                 raise e
 
         try:
+            batch_rows = sum(pq.read_metadata(p).num_rows for p in files)
             _commit_paths(files)
-            rows_committed = sum(pq.read_metadata(p).num_rows for p in files)
+            rows_committed = batch_rows
             committed_paths = list(files)
         except Exception as batch_err:
             logger.warning(
@@ -627,20 +630,24 @@ def _commit_one_chunk(source: dict, lake_ident: str, files: list[str], table_nam
             )
             for f in files:
                 try:
-                    added = _commit_paths([f])
-                    rows_committed += added
+                    file_rows = pq.read_metadata(f).num_rows
+                    _commit_paths([f])
+                    rows_committed += file_rows
                     committed_paths.append(f)
                 except Exception as inner_err:
                     logger.error("%s Commit buffer error on %s: %s", _core_mod._ICE, f, inner_err)
                     if (
-                        "is not a valid Parquet file" in str(inner_err)
+                        isinstance(inner_err, pa.ArrowInvalid)
+                        or "is not a valid Parquet file" in str(inner_err)
                         or "No files found" in str(inner_err)
                         or "Missing page" in str(inner_err)
                     ):
                         if _quarantine_buffer_file(source, f, inner_err, table_name):
                             quarantined_files += 1
+                            continue
+                    file_errors.append(f"{os.path.basename(f)}: {inner_err}")
 
-    return rows_committed, committed_paths, quarantined_files
+    return rows_committed, committed_paths, quarantined_files, file_errors
 
 
 def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = "logs") -> dict:
@@ -660,6 +667,7 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     rows_committed = 0
     committed_paths: list[str] = []
     quarantined_files = 0
+    commit_errors: list[str] = []
 
     # Bounded chunks: each chunk opens its own DuckLake write-attach and
     # detaches before the next, so a large backlog never monopolizes the
@@ -667,16 +675,20 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     for i in range(0, len(files), _BUFFER_COMMIT_CHUNK_SIZE):
         chunk = files[i : i + _BUFFER_COMMIT_CHUNK_SIZE]
         try:
-            chunk_rows, chunk_paths, chunk_quarantined = _commit_one_chunk(source, lake_ident, chunk, table_name)
-        except Exception as attach_err:
-            logger.error("%s Failed to attach DuckLake in read-write mode: %s", _core_mod._ICE, attach_err)
+            chunk_rows, chunk_paths, chunk_quarantined, chunk_errors = _commit_one_chunk(
+                source, lake_ident, chunk, table_name
+            )
+        except Exception as chunk_err:
+            logger.error("%s DuckLake buffer chunk failed: %s", _core_mod._ICE, chunk_err)
             # Stop here rather than aborting everything committed so far —
             # a transient attach conflict on a later chunk shouldn't discard
             # rows already durably committed by earlier chunks this tick.
+            commit_errors.append(str(chunk_err))
             break
         rows_committed += chunk_rows
         committed_paths.extend(chunk_paths)
         quarantined_files += chunk_quarantined
+        commit_errors.extend(chunk_errors)
 
     # Tombstone (NOT unlink) the committed buffer parquets: views bound
     # BEFORE this commit still reference these paths, and a hard unlink
@@ -693,12 +705,15 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
         except Exception as e:
             logger.warning("%s metadata pointer sync after commit failed: %s", _core_mod._ICE, e)
 
-    return {
+    result = {
         "files_committed": len(committed_paths),
         "rows_committed": rows_committed,
         "snapshot_id": "ducklake",
         "quarantined_files": quarantined_files,
     }
+    if commit_errors:
+        result["error"] = "; ".join(commit_errors)
+    return result
 
 
 def optimize_table(

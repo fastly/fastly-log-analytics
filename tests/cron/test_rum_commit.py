@@ -146,6 +146,52 @@ def test_rum_commit_partial_failure_warning(monkeypatch):
     assert "FOS connection timeout" in kwargs.get("error_message", "")
 
 
+def test_rum_commit_returned_partial_result_blocks_publication(monkeypatch):
+    log_calls = []
+    ledger_calls = []
+    sync_calls = []
+
+    monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 1005)
+    monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda dir, sid, task: (True, ""))
+    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr(
+        "backend.core.duckdb.log_cron_run",
+        lambda *args, **kwargs: log_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *a, **k: None)
+
+    def mock_commit_buffer(src, table_name):
+        if table_name == "client_vitals":
+            return {
+                "files_committed": 1,
+                "rows_committed": 7,
+                "error": "transient per-file write failure",
+            }
+        return {"files_committed": 0, "rows_committed": 0}
+
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit_buffer)
+    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: sync_calls.append(table_name))
+    monkeypatch.setattr(
+        "backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum))
+    )
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
+
+    assert sync_calls == ["client_vitals"]
+    assert ledger_calls == []
+    assert len(log_calls) == 1
+    args, kwargs = log_calls[0]
+    assert args[3] == "warning"
+    assert kwargs["rows_ingested"] == 7
+    assert "transient per-file write failure" in kwargs["error_message"]
+    assert "Partial RUM commit" in kwargs["summary"]
+
+
 def test_rum_commit_active_request_politeness(monkeypatch):
     """When active queries are present:
     - Background automated ticks defer

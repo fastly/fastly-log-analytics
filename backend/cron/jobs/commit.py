@@ -169,6 +169,13 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         duration = time.time() - start_time
         quarantined = int(result.get("quarantined_files", 0) or 0)
         quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
+        commit_error_parts = []
+        if result.get("error"):
+            commit_error_parts.append(str(result["error"]))
+        if quarantined:
+            commit_error_parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
+        commit_error = "; ".join(commit_error_parts)
+        incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
         # Post-commit backlog probe: if anything is still in the buffer after a
         # successful commit, the next commit was racing with a fresh ingest OR
         # the drain is genuinely stuck (catalog perms, schema mismatch, etc.).
@@ -180,19 +187,26 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         if result.get("files_committed", 0) > 0:
             summary = (
                 f"Committed {result['files_committed']} buffer file(s) "
-                f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}{backlog_suffix}"
+                f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}"
+                f"{incomplete_suffix}{backlog_suffix}"
             )
             log_cron_run(
                 src,
                 "commit",
                 duration,
-                "success",
+                "error" if commit_error else "success",
                 run_id=run_id,
                 rows_ingested=result["rows_committed"],
+                error_message=commit_error or None,
                 summary=summary,
                 log_output=_extract_log_text(run_id),
             )
-            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "done", "message": summary})
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="commit",
+                event={"type": "error" if commit_error else "done", "message": summary},
+            )
 
             # ── Post-commit view refresh + pool warm ──
             # commit_buffer drained the buffer (buf_set changed) and advanced
@@ -242,17 +256,24 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             except Exception as e:
                 logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
         else:
-            summary = "No new data to commit" + quarantine_suffix + backlog_suffix
+            summary_start = "No buffer files committed" if commit_error else "No new data to commit"
+            summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
             log_cron_run(
                 src,
                 "commit",
                 duration,
-                "success",
+                "error" if commit_error else "success",
                 run_id=run_id,
+                error_message=commit_error or None,
                 summary=summary,
                 log_output=_extract_log_text(run_id),
             )
-            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "done", "message": summary})
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="commit",
+                event={"type": "error" if commit_error else "done", "message": summary},
+            )
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(

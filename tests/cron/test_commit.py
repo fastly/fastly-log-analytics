@@ -175,10 +175,32 @@ def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_conf
     _sync_shim.assert_not_called()
 
 
-def test_quarantined_files_appear_in_summary(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
-    """commit_buffer reports unreadable buffer files via
-    ``quarantined_files``; the summary must surface the count so the
-    user can act on the corrupt-input signal."""
+def test_commit_failure_without_progress_is_not_a_successful_noop(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(
+            return_value={
+                "files_committed": 0,
+                "rows_committed": 0,
+                "snapshot_id": "ducklake",
+                "error": "write attach unavailable",
+            }
+        ),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["error_message"] == "write attach unavailable"
+    assert "No buffer files committed" in kwargs["summary"]
+
+
+def test_quarantined_files_log_incomplete_commit(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
+    """Quarantining unreadable input is surfaced as an error, not a successful drain."""
+    monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer",
         MagicMock(
@@ -194,8 +216,67 @@ def test_quarantined_files_appear_in_summary(monkeypatch, stub_load_config, stub
     commit._run_commit.__wrapped__("svc-1")
 
     args, kwargs = stub_cron_envelope["log"].call_args
-    assert args[3] == "success"
+    assert args[3] == "error"
     assert "quarantined 2" in kwargs["summary"]
+    assert "2 unreadable buffer file(s) quarantined" in kwargs["error_message"]
+    assert stub_cron_envelope["log_event"].call_args.kwargs["event"]["type"] == "error"
+
+
+def test_partial_commit_error_preserves_counts_and_refreshes_durable_rows(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(
+            return_value={
+                "files_committed": 1,
+                "rows_committed": 12,
+                "snapshot_id": "ducklake",
+                "quarantined_files": 0,
+                "error": "later chunk attach failed",
+            }
+        ),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["rows_ingested"] == 12
+    assert kwargs["error_message"] == "later chunk attach failed"
+    assert "Committed 1 buffer file(s) (12 rows)" in kwargs["summary"]
+    assert "commit incomplete: later chunk attach failed" in kwargs["summary"]
+    from backend.cron.jobs import _common
+
+    _common.refresh_view_and_warm_pool.assert_called_once()
+
+
+def test_high_throughput_commit_uses_ledger_merge_not_standard_buffer(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    merge_calls = []
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: merge_calls.append(("merge", sid)))
+    monkeypatch.setattr(
+        "backend.core.ingest.finalize_committed_raw",
+        lambda sid: merge_calls.append(("finalize", sid)) or {"delete_after": False, "deleted": 0},
+    )
+    meta_con = MagicMock()
+    meta_con.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=None)),
+        MagicMock(fetchone=MagicMock(return_value=(0,))),
+    ]
+    monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
+    standard_commit = MagicMock()
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", standard_commit)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    assert merge_calls == [("merge", "svc-1"), ("finalize", "svc-1")]
+    standard_commit.assert_not_called()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "success"
+    assert "merged small lake files" in kwargs["summary"]
 
 
 def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):

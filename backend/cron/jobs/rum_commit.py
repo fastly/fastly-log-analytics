@@ -91,26 +91,41 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         vitals_res = {}
         errors_res = {}
 
+        def _buffer_result_error(result):
+            errors = []
+            if result.get("error"):
+                errors.append(str(result["error"]))
+            quarantined = int(result.get("quarantined_files", 0) or 0)
+            if quarantined:
+                errors.append(f"{quarantined} unreadable buffer file(s) quarantined")
+            return "; ".join(errors) or None
+
         # Commit client_vitals
         try:
             vitals_res = db_iceberg.commit_buffer(src, table_name="client_vitals")
+            vitals_err = _buffer_result_error(vitals_res)
             if vitals_res.get("files_committed", 0) > 0:
                 total_committed_vitals = vitals_res.get("rows_committed", 0)
                 # Sync client_vitals view/metadata
                 db_iceberg.sync_data(src, table_name="client_vitals")
+            if vitals_err:
+                logger.warning("[rum_commit] %s: client_vitals commit incomplete: %s", service_id, vitals_err)
         except Exception as e:
-            vitals_err = str(e)
+            vitals_err = "; ".join(part for part in (vitals_err, str(e)) if part)
             logger.warning("[rum_commit] %s: client_vitals commit failed: %s", service_id, e)
 
         # Commit client_errors
         try:
             errors_res = db_iceberg.commit_buffer(src, table_name="client_errors")
+            errors_err = _buffer_result_error(errors_res)
             if errors_res.get("files_committed", 0) > 0:
                 total_committed_errors = errors_res.get("rows_committed", 0)
                 # Sync client_errors view/metadata
                 db_iceberg.sync_data(src, table_name="client_errors")
+            if errors_err:
+                logger.warning("[rum_commit] %s: client_errors commit incomplete: %s", service_id, errors_err)
         except Exception as e:
-            errors_err = str(e)
+            errors_err = "; ".join(part for part in (errors_err, str(e)) if part)
             logger.warning("[rum_commit] %s: client_errors commit failed: %s", service_id, e)
 
         # Raw RUM objects may only be deleted after both DuckLake commit paths

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
@@ -68,6 +69,31 @@ def _lake_count(source: dict) -> int:
         return int(row[0])
     finally:
         con.close()
+
+
+class _ExecuteProxy:
+    def __init__(self, con, reject_insert):
+        self._con = con
+        self._reject_insert = reject_insert
+
+    def execute(self, query, *args, **kwargs):
+        self._reject_insert(query)
+        return self._con.execute(query, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
+def _proxy_commit_connection(monkeypatch, reject_insert):
+    original = buffer_mod._ducklake_write_connection
+
+    @contextmanager
+    def proxied(source):
+        with original(source) as con:
+            yield _ExecuteProxy(con, reject_insert)
+
+    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", proxied)
+    return original
 
 
 def test_ducklake_table_name_is_per_service_and_sanitized():
@@ -541,7 +567,82 @@ class TestCommitBufferChunking:
         # and processing stops there rather than aborting everything.
         assert result["rows_committed"] == 2
         assert result["files_committed"] == 2
+        assert "Failed to attach DuckLake" in result.get("error", "")
         assert _lake_count(src) == 2
+
+        monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", orig_write_conn)
+        retry_result = _commit_buffer_impl(src)
+        assert retry_result["files_committed"] == 2
+        assert retry_result["rows_committed"] == 2
+        assert retry_result.get("error") is None
+        assert _lake_count(src) == 4
+
+    def test_unreadable_parquet_is_quarantined_without_losing_valid_rows(self, tmp_path):
+        src = _make_source(tmp_path, f"quarantine{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        _write_buffer(src, "batch_good.parquet", ts=ts, source_file="s3://b/raw/good.gz", n=2)
+        bad_path = os.path.join(src["_cache_dir_override"], "buffer", "batch_bad.parquet")
+        with open(bad_path, "wb") as bad_file:
+            bad_file.write(b"not a parquet file")
+
+        result = _commit_buffer_impl(src)
+
+        assert result["files_committed"] == 1
+        assert result["rows_committed"] == 2
+        assert result["quarantined_files"] == 1
+        assert result.get("error") is None
+        assert _lake_count(src) == 2
+        assert not os.path.exists(bad_path)
+        quarantine_dir = os.path.join(src["_cache_dir_override"], "buffer", ".quarantine")
+        assert any(name.endswith("__batch_bad.parquet") for name in os.listdir(quarantine_dir))
+
+    def test_per_file_fallback_reports_parquet_row_count(self, tmp_path, monkeypatch):
+        def reject_multi_file_insert(query):
+            if query.startswith("INSERT INTO") and query.count("batch_") > 1:
+                raise RuntimeError("force per-file fallback")
+
+        _proxy_commit_connection(monkeypatch, reject_multi_file_insert)
+        src = _make_source(tmp_path, f"fallbackrows{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        _write_buffer(src, "batch_a.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=2)
+        _write_buffer(src, "batch_b.parquet", ts=ts + timedelta(seconds=1), source_file="s3://b/raw/b.gz", n=3)
+
+        result = _commit_buffer_impl(src)
+
+        assert result["files_committed"] == 2
+        assert result["rows_committed"] == 5
+        assert result.get("error") is None
+        assert _lake_count(src) == 5
+
+    def test_per_file_fallback_reports_retryable_file_failure(self, tmp_path, monkeypatch):
+        failed = {"once": True}
+
+        def reject_multi_file_insert_and_one_file(query):
+            if query.startswith("INSERT INTO") and query.count("batch_") > 1:
+                raise RuntimeError("force per-file fallback")
+            if query.startswith("INSERT INTO") and "batch_b.parquet" in query and failed["once"]:
+                failed["once"] = False
+                raise RuntimeError("transient per-file write failure")
+
+        original = _proxy_commit_connection(monkeypatch, reject_multi_file_insert_and_one_file)
+        src = _make_source(tmp_path, f"fallbackfailure{uuid.uuid4().hex[:8]}")
+        ts = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        _write_buffer(src, "batch_a.parquet", ts=ts, source_file="s3://b/raw/a.gz", n=2)
+        _write_buffer(src, "batch_b.parquet", ts=ts + timedelta(seconds=1), source_file="s3://b/raw/b.gz", n=3)
+
+        result = _commit_buffer_impl(src)
+
+        assert result["files_committed"] == 1
+        assert result["rows_committed"] == 2
+        assert "transient per-file write failure" in result.get("error", "")
+        assert buffer_files(src) == [os.path.join(src["_cache_dir_override"], "buffer", "batch_b.parquet")]
+        assert _lake_count(src) == 2
+
+        monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", original)
+        retry_result = _commit_buffer_impl(src)
+        assert retry_result["files_committed"] == 1
+        assert retry_result["rows_committed"] == 3
+        assert _lake_count(src) == 5
 
 
 def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, caplog):
