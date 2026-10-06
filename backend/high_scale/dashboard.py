@@ -221,7 +221,7 @@ def _time_series(service: HighScaleService, start_time: str | None, end_time: st
     ]
     params: dict[str, Any] = {"service_id": service.service_id}
     if start is not None and end is not None:
-        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start < {end:DateTime64(3)}"])
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start <= {end:DateTime64(3)}"])
         params.update({"start": start, "end": end})
     rows = service.client.execute(
         "SELECT bucket_start, sum(request_count) AS value "
@@ -303,9 +303,12 @@ def _filtered_aggregates(
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
+        from datetime import timedelta
+
+        end_upper = end + timedelta(minutes=1) if end.second == 0 and end.microsecond == 0 else end
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
-        clauses.append("event_timestamp < {end:DateTime64(3)}")
-        params.update({"start": start, "end": end})
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
 
     where_clause = " AND ".join(clauses)
 

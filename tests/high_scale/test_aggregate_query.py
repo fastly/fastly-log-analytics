@@ -108,6 +108,7 @@ def test_range_parameters_use_a_clickhouse_type_matching_the_parameter_format() 
 
     assert "{start:DateTime64(3)}" in client.sql
     assert "{end:DateTime64(3)}" in client.sql
+    assert "bucket_start <= {end:DateTime64(3)}" in client.sql
     assert "{start:DateTime}" not in client.sql
     assert "{end:DateTime}" not in client.sql
 

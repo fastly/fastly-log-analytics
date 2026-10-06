@@ -59,7 +59,7 @@ def query_clickhouse_aggregate(
     if request.start is not None and request.end is not None:
         start = request.start.astimezone(UTC)
         end = request.end.astimezone(UTC)
-        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start < {end:DateTime64(3)}"])
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start <= {end:DateTime64(3)}"])
         params.update({"start": start, "end": end})
 
     from backend.core.clickhouse_client import ClickHouseError

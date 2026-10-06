@@ -241,3 +241,40 @@ def test_high_scale_filtered_aggregates_surfaces_watermark_extents():
     )
     assert response.earliest_log_at == "2026-09-15T00:00:00+00:00"
     assert response.latest_log_at == "2026-09-16T00:00:00+00:00"
+
+
+def test_high_scale_time_series_queries_through_in_flight_minute():
+    executed_sql: list[str] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed_sql.append(sql)
+            return super().execute(sql, params)
+
+    service = HighScaleService(
+        service_id="svc",
+        client=CapturingClient(),
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark(
+            service_id="svc",
+            domain="request",
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+    aggregates(
+        service,
+        AggregatesRequest(fields=["url"]),
+        "2026-09-15T00:00:00Z",
+        "2026-09-15T19:00:00Z",
+    )
+
+    ts_queries = [s for s in executed_sql if "FROM request_aggregates" in s]
+    assert ts_queries, "expected request_aggregates query"
+    assert any("bucket_start <= {end:DateTime64(3)}" in q for q in ts_queries)
