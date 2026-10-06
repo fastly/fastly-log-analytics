@@ -2,10 +2,9 @@
 
 Pins ``_run_metadata_sync`` — the read-only-services-friendly job that
 refreshes the Iceberg catalog from the cloud, syncs new data files, and
-rebuilds the DuckDB view. The job is decorated by ``@cron_task`` (no
-wrapped exposure here — the function isn't decorated), so we call it
-directly. Tests stub the heavy iceberg + DB operations and pin the
-wrapper's status / error / skip behaviour.
+rebuilds the DuckDB view. The core helper is also called by the decorated
+post-commit dispatcher; tests call the core helper directly to isolate its
+status, error, and skip behavior.
 
 Other functions in this module (``_run_ngwaf_bot_sync``,
 ``_run_bot_data_refresh``, ``_run_rdns_enrichment``,
@@ -21,6 +20,76 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.cron.jobs import metadata
+
+
+def test_post_commit_metadata_sync_dispatch_coalesces_overlapping_requests(monkeypatch):
+    dispatched_threads = []
+    calls = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs):
+            self.target = target
+            self.args = args
+            dispatched_threads.append(self)
+
+        def start(self):
+            return None
+
+    def fake_sync(service_id: str) -> None:
+        calls.append(service_id)
+        if len(calls) == 1:
+            metadata.dispatch_post_commit_metadata_sync(service_id)
+
+    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(metadata, "_run_post_commit_metadata_sync", fake_sync)
+
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+
+    assert len(dispatched_threads) == 1
+    assert calls == []
+    dispatched_threads[0].target(*dispatched_threads[0].args)
+
+    assert calls == ["svc-1", "svc-1"]
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_post_commit_metadata_sync_worker_clears_state_after_failure(monkeypatch):
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        metadata,
+        "_run_post_commit_metadata_sync",
+        MagicMock(side_effect=RuntimeError("unexpected failure")),
+    )
+
+    metadata.dispatch_post_commit_metadata_sync("svc-1")
+    metadata._post_commit_metadata_sync_worker("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
+
+
+def test_post_commit_metadata_sync_dispatch_clears_state_if_thread_start_fails(monkeypatch):
+    class FailedThread:
+        def __init__(self, *, target, args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(metadata.threading, "Thread", FailedThread)
+
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        metadata.dispatch_post_commit_metadata_sync("svc-1")
+
+    assert metadata._post_commit_metadata_sync_rerun == {}
 
 
 @pytest.fixture

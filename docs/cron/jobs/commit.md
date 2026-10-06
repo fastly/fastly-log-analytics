@@ -1,8 +1,8 @@
 > [!NOTE]
-> **Cron Specification Status: VERIFIED**
-> The canonical verification passed on Local Standard, GCE Standard, and
-> Elevation High-Scale. The verification-window freshness report is archived
-> with the local deployment artifacts.
+> **Original Cron 2 verification:** passed on Local Standard, GCE Standard,
+> and Elevation High-Scale. The verification-window freshness report is
+> archived with the local deployment artifacts. The post-commit metadata-sync
+> latency remediation requires a new canonical deployment verification.
 
 # Background Job Specification: `commit_{service_id}`
 
@@ -62,11 +62,15 @@ the next scheduled cycle can retry it.
    the cron run `error`, even if other files committed. Preserve partial
    progress in the summary and error detail.
 6. When files did commit, refresh and warm the local DuckDB view/pool, trigger
-   metadata sync, and launch local compaction even if another chunk or file
-   failed. This makes durable partial progress visible without claiming the
-   run completed successfully.
-7. Empty input remains a successful no-op. On-demand sync is not triggered
-   when there were no committed files.
+   a coalesced background metadata sync, and launch local compaction even if
+   another chunk or file failed. The view/pool refresh remains synchronous so
+   durable partial progress is visible before commit completion; metadata sync
+   runs with its own `metadata_sync` cron record and telemetry so a slow remote
+   metadata read does not extend the commit duration. At most one sync runs per
+   service, with one follow-up pass coalescing commits that arrive while it is
+   running.
+7. Empty input remains a successful no-op. On-demand metadata sync is not
+   triggered when there were no committed files.
 
 ## 5. High-Scale commit lifecycle
 
@@ -126,8 +130,10 @@ Usage records are written to PostgreSQL `usage_log`. There is no SQLite
   a full-success run.
 - **High-Scale merge/finalization failure:** record `error`; do not proceed to
   raw-file finalization after a failed durable merge.
-- **Post-commit metadata pointer sync failure:** it remains best-effort and is
-  logged as a warning by the buffer writer.
+- **Post-commit metadata sync failure:** it is recorded by its own
+  `metadata_sync` cron run and cannot undo durable commits. A dispatch failure
+  is attached as a warning to the commit progress; the next commit can request
+  another sync.
 
 ## 9. Verification checklist
 
@@ -139,6 +145,8 @@ Usage records are written to PostgreSQL `usage_log`. There is no SQLite
   errors, and retry only still-pending files on a later invocation.
 - [x] Quarantined files appear in summaries and make the Standard commit run
   `error`.
+- [x] Post-commit metadata sync dispatch is per-service coalesced, carries its
+  own cron telemetry, and does not extend the commit cron duration.
 - [x] Request and RUM cron callers preserve partial counts and do not publish
   incomplete RUM ledger progress.
 - [x] High-Scale merge flushes inlined rows before raw finalization and keeps

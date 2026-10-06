@@ -5,9 +5,9 @@ Single job (``_run_commit``) that runs on the user-tunable
 the freshness/cost tradeoff can be tuned independently of the Fastly logging
 endpoint period.
 
-After a successful commit the function calls ``_run_metadata_sync`` resolved
-off :mod:`backend.cron.jobs.metadata` at call time, so test patches at
-``backend.cron.jobs.metadata._run_metadata_sync`` intercept the call.
+After a successful Standard-mode commit the function dispatches a coalesced
+metadata sync through :mod:`backend.cron.jobs.metadata`. High-Scale commits
+retain their separate inline ledger-merge path.
 """
 
 from __future__ import annotations
@@ -224,15 +224,14 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                 progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
             )
 
-            # ── On-demand Sync ──
-            # Since we just committed new data to the cloud, trigger a sync
-            # immediately so the local cache/Data Lake view is updated.
-            # Resolved off the metadata jobs module at call time so patches
-            # at ``backend.cron.jobs.metadata._run_metadata_sync`` intercept.
+            # ── On-demand metadata sync ──
+            # Keep the commit cron's lease and duration scoped to the commit;
+            # metadata sync has its own cron run, telemetry, and follow-up
+            # scheduling if another commit lands while it is already running.
             try:
                 from backend.cron.jobs import metadata as _metadata_jobs
 
-                _metadata_jobs._run_metadata_sync(service_id)
+                _metadata_jobs.dispatch_post_commit_metadata_sync(service_id)
             except Exception as e:
                 _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "warning", "message": e})
 

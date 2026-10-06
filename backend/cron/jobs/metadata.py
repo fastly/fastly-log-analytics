@@ -3,8 +3,8 @@
 Covers everything that isn't ingest/commit/compaction proper:
 
   * ``_run_metadata_sync`` — analyst pull-to-local refresh + bootstrap
-    helper called by :meth:`Scheduler.start` and by ``_run_commit``
-    after a successful flush.
+    helper called by :meth:`Scheduler.start`, scheduled metadata jobs, and
+    the coalesced post-commit dispatcher.
   * ``_run_ngwaf_bot_sync`` — per-service NGWAF VERIFIED-BOT pull.
   * ``_run_bot_data_refresh`` — global daily bot-source cache refresh.
   * ``_run_rdns_enrichment`` — every-5-min rDNS lookup batcher.
@@ -16,6 +16,7 @@ Covers everything that isn't ingest/commit/compaction proper:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import httpx
@@ -31,6 +32,9 @@ from backend.cron.scheduler import (
 )
 
 logger = logging.getLogger("backend.scheduler")
+
+_post_commit_metadata_sync_lock = threading.Lock()
+_post_commit_metadata_sync_rerun: dict[str, bool] = {}
 
 
 _RETRYABLE_WEBHOOK_STATUS = (429, 500, 502, 503, 504)
@@ -359,10 +363,50 @@ def _run_metadata_sync(
     logger.info("🏁  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
 
 
+@cron_task("metadata_sync", job_name="metadata_sync")
+def _run_post_commit_metadata_sync(service_id: str) -> None:
+    _run_metadata_sync(service_id)
+
+
+def _post_commit_metadata_sync_worker(service_id: str) -> None:
+    while True:
+        try:
+            _run_post_commit_metadata_sync(service_id)
+        except Exception:
+            logger.exception("[scheduler] %s: post-commit metadata sync failed unexpectedly", service_id)
+
+        with _post_commit_metadata_sync_lock:
+            if _post_commit_metadata_sync_rerun.get(service_id, False):
+                _post_commit_metadata_sync_rerun[service_id] = False
+                continue
+            _post_commit_metadata_sync_rerun.pop(service_id, None)
+            return
+
+
+def dispatch_post_commit_metadata_sync(service_id: str) -> None:
+    """Run metadata sync off the commit path, coalescing requests per service."""
+    with _post_commit_metadata_sync_lock:
+        if service_id in _post_commit_metadata_sync_rerun:
+            _post_commit_metadata_sync_rerun[service_id] = True
+            return
+
+        _post_commit_metadata_sync_rerun[service_id] = False
+        worker = threading.Thread(
+            target=_post_commit_metadata_sync_worker,
+            args=(service_id,),
+            name=f"metadata-sync-on-commit:{service_id}",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception:
+            _post_commit_metadata_sync_rerun.pop(service_id, None)
+            raise
+
+
 # _run_metadata_sync can't take @cron_task (it doubles as a bootstrap helper
-# with extra kwargs), but external/Celery scheduling requires a registered
-# task — without this wrapper, RedBeat dispatches an unregistered name and
-# read-only (analyst) services silently stop refreshing.
+# with extra kwargs). The wrapper supplies independent telemetry and usage
+# flushing for the post-commit background dispatch.
 from backend.celery_app import app as _celery_app  # noqa: E402
 
 

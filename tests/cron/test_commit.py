@@ -56,8 +56,8 @@ def stub_cron_envelope(monkeypatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    # Post-commit metadata-sync resolves off backend.cron.jobs.metadata.
-    monkeypatch.setattr("backend.cron.jobs.metadata._run_metadata_sync", MagicMock())
+    # Post-commit metadata-sync dispatch resolves off backend.cron.jobs.metadata.
+    monkeypatch.setattr("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync", MagicMock())
     return {
         "start": start,
         "log": log,
@@ -134,7 +134,7 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
 ):
     """Happy path: commit_buffer returns rows_committed > 0 →
     log_cron_run records 'success' with the row count + snapshot id,
-    refresh_view_and_warm_pool fires, and metadata_sync gets kicked."""
+    refresh_view_and_warm_pool fires, and metadata_sync is dispatched."""
     monkeypatch.setattr(
         "backend.core.iceberg.commit_buffer",
         MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
@@ -149,10 +149,10 @@ def test_success_with_committed_files_logs_summary_and_refreshes_view(
     assert "8675309" in kwargs["summary"]
 
     from backend.cron.jobs import _common
-    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
 
     _common.refresh_view_and_warm_pool.assert_called_once()
-    _sync_shim.assert_called_once_with("svc-1")
+    dispatch_post_commit_metadata_sync.assert_called_once_with("svc-1")
 
 
 def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
@@ -170,9 +170,30 @@ def test_success_no_files_committed_logs_no_new_data(monkeypatch, stub_load_conf
     assert args[3] == "success"
     assert "No new data" in kwargs["summary"]
 
-    from backend.cron.jobs.metadata import _run_metadata_sync as _sync_shim
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
 
-    _sync_shim.assert_not_called()
+    dispatch_post_commit_metadata_sync.assert_not_called()
+
+
+def test_metadata_sync_dispatch_failure_does_not_fail_durable_commit(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 1, "rows_committed": 12, "snapshot_id": "ducklake"}),
+    )
+    monkeypatch.setattr(
+        "backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync",
+        MagicMock(side_effect=RuntimeError("worker unavailable")),
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    assert stub_cron_envelope["log"].call_args.args[3] == "success"
+    assert any(
+        call.kwargs.get("event", {}).get("type") == "warning" for call in stub_cron_envelope["log_event"].call_args_list
+    )
 
 
 def test_commit_failure_without_progress_is_not_a_successful_noop(
@@ -277,6 +298,9 @@ def test_high_throughput_commit_uses_ledger_merge_not_standard_buffer(
     args, kwargs = stub_cron_envelope["log"].call_args
     assert args[3] == "success"
     assert "merged small lake files" in kwargs["summary"]
+    from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+
+    dispatch_post_commit_metadata_sync.assert_not_called()
 
 
 def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
