@@ -13,7 +13,6 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-import duckdb
 import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -35,7 +34,7 @@ from backend.core.clickhouse_rows import (
     digest_rows,
     utc,
 )
-from backend.core.duckdb import _configure_fos, _get_fos_client
+from backend.core.duckdb import _configure_fos, _duckdb_connect, _get_fos_client
 from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
 from backend.repositories._base import _safe_table
 
@@ -288,7 +287,7 @@ def export_snapshot(
     identity = source_catalog_identity()
     source = config.config_to_source(cfg)
     objects = FosArtifacts(source)
-    with duckdb.connect(":memory:") as con:
+    with _duckdb_connect(":memory:") as con:
         con.execute("SET memory_limit='512MB'")
         con.execute("SET threads=2")
         con.execute("SET temp_directory=''")

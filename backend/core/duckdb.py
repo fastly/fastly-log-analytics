@@ -918,7 +918,7 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
     conn = None
     _barrier_wait(_abs_path)
     try:
-        conn = duckdb.connect(db_path, read_only=read_only)
+        conn = _duckdb_connect(db_path, read_only=read_only)
         _register_live_connection(conn, _abs_path)
     except Exception as e:
         if read_only or not _is_corruption_error(e):
@@ -937,7 +937,7 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
                 logger.error("duckdb_cleanup_failed path=%s err=%s", sidecar, rm_err)
         clear_initialization_state(db_path)
         _barrier_wait(_abs_path)
-        conn = duckdb.connect(db_path, read_only=False)
+        conn = _duckdb_connect(db_path, read_only=False)
         _register_live_connection(conn, _abs_path)
 
     try:
@@ -949,11 +949,20 @@ def get_safe_duckdb_connection(db_path: str, read_only: bool = False):
             pass
 
 
+def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
+    """Open DuckDB with the config required by the bundled DuckLake extension."""
+    if os.getenv("DUCKLAKE_EXTENSION_PATH"):
+        connection_config = dict(kwargs.pop("config", None) or {})
+        connection_config["allow_unsigned_extensions"] = "true"
+        kwargs["config"] = connection_config
+    return duckdb.connect(database, **kwargs)
+
+
 def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Return a tracked DuckDB connection in memory."""
     import os
 
-    con = duckdb.connect(":memory:")
+    con = _duckdb_connect(":memory:")
 
     _temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
     os.makedirs(_temp_dir, exist_ok=True)
@@ -1045,7 +1054,7 @@ def get_connection(
                 # The database file must exist before we can attach it read-only.
                 # If it doesn't exist, connect read-write briefly to create it.
                 try:
-                    duckdb.connect(db_path, read_only=False).close()
+                    _duckdb_connect(db_path, read_only=False).close()
                 except Exception:
                     pass  # If this fails, let the connect below fail and trigger the retry loop
             # DuckDB's native file lock is process-wide: opening the same
@@ -1054,7 +1063,7 @@ def get_connection(
             # process owns this file and must use one consistent file mode.
             # The public ``read_only`` argument remains part of the connection
             # API, but never changes the native service-file mode.
-            con = duckdb.connect(connect_path, read_only=False)
+            con = _duckdb_connect(connect_path, read_only=False)
             _register_live_connection(con, db_path)
             break
         except Exception as e:

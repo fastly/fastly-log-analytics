@@ -921,6 +921,14 @@ Two 2026-08-13 defects from a real teardown, both now pinned by [tests/utils/tes
 Also: **never label a destructive log line with a name you didn't resolve from the thing being deleted.** The teardown passed the customer's service display name as `cdn_service_name`, so the log read ``Deleting CDN service '<customer-domain>'`` while actually deleting a different service id entirely — indistinguishable, to the operator watching, from destroying their production site. Log the id alongside every delete.
 
 ### 32. DuckLake inlines small commits — only `ducklake_flush_inlined_data` makes them durable
+
+Backend images bundle the DuckDB 1.5.4-compatible backport of
+duckdb/ducklake#1495. `DUCKLAKE_EXTENSION_PATH` must be loaded explicitly; never fall back to
+the affected official extension when that load fails. Connections that load
+this unsigned artifact must be created through `_duckdb_connect`. The image
+build runs `scripts/verify_ducklake_issue_1495.py` against the Python wheel,
+covering superseded inline tables and pinned snapshots after a flush.
+
 DuckLake does not write parquet for a small INSERT. It **inlines** the rows straight into the metadata catalog (Postgres, or the `.ducklake` file), visible as `changes: {'inlined_insert': [...]}` in `ducklake_snapshots`. `ducklake_table_info` then honestly reports `file_count = 0` for a table holding real committed rows.
 
 **Neither compaction primitive promotes inlined rows.** Verified empirically on a throwaway catalog: `ducklake_merge_adjacent_files` (celery path) and `ducklake_rewrite_data_files` (default path, via `optimize_table`) both leave `file_count = 0` with zero parquet on disk, because both operate on already-materialized files. A table whose every commit was inlined stays inlined forever no matter how often compaction runs. `ducklake_flush_inlined_data` is the ONLY primitive that promotes them.

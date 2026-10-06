@@ -31,6 +31,10 @@ Standard and High-Scale are separate commit paths. Do not route High-Scale
 through `commit_buffer` or treat its worker-side ledger writes as equivalent
 to Standard buffer commits.
 
+Both paths load the same pinned DuckLake extension in backend images. Its build
+is gated by the duckdb/ducklake#1495 inlined-table regression scenario; extension load
+failure is fatal to the attach rather than falling back to the official binary.
+
 ## 3. Scheduling and eligibility
 
 The scheduler registers `commit_{service_id}` at the configured interval with

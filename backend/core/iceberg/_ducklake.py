@@ -230,18 +230,23 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     # holding it (otherwise a timed-out re-acquire would double-release).
     lock_held = True
     try:
+        bundled_extension = os.getenv("DUCKLAKE_EXTENSION_PATH")
         try:
             extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
             if extension_directory:
                 os.makedirs(extension_directory, exist_ok=True)
                 escaped_extension_directory = extension_directory.replace("'", "''")
                 con.execute(f"SET extension_directory = '{escaped_extension_directory}';")
-            try:
-                con.execute("LOAD ducklake;")
-            except Exception:
-                con.execute("INSTALL ducklake; LOAD ducklake;")
+            if bundled_extension:
+                con.execute(f"LOAD '{escape_sql_literal(bundled_extension)}';")
+            else:
+                try:
+                    con.execute("LOAD ducklake;")
+                except Exception:
+                    con.execute("INSTALL ducklake; LOAD ducklake;")
         except Exception as e:
-            logger.warning("[ducklake] %s: failed to INSTALL/LOAD ducklake extension: %s", service_id, e)
+            source_description = "bundled" if bundled_extension else "installed"
+            logger.warning("[ducklake] %s: failed to load %s DuckLake extension: %s", service_id, source_description, e)
             return False
 
         try:

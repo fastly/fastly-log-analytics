@@ -1,0 +1,219 @@
+diff --git a/src/functions/ducklake_flush_inlined_data.cpp b/src/functions/ducklake_flush_inlined_data.cpp
+index ba4ecec1..6865b202 100644
+--- a/src/functions/ducklake_flush_inlined_data.cpp
++++ b/src/functions/ducklake_flush_inlined_data.cpp
+@@ -644,8 +644,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context,
+ 				continue;
+ 			}
+ 			auto &table = table_ref.get();
+-			auto &inlined_tables = table.GetInlinedDataTables();
+-			for (auto &inlined_table : inlined_tables) {
++			for (auto &inlined_table : table.GetInlinedDataTables(transaction, transaction.GetSnapshot())) {
+ 				DuckLakeDataFlusher compactor(context, ducklake_catalog, transaction, *input.binder, table.GetTableId(),
+ 				                              inlined_table);
+ 				flushes.push_back(compactor.GenerateFlushCommand());
+@@ -753,7 +752,7 @@ static unique_ptr<LogicalOperator> FlushInlinedDataBind(ClientContext &context,
+ 	auto projection = make_uniq<LogicalProjection>(bind_index, std::move(proj_exprs));
+ 	projection->children.push_back(std::move(filter));
+
+-	return projection;
++	return unique_ptr<LogicalOperator>(projection.release());
+ }
+
+ DuckLakeFlushInlinedDataFunction::DuckLakeFlushInlinedDataFunction()
+diff --git a/src/include/storage/ducklake_metadata_manager.hpp b/src/include/storage/ducklake_metadata_manager.hpp
+index ad3536f8..c99c192b 100644
+--- a/src/include/storage/ducklake_metadata_manager.hpp
++++ b/src/include/storage/ducklake_metadata_manager.hpp
+@@ -219,6 +219,7 @@ public:
+ 	static string GetNetInlinedRowCountSql(const string &inlined_table_name);
+ 	static string GetTableColumnSchemaSql(TableIndex table_id);
+ 	static string GetInlinedTableNamesSql(TableIndex table_id);
++	unordered_set<string> GetInlinedTableNames(TableIndex table_id);
+ 	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
+ 	virtual vector<DuckLakeFileForCleanup> GetOrphanFilesForCleanup(const string &filter, const string &separator);
+ 	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const string &filter, CleanupType type,
+diff --git a/src/include/storage/ducklake_table_entry.hpp b/src/include/storage/ducklake_table_entry.hpp
+index 4e7ce537..5a01b507 100644
+--- a/src/include/storage/ducklake_table_entry.hpp
++++ b/src/include/storage/ducklake_table_entry.hpp
+@@ -78,6 +78,9 @@ public:
+ 	const vector<DuckLakeInlinedTableInfo> &GetInlinedDataTables() const {
+ 		return inlined_data_tables;
+ 	}
++	//! The inlined data tables to read at the snapshot, skipping the flushed and dropped ones
++	vector<DuckLakeInlinedTableInfo> GetInlinedDataTables(DuckLakeTransaction &transaction,
++	                                                      DuckLakeSnapshot snapshot) const;
+ 	const ColumnDefinition &GetColumnByFieldId(FieldIndex field_index) const;
+ 	//! Returns the root field id of a column
+ 	const DuckLakeFieldId &GetFieldId(PhysicalIndex column_index) const;
+diff --git a/src/include/storage/ducklake_transaction.hpp b/src/include/storage/ducklake_transaction.hpp
+index b43c50fa..23f0974f 100644
+--- a/src/include/storage/ducklake_transaction.hpp
++++ b/src/include/storage/ducklake_transaction.hpp
+@@ -276,6 +276,7 @@ public:
+ 	const unordered_map<string, DataFileIndex> &GetDroppedFiles() const;
+ 	const set<TableIndex> &GetTablesDeletedFrom() const;
+ 	const vector<FlushedInlinedTableInfo> &GetFlushedInlinedTables() const;
++	bool InlinedTableFlushed(const string &table_name) const;
+ 	const DuckLakeNameMapSet &GetNewNameMaps() const {
+ 		return new_name_maps;
+ 	}
+diff --git a/src/metadata_manager/quack_metadata_manager.cpp b/src/metadata_manager/quack_metadata_manager.cpp
+index 665d0a9f..50fc8f54 100644
+--- a/src/metadata_manager/quack_metadata_manager.cpp
++++ b/src/metadata_manager/quack_metadata_manager.cpp
+@@ -46,7 +46,7 @@ unique_ptr<QueryResult> QuackMetadataManager::AttachMetadata(const string &attac
+ 		}
+ 		result = fresh_conn.Query(query);
+ 	}
+-	return result;
++	return unique_ptr<QueryResult>(result.release());
+ }
+
+ unique_ptr<QueryResult> QuackMetadataManager::Query(DuckLakeSnapshot snapshot, string &query) {
+diff --git a/src/storage/ducklake_metadata_manager.cpp b/src/storage/ducklake_metadata_manager.cpp
+index 5a39eddb..3cee1a56 100644
+--- a/src/storage/ducklake_metadata_manager.cpp
++++ b/src/storage/ducklake_metadata_manager.cpp
+@@ -575,6 +575,19 @@ WHERE table_id = %d)",
+ 	                          table_id.index);
+ }
+
++unordered_set<string> DuckLakeMetadataManager::GetInlinedTableNames(TableIndex table_id) {
++	auto query = GetInlinedTableNamesSql(table_id);
++	auto result = Query(query);
++	if (result->HasError()) {
++		result->GetErrorObject().Throw("Failed to get inlined data tables from DuckLake: ");
++	}
++	unordered_set<string> table_names;
++	for (auto &row : *result) {
++		table_names.insert(row.GetValue<string>(0));
++	}
++	return table_names;
++}
++
+ DuckLakeCatalogInfo DuckLakeMetadataManager::GetCatalogForSnapshot(DuckLakeSnapshot snapshot) {
+ 	auto &ducklake_catalog = transaction.GetCatalog();
+ 	return BuildCatalogForSnapshot(
+diff --git a/src/storage/ducklake_multi_file_list.cpp b/src/storage/ducklake_multi_file_list.cpp
+index 256b036c..c0639911 100644
+--- a/src/storage/ducklake_multi_file_list.cpp
++++ b/src/storage/ducklake_multi_file_list.cpp
+@@ -285,7 +285,7 @@ vector<DuckLakeFileListExtendedEntry> DuckLakeMultiFileList::GetFilesExtended()
+ 		transaction_row_start += file.row_count;
+ 		result.push_back(std::move(file_entry));
+ 	}
+-	inlined_data_tables = read_info.table.GetInlinedDataTables();
++	inlined_data_tables = read_info.table.GetInlinedDataTables(transaction, read_info.snapshot);
+ 	for (auto &table : inlined_data_tables) {
+ 		DuckLakeFileListExtendedEntry file_entry;
+ 		file_entry.file.path = table.table_name;
+@@ -351,7 +351,7 @@ void DuckLakeMultiFileList::GetFilesForTable() const {
+ 		transaction_row_start += file.row_count;
+ 		files.emplace_back(std::move(file_entry));
+ 	}
+-	inlined_data_tables = read_info.table.GetInlinedDataTables();
++	inlined_data_tables = read_info.table.GetInlinedDataTables(transaction, read_info.snapshot);
+ 	for (auto &table : inlined_data_tables) {
+ 		DuckLakeFileListEntry file_entry;
+ 		file_entry.file.path = table.table_name;
+@@ -378,7 +378,7 @@ void DuckLakeMultiFileList::GetTableInsertions() const {
+ 	auto &metadata_manager = transaction.GetMetadataManager();
+ 	files = metadata_manager.GetTableInsertions(read_info.table, *read_info.start_snapshot, read_info.snapshot);
+ 	// add inlined data tables as sources (if any)
+-	inlined_data_tables = read_info.table.GetInlinedDataTables();
++	inlined_data_tables = read_info.table.GetInlinedDataTables(transaction, read_info.snapshot);
+ 	for (auto &table : inlined_data_tables) {
+ 		DuckLakeFileListEntry file_entry;
+ 		file_entry.file.path = table.table_name;
+@@ -405,7 +405,7 @@ void DuckLakeMultiFileList::GetTableDeletions() const {
+ 		files.emplace_back(std::move(file_entry));
+ 	}
+ 	// add inlined data tables as sources (if any)
+-	inlined_data_tables = read_info.table.GetInlinedDataTables();
++	inlined_data_tables = read_info.table.GetInlinedDataTables(transaction, read_info.snapshot);
+ 	for (auto &table : inlined_data_tables) {
+ 		DuckLakeFileListEntry file_entry;
+ 		file_entry.file.path = table.table_name;
+diff --git a/src/storage/ducklake_table_entry.cpp b/src/storage/ducklake_table_entry.cpp
+index a708e3e4..cf402537 100644
+--- a/src/storage/ducklake_table_entry.cpp
++++ b/src/storage/ducklake_table_entry.cpp
+@@ -460,11 +460,37 @@ idx_t DuckLakeTableEntry::GetNetDataFileRowCount(DuckLakeTransaction &transactio
+ 	return metadata_manager.GetNetDataFileRowCount(GetTableId(), transaction.GetSnapshot());
+ }
+
++vector<DuckLakeInlinedTableInfo> DuckLakeTableEntry::GetInlinedDataTables(DuckLakeTransaction &transaction,
++                                                                          DuckLakeSnapshot snapshot) const {
++	// Another attach can drop superseded inlined tables without bumping the schema version.
++	bool may_be_dropped = inlined_data_tables.size() > 1;
++	if (inlined_data_tables.size() == 1) {
++		// The sole inlined table can be superseded after an older or pinned snapshot.
++		may_be_dropped = transaction.GetCatalog().CatalogSnapshot() ||
++		                 snapshot.schema_version < transaction.GetSnapshot().schema_version;
++	}
++	unordered_set<string> registered_tables;
++	if (may_be_dropped) {
++		registered_tables = transaction.GetMetadataManager().GetInlinedTableNames(GetTableId());
++	}
++	vector<DuckLakeInlinedTableInfo> result;
++	for (auto &inlined_table : inlined_data_tables) {
++		if (transaction.InlinedTableFlushed(inlined_table.table_name)) {
++			continue;
++		}
++		if (may_be_dropped && registered_tables.find(inlined_table.table_name) == registered_tables.end()) {
++			continue;
++		}
++		result.push_back(inlined_table);
++	}
++	return result;
++}
++
+ idx_t DuckLakeTableEntry::GetNetInlinedRowCount(DuckLakeTransaction &transaction) {
+ 	auto &metadata_manager = transaction.GetMetadataManager();
+ 	auto snapshot = transaction.GetSnapshot();
+ 	idx_t total = 0;
+-	for (auto &inlined_table : inlined_data_tables) {
++	for (auto &inlined_table : GetInlinedDataTables(transaction, snapshot)) {
+ 		total += metadata_manager.GetNetInlinedRowCount(inlined_table.table_name, snapshot);
+ 	}
+ 	return total;
+diff --git a/src/storage/ducklake_transaction.cpp b/src/storage/ducklake_transaction.cpp
+index 6aa7c9a0..7f1c4114 100644
+--- a/src/storage/ducklake_transaction.cpp
++++ b/src/storage/ducklake_transaction.cpp
+@@ -1418,7 +1418,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
+ 		if (!entry) {
+ 			return names;
+ 		}
+-		for (auto &t : entry->Cast<DuckLakeTableEntry>().GetInlinedDataTables()) {
++		for (auto &t : entry->Cast<DuckLakeTableEntry>().GetInlinedDataTables(*this, transaction_snapshot)) {
+ 			names.push_back(t.table_name);
+ 		}
+ 		return names;
+@@ -1502,7 +1502,7 @@ unique_ptr<QueryResult> DuckLakeTransaction::ExecuteRaw(string query) {
+ 	if (cb) {
+ 		cb(query, end - start);
+ 	}
+-	return result;
++	return unique_ptr<QueryResult>(result.release());
+ }
+
+ unique_ptr<QueryResult> DuckLakeTransaction::Query(string query) {
+@@ -1784,6 +1784,15 @@ const vector<FlushedInlinedTableInfo> &DuckLakeTransaction::GetFlushedInlinedTab
+ 	return state->flushed_inlined_tables;
+ }
+
++bool DuckLakeTransaction::InlinedTableFlushed(const string &table_name) const {
++	for (const auto &flushed_table : GetFlushedInlinedTables()) {
++		if (flushed_table.inlined_table.table_name == table_name) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ bool DuckLakeTransaction::FileIsDropped(const string &path) const {
+ 	return state->dropped_files.find(path) != state->dropped_files.end();
+ }
