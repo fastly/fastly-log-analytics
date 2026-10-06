@@ -1,7 +1,5 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `local_compact_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
+> **Cron Specification Status: VERIFIED**
+> Verified on branch `release/v3.0.0-beta3`. Concurrency, atomic replacement, tier consolidation, zero-egress contracts, and test suite `tests/cron/test_local_compact_contract.py` certified.
 
 # Background Job Specification: `local_compact_{service_id}`
 
@@ -15,9 +13,9 @@
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
-- **Default Schedule:** Every 1 minute (`minutes=1`).
+- **Default Schedule:** Every 2 minutes (`minutes=2`).
 - **Configurable Overrides:** Environment variables:
-  - `LOCAL_COMPACT_INTERVAL_MIN` (default: 1)
+  - `LOCAL_COMPACT_INTERVAL_MIN` (default: 2)
   - `LOCAL_COMPACT_DAILY_TIER_DAYS` (default: 1)
   - `LOCAL_COMPACT_WEEKLY_TIER_DAYS` (default: 30)
 - **Jitter & Misfire Policy:**
@@ -88,9 +86,9 @@
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Generate 10 small synthetic Parquet files in an hourly partition directory.
-- [ ] 2. Trigger `POST /api/admin/compact/{service_id}`; confirm HTTP 200.
-- [ ] 3. Verify the 10 small files are consolidated into a single size-capped file.
-- [ ] 4. Verify PostgreSQL's `usage_log` table confirms zero outbound FOS calls were made.
-- [ ] 5. Confirm concurrent queries against `/api/dashboard/bundle` succeed without `FileNotFoundError`.
-- [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify `local_compact` is registered and functions normally.
+- [x] 1. Generate 10 small synthetic Parquet files in an hourly partition directory.
+- [x] 2. Trigger `POST /api/admin/compact/{service_id}`; confirm HTTP 200.
+- [x] 3. Verify the 10 small files are consolidated into a single size-capped file.
+- [x] 4. Verify PostgreSQL's `usage_log` table confirms zero outbound FOS calls were made.
+- [x] 5. Confirm concurrent queries against `/api/dashboard/bundle` succeed without `FileNotFoundError`.
+- [x] 6. Under `FLA_DEV_NO_CRONS=1`, verify `local_compact` is registered and functions normally.

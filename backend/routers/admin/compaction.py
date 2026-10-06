@@ -236,7 +236,13 @@ def backfill_bundle_rollups(source: dict = Depends(get_source)):
     response_model=LocalCompactNowResponse,
     response_model_exclude_unset=True,
 )
+@router.post(
+    "/admin/compact/{service_id}",
+    response_model=LocalCompactNowResponse,
+    response_model_exclude_unset=True,
+)
 def local_compact_now(
+    service_id: str | None = None,
     source: dict = Depends(get_source),
     min_files: int = Query(
         default=3,
@@ -264,7 +270,9 @@ def local_compact_now(
 
 
 @router.get("/admin/compaction-stats", response_model=CompactionStatsResponse)
-def compaction_stats(source: dict = Depends(get_source)) -> CompactionStatsResponse:
+@router.get("/admin/compaction-status", response_model=CompactionStatsResponse)
+@router.get("/admin/compaction-status/{service_id}", response_model=CompactionStatsResponse)
+def compaction_stats(service_id: str | None = None, source: dict = Depends(get_source)) -> CompactionStatsResponse:
     """Snapshot of file-count distribution across local cache partitions.
 
     Useful for monitoring: rising partitions_above_3 means the local

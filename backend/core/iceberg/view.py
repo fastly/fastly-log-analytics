@@ -143,7 +143,12 @@ def is_stale_view_error(exc: BaseException) -> bool:
     :mod:`backend.core.iceberg`.
     """
     msg = str(exc)
-    return "No files found" in msg or "Catalog Error: Table with name" in msg or "No such file or directory" in msg
+    return (
+        "No files found" in msg
+        or "Catalog Error: Table with name" in msg
+        or "No such file or directory" in msg
+        or "Cannot open file" in msg
+    )
 
 
 def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs", **kwargs):

@@ -656,21 +656,25 @@ class Scheduler:
                 continue
 
             # local_compact — local-only parquet compaction, always-on
-            # (no config/access gate), every 2 min. Matches _sync_jobs.
+            # (no config/access gate), every 2 min (or LOCAL_COMPACT_INTERVAL_MIN). Matches _sync_jobs.
             lc_job_id = f"local_compact_{service_id}"
             if lc_job_id not in self._job_ids:
+                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
                 self._add_job(
                     _run_local_compact,
                     "interval",
-                    minutes=2,
+                    minutes=lc_interval_mins,
+                    jitter=10,
                     args=[service_id],
                     id=lc_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=120,
+                    misfire_grace_time=60,
                 )
                 self._job_ids[lc_job_id] = lc_job_id
-                logger.info("⚙️  [scheduler] (dev-local) Registered %s (every 2 min, local-only).", lc_job_id)
+                logger.info(
+                    "⚙️  [scheduler] (dev-local) Registered %s (every %d min, local-only).", lc_job_id, lc_interval_mins
+                )
 
             # partial_hour_merge — local-only partial-hour rollup merge,
             # always-on, every 30s. Same local-only safety profile as
@@ -1183,19 +1187,24 @@ class Scheduler:
             lc_job_id = f"local_compact_{service_id}"
             seen_ids.add(lc_job_id)
             if lc_job_id not in self._job_ids:
+                lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
                 self._add_job(
                     _run_local_compact,
                     "interval",
-                    minutes=2,
-                    jitter=15,
+                    minutes=lc_interval_mins,
+                    jitter=10,
                     args=[service_id],
                     id=lc_job_id,
                     max_instances=1,
                     coalesce=True,
-                    misfire_grace_time=120,
+                    misfire_grace_time=60,
                 )
                 self._job_ids[lc_job_id] = lc_job_id
-                logger.info("⚙️  [scheduler] Registered local_compact job %s (every 2 min, local-only).", lc_job_id)
+                logger.info(
+                    "⚙️  [scheduler] Registered local_compact job %s (every %d min, local-only).",
+                    lc_job_id,
+                    lc_interval_mins,
+                )
 
             # ── Partial-hour incremental merge (speed layer) ──────────────────
             # 30s cadence — folds newly-landed buffer/active-hour-partition

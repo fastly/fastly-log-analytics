@@ -662,6 +662,7 @@ def _is_stale_view_error(e: Exception) -> bool:
         or "Catalog Error: Table with name" in msg
         or "does not exist" in msg
         or "No such file or directory" in msg
+        or "Cannot open file" in msg
     )
     if not looks_stale:
         return False

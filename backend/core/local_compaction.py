@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import time
 import uuid
 from collections import defaultdict
@@ -284,6 +285,9 @@ def compact_local_partitions(
                 # block dashboard reads for ~1s per partition.
                 with publish_lock:
                     r = _compact_single_partition(part_dir, bin_basenames, dry_run=dry_run)
+                if r.get("skipped_enospc"):
+                    result["errors"].append(f"{part_dir}: ENOSPC pre-check failed (< 2x needed free disk)")
+                    continue
                 partition_compacted = True
                 result["files_merged"] += r["files_merged"]
                 result["files_removed"] += r["files_removed"]
@@ -478,6 +482,21 @@ def _rollup_bins(
             result["bytes_before"] += bytes_before
             continue
 
+        # Pre-check available disk space before merge (Section 7)
+        try:
+            free_bytes = shutil.disk_usage(out_root).free
+            if free_bytes < 2 * bytes_before:
+                logger.warning(
+                    "[local-compact] Insufficient disk space in %s for %s: %d bytes free < 2x needed (%d bytes). Skipping.",
+                    out_root,
+                    rollup_key,
+                    free_bytes,
+                    2 * bytes_before,
+                )
+                continue
+        except OSError:
+            pass
+
         if len(bin_paths) == 1:
             # Migrate single-file bin to the tier folder to retire the source.
             old_path = bin_paths[0]
@@ -521,6 +540,12 @@ def _rollup_bins(
                     )
                 finally:
                     con.close()
+
+                # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
+                # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
+                os.rename(tmp_path, out_path)
+                bytes_after = os.path.getsize(out_path)
+
                 for p in bin_paths:
                     try:
                         os.remove(p)
@@ -528,8 +553,7 @@ def _rollup_bins(
                         result.setdefault("removed_basenames", []).append(os.path.basename(p))
                     except OSError as e:
                         logger.warning("[local-compact] failed to remove %s: %s", p, e)
-                os.rename(tmp_path, out_path)
-                bytes_after = os.path.getsize(out_path)
+
                 result[rollup_key] += 1
                 result["files_merged"] += len(bin_paths)
                 result["bytes_before"] += bytes_before
@@ -730,6 +754,27 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
             "bytes_after": 0,
         }
 
+    # Pre-check available disk space before merge (Section 7): abort if free space < 2x target bin size
+    try:
+        free_bytes = shutil.disk_usage(part_dir).free
+        if free_bytes < 2 * bytes_before:
+            logger.warning(
+                "[local-compact] Insufficient disk space in %s: %d bytes free < 2x needed (%d bytes). Skipping.",
+                part_dir,
+                free_bytes,
+                2 * bytes_before,
+            )
+            return {
+                "files_merged": 0,
+                "files_removed": 0,
+                "removed_basenames": [],
+                "bytes_before": bytes_before,
+                "bytes_after": 0,
+                "skipped_enospc": True,
+            }
+    except OSError:
+        pass
+
     # Write to a temp file in the same directory so the atomic rename
     # below stays within one filesystem (rename across filesystems is
     # NOT atomic on POSIX).
@@ -764,9 +809,20 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
     finally:
         con.close()
 
-    # Atomic publish: delete originals BEFORE rename so a crash leaves
-    # only the tmp (which the dashboard glob ignores via the .parquet.tmp
-    # suffix). Worst case: cleanup pass next run removes the orphaned tmp.
+    # Atomic publish: rename tmp_path -> out_path FIRST so new compacted file is
+    # atomically present on disk before unlinking originals (Section 5 Step 4 & Section 7).
+    # Original source files remain untouched until atomic rename succeeds.
+    try:
+        os.rename(tmp_path, out_path)
+        bytes_after = os.path.getsize(out_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
     files_removed = 0
     removed_basenames: list[str] = []
     for p in paths:
@@ -776,8 +832,6 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
             removed_basenames.append(os.path.basename(p))
         except OSError as e:
             logger.warning("[local-compact] failed to remove %s: %s", p, e)
-    os.rename(tmp_path, out_path)
-    bytes_after = os.path.getsize(out_path)
 
     return {
         "files_merged": len(parquets),
