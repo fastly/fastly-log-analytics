@@ -1,4 +1,7 @@
+from dataclasses import replace
 from datetime import UTC, datetime
+
+import pytest
 
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.dashboard import aggregates, header_metrics
@@ -8,6 +11,8 @@ from backend.models.dashboard import AggregatesRequest
 
 class FakeClient:
     def execute(self, sql, params=None):
+        if "AS chart_bucket" in sql:
+            return [{"chart_bucket": "2026-09-15 19:00:00", "value": 12}]
         if "AS bucket_start" in sql or "SELECT bucket_start" in sql:
             return [{"bucket_start": "2026-09-15 19:00:00", "value": 12}]
         if "AS v, count() AS c" in sql:
@@ -278,3 +283,54 @@ def test_high_scale_time_series_queries_through_in_flight_minute():
     ts_queries = [s for s in executed_sql if "FROM request_aggregates" in s]
     assert ts_queries, "expected request_aggregates query"
     assert any("bucket_start <= {end:DateTime64(3)}" in q for q in ts_queries)
+
+
+@pytest.mark.parametrize(
+    ("interval", "seconds"),
+    [("1 minute", 60), ("5 minutes", 300), ("1 hour", 3600), ("1 day", 86400)],
+)
+def test_high_scale_time_series_groups_by_returned_interval(interval: str, seconds: int) -> None:
+    executed: list[tuple[str, dict]] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed.append((sql, params or {}))
+            return super().execute(sql, params)
+
+    service = replace(_service_with_watermark(), client=CapturingClient())
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url"], chart_interval=interval),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    query, params = next(
+        (sql, params) for sql, params in executed if "FROM request_aggregates" in sql and "AS value" in sql
+    )
+    assert "toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND)" in query
+    assert "GROUP BY chart_bucket ORDER BY chart_bucket" in query
+    assert params["bucket_seconds"] == seconds
+    assert response.interval == interval
+    assert response.time_series[0].value == 12
+
+
+def test_high_scale_one_second_chart_uses_request_facts() -> None:
+    executed: list[str] = []
+
+    class CapturingClient(FakeClient):
+        def execute(self, sql, params=None):
+            executed.append(sql)
+            return super().execute(sql, params)
+
+    service = replace(_service_with_watermark(), client=CapturingClient())
+    response = aggregates(
+        service,
+        AggregatesRequest(fields=["url"], chart_interval="1 second"),
+        "2026-09-15T00:00:00Z",
+        "2026-09-16T00:00:00Z",
+    )
+
+    assert any("toStartOfSecond(event_timestamp)" in sql for sql in executed)
+    assert not any("FROM request_aggregates" in sql for sql in executed)
+    assert response.interval == "1 second"

@@ -212,26 +212,30 @@ def _aggregate(
     )
 
 
-def _time_series(service: HighScaleService, start_time: str | None, end_time: str | None) -> list[TimeSeriesPoint]:
+def _time_series(
+    service: HighScaleService, start_time: str | None, end_time: str | None, chart_interval: str
+) -> list[TimeSeriesPoint]:
     start = _range_value(start_time)
     end = _range_value(end_time)
     clauses = [
         "service_id={service_id:String}",
         "1=1",
     ]
-    params: dict[str, Any] = {"service_id": service.service_id}
+    bucket_seconds = {"1 minute": 60, "5 minute": 300, "1 hour": 3600, "1 day": 86400}[chart_interval.removesuffix("s")]
+    params: dict[str, Any] = {"service_id": service.service_id, "bucket_seconds": bucket_seconds}
     if start is not None and end is not None:
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", "bucket_start <= {end:DateTime64(3)}"])
         params.update({"start": start, "end": end})
     rows = service.client.execute(
-        "SELECT bucket_start, sum(request_count) AS value "
+        "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
+        "sum(request_count) AS value "
         "FROM request_aggregates "
         f"WHERE {' AND '.join(clauses)} "
-        "GROUP BY bucket_start ORDER BY bucket_start",
+        "GROUP BY chart_bucket ORDER BY chart_bucket",
         params,
     )
     return [
-        TimeSeriesPoint(time=safe_iso(row["bucket_start"]) or str(row["bucket_start"]), value=float(row["value"]))
+        TimeSeriesPoint(time=safe_iso(row["chart_bucket"]) or str(row["chart_bucket"]), value=float(row["value"]))
         for row in rows
     ]
 
@@ -407,7 +411,7 @@ def _filtered_aggregates(
 
 
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
-    if req.filters:
+    if req.filters or req.chart_interval in ("1 second", "1 seconds"):
         return _filtered_aggregates(service, req, start_time, end_time)
 
     requested_fields = req.fields or list(_FIELD_DIMENSIONS)
@@ -446,7 +450,7 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         if map_response is not None
         else []
     )
-    time_series = _time_series(service, start_time, end_time)
+    time_series = _time_series(service, start_time, end_time, req.chart_interval)
     return AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,

@@ -41,6 +41,12 @@ The **Dashboard** is the primary operational and analytical landing page of Fast
 | `trend` | string | `off` | Moving average / trend overlay: `off`, `auto`, `1m`, `5m`, `1h`, `1d`. |
 | `view` | string | None | Saved view ID to restore filters and time range. |
 
+Traffic bars use 90% of the returned aggregation interval in every deployment.
+The high-scale request-count path must re-bucket its minute aggregates to the
+requested chart interval before returning them; returning minute points labeled
+as hourly or daily makes the bars overlap. One-second charts use request facts,
+because minute aggregates cannot recover second-level counts.
+
 ---
 
 ## 3. Role & Permission Matrix (3 Distinct Personas)
