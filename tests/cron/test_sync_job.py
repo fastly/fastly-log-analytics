@@ -440,6 +440,43 @@ def test_adaptive_ingest_stops_after_empty_followup_and_aggregates_outcomes(monk
     assert done["outcome_counters"]["objects_processed"] == 3
 
 
+def test_adaptive_ingest_publishes_rows_before_each_followup(monkeypatch):
+    """Rows from an intermediate pass must be published before the follow-up
+    sleep, not held until the end of the ~20 s polling window."""
+    from backend.cron.jobs import sync as sync_mod
+
+    pass_results = iter([2, 1, 0])
+    timeline: list[str] = []
+
+    def ingest_fn(**_kwargs):
+        count = next(pass_results)
+        timeline.append(f"pass:{count}")
+        yield {"type": "done", "new_files": count, "rows_inserted": count * 10}
+
+    monkeypatch.setattr(sync_mod.time, "sleep", lambda _s: timeline.append("sleep"))
+
+    list(
+        sync_mod._ingest_with_adaptive_followups(
+            ingest_fn, adaptive=True, after_pass=lambda: timeline.append("publish")
+        )
+    )
+
+    assert timeline == ["pass:2", "publish", "sleep", "pass:1", "publish", "sleep", "pass:0"]
+
+
+def test_adaptive_ingest_skips_publish_when_no_followup_runs(monkeypatch):
+    from backend.cron.jobs import sync as sync_mod
+
+    published: list[None] = []
+
+    def ingest_fn(**_kwargs):
+        yield {"type": "done", "new_files": 1, "rows_inserted": 5}
+
+    list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=False, after_pass=lambda: published.append(None)))
+
+    assert published == []
+
+
 def test_adaptive_ingest_obeys_twenty_second_followup_cap(monkeypatch):
     from backend.cron.jobs import sync as sync_mod
 

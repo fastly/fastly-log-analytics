@@ -40,6 +40,7 @@ def _ingest_with_adaptive_followups(
     ingest_fn: Callable[..., Iterator[dict]],
     *,
     adaptive: bool,
+    after_pass: Callable[[], None] | None = None,
     **ingest_kwargs,
 ) -> Iterator[dict]:
     from backend.core.ingest import _new_object_outcome
@@ -47,6 +48,7 @@ def _ingest_with_adaptive_followups(
     started = time.monotonic()
     pass_number = 0
     processed_files = 0
+    pass_rows = 0
     totals: dict[str, Any] = {
         "new_files": 0,
         "rows_inserted": 0,
@@ -62,6 +64,10 @@ def _ingest_with_adaptive_followups(
         if pass_number:
             if not adaptive or pass_number >= 3 or time.monotonic() - started + 3 > 20:
                 break
+            # Publish this pass's rows now; the caller's final refresh only
+            # runs after the whole polling window.
+            if after_pass is not None and pass_rows > 0:
+                after_pass()
             time.sleep(3)
             yield {"type": "status", "message": "Adaptive polling: checking for newly arrived log files."}
 
@@ -75,6 +81,7 @@ def _ingest_with_adaptive_followups(
             elif event.get("type") == "done":
                 pass_done = event
                 pass_new_files = event.get("new_files", 0)
+                pass_rows = event.get("rows_inserted", 0)
                 processed_files += pass_new_files
                 for key in ("new_files", "rows_inserted", "corrupt_rows", "deleted_files", "quarantined_files"):
                     totals[key] += event.get(key, 0)
@@ -391,10 +398,26 @@ def _run_log_discovery_cron(
         pass_max_files = max_incremental_files if not is_manual else 5000
         pass_max_seconds = 20 if not is_manual else 240
 
+        def _publish_pass_rows() -> None:
+            from backend.cron.jobs._common import refresh_view_and_warm_pool
+
+            refresh_view_and_warm_pool(src, service_id, log_prefix=f"{elapsed()} [adaptive] ")
+            try:
+                refresh_config_status(service_id, include_top_values=False)
+                from backend.sync_status_publisher import publisher as _pub
+                from backend.sync_status_snapshot import compute_sync_status_cached as _snap
+
+                snapshot = _snap(service_id)
+                if snapshot is not None:
+                    _pub.publish(service_id, snapshot)
+            except Exception:
+                logger.exception("[scheduler] %s: adaptive-pass status publish failed", service_id)
+
         try:
             for event in _ingest_with_adaptive_followups(
                 ingest,
                 adaptive=sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual,
+                after_pass=_publish_pass_rows,
                 source=src,
                 delete_after=delete_after,
                 max_files=pass_max_files,
