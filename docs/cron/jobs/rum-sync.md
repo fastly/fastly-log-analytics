@@ -69,11 +69,16 @@
 7. **Local Parquet Write:** Writes transformed records to the Standard RUM buffer and refreshes the active DuckDB view.
 8. **Ingest Tracking Update:** Inserts ingested filenames into PostgreSQL
    `ingested_files` metadata for `client_vitals` and `client_errors`.
-9. **Retention Cleanup:** `rum.delete_after` is age-based cleanup, not
-   acknowledgement of files processed by this run. Cleanup failures are logged
-   and excluded from current-run object counters. Standard RUM does not
-   immediately delete each processed source object; `source_delete_failures`
-   applies only when a path explicitly schedules per-object deletion.
+9. **Raw Deletion (intended contract):** like request ingestion, RUM must
+   delete each raw object as it goes — inline, per chunk, right after its
+   buffer write and `ingested_files` insert succeed — under
+   `resolve_raw_delete_after` (default on; off for a high-scale shared
+   source). Failures increment `source_delete_failures` and the object is
+   reclaimed later by the stranded already-ingested sweep. **Current code
+   does not do this** (§10, gap 2): it never deletes per-object, and only the
+   opt-in age-based `cleanup_old_rum_logs` (`rum.delete_after` days) removes
+   anything. Once inline deletion lands, that age-based pass is a backstop
+   only, or is removed.
 10. **Telemetry, Status & Log Recording:**
     - Persists the zero-filled request/RUM outcome counters in `cron_runs`.
       Malformed records, corrupt containers, evidence-capture failures, and
