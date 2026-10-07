@@ -266,6 +266,16 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         )
         logger.info("RUM commit complete: %s", summary)
 
+        try:
+            from backend.sync_status_publisher import publisher as _sync_status_publisher
+            from backend.sync_status_snapshot import compute_sync_status_cached
+
+            _snapshot = compute_sync_status_cached(service_id)
+            if _snapshot is not None:
+                _sync_status_publisher.publish(service_id, _snapshot)
+        except Exception:
+            logger.exception("[rum_commit] %s: sync-status SSE publish failed", service_id)
+
     except Exception as e:
         logger.error(f"RUM commit failed: {e}", exc_info=True)
         duration = time.time() - start_time

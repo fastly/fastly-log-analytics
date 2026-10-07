@@ -1060,7 +1060,7 @@ class Scheduler:
                     )
 
                 # ── RUM commit job (compact RUM tables) ──────────────────────
-                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", commit_interval_mins)))
+                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
                 rum_commit_job_id = f"rum_commit_{service_id}"
                 seen_ids.add(rum_commit_job_id)
 

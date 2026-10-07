@@ -845,3 +845,40 @@ def test_rum_sync_not_deferred_by_in_flight_requests(monkeypatch):
         rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
 
     assert ingest_mock.called, "rum_sync must not be deferred by active queries"
+
+
+def test_rum_sync_triggers_commit_when_rows_ingested(monkeypatch):
+    """When RUM beacons are ingested (total > 0), trigger rum_commit immediately
+    so that RUM recency and table state achieve parity with request logs."""
+    from unittest.mock import MagicMock
+
+    mock_commit = MagicMock()
+    monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", mock_commit)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda sid, *a, **kw: iter([("started", 1), ("done", 25)]))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    mock_commit.assert_called_once_with(SERVICE_ID)
+
+
+def test_rum_sync_does_not_trigger_commit_when_zero_rows(monkeypatch):
+    """When no RUM beacons are ingested (total == 0), do not trigger rum_commit."""
+    from unittest.mock import MagicMock
+
+    mock_commit = MagicMock()
+    monkeypatch.setattr("backend.cron.jobs.rum_commit._run_rum_commit", mock_commit)
+    monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda sid, rid: True)
+    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda sid, *a, **kw: iter([("started", 1), ("done", 0)]))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+
+    rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    mock_commit.assert_not_called()

@@ -310,6 +310,17 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                                 exc_info=True,
                             )
 
+                if total > 0:
+                    try:
+                        from backend.cron.jobs.rum_commit import _run_rum_commit
+
+                        logger.info(
+                            "⚡ [rum_sync] %s: triggering post-sync RUM commit for %d new rows", service_id, total
+                        )
+                        _run_rum_commit(service_id)
+                    except Exception as commit_err:
+                        logger.warning("RUM post-sync commit failed for %s: %s", service_id, commit_err)
+
     except Exception as e:
         logger.error(f"RUM sync failed: {e}", exc_info=True)
         if run_id:
