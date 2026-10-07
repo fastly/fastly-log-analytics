@@ -19,7 +19,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Configured via `rum.commit_interval_mins` (default matches `cron_sync.commit_interval_mins`, typically every 5 minutes).
 - **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "standard"`.
-- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_commit", service_id)`. If active user/analyst queries are running on DuckDB, non-manual RUM commit ticks defer to protect query latency and avoid lock contention.
+- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_commit", service_id)`. If active user/analyst queries are running on DuckDB, non-manual RUM commit ticks defer to protect query latency and avoid lock contention. The request `commit_{id}` job has no such gate, so this is a parity gap slated for removal (see [rum-sync.md §10](rum-sync.md#10-parity-with-request-ingestion-open-work), gap 5).
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
 

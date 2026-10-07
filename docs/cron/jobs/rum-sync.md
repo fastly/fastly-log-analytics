@@ -20,7 +20,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Evaluated on the Standard RUM interval derived from `rum.sync_interval_seconds` or the service sync interval, with a five-second minimum.
 - **Registration Gate:** Registered only when RUM is enabled and the deployment mode is Standard (`DEPLOYMENT_MODE=standard`).
-- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_sync", service_id)`. Non-manual ticks defer while active queries are running.
+- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_sync", service_id)`. Non-manual ticks defer while active queries are running. `log_discovery` no longer has this gate, so it is a parity gap slated for removal (§10, gap 5).
 - **Mutual Exclusion Rule:** Standard `rum_sync_{service_id}` is not registered in High-Scale mode; the distinct `rum_discovery_{service_id}` worker path owns that mode.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
@@ -52,6 +52,10 @@
    - If bundle adoption, restore, or drift resync fails, logs a RUM-specific warning;
      this does not change the shared ingestion/quarantine contract.
 4. **FOS LIST Call:** Lists the `raw/rum/` prefix through the shared FOS client.
+   Current behavior calls `list_fos_files(..., incremental_only=False)`, which
+   lists the entire `raw/rum/` tree every tick. See
+   [§10 Parity Gaps](#10-parity-with-request-ingestion-open-work) — this is the
+   main source of `rum_sync` cost and host contention in Standard mode.
 5. **Filter Processed Files:** Compares discovered files against
    PostgreSQL `ingested_files` metadata for both RUM tables.
 6. **Download & Parse Beacons in Chunks:**
@@ -119,3 +123,45 @@
 - [x] 4. Metric recording verified: `tests/test_fastly_realtime_metrics.py` (2 passed).
 - [x] 5. Progress tracking and duration finalization verified in `cron_runs`.
 - [x] 6. Warning status transitions verified for partial file errors and reconcile failures.
+- [ ] 7. Incremental minute-prefix discovery: an idle tick issues ≤ 5 LIST calls regardless of `raw/rum/` size.
+- [ ] 8. Raw RUM objects are deleted after ingest under `resolve_raw_delete_after`; stranded already-ingested objects are reclaimed.
+- [ ] 9. A LIST failure marks the run `"error"` (never a silent `"success"` with 0 files).
+- [ ] 10. `rum_sync` p95 duration < 5 s on GCE Standard under the 5 RPS seeder; request lag p90 < 20 s on the same host.
+
+---
+
+## 10. Parity with Request Ingestion (Open Work)
+
+RUM and request ingestion are meant to share strategy and code. Standard
+`rum_sync` has drifted from `log_discovery`. High-Scale `rum_discovery` already
+matches the request path: it uses `rum_minute_list_prefix`, and
+`finalize_committed_raw` deletes raw objects after commit. Standard mode is the
+outlier.
+
+### Observed impact (GCE Standard, 4 vCPU, 2026-10-07)
+
+`rum_sync` runs every 30 s and takes 23–52 s per run, so it is effectively
+always running. It contends with `log_discovery`, whose header
+`refresh_config_status` varies from 1.3 s to 13 s. Request lag stays at a
+median of about 22 s with a p90 of about 34 s, above the 20 s SLA. Local
+Standard and High-Scale both pass.
+
+### Gap table
+
+| # | Concern | Request (`ingest` / `log_discovery`) | Standard RUM (`ingest_rum_logs` / `rum_sync`) | Target |
+|---|---|---|---|---|
+| 1 | Discovery scope | `incremental_only=True`: last 5 minute-prefixes, then a 4 h `StartAfter` fallback | `incremental_only=False`: full `raw/rum/` LIST every tick | Same incremental path. `list_fos_files` minute-prefix gate and `_compute_incremental_start_after` are hard-coded to `raw/request/`; parameterize them by prefix (reuse `rum_minute_list_prefix`). |
+| 2 | Raw deletion after ingest | `delete_after` (`resolve_raw_delete_after`, default on) deletes inline after buffer write. Stranded already-ingested objects are reclaimed (capped). | Never deletes per-object. Only age-based `cleanup_old_rum_logs` (opt-in `rum.delete_after` days) runs, and it LISTs the whole prefix again. | Same `delete_after` contract and stranded-object reclaim. Keep the high-scale shared-source stand-down. |
+| 3 | Time budget | `max_seconds`; first chunk always runs (Trap #41) | No budget | Same budget and first-chunk guarantee |
+| 4 | LIST failure | Error event surfaced to the run | `{"type": "error"}` events are dropped; the run records `"success"` with 0 files | Record `"error"` |
+| 5 | Politeness gate | Removed from `log_discovery` (`5a7541fd`) and absent from `commit` | `should_defer_cron` still gates `rum_sync` and `rum_commit` | Remove it, matching the request path |
+| 6 | `ingested_files` growth | Trimmed by `metadata_cleanup` | Exempt from trimming (`11e17bff`), because raw objects outlive their rows and a full LIST would re-ingest them; grows without limit | After gap 2 lands, restore trimming with a window larger than raw retention |
+| 7 | Code sharing | `ingest()` | Separate ~500-line `ingest_rum_logs` that re-implements chunking, download, in-flight and outcome handling | Converge on one chunk loop parameterized by a table/parse spec (follow-up, after 1–6) |
+
+### Cleanup owed once the gaps close
+
+- Duplicate `client_vitals` / `client_errors` rows written by the 2026-10-06
+  re-ingest (Local and likely GCE). Dedupe on the beacon's natural key, using
+  the same DuckLake delete path as retention, after a dry-run count.
+- Already-ingested raw objects still in `raw/rum/`. These are reclaimed by the
+  stranded-object sweep from gap 2, not by a one-off script.

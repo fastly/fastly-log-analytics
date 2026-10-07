@@ -109,7 +109,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
-| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md); [High-Scale mode](jobs/rum-discovery.md) |
+| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (request-parity gaps open, see §10); [High-Scale mode](jobs/rum-discovery.md) |
 | `rum_commit_{id}` | Every 5 min | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) |
 | `ledger_rum_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) |
 | `metric_snapshot` | Every 60 sec | APScheduler | Pod APScheduler | Global / Admin | [metric-snapshot.md](jobs/metric-snapshot.md) |
