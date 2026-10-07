@@ -51,6 +51,7 @@
    - Loads retention thresholds from `configs/{service_id}.json` under `metadata_retention`. Defaults to 1 day for `usage_log` and `ingested_files`, 7 days for `cron_runs`, and 30 days for `slow_queries`.
 4. **Purge Ingested Files (with Dedup Guard):**
    - Verifies whether `cron_sync.delete_after` is active. If `delete_after` is `false`, `ingested_files` is preserved as the dedup gate against re-ingestion storms.
+   - Never trims RUM rows (`table_name` `client_vitals` / `client_errors`). RUM raw objects outlive the retention window and `rum_sync` LISTs `raw/rum/` in full, so a trimmed row re-ingests its beacon file as duplicate rows.
    - Otherwise, calculates cutoff and deletes rows in 5,000-row chunks.
 5. **Purge Usage Log Records:**
    - Deletes raw `usage_log` rows older than `usage_log_days` in 5,000-row chunks.
@@ -82,6 +83,7 @@
 - **Audit Checklist:**
   - Confirm `usage_log_hourly_summary` is NOT deleted (billing history preserved).
   - Verify `ingested_files` deletion is suppressed when `cron_sync.delete_after=false`.
+  - Verify RUM `ingested_files` rows survive cleanup while aged request rows are trimmed (`tests/core/test_reconciliation.py::test_cleanup_never_trims_rum_ingested_files_rows`).
   - Confirm database files don't suffer from fragmentation.
 
 ---

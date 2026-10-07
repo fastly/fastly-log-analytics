@@ -270,6 +270,31 @@ def test_cleanup_force_disables_ingested_files_when_delete_after_false(monkeypat
     assert override_msgs, "expected status event explaining the override"
 
 
+def test_cleanup_never_trims_rum_ingested_files_rows():
+    """RUM raw objects outlive the ingested_files retention window and the
+    RUM LIST is a full (non-incremental) scan, so trimming RUM dedup rows
+    makes rum_sync re-ingest every aged-out beacon file as duplicate rows."""
+    sid = "svc-cleanup-rum-dedup"
+    _seed_ingested_file(sid, 3, days_ago=400)
+    con = _con(sid)
+    con.executemany(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'fos', ?, datetime('now', '-400 days'), 1, 100)",
+        [(f"raw/rum/old-{t}-{i}.gz", t) for t in ("client_vitals", "client_errors") for i in range(2)],
+    )
+    con.commit()
+
+    result = reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 1})
+
+    assert result["deleted"]["ingested_files"] == 3
+    remaining = {
+        r["table_name"]
+        for r in _con(sid).execute("SELECT table_name FROM ingested_files WHERE source_name = 'fos'").fetchall()
+    }
+    assert remaining == {"client_vitals", "client_errors"}
+    assert result["after"]["ingested_files"] == 4
+
+
 def test_cleanup_on_event_callback_failure_does_not_abort():
     sid = "svc-cleanup-bad-callback"
     _seed_usage_log(sid, 3, days_ago=10)

@@ -71,6 +71,10 @@ _CLEANUP_TABLES = (
     ("slow_queries", "slow_queries_days", "started_at_utc"),
     ("quarantined_files", "quarantine_days", "quarantined_at"),
 )
+# RUM dedup rows are never aged out: RUM raw objects outlive this retention
+# window (they are kept, or deleted only after ``rum.delete_after`` days) and
+# the RUM LIST is a full scan, so a trimmed row re-ingests its file as duplicates.
+_INGESTED_FILES_RETENTION_FILTER = " AND table_name NOT IN ('client_vitals', 'client_errors')"
 # Table whose timestamp column is unix-epoch seconds, not an ISO string.
 # Handled with an epoch-cutoff DELETE instead of the standard
 # ``datetime('now', '-Nd')`` comparison the other tables use.
@@ -351,17 +355,18 @@ def cleanup_metadata(
                         )
                 else:
                     timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    extra = _INGESTED_FILES_RETENTION_FILTER if table == "ingested_files" else ""
                     if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN "
                             f"(SELECT ctid FROM {table} "
-                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
+                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day'){extra} LIMIT ?)",
                             (days_int, _BATCH),
                         )
                     else:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE rowid IN "
-                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?){extra} LIMIT ?)",
                             (f"-{days_int} days", _BATCH),
                         )
                 n = int(cur.rowcount or 0)
