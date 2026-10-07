@@ -153,22 +153,24 @@ def _make_ingest_events(events: list[dict]) -> Any:
 # ── _run_log_discovery_cron ────────────────────────────────────────────────────────
 
 
-def test_returns_when_should_defer_cron_true(monkeypatch, stub_load_config):
-    """Active-request gate fires → ingest never called."""
+def test_scheduled_tick_is_not_deferred_by_in_flight_requests(monkeypatch, stub_load_config):
+    """Request freshness is the SLA: each deferral cost a full interval and the
+    dashboard's own polling kept the gate tripped, so the tick must proceed."""
     from backend.cron.jobs import sync as sync_mod
+    from backend.utils import active_requests
 
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: True)
-    ingest_mock = MagicMock()
-    monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
-    get_src = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
+    active_requests._reset_for_tests()
+    active_requests.increment_active_requests()
+    try:
+        get_src = MagicMock(return_value=None)
+        monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
 
-    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+        sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
 
-    ingest_mock.assert_not_called()
-    # Config load never even runs — gate fires before.
-    stub_load_config["load"].assert_not_called()
-    get_src.assert_not_called()
+        stub_load_config["load"].assert_called_once_with("svc-1")
+        get_src.assert_called_once_with("svc-1")
+    finally:
+        active_requests._reset_for_tests()
 
 
 def test_skips_when_config_missing(monkeypatch):

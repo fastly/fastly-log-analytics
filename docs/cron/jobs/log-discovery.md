@@ -48,6 +48,7 @@
 ## 5. Execution Lifecycle & Step-by-Step Logic
 ### Standard Mode:
 1. **Pre-Flight Checks:** Verify service configuration and FOS credentials. Check `FLA_DEV_NO_CRONS=1` (exits immediately if set).
+   - Unlike the maintenance crons, `log_discovery` has no start-of-tick active-request gate (`should_defer_cron`). Each deferred tick waited a full interval, and dashboard/SSE polling kept the gate tripped, which chained 20–30 s of request lag. In-flight API requests still get priority mid-tick through `yield_to_api`.
 2. **FOS LIST Call:** Executes `FosS3FileSystem.ls(f"{bucket}/{prefix}/raw/request/")` with pagination.
 3. **Filter Known Keys:** Checks discovered keys against PostgreSQL `ingested_files` metadata.
 4. **Download & Transform:**

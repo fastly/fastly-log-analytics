@@ -203,15 +203,10 @@ def _run_log_discovery_cron(
         start_cron_run,
     )
     from backend.core.ingest import _new_object_outcome, ingest
-    from backend.utils.active_requests import should_defer_cron
 
-    # Active-request gate (perf #84): defer the sync tick if API requests
-    # are in flight — DuckDB pool slot + Fastly bandwidth contention. Bound
-    # by a 30 s starvation guard so a sustained-traffic service still gets
-    # ticks eventually.
-    if should_defer_cron("log_discovery", service_id):
-        return
-
+    # No start-of-tick active-request gate here: a deferred tick waits a full
+    # interval, and dashboard/SSE polling kept it tripped, chaining 20-30 s of
+    # request lag. Mid-tick yield_to_api still gives in-flight requests priority.
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         logger.warning("[scheduler] %s: config not found, skipping.", service_id)
