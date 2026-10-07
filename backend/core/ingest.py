@@ -209,7 +209,7 @@ def _parse_fastly_filename_dt(fname: str) -> datetime | None:
 
 
 _V3_MINUTE_KEY_RE = re.compile(
-    r"(?:^|/)raw/request/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})/minute=(\d{2})/"
+    r"(?:^|/)raw/(?:request|rum)/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})/minute=(\d{2})/"
 )
 _MINUTE_KEY_RE = re.compile(r"/raw/year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})/minute=(\d{2})/")
 _SLASHED_KEY_RE = re.compile(r"/raw/(\d{4})/(\d{2})/(\d{2})/(\d{2})/[^/]*?_(\d{2})\.json\.gz")
@@ -254,7 +254,9 @@ def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
     return None
 
 
-def _compute_incremental_start_after(already: set[str], lookback_hours: int = 4) -> str | None:
+def _compute_incremental_start_after(
+    already: set[str], lookback_hours: int = 4, prefix_subpath: str = "raw/request/"
+) -> str | None:
     """Derive an S3 ``StartAfter`` key from previously-ingested filenames.
 
     The cron's incremental mode skips most of the bucket by passing a
@@ -262,12 +264,15 @@ def _compute_incremental_start_after(already: set[str], lookback_hours: int = 4)
     have, minus a small lookback to catch late-arriving POP logs. Without
     this, every cron run would scan the entire bucket from epoch.
 
-    The bound is formatted in the v3 request key layout.
+    The bound is formatted in the v3 key layout matching ``prefix_subpath``.
 
-    Returns None when ``already`` is empty or no key matches the v3 request
-    layout (the caller then falls back to a full scan).
+    Returns None when ``already`` is empty or no key matches the layout
+    (the caller then falls back to a full scan).
     """
-    parsed = [p for f in already if "/raw/" in f and (p := _parse_key_layout_dt(f)) is not None]
+    norm_subpath = prefix_subpath.strip("/")
+    parsed = [p for f in already if norm_subpath in f and (p := _parse_key_layout_dt(f)) is not None]
+    if not parsed:
+        parsed = [p for f in already if "/raw/" in f and (p := _parse_key_layout_dt(f)) is not None]
     if not parsed:
         return None
     latest_dt = max(dt for _, dt in parsed)
@@ -275,7 +280,7 @@ def _compute_incremental_start_after(already: set[str], lookback_hours: int = 4)
 
     layouts = {layout for layout, _ in parsed}
     if "v3" in layouts:
-        return lookback.strftime("raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+        return lookback.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
     if "dash" in layouts:
         return lookback.strftime("raw/%Y-%m-%d/%H/")
     if "slashed" in layouts:
@@ -570,11 +575,12 @@ def list_fos_files(
         # (no previously ingested files). On subsequent cron runs `already` is non-empty,
         # so we fall through to the incremental lookback — scanning only the last 4 hours
         # instead of the entire bucket from the original import start date.
-        start_after_key = st_dt.strftime("raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+        norm_subpath = prefix_subpath.strip("/")
+        start_after_key = st_dt.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
         logger.info("[ingest] %s: Using requested start_time to bound FOS scan: %s", src.get("name"), start_after_key)
     elif incremental_only and already:
         try:
-            start_after_key = _compute_incremental_start_after(already, lookback_hours=4)
+            start_after_key = _compute_incremental_start_after(already, lookback_hours=4, prefix_subpath=prefix_subpath)
         except Exception as e:
             logger.warning(
                 "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", src.get("name"), e
@@ -596,27 +602,29 @@ def list_fos_files(
         yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
 
         # Option B (Minute-Prefix Listing for Standard Incremental Mode):
-        # On the hot incremental path (incremental_only=True, no explicit st_dt/et_dt, v3 request prefix),
+        # On the hot incremental path (incremental_only=True, no explicit st_dt/et_dt, v3 prefix),
         # query the recent minute-prefixes (last 5 minutes) first.
         # This matches High-Scale's sub-300ms discovery and avoids scanning 4 hours of StartAfter objects.
         # If the minute prefixes yield 0 total objects (e.g. non-v3 layout or legacy tests),
         # fall back to the standard Prefix + StartAfter pagination.
-        from backend.provision.log_paths import minute_list_prefix
+        from backend.provision.log_paths import minute_list_prefix, rum_minute_list_prefix
 
         now_utc = datetime.now(UTC)
+        norm_subpath = prefix_subpath.strip("/")
         use_minute_prefixes = (
             incremental_only
             and not st_dt
             and not et_dt
-            and prefix_subpath == "raw/request/"
+            and norm_subpath in ("raw/request", "raw/rum")
             and bool(already)
             and any("year=" in f for f in already)
         )
 
         scan_batches: list[dict[str, Any]] = []
         if use_minute_prefixes:
+            prefix_fn = rum_minute_list_prefix if norm_subpath == "raw/rum" else minute_list_prefix
             for i in range(5):
-                min_sub = minute_list_prefix(now_utc - timedelta(minutes=i))
+                min_sub = prefix_fn(now_utc - timedelta(minutes=i))
                 pfx = f"{prefix_path}/{min_sub}" if prefix_path else min_sub
                 scan_batches.append({"Bucket": src["bucket"], "Prefix": pfx})
 
@@ -679,7 +687,9 @@ def list_fos_files(
 
         # Fallback: if minute-prefix scan was attempted but found zero objects in total
         # (e.g. non-v3 key layout or legacy test environment), fall back to standard lookback scan.
-        if use_minute_prefixes and total_listed == 0:
+        # But if the service has confirmed v3 layout, an idle tick (0 objects in the last 5 minutes)
+        # must NOT scan the full lookback.
+        if use_minute_prefixes and total_listed == 0 and not any("year=" in f for f in already):
             fb_kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
             if start_after_key:
                 fb_kwargs["StartAfter"] = f"{prefix_path}/{start_after_key}" if prefix_path else start_after_key
@@ -1840,7 +1850,7 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
     from backend.core.metadata.base import get_con
 
     con_meta = get_con(service_id)
@@ -2043,7 +2053,7 @@ def convert_object(service_id: str, object_key: str, worker_id: str) -> str:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
             try:
-                duckdb_con.execute("DETACH lake")
+                _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
                 pass
             duckdb_con.close()
@@ -2103,7 +2113,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
     from backend.core.metadata.base import get_con
 
     summary: dict[str, int] = {
@@ -2380,7 +2390,7 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
             try:
-                duckdb_con.execute("DETACH lake")
+                _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
                 pass
             duckdb_con.close()
@@ -2784,16 +2794,27 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
 
     from backend.core.rum_ingest import extract_metrics_from_faro_payload, safe_float, safe_int
 
+    # Multi-tenant routing: not corruption, so caller must not count as valid or corrupt
     log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
     if log_service_id and log_service_id != service_id:
         return None
 
-    received_at = log_data.get("timestamp") or datetime.now(UTC).isoformat()
+    # Legitimate non-beacon skips: CORS preflight, health checks, /ping, /favicon.ico
+    if (
+        log_data.get("method") == "OPTIONS"
+        or log_data.get("is_healthcheck")
+        or log_data.get("path") in ("/health", "/ping", "/favicon.ico")
+    ):
+        return None
+
+    received_at = log_data.get("timestamp")
+    if not received_at:
+        raise ValueError("missing_timestamp")
     try:
         dt = datetime.fromisoformat(received_at)
         dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-    except Exception:
-        dt = datetime.now(UTC)
+    except Exception as e:
+        raise ValueError(f"invalid_timestamp: {e}") from e
 
     city_val = log_data.get("city") or log_data.get("geo_city") or ""
     region_val = log_data.get("region") or log_data.get("geo_region") or ""
@@ -2966,11 +2987,22 @@ def _parse_rum_beacon_file(local_path: str, service_id: str) -> tuple[list[dict]
             try:
                 parsed = _parse_rum_line(log_data, service_id)
             except Exception as e:
-                corrupt_lines.append((stripped, f"parse_error: {e}"[:200]))
+                msg = str(e)
+                if msg == "missing_timestamp":
+                    corrupt_lines.append((stripped, "missing_timestamp"))
+                elif msg.startswith("invalid_timestamp"):
+                    corrupt_lines.append(
+                        (stripped, f"invalid_timestamp: {msg.removeprefix('invalid_timestamp: ')}"[:200])
+                    )
+                else:
+                    corrupt_lines.append((stripped, f"parse_error: {e}"[:200]))
                 continue
             if parsed is None:
                 continue
             v_rows, e_rows = parsed
+            if not v_rows and not e_rows:
+                corrupt_lines.append((stripped, "empty_beacon_payload"))
+                continue
             vitals_rows.extend(v_rows)
             errors_rows.extend(e_rows)
 
@@ -3063,7 +3095,7 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
 
     # Schema catalog only — CLIENT_VITALS_ARROW_SCHEMA/CLIENT_ERRORS_ARROW_SCHEMA
     # are plain, static pa.Schema definitions (no iceberg pipeline logic), the
@@ -3256,7 +3288,7 @@ def convert_rum_object(service_id: str, object_key: str, worker_id: str) -> str:
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
             try:
-                duckdb_con.execute("DETACH lake")
+                _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
                 pass
             duckdb_con.close()
@@ -3287,7 +3319,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.ducklake_admission import ducklake_write_admission
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach, ducklake_table_name
     from backend.core.iceberg.rum_schema import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
     from backend.core.metadata.base import get_con
 
@@ -3505,7 +3537,7 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             admission_cm.__exit__(None, None, None)
         if duckdb_con is not None:
             try:
-                duckdb_con.execute("DETACH lake")
+                _ducklake_detach(duckdb_con, service_id=service_id)
             except Exception:
                 pass
             duckdb_con.close()

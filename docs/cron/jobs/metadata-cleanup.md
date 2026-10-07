@@ -51,8 +51,8 @@
    - Loads retention thresholds from `configs/{service_id}.json` under `metadata_retention`. Defaults to 1 day for `usage_log` and `ingested_files`, 7 days for `cron_runs`, and 30 days for `slow_queries`.
 4. **Purge Ingested Files (with Dedup Guard):**
    - Verifies whether `cron_sync.delete_after` is active. If `delete_after` is `false`, `ingested_files` is preserved as the dedup gate against re-ingestion storms.
-   - Never trims RUM rows (`table_name` `client_vitals` / `client_errors`). RUM raw objects outlive the retention window and `rum_sync` LISTs `raw/rum/` in full, so a trimmed row re-ingests its beacon file as duplicate rows. This exemption is temporary. Restore trimming once `rum_sync` deletes raw objects after ingest and lists incrementally (see [rum-sync.md §10](rum-sync.md#10-parity-with-request-ingestion-open-work), gaps 1, 2, 6).
-   - Otherwise, calculates cutoff and deletes rows in 5,000-row chunks.
+   - Trims request rows older than `ingested_files_days` (default 1 day). Trims RUM rows (`client_vitals` / `client_errors`) older than a window guaranteed larger than any raw object's lifetime (`max(ingested_files_days, log_retention_days + 1)`), ensuring `ingested_files` does not grow without limit while preventing any re-ingest.
+   - Deletes rows in 5,000-row chunks.
 5. **Purge Usage Log Records:**
    - Deletes raw `usage_log` rows older than `usage_log_days` in 5,000-row chunks.
    - *Note:* Hourly summary rollups in `usage_log_hourly_summary` are preserved indefinitely for billing history.
@@ -83,7 +83,7 @@
 - **Audit Checklist:**
   - Confirm `usage_log_hourly_summary` is NOT deleted (billing history preserved).
   - Verify `ingested_files` deletion is suppressed when `cron_sync.delete_after=false`.
-  - Verify RUM `ingested_files` rows survive cleanup while aged request rows are trimmed (`tests/core/test_reconciliation.py::test_cleanup_never_trims_rum_ingested_files_rows`).
+  - Verify RUM `ingested_files` rows are trimmed once past the raw retention window (`tests/core/test_reconciliation.py::test_cleanup_trims_rum_ingested_files_past_raw_retention_window`).
   - Confirm database files don't suffer from fragmentation.
 
 ---

@@ -249,15 +249,12 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
 
     Calls ingest_rum_logs generator which handles orphan-row safety internally.
     """
-    is_manual = kwargs.get("is_manual", False) or kwargs.get("run_id") is not None
-    if not is_manual:
-        from backend.utils.active_requests import should_defer_cron
-
-        if should_defer_cron("rum_sync", service_id):
-            logger.info("⏸️ [rum_sync] %s: active queries running, deferring RUM sync tick", service_id)
-            return
-
+    # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
+    # tick waits a full interval, and dashboard/SSE polling kept it tripped.
     logger.info(f"RUM sync starting for {service_id}")
+
+    is_manual = kwargs.get("is_manual", False) or kwargs.get("run_id") is not None
+    pass_max_seconds = 20 if not is_manual else 240
 
     from backend.core import metadata
     from backend.cron_progress import add_progress, cleanup_progress_and_reap, end_progress, start_progress
@@ -265,7 +262,7 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
     run_id = None
     had_warning = False
     try:
-        for event in ingest_rum_logs(service_id):
+        for event in ingest_rum_logs(service_id, max_seconds=pass_max_seconds):
             if event[0] == "started":
                 run_id = event[1]
                 start_progress(run_id, service_id=service_id, task="rum_sync")

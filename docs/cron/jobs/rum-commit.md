@@ -19,7 +19,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Configured via `rum.commit_interval_mins` (default matches `cron_sync.commit_interval_mins`, typically every 5 minutes).
 - **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "standard"`.
-- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_commit", service_id)`. If active user/analyst queries are running on DuckDB, non-manual RUM commit ticks defer to protect query latency and avoid lock contention. The request `commit_{id}` job has no such gate, so this is a parity gap slated for removal (see [rum-sync.md §10](rum-sync.md#10-parity-with-request-ingestion-open-work), gap 5).
+- **Active-Request Gate:** Removed mirroring commit `5a7541fd` (and matching request `commit_{id}`): RUM freshness requires that automated ticks proceed without deferral.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
 
@@ -43,10 +43,10 @@
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-1. **Pre-Flight Checks & Politeness Gate:**
+1. **Pre-Flight Checks:**
    - Verifies RUM is enabled and service is `read_write`.
    - Checks `FLA_DEV_NO_CRONS=1`.
-   - Checks `should_defer_cron("rum_commit", service_id)`. If active queries are running and run is not manual/forced, defers tick.
+   - Automated ticks proceed without in-flight query deferral (matching the request commit path).
 2. **Disk Space Safety Pre-Check:**
    - Executes `_check_disk_space(_commit_cache_dir(src), service_id, "rum_commit")`.
    - If disk space is below safety threshold (<500MB), aborts immediately with status `"error"` to avoid mid-commit corruption.

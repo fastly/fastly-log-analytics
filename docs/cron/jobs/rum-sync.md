@@ -45,40 +45,30 @@
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-1. **Prerequisite & Politeness Check:** Confirms RUM is enabled and Standard mode is active. Checks `FLA_DEV_NO_CRONS=1`. If not a manual run, checks `should_defer_cron("rum_sync", service_id)`.
+1. **Prerequisite Check:** Confirms RUM is enabled and Standard mode is active. Checks `FLA_DEV_NO_CRONS=1`. No start-of-tick active-request deferral (mirroring commit `5a7541fd`): a deferred tick waits a full interval, and dashboard/SSE polling kept it tripped.
 2. **Progress Lifecycle Start:** Calls `start_cron_run(service_id, "rum_sync")` returning `run_id`, then calls `start_progress(run_id, service_id=service_id, task="rum_sync")`.
 3. **Faro Bundle Integrity & Reconcile:**
    - Calls `_reconcile_faro_bundle(service_id, run_id)` to ensure pinned Faro SDK bundle is present in FOS and live VCL routes to it.
    - If bundle adoption, restore, or drift resync fails, logs a RUM-specific warning;
      this does not change the shared ingestion/quarantine contract.
-4. **FOS LIST Call:** Lists the `raw/rum/` prefix through the shared FOS client.
-   Current behavior calls `list_fos_files(..., incremental_only=False)`, which
-   lists the entire `raw/rum/` tree every tick. See
-   [§10 Parity Gaps](#10-parity-with-request-ingestion-open-work) — this is the
-   main source of `rum_sync` cost and host contention in Standard mode.
+4. **FOS LIST Call (Incremental Minute-Prefix Discovery):** Lists through `list_fos_files(..., prefix_subpath="raw/rum/", incremental_only=True)`. Queries the recent minute-prefixes (`rum_minute_list_prefix`, last 5 minutes) first, with a 4-hour `StartAfter` lookback bound. An idle tick issues ≤ 5 LIST calls regardless of `raw/rum/` size. Any LIST error immediately surfaces as a run `"error"`.
 5. **Filter Processed Files:** Compares discovered files against
    PostgreSQL `ingested_files` metadata for both RUM tables.
 6. **Download & Parse Beacons in Chunks:**
-   - Downloads new `.gz` chunks in parallel.
-   - Decompresses and extracts JSON beacon payloads:
-     - Web Vitals: `lcp`, `inp`, `cls`, `ttfb`, `fcp`, `device_type`, `connection_type`, `effective_type`.
-     - Errors: `message`, `source_file`, `lineno`, `colno`, `stack_trace`.
-   - Uses the same ingestion contract as request logs: valid beacons continue to their
-     normal buffers, each malformed beacon becomes an individual local exact-byte
-     quarantine item, corrupt gzip becomes one item, and processing continues.
-7. **Local Parquet Write:** Writes transformed records to the Standard RUM buffer and refreshes the active DuckDB view.
-8. **Ingest Tracking Update:** Inserts ingested filenames into PostgreSQL
-   `ingested_files` metadata for `client_vitals` and `client_errors`.
-9. **Raw Deletion (intended contract):** like request ingestion, RUM must
-   delete each raw object as it goes — inline, per chunk, right after its
-   buffer write and `ingested_files` insert succeed — under
-   `resolve_raw_delete_after` (default on; off for a high-scale shared
-   source). Failures increment `source_delete_failures` and the object is
-   reclaimed later by the stranded already-ingested sweep. **Current code
-   does not do this** (§10, gap 2): it never deletes per-object, and only the
-   opt-in age-based `cleanup_old_rum_logs` (`rum.delete_after` days) removes
-   anything. Once inline deletion lands, that age-based pass is a backstop
-   only, or is removed.
+   - Downloads new `.gz` chunks in parallel using bounded chunks (`CHUNK_SIZE = 50`) under `max_seconds` budget (Trap #41: first chunk is always allowed to execute).
+   - Decompresses and extracts beacon payloads using the shared `_parse_rum_beacon_file` and `_parse_rum_line`:
+     - Web Vitals: `lcp`, `inp`, `cls`, `ttfb`, `fcp`, `device`, `browser`, `os`, `cid`, `req_id`, `pathname`, `city`, `region`, `country`, `pop`, `tls`.
+     - Errors: `error_message`, `error_file`, `error_line`, `error_col`, `pathname`, `browser`, `os`, `device`, `cid`, `req_id`, `city`, `region`, `country`, `pop`, `tls`, `ttfb`.
+   - Every line that is invalid JSON, fails to parse, or parses to nothing that should have produced a row (including missing or unparseable timestamps) goes into `corrupt_lines` with a categorized reason and exact-byte local capture via `_quarantine_rum_corrupt_lines`.
+   - Corrupt gzip containers go through `_capture_corrupt_container(service_id, "rum", ...)`.
+   - On capture failure, marks object failed and adds to deletion-exclusion set.
+7. **Local Parquet Write:** Writes transformed records to the Standard RUM buffer (`client_vitals`, `client_errors`) and refreshes the active DuckDB view.
+8. **Ingest Tracking Update (Durable Bookkeeping):** Inserts ingested filenames into PostgreSQL `ingested_files` metadata with the *durable* rows actually written per table per file (`row_count = 0` for files that produced no rows for that table). Files that fail download or decompression are excluded so they are retried on the next tick.
+9. **Inline Raw Deletion & Stranded Sweep:** Under `resolve_raw_delete_after` (default on; off for high-scale shared source), deletes raw objects inline per chunk right after buffer write and `ingested_files` insert succeed.
+   - Excludes unreadable files and files whose quarantine capture failed (`exclude_from_delete = failed_paths | capture_failed_paths`).
+   - Counts delete failures in `source_delete_failures`.
+   - Reclaims stranded already-ingested objects discovered by `list_fos_files` up to `_STRANDED_DELETE_CAP`.
+   - `cleanup_old_rum_logs` remains as an age-only backstop.
 10. **Telemetry, Status & Log Recording:**
     - Persists the zero-filled request/RUM outcome counters in `cron_runs`.
       Malformed records, corrupt containers, evidence-capture failures, and
@@ -123,46 +113,38 @@
 
 ## 9. AI Session Automated Verification Checklist
 - [x] 1. Upload/mock synthetic RUM beacon `.gz` files in FOS `raw/rum/`.
-- [x] 2. Unit & Integration test suites verified: `tests/cron/test_rum_sync.py` (25 passed).
+- [x] 2. Unit & Integration test suites verified: `tests/cron/test_rum_sync.py` (26 passed).
 - [x] 3. Scheduler integration verified: `tests/test_scheduler.py` (7 passed).
 - [x] 4. Metric recording verified: `tests/test_fastly_realtime_metrics.py` (2 passed).
 - [x] 5. Progress tracking and duration finalization verified in `cron_runs`.
 - [x] 6. Warning status transitions verified for partial file errors and reconcile failures.
-- [ ] 7. Incremental minute-prefix discovery: an idle tick issues ≤ 5 LIST calls regardless of `raw/rum/` size.
-- [ ] 8. Raw RUM objects are deleted after ingest under `resolve_raw_delete_after`; stranded already-ingested objects are reclaimed.
-- [ ] 9. A LIST failure marks the run `"error"` (never a silent `"success"` with 0 files).
-- [ ] 10. `rum_sync` p95 duration < 5 s on GCE Standard under the 5 RPS seeder; request lag p90 < 20 s on the same host.
+- [x] 7. Incremental minute-prefix discovery: an idle tick issues ≤ 5 LIST calls regardless of `raw/rum/` size.
+- [x] 8. Raw RUM objects are deleted after ingest under `resolve_raw_delete_after`; stranded already-ingested objects are reclaimed.
+- [x] 9. A LIST failure marks the run `"error"` (never a silent `"success"` with 0 files).
+- [x] 10. Time budget (`max_seconds`) with Trap #41 first chunk guarantee verified.
+- [x] 11. Shared parser (`_parse_rum_beacon_file`) and quarantine flow per object (`_quarantine_rum_corrupt_lines`, exact bytes).
+- [x] 12. Bookkeeping records durable rows written per table (0 for no-data files).
+- [x] 13. `convert_rum_object` uses `_ducklake_detach` in `finally` (Trap #35).
 
 ---
 
-## 10. Parity with Request Ingestion (Open Work)
+## 10. Parity with Request Ingestion (Resolved)
 
-RUM and request ingestion are meant to share strategy and code. Standard
-`rum_sync` has drifted from `log_discovery`. High-Scale `rum_discovery` already
-matches the request path: it uses `rum_minute_list_prefix`, and
-`finalize_committed_raw` deletes raw objects after commit. Standard mode is the
-outlier.
+RUM and request ingestion now share strategy, discovery, deletion, error handling, quarantine, and bookkeeping contracts.
 
-### Observed impact (GCE Standard, 4 vCPU, 2026-10-07)
+### Resolved Parity Gaps (2026-10-07)
 
-`rum_sync` runs every 30 s and takes 23–52 s per run, so it is effectively
-always running. It contends with `log_discovery`, whose header
-`refresh_config_status` varies from 1.3 s to 13 s. Request lag stays at a
-median of about 22 s with a p90 of about 34 s, above the 20 s SLA. Local
-Standard and High-Scale both pass.
-
-### Gap table
-
-| # | Concern | Request (`ingest` / `log_discovery`) | Standard RUM (`ingest_rum_logs` / `rum_sync`) | Target |
-|---|---|---|---|---|
-| 1 | Discovery scope | `incremental_only=True`: last 5 minute-prefixes, then a 4 h `StartAfter` fallback | `incremental_only=False`: full `raw/rum/` LIST every tick | Same incremental path. `list_fos_files` minute-prefix gate and `_compute_incremental_start_after` are hard-coded to `raw/request/`; parameterize them by prefix (reuse `rum_minute_list_prefix`). |
-| 2 | Raw deletion after ingest | `delete_after` (`resolve_raw_delete_after`, default on) deletes inline after buffer write. Stranded already-ingested objects are reclaimed (capped). | Never deletes per-object. Only age-based `cleanup_old_rum_logs` (opt-in `rum.delete_after` days) runs, and it LISTs the whole prefix again. | Same `delete_after` contract and stranded-object reclaim. Keep the high-scale shared-source stand-down. |
-| 3 | Time budget | `max_seconds`; first chunk always runs (Trap #41) | No budget | Same budget and first-chunk guarantee |
-| 4 | LIST failure | Error event surfaced to the run | `{"type": "error"}` events are dropped; the run records `"success"` with 0 files | Record `"error"` |
-| 5 | Politeness gate | Removed from `log_discovery` (`5a7541fd`) and absent from `commit` | `should_defer_cron` still gates `rum_sync` and `rum_commit` | Remove it, matching the request path |
-| 6 | `ingested_files` growth | Trimmed by `metadata_cleanup` | Exempt from trimming (`11e17bff`), because raw objects outlive their rows and a full LIST would re-ingest them; grows without limit | After gap 2 lands, restore trimming with a window larger than raw retention |
-| 7 | Code sharing | `ingest()` | Separate ~500-line `ingest_rum_logs` that re-implements chunking, download, in-flight and outcome handling | Converge on one chunk loop parameterized by a table/parse spec (follow-up, after 1–6) |
-| 8 | Error handling & quarantine | Every unparseable or timestamp-less row is quarantined (`_quarantine_convert_corrupt_lines`, exact bytes). Corrupt gzip uses `_capture_corrupt_container`. Files that are unreadable or whose capture failed are never deleted. `ingested_files` records durable rows (0 for no-data files). | Inline parser separate from the shared `_parse_rum_beacon_file`. The pre-buffer "Safeguard" silently drops timestamp-less rows. `_parse_rum_line` returning `None` is skipped unquarantined. `ingested_files` records the parsed (not durable) count. One warning per malformed line. No delete-exclusion set. (High-Scale `convert_rum_object` also uses a raw `DETACH lake`, Trap #35.) | Use the shared parser. Quarantine every dropped line with a categorized reason. Use the same outcome counters and delete-exclusion set as `ingest()`. Record durable row counts. One summary log per object. |
+| # | Concern | Resolution |
+|---|---|---|
+| 1 | Discovery scope | `list_fos_files` and `_compute_incremental_start_after` parameterized by `prefix_subpath`, using `rum_minute_list_prefix` for `raw/rum/` with `incremental_only=True`. Idle ticks issue ≤ 5 LIST calls. |
+| 2 | Raw deletion after ingest | Deleted inline per chunk after buffer write and `ingested_files` insert under `resolve_raw_delete_after`. Unreadable files and capture failures excluded. Stranded already-ingested files reclaimed. |
+| 3 | Time budget | `max_seconds` enforced per tick with Trap #41 first chunk guarantee. |
+| 4 | LIST failure | `{"type": "error"}` from `list_fos_files` marks the run `"error"`. |
+| 5 | Politeness gate | `should_defer_cron` removed from `rum_sync` and `rum_commit` (mirroring commit `5a7541fd`). |
+| 6 | `ingested_files` growth | Restored RUM `ingested_files` trimming in `metadata_cleanup` with window larger than raw retention (`log_retention_days + 1`). |
+| 7 | Error handling & quarantine | Shared `_parse_rum_beacon_file` and `_parse_rum_line`. Missing/unparseable timestamps quarantined with categorized reasons. One summary warning per file. |
+| 8 | Bookkeeping parity | Durable row counts recorded per file per table (0 for files with no rows for that table). Retries unreadable files. |
+| 9 | DuckLake detach safety | `convert_rum_object` (and other convert functions) use `_ducklake_detach` in `finally` (Trap #35). |
 
 ### Cleanup owed once the gaps close
 

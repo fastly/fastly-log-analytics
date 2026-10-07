@@ -496,3 +496,311 @@ def test_ingest_rum_logs_faro_dual_fan_out(
     errors_row = [r for r in ingested if r["table_name"] == "client_errors"][0]
     assert vitals_row["row_count"] == 1
     assert errors_row["row_count"] == 1
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.core.rum_ingest._get_fos_client")
+@patch("backend.core.metadata.get_con")
+@patch("backend.core.metadata.ingest_log.get_con")
+@patch("backend.core.rum_ingest.start_cron_run")
+@patch("backend.core.rum_ingest.log_cron_run")
+@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+def test_ingest_rum_logs_list_fos_files_error_marks_run_error(
+    mock_finalize,
+    mock_log,
+    mock_start,
+    mock_get_con_ingest,
+    mock_get_con_metadata,
+    mock_get_fos,
+    mock_get_source,
+    mock_metadata_db,
+):
+    """Gap 4: A LIST error from list_fos_files marks the RUM run error, not success with 0 files."""
+    service_id = "test_service"
+    mock_get_con_ingest.return_value = mock_metadata_db
+    mock_get_con_metadata.return_value = mock_metadata_db
+    mock_start.return_value = 123
+    mock_get_source.return_value = {
+        "name": "test_service",
+        "service_id": service_id,
+        "bucket": "test-bucket",
+        "prefix": "test-prefix",
+    }
+
+    def fake_list_gen(**kwargs):
+        yield {"type": "error", "message": "FOS list failed: Access Denied"}
+        return {
+            "new_files": [],
+            "file_sizes": {},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    with patch("backend.core.ingest.list_fos_files", side_effect=fake_list_gen):
+        events = list(ingest_rum_logs(service_id))
+
+    # Must yield error event, not done 0
+    assert any(evt[0] == "error" for evt in events), f"Expected error event, got {events}"
+
+    # log_cron_run must be called with status='error'
+    assert mock_log.called
+    call_args = mock_log.call_args[0]
+    call_kwargs = mock_log.call_args[1]
+    status = call_args[3] if len(call_args) > 3 else call_kwargs.get("status")
+    assert status == "error", f"Expected cron run status 'error', got {status}"
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.core.rum_ingest._get_fos_client")
+@patch("backend.core.metadata.get_con")
+@patch("backend.core.metadata.ingest_log.get_con")
+@patch("backend.core.rum_ingest.start_cron_run")
+@patch("backend.core.rum_ingest.log_cron_run")
+@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+def test_ingest_rum_logs_incremental_idle_tick_bounds_list_calls(
+    mock_finalize,
+    mock_log,
+    mock_start,
+    mock_get_con_ingest,
+    mock_get_con_metadata,
+    mock_get_fos,
+    mock_get_source,
+    mock_metadata_db,
+):
+    """Gap 1: Incremental discovery on an idle tick issues <= 5 LIST calls
+    against a large mocked raw/rum/ prefix."""
+    service_id = "test_service"
+    mock_get_con_ingest.return_value = mock_metadata_db
+    mock_get_con_metadata.return_value = mock_metadata_db
+    mock_start.return_value = 123
+    mock_get_source.return_value = {
+        "name": "test_service",
+        "service_id": service_id,
+        "bucket": "test-bucket",
+    }
+
+    # Pre-populate ingested_files with existing v3 RUM files
+    mock_metadata_db.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name) "
+        "VALUES (?, ?, 10, 100, 'client_vitals')",
+        ("s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/file1.json.gz", "test_service"),
+    )
+    mock_metadata_db.execute(
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, table_name) "
+        "VALUES (?, ?, 10, 100, 'client_errors')",
+        ("s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/file1.json.gz", "test_service"),
+    )
+    mock_metadata_db.commit()
+
+    list_calls = []
+    mock_s3 = MagicMock()
+    mock_get_fos.return_value = mock_s3
+    mock_paginator = MagicMock()
+
+    def fake_paginate(**kwargs):
+        list_calls.append(kwargs)
+        # If full raw/rum/ prefix is scanned, simulate a large bucket returning 10 pages
+        if kwargs.get("Prefix") == "raw/rum/":
+            return [
+                {
+                    "Contents": [
+                        {
+                            "Key": f"raw/rum/year=2026/month=10/day=07/hour=10/minute={i:02d}/old_{j}.json.gz",
+                            "Size": 100,
+                        }
+                        for j in range(100)
+                    ]
+                }
+                for i in range(10)
+            ]
+        # Minute prefix returns empty (idle tick)
+        return [{"Contents": []}]
+
+    mock_paginator.paginate.side_effect = fake_paginate
+    mock_s3.get_paginator.return_value = mock_paginator
+
+    events = list(ingest_rum_logs(service_id))
+    assert events == [("started", 123), ("done", 0)]
+
+    # The idle tick must issue <= 5 LIST calls (one per minute prefix),
+    # never a full scan of raw/rum/
+    assert len(list_calls) <= 5, f"Expected <= 5 LIST calls on idle tick, got {len(list_calls)}: {list_calls}"
+    assert all("minute=" in call.get("Prefix", "") for call in list_calls), (
+        f"All calls must be minute-scoped, got {list_calls}"
+    )
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.core.rum_ingest._get_fos_client")
+@patch("backend.core.metadata.get_con")
+@patch("backend.core.metadata.ingest_log.get_con")
+@patch("backend.core.rum_ingest.start_cron_run")
+@patch("backend.core.rum_ingest.log_cron_run")
+@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+@patch("backend.core.iceberg.write_to_buffer")
+def test_ingest_rum_logs_time_budget_allows_first_chunk_trap_41(
+    mock_write_buffer,
+    mock_finalize,
+    mock_log,
+    mock_start,
+    mock_get_con_ingest,
+    mock_get_con_metadata,
+    mock_get_fos,
+    mock_get_source,
+    mock_metadata_db,
+    monkeypatch,
+):
+    """Gap 3 & Trap #41: ingest_rum_logs respects max_seconds budget,
+    but ALWAYS allows the first chunk to execute even if the budget is expired."""
+    import io
+    import time
+
+    service_id = "test_service"
+    mock_get_con_ingest.return_value = mock_metadata_db
+    mock_get_con_metadata.return_value = mock_metadata_db
+    mock_start.return_value = 123
+    mock_get_source.return_value = {
+        "name": "test_service",
+        "service_id": service_id,
+        "bucket": "test-bucket",
+    }
+
+    # Generate 100 fake files (2 chunks of 50)
+    fake_files = [
+        f"s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/f_{i}.json.gz" for i in range(100)
+    ]
+    valid_line = json.dumps({"timestamp": "2026-10-07T14:50:00Z", "rum_metric_name": "LCP", "rum_metric_value": "120"})
+    gz_content = gzip.compress(valid_line.encode("utf-8"))
+
+    mock_s3 = MagicMock()
+    mock_get_fos.return_value = mock_s3
+    mock_s3.get_object.return_value = {"Body": io.BytesIO(gz_content)}
+
+    def fake_list_gen(**kwargs):
+        if False:
+            yield {}
+        return {
+            "new_files": fake_files,
+            "file_sizes": {f: len(gz_content) for f in fake_files},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
+
+    # Time manipulation: start at 1000.0, and after chunk 0 completes, advance time to 2000.0 (past max_seconds=20)
+    current_time = 1000.0
+
+    def fake_time():
+        nonlocal current_time
+        return current_time
+
+    monkeypatch.setattr(time, "time", fake_time)
+
+    # Wrap _download_chunk_to_local to advance time after first chunk
+    from backend.core import ingest as ingest_mod
+
+    orig_download = ingest_mod._download_chunk_to_local
+
+    download_count = 0
+
+    def counting_download(s3_client, chunk, tmpdir):
+        nonlocal current_time, download_count
+        download_count += 1
+        res = orig_download(s3_client, chunk, tmpdir)
+        current_time += 100.0  # Expire the 20s budget
+        return res
+
+    monkeypatch.setattr(ingest_mod, "_download_chunk_to_local", counting_download)
+
+    events = list(ingest_rum_logs(service_id, max_seconds=20))
+
+    # Exactly 1 chunk must have downloaded and processed (50 files), not 2 chunks (100 files)
+    assert download_count == 1, f"Expected exactly 1 chunk due to max_seconds bound, got {download_count}"
+
+
+@patch("backend.core.rum_ingest.get_source_for_service")
+@patch("backend.core.rum_ingest._get_fos_client")
+@patch("backend.core.metadata.get_con")
+@patch("backend.core.metadata.ingest_log.get_con")
+@patch("backend.core.rum_ingest.start_cron_run")
+@patch("backend.core.rum_ingest.log_cron_run")
+@patch("backend.core.rum_ingest.finalize_cron_run_if_running")
+@patch("backend.core.iceberg.write_to_buffer")
+def test_ingest_rum_logs_deletes_raw_objects_inline_and_excludes_failures(
+    mock_write_buffer,
+    mock_finalize,
+    mock_log,
+    mock_start,
+    mock_get_con_ingest,
+    mock_get_con_metadata,
+    mock_get_fos,
+    mock_get_source,
+    mock_metadata_db,
+    monkeypatch,
+):
+    """Gap 2: ingest_rum_logs deletes raw objects inline after buffer write + insert_ingested_files,
+    excluding unreadable files and files whose quarantine capture failed."""
+    import io
+
+    service_id = "test_service"
+    mock_get_con_ingest.return_value = mock_metadata_db
+    mock_get_con_metadata.return_value = mock_metadata_db
+    mock_start.return_value = 123
+    mock_get_source.return_value = {
+        "name": "test_service",
+        "service_id": service_id,
+        "bucket": "test-bucket",
+    }
+
+    file_good = "s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/good.json.gz"
+    file_bad = "s3://test-bucket/raw/rum/year=2026/month=10/day=07/hour=14/minute=50/bad.json.gz"
+    good_line = (
+        json.dumps({"timestamp": "2026-10-07T14:50:00Z", "rum_metric_name": "LCP", "rum_metric_value": "120"}).encode()
+        + b"\n"
+    )
+    bad_line = b'{"timestamp":\n'  # malformed JSON
+
+    content_good = gzip.compress(good_line)
+    content_bad = gzip.compress(bad_line)
+
+    deleted_batches = []
+
+    def fake_delete(fos_client, bucket, keys):
+        deleted_batches.append(list(keys))
+        return len(keys), set()
+
+    monkeypatch.setattr("backend.core.ingest._delete_objects_robust_with_failures", fake_delete)
+
+    def fake_list_gen(**kwargs):
+        if False:
+            yield {}
+        return {
+            "new_files": [file_good, file_bad],
+            "file_sizes": {file_good: len(content_good), file_bad: len(content_bad)},
+            "skipped_already": 0,
+            "stranded_already": [],
+        }
+
+    monkeypatch.setattr("backend.core.ingest.list_fos_files", fake_list_gen)
+
+    mock_s3 = MagicMock()
+    mock_get_fos.return_value = mock_s3
+
+    def fake_get_object(**kwargs):
+        key = kwargs.get("Key")
+        if "good.json.gz" in key:
+            return {"Body": io.BytesIO(content_good)}
+        return {"Body": io.BytesIO(content_bad)}
+
+    mock_s3.get_object.side_effect = fake_get_object
+
+    # Simulate quarantine capture failure for bad.json.gz
+    with patch("backend.core.ingest._quarantine_rum_corrupt_lines", side_effect=OSError("quarantine unavailable")):
+        events = list(ingest_rum_logs(service_id))
+
+    # The good file's raw object MUST have been deleted inline
+    all_deleted_keys = [k for batch in deleted_batches for k in batch]
+    assert "raw/rum/year=2026/month=10/day=07/hour=14/minute=50/good.json.gz" in all_deleted_keys
+    # The bad file (quarantine capture failure) MUST be excluded from deletion
+    assert "raw/rum/year=2026/month=10/day=07/hour=14/minute=50/bad.json.gz" not in all_deleted_keys

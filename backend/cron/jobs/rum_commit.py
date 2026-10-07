@@ -42,14 +42,8 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
     if not sync_cfg.get("enabled", True) and not force:
         return
 
-    is_manual = kwargs.get("is_manual", False) or run_id is not None
-    if not is_manual and not force:
-        from backend.utils.active_requests import should_defer_cron
-
-        if should_defer_cron("rum_commit", service_id):
-            logger.info("⏸️ [rum_commit] %s: active queries running, deferring RUM commit tick", service_id)
-            return
-
+    # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
+    # tick waits a full interval, and dashboard/SSE polling kept it tripped.
     try:
         if run_id is None:
             run_id = start_cron_run(src, "rum_commit")

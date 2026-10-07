@@ -192,11 +192,9 @@ def test_rum_commit_returned_partial_result_blocks_publication(monkeypatch):
     assert "Partial RUM commit" in kwargs["summary"]
 
 
-def test_rum_commit_active_request_politeness(monkeypatch):
-    """When active queries are present:
-    - Background automated ticks defer
-    - Manual ticks (is_manual=True) or forced ticks (force=True) bypass deferral
-    """
+def test_rum_commit_not_deferred_by_in_flight_requests(monkeypatch):
+    """Mirroring commit 5a7541fd: RUM freshness requires that automated ticks
+    are never deferred by active queries."""
     start_calls = []
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
@@ -204,21 +202,11 @@ def test_rum_commit_active_request_politeness(monkeypatch):
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task) or 1002)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
 
-    # Automated background run -> defers
-    rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
-    assert len(start_calls) == 0
-
-    # Force run -> proceeds
     with patch("backend.cron.scheduler._check_disk_space", return_value=(False, "disk full")):
         with patch("backend.core.duckdb.log_cron_run"):
-            rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID, force=True)
+            # Automated background run -> proceeds, does NOT defer
+            rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID)
             assert len(start_calls) == 1
-
-    # Manual run -> proceeds
-    with patch("backend.cron.scheduler._check_disk_space", return_value=(False, "disk full")):
-        with patch("backend.core.duckdb.log_cron_run"):
-            rum_commit_mod._run_rum_commit.__wrapped__(SERVICE_ID, is_manual=True)
-            assert len(start_calls) == 2
 
 
 def test_rum_commit_aborts_on_low_disk(monkeypatch):

@@ -216,6 +216,24 @@ def test_convert_rum_object_with_failed_lake_attach_stays_retryable(tmp_path):
     assert "attach failed" in row["last_error"]
 
 
+def test_convert_rum_object_uses_ducklake_detach_in_finally(tmp_path):
+    """Trap #35: convert_rum_object must call _ducklake_detach in finally,
+    never raw duckdb_con.execute('DETACH lake')."""
+    object_key = "raw/rum/2026/08/27/11/02/detach_test.json.gz"
+    con, _ = _clear_ledger()
+    _seed_discovered(con, object_key)
+
+    raw = tmp_path / "detach_test.json"
+    _write_gz(raw, [VITALS_LINE])
+    with (
+        _rum_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": str(raw)})),
+        patch("backend.core.iceberg._ducklake._ducklake_detach") as mock_detach,
+    ):
+        status = convert_rum_object(SERVICE_ID, object_key, "w1")
+        assert status == "committed"
+        assert mock_detach.called, "convert_rum_object must call _ducklake_detach in finally"
+
+
 # ── download failures: dead key vs transient ──────────────────────────────
 
 

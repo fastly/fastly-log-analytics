@@ -1119,6 +1119,30 @@ default 4). Concurrency is enabled only when a pool-backed `control_plane` is se
 the SQLite ledger is not thread-safe. Size it against Postgres `max_connections`:
 pods × concurrency connections are added on top of the existing load.
 
+### 44. RUM and request ingest must share the parse, quarantine, and deletion contract
+
+Standard-mode RUM ingest (`rum_sync` / `ingest_rum_logs`) drifted from request
+ingest (`log_discovery` / `ingest`), creating several severe failure modes:
+1. Discovery scanned the full `raw/rum/` prefix every tick instead of using bounded
+   incremental minute-prefixes (`rum_minute_list_prefix`), burning host CPU and
+   causing 20–50s ticks that starved request discovery.
+2. Raw objects were never deleted inline upon buffer commit; `cleanup_old_rum_logs`
+   only deleted after 90 days. Because `metadata_cleanup` trimmed `ingested_files` after
+   1 day, subsequent full scans re-ingested hundreds of thousands of aged raw beacons
+   as duplicate rows.
+3. Errors and corrupt lines used an inline parser that silently dropped rows missing
+   timestamps, rather than quarantining them with exact bytes via
+   `_quarantine_rum_corrupt_lines`.
+4. Deletion exclusion sets were missing, risking data loss on unreadable or capture-failed objects.
+
+Always enforce the unified contract across both streams:
+- Parameterize minute-prefix discovery and `StartAfter` bounds by prefix subpath.
+- Delete each raw object inline per chunk under `resolve_raw_delete_after`, excluding
+  unreadable objects and objects whose quarantine capture failed.
+- Share the parser (`_parse_rum_beacon_file` / `_parse_rum_line`) and quarantine flow.
+- Record durable rows in `ingested_files` (0 for files that produced no rows for that table).
+- Enforce the `max_seconds` budget with the first chunk always allowed to run (Trap #41).
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

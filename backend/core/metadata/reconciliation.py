@@ -71,10 +71,6 @@ _CLEANUP_TABLES = (
     ("slow_queries", "slow_queries_days", "started_at_utc"),
     ("quarantined_files", "quarantine_days", "quarantined_at"),
 )
-# RUM dedup rows are never aged out: RUM raw objects outlive this retention
-# window (they are kept, or deleted only after ``rum.delete_after`` days) and
-# the RUM LIST is a full scan, so a trimmed row re-ingests its file as duplicates.
-_INGESTED_FILES_RETENTION_FILTER = " AND table_name NOT IN ('client_vitals', 'client_errors')"
 # Table whose timestamp column is unix-epoch seconds, not an ISO string.
 # Handled with an epoch-cutoff DELETE instead of the standard
 # ``datetime('now', '-Nd')`` comparison the other tables use.
@@ -353,20 +349,44 @@ def cleanup_metadata(
                             f"(SELECT rowid FROM {table} WHERE {ts_col} < ? LIMIT ?)",
                             (cutoff_epoch, _BATCH),
                         )
+                elif table == "ingested_files":
+                    from backend import config as svcconfig
+
+                    cfg_svc = svcconfig.load_config(service_id) or {}
+                    raw_retention_days = int(cfg_svc.get("log_retention_days", 90))
+                    rum_days_int = max(days_int, raw_retention_days + 1)
+                    timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
+                    if table_postgres:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE ctid IN "
+                            f"(SELECT ctid FROM {table} WHERE "
+                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
+                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day')) "
+                            f"LIMIT ?)",
+                            (days_int, rum_days_int, _BATCH),
+                        )
+                    else:
+                        cur = table_con.execute(
+                            f"DELETE FROM {table} WHERE rowid IN "
+                            f"(SELECT rowid FROM {table} WHERE "
+                            f"(table_name NOT IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?)) "
+                            f"OR (table_name IN ('client_vitals', 'client_errors') AND {ts_col} < datetime('now', ?)) "
+                            f"LIMIT ?)",
+                            (f"-{days_int} days", f"-{rum_days_int} days", _BATCH),
+                        )
                 else:
                     timestamp_expr = _retention_timestamp_expr(ts_col, table_postgres)
-                    extra = _INGESTED_FILES_RETENTION_FILTER if table == "ingested_files" else ""
                     if table_postgres:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE ctid IN "
                             f"(SELECT ctid FROM {table} "
-                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day'){extra} LIMIT ?)",
+                            f"WHERE {timestamp_expr} < CURRENT_TIMESTAMP - (? * INTERVAL '1 day') LIMIT ?)",
                             (days_int, _BATCH),
                         )
                     else:
                         cur = table_con.execute(
                             f"DELETE FROM {table} WHERE rowid IN "
-                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?){extra} LIMIT ?)",
+                            f"(SELECT rowid FROM {table} WHERE {ts_col} < datetime('now', ?) LIMIT ?)",
                             (f"-{days_int} days", _BATCH),
                         )
                 n = int(cur.rowcount or 0)

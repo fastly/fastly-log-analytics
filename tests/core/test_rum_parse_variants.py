@@ -22,6 +22,8 @@ side of the same path.
 import gzip
 import json
 
+import pytest
+
 from backend.core.ingest import _parse_rum_beacon_file, _parse_rum_line
 
 SERVICE_ID = "svc-parse-variants"
@@ -306,18 +308,41 @@ def test_parse_rum_line_returns_none_for_another_services_beacon():
     difference, so the parser returns None rather than empty lists."""
     assert _parse_rum_line({"rum_service_id": "some-other-service", "rum_metric_name": "LCP"}, SERVICE_ID) is None
     # Our own service_id (either key spelling) parses normally.
-    assert _parse_rum_line({"service_id": SERVICE_ID, "rum_metric_name": "LCP"}, SERVICE_ID) is not None
+    assert (
+        _parse_rum_line(
+            {"service_id": SERVICE_ID, "timestamp": "2026-08-27T10:00:00Z", "rum_metric_name": "LCP"}, SERVICE_ID
+        )
+        is not None
+    )
 
 
-def test_parse_rum_line_falls_back_to_now_for_unparseable_timestamp():
-    """A malformed ``timestamp`` must not fail the line — a NULL/absent
-    timestamp is unwritable to the lake table (non-null column), so the
-    parser substitutes now and keeps the beacon."""
-    log_data = {"timestamp": "not-a-timestamp", "rum_metric_name": "LCP", "rum_metric_value": "1"}
-    vitals_rows, _ = _parse_rum_line(log_data, SERVICE_ID)
-    ts = vitals_rows[0]["timestamp"]
-    assert ts is not None
-    assert ts.tzinfo is not None
+def test_parse_rum_line_raises_on_missing_or_unparseable_timestamp():
+    """Gap 8: A line with a missing or unparseable timestamp must fail so that
+    it is quarantined with a categorized reason rather than silently dropping or inventing timestamps."""
+    with pytest.raises(ValueError, match="missing_timestamp"):
+        _parse_rum_line({"rum_metric_name": "LCP", "rum_metric_value": "1"}, SERVICE_ID)
+
+    with pytest.raises(ValueError, match="invalid_timestamp"):
+        _parse_rum_line({"timestamp": "not-a-timestamp", "rum_metric_name": "LCP", "rum_metric_value": "1"}, SERVICE_ID)
+
+
+def test_parse_rum_beacon_file_quarantines_missing_or_unparseable_timestamp(tmp_path):
+    """Gap 8: Every line with missing/unparseable timestamp goes into corrupt_lines."""
+    raw_file = tmp_path / "bad_ts.json.gz"
+    lines = [
+        json.dumps({"timestamp": "2026-08-27T10:04:00Z", "rum_metric_name": "CLS", "rum_metric_value": "0.2"}),
+        json.dumps({"rum_metric_name": "LCP", "rum_metric_value": "1.0"}),  # missing timestamp
+        json.dumps({"timestamp": "bad-iso", "rum_metric_name": "INP", "rum_metric_value": "150"}),  # invalid timestamp
+    ]
+    with gzip.open(raw_file, "wt", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    vitals, errors, corrupt = _parse_rum_beacon_file(str(raw_file), SERVICE_ID)
+    assert len(vitals) == 1
+    assert len(corrupt) == 2
+    reasons = [reason for _, reason in corrupt]
+    assert any("missing_timestamp" in r for r in reasons)
+    assert any("invalid_timestamp" in r for r in reasons)
 
 
 def test_parse_rum_beacon_file_ignores_blank_lines_without_quarantining_them():

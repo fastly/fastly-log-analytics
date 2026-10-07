@@ -270,29 +270,85 @@ def test_cleanup_force_disables_ingested_files_when_delete_after_false(monkeypat
     assert override_msgs, "expected status event explaining the override"
 
 
-def test_cleanup_never_trims_rum_ingested_files_rows():
-    """RUM raw objects outlive the ingested_files retention window and the
-    RUM LIST is a full (non-incremental) scan, so trimming RUM dedup rows
-    makes rum_sync re-ingest every aged-out beacon file as duplicate rows."""
+def test_cleanup_trims_rum_ingested_files_past_raw_retention_window():
+    """RUM raw objects are deleted inline as they go (gap 2), and any age-based
+    backstop deletes within log_retention_days (default 90d). Metadata cleanup
+    trims RUM ingested_files older than that window so ingested_files does not
+    grow without limit."""
     sid = "svc-cleanup-rum-dedup"
     _seed_ingested_file(sid, 3, days_ago=400)
     con = _con(sid)
+    # Seed 4 RUM files 400 days ago (past the 91-day raw retention window)
+    # and 2 RUM files 10 days ago (within the 91-day window)
     con.executemany(
         "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
         "VALUES (?, 'fos', ?, datetime('now', '-400 days'), 1, 100)",
         [(f"raw/rum/old-{t}-{i}.gz", t) for t in ("client_vitals", "client_errors") for i in range(2)],
     )
+    con.executemany(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'fos', ?, datetime('now', '-10 days'), 1, 100)",
+        [(f"raw/rum/recent-{t}.gz", t) for t in ("client_vitals", "client_errors")],
+    )
     con.commit()
 
     result = reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 1})
 
-    assert result["deleted"]["ingested_files"] == 3
-    remaining = {
-        r["table_name"]
-        for r in _con(sid).execute("SELECT table_name FROM ingested_files WHERE source_name = 'fos'").fetchall()
-    }
-    assert remaining == {"client_vitals", "client_errors"}
-    assert result["after"]["ingested_files"] == 4
+    # 3 request files (400d old, cutoff 1d) + 4 RUM files (400d old, cutoff 91d) = 7 deleted
+    assert result["deleted"]["ingested_files"] == 7
+    # 2 recent RUM files (10d old, within 91d window) survive
+    assert result["after"]["ingested_files"] == 2
+    remaining = [
+        r["file_name"]
+        for r in _con(sid).execute("SELECT file_name FROM ingested_files WHERE source_name = 'fos'").fetchall()
+    ]
+    assert all("recent-" in fn for fn in remaining)
+
+
+def test_cleanup_rum_trimming_causes_no_reingest(monkeypatch):
+    """Gap 6 & Gap 2: Proving that trimming aged RUM ingested_files rows does not
+    cause re-ingest because raw objects were deleted inline and discovery is incremental."""
+    from unittest.mock import MagicMock
+
+    from backend.core.rum_ingest import ingest_rum_logs
+
+    sid = "svc-cleanup-no-reingest"
+    con = _con(sid)
+    # 1. File was previously ingested 400 days ago
+    old_file_key = "s3://test-bucket/raw/rum/year=2025/month=08/day=01/hour=12/minute=00/old.json.gz"
+    con.execute(
+        "INSERT INTO ingested_files (file_name, source_name, table_name, ingested_at, row_count, file_size_bytes) "
+        "VALUES (?, 'test_service', 'client_vitals', datetime('now', '-400 days'), 1, 100)",
+        (old_file_key,),
+    )
+    con.commit()
+
+    # 2. Cleanup runs and trims the 400d old record
+    reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 1})
+    assert con.execute("SELECT COUNT(*) FROM ingested_files WHERE file_name = ?", (old_file_key,)).fetchone()[0] == 0
+
+    # 3. Next rum_sync runs against FOS:
+    # Per the Gap 2 contract, old.json.gz was deleted upon ingest, so FOS has no such file.
+    # Furthermore, incremental minute-prefix listing only scans recent minutes.
+    mock_s3 = MagicMock()
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = [{"Contents": []}]
+    mock_s3.get_paginator.return_value = mock_paginator
+
+    monkeypatch.setattr("backend.core.rum_ingest._get_fos_client", lambda src: mock_s3)
+    monkeypatch.setattr(
+        "backend.core.rum_ingest.get_source_for_service",
+        lambda s: {"name": sid, "bucket": "test-bucket", "service_id": sid},
+    )
+    monkeypatch.setattr("backend.core.metadata.get_con", lambda s: con)
+    monkeypatch.setattr("backend.core.rum_ingest.start_cron_run", lambda s, t: 1)
+    monkeypatch.setattr("backend.core.rum_ingest.log_cron_run", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.core.rum_ingest.finalize_cron_run_if_running", lambda *a, **kw: None)
+
+    events = list(ingest_rum_logs(sid))
+    # Must report 0 rows ingested — NO re-ingest!
+    assert events == [("started", 1), ("done", 0)]
+    assert con.execute("SELECT COUNT(*) FROM ingested_files").fetchone()[0] == 0
 
 
 def test_cleanup_on_event_callback_failure_does_not_abort():

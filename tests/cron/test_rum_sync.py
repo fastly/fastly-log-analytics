@@ -461,7 +461,7 @@ def test_beacon_ingest_still_proceeds_when_faro_reconcile_raises(config_store, f
         ("done", 10),
     ]
 
-    def fake_ingest(service_id):
+    def fake_ingest(service_id, *args, **kwargs):
         yield from events
 
     monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", fake_ingest)
@@ -490,7 +490,9 @@ def test_faro_only_reconcile_failure_marks_standard_rum_run_warning(monkeypatch)
     con.execute("INSERT INTO cron_runs VALUES (42, ?, 'success')", (SERVICE_ID,))
     monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
     monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
-    monkeypatch.setattr(rum_sync_mod, "ingest_rum_logs", lambda service_id: iter([("started", 42), ("done", 0)]))
+    monkeypatch.setattr(
+        rum_sync_mod, "ingest_rum_logs", lambda service_id, *args, **kwargs: iter([("started", 42), ("done", 0)])
+    )
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.add_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
@@ -509,7 +511,7 @@ def test_standard_rum_data_plane_error_is_not_downgraded_to_warning(monkeypatch)
     monkeypatch.setattr("backend.core.metadata.get_con", lambda service_id: con)
     monkeypatch.setattr(rum_sync_mod, "_reconcile_faro_bundle", lambda service_id, run_id: False)
 
-    def failed_ingest(service_id):
+    def failed_ingest(service_id, *args, **kwargs):
         yield ("started", 43)
         con.execute("UPDATE cron_runs SET status = 'error' WHERE id = 43")
         con.commit()
@@ -827,3 +829,19 @@ def test_skips_when_no_config(config_store, frozen_now, mock_fos, mock_download,
     rum_sync_mod._reconcile_faro_bundle("no-such-service", None)
 
     assert download_calls == []
+
+
+def test_rum_sync_not_deferred_by_in_flight_requests(monkeypatch):
+    """Mirroring commit 5a7541fd: RUM freshness requires that automated ticks
+    are never deferred by active queries."""
+    import os
+    from unittest.mock import patch
+
+    ingest_mock = MagicMock(return_value=iter([]))
+    monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", ingest_mock)
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
+
+    with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standard"}):
+        rum_sync_mod._run_rum_sync.__wrapped__(SERVICE_ID)
+
+    assert ingest_mock.called, "rum_sync must not be deferred by active queries"
