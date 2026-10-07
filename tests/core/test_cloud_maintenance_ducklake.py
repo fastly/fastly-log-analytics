@@ -535,6 +535,21 @@ def test_optimize_table_flushes_inlined_rows_to_parquet(tmp_path, monkeypatch):
     assert _read(src) == [f"r{i}" for i in range(5)], "the flush must be lossless"
 
 
+def test_optimize_table_does_not_list_legacy_iceberg_metadata(tmp_path, monkeypatch):
+    """DuckLake rewrites produce no Iceberg metadata.json; the legacy pointer
+    discovery must not run (it LISTs every historical metadata.json on FOS
+    while the service lock is held)."""
+    calls = []
+    monkeypatch.setattr(buffer_mod._core_mod, "_sync_metadata_pointer_from_discovery", lambda *a, **k: calls.append(a))
+    src = _make_source(tmp_path, f"noptr{uuid.uuid4().hex[:8]}")
+    _seed(src, "logs", _logs_cols(), [(NOW - timedelta(hours=i), f"r{i}") for i in range(3)])
+
+    result = buffer_mod._optimize_table_impl(src)
+
+    assert "error" not in result
+    assert calls == []
+
+
 def test_ducklake_write_connection_file_mode(tmp_path):
     """Under file mode, _ducklake_write_connection attaches read-write,
     executes statements, and restores read-only mode upon exit."""

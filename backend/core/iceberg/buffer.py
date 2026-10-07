@@ -699,12 +699,6 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
     if committed_paths:
         tombstone_buffer_files(source, committed_paths)
 
-    if rows_committed > 0:
-        try:
-            _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
-        except Exception as e:
-            logger.warning("%s metadata pointer sync after commit failed: %s", _core_mod._ICE, e)
-
     result = {
         "files_committed": len(committed_paths),
         "rows_committed": rows_committed,
@@ -772,10 +766,6 @@ def _optimize_table_impl(
                 int(r[3]) for r in rewrite_rows if len(r) >= 4
             )
 
-            try:
-                _core_mod._sync_metadata_pointer_from_discovery(source, table_name)
-            except Exception as e:
-                logger.warning("%s metadata pointer sync after rewrite failed: %s", _core_mod._ICE, e)
             return {
                 "files_rewritten": files_rewritten,
                 "files_added": files_added,

@@ -532,6 +532,32 @@ class TestCommitBufferChunking:
         assert attach_calls["n"] == 3
         assert _lake_count(src) == 5
 
+    def test_commit_does_not_list_legacy_iceberg_metadata(self, tmp_path, monkeypatch):
+        """A DuckLake commit writes no Iceberg metadata.json, so the legacy
+        pointer discovery (a paginated FOS LIST of every historical
+        metadata.json) must not run while commit_buffer holds the service
+        lock — on a long-lived service it took ~30 s and blocked the
+        post-ingest view refresh, inflating request lag."""
+        calls = []
+        monkeypatch.setattr(
+            buffer_mod._core_mod,
+            "_sync_metadata_pointer_from_discovery",
+            lambda *a, **k: calls.append(a),
+        )
+        src = _make_source(tmp_path, f"noptr{uuid.uuid4().hex[:8]}")
+        _write_buffer(
+            src,
+            "batch_0.parquet",
+            ts=datetime(2026, 9, 23, 12, 0, tzinfo=UTC),
+            source_file="s3://b/raw/0.gz",
+            n=1,
+        )
+
+        result = _commit_buffer_impl(src)
+
+        assert result["rows_committed"] == 1
+        assert calls == []
+
     def test_chunked_commit_preserves_rows_when_a_later_chunk_fails_to_attach(self, tmp_path, monkeypatch):
         """If a later chunk's attach fails (transient contention), rows
         already committed by earlier chunks must stay committed — the
