@@ -401,9 +401,20 @@ def _run_log_discovery_cron(
         def _publish_pass_rows() -> None:
             from backend.cron.jobs._common import refresh_view_and_warm_pool
 
-            refresh_view_and_warm_pool(src, service_id, log_prefix=f"{elapsed()} [adaptive] ")
+            def _progress(ev: dict) -> None:
+                _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
+
+            refresh_view_and_warm_pool(src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress)
             try:
+                t_status = time.time()
                 refresh_config_status(service_id, include_top_values=False)
+                _progress(
+                    {
+                        "type": "status",
+                        "message": f"{elapsed()} [adaptive] refresh_config_status: "
+                        f"{int((time.time() - t_status) * 1000)}ms",
+                    }
+                )
                 from backend.sync_status_publisher import publisher as _pub
                 from backend.sync_status_snapshot import compute_sync_status_cached as _snap
 

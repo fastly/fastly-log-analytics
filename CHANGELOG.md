@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Usage-log backfill delayed the next FOS poll by ~5 s** — every `log_discovery` tick loaded every historical `fastly.edge` URL from `usage_log` (~450k on long-lived services) to find the last hour's unbackfilled files. The lookup now queries only those files' URLs.
 - **Adaptive polling hid ingested rows for up to 20 s** — `log_discovery` re-polls FOS up to twice within a tick, but only published the view and header extents after the last pass. Each follow-up pass now publishes the previous pass's rows first.
 - **Post-ingest view refresh stalled behind DuckLake commits** — every buffer commit and table optimize paginated through all legacy Iceberg `metadata.json` objects in FOS while holding the per-service lock (30 s+ on services with long Iceberg history), so the dashboard view kept serving stale buffer paths. DuckLake writes no Iceberg metadata, so both calls are removed.
 - **Standard-mode request lag exceeded one minute** — `log_discovery` ran hourly rollup recomputes inline (90–170 s on a busy service), so most ticks were skipped. Rollups now run on a per-service single-flight background worker that coalesces queued hours.

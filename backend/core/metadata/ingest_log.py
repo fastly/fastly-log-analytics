@@ -472,6 +472,9 @@ def list_unbackfilled_fastly_edge_files(
     # do the anti-join in Python. The set membership check is O(1) per
     # row; the SELECT on usage_log uses idx_usage_dedup keyed on
     # (service_id, function_name, url).
+    if not rows:
+        return []
+
     from backend.core.metadata import usage_log_db as _usage_log_db
 
     backfilled: set[str] = set()
@@ -483,14 +486,21 @@ def list_unbackfilled_fastly_edge_files(
         # against an empty table returns every outer row).
         ul_con = None
     if ul_con is not None:
+        # Scope the lookup to the outer rows' names: loading every historical
+        # fastly.edge URL (~450k on long-lived services) cost ~5 s per tick.
+        names = [r["file_name"] for r in rows]
         try:
-            backfilled.update(
-                r[0]
-                for r in ul_con.execute(
-                    "SELECT url FROM usage_log WHERE service_id = ? AND function_name = 'fastly.edge'",
-                    (service_id,),
-                ).fetchall()
-            )
+            for i in range(0, len(names), 500):
+                chunk = names[i : i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                backfilled.update(
+                    r[0]
+                    for r in ul_con.execute(
+                        "SELECT url FROM usage_log WHERE service_id = ? AND function_name = 'fastly.edge'"
+                        f" AND url IN ({placeholders})",
+                        (service_id, *chunk),
+                    ).fetchall()
+                )
         finally:
             try:
                 ul_con.close()
