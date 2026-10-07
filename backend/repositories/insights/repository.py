@@ -826,10 +826,9 @@ def get_insights(
         # connection pattern the per-insight dispatch below already uses
         # safely: DuckDB releases the GIL during query execution, and cursors
         # on the same parent connection are thread-safe to use concurrently
-        # from different threads. With ``DUCKDB_POOL_CONN_THREADS=1`` (each
-        # pool connection single-threaded — see backend/core/duckdb_pool.py)
-        # up to 4 concurrent cursors here exactly saturates the 4-core prod
-        # VM with no oversubscription. The WAF task is the only WRITE (a
+        # from different threads. DuckDB's thread pool is instance-global
+        # (``DUCKDB_THREADS``), so these cursors share it rather than each
+        # spawning their own. The WAF task is the only WRITE (a
         # CREATE TABLE into the scratch ``:memory:`` DB) among the three
         # read-only aggregate SELECTs; it writes a brand-new, uniquely-named
         # catalog object that none of the three reads touch, so there's no

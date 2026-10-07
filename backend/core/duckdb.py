@@ -958,6 +958,18 @@ def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(database, **kwargs)
 
 
+def _ensure_threads(con: duckdb.DuckDBPyConnection, n_threads: int) -> None:
+    """Set the instance-global DuckDB thread count only when it differs.
+
+    ``threads`` is shared by every connection to the same database instance;
+    each change makes DuckDB relaunch its worker pool, which can deadlock
+    against in-flight scans (AGENTS.md Trap #42).
+    """
+    current = con.execute("SELECT current_setting('threads')").fetchone()
+    if current is None or int(current[0]) != n_threads:
+        con.execute(f"SET threads = {int(n_threads)};")
+
+
 def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnection:
     """Return a tracked DuckDB connection in memory."""
     import os
@@ -1159,7 +1171,7 @@ def get_connection(
         # block (now removed) was overridden by this SET — last SET wins in DuckDB.
         _cached_n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
     try:
-        con.execute(f"SET threads = {_cached_n_threads};")
+        _ensure_threads(con, _cached_n_threads)
     except Exception:
         pass
     # CRITICAL: only auto-derive memory_limit when DUCKDB_MEMORY_LIMIT is

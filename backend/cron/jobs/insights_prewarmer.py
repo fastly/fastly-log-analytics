@@ -166,14 +166,9 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # newly-bound view tables anyway).
         con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
 
-        # CPU & Memory guard: Prewarmer is a background maintenance task and should not saturate
-        # host CPUs or exceed container memory limits on 4-vCPU systems. Limiting DuckDB threads to 1
-        # and max_workers to 2 keeps standard execution steady without blocking user queries or streaming crons.
-        try:
-            con.execute("SET memory_limit = '384MB';")
-            con.execute("SET threads = 1;")
-        except Exception:
-            pass
+        # Throttled via max_workers=2 below. Never change DuckDB threads/memory_limit here:
+        # both are instance-global, so they'd clobber every concurrent query, and
+        # changing threads mid-flight deadlocks DuckDB (AGENTS.md Trap #42).
 
         yield_to_api(max_wait_secs=1.0)
 

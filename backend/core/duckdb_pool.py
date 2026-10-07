@@ -186,22 +186,6 @@ def _pool_sweep_enabled() -> bool:
     return os.getenv("DUCKDB_POOL_SWEEP", "0").lower() in ("1", "true", "yes", "on")
 
 
-def _pool_conn_threads() -> int:
-    """Per-pool-connection DuckDB thread count.
-
-    Defaults to 1 to prevent oversubscription on the 4-core VM
-    (8 conns × 4 threads = 32 threads). Override via
-    ``DUCKDB_POOL_CONN_THREADS`` env var.
-    """
-    raw = os.getenv("DUCKDB_POOL_CONN_THREADS", "1")
-    if not raw:
-        return 1
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 1
-
-
 # Per-connection state tracking. DuckDB connection objects are slotted
 # C types — they don't accept arbitrary attribute assignment — so we
 # keep our metadata in a module-level dict keyed by id(con). Entries are
@@ -517,17 +501,6 @@ class _Pool:
                         "[pool] %s: failed to apply DUCKDB_POOL_CONN_MEMORY_LIMIT=%r: %s",
                         self.service_key,
                         mem_limit,
-                        e,
-                    )
-            conn_threads = _pool_conn_threads()
-            if conn_threads is not None:
-                try:
-                    con.execute(f"SET threads = {conn_threads}")
-                except Exception as e:
-                    logger.warning(
-                        "[pool] %s: failed to apply DUCKDB_POOL_CONN_THREADS=%d: %s",
-                        self.service_key,
-                        conn_threads,
                         e,
                     )
             self._stamp_fingerprint(con, src)

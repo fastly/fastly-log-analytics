@@ -227,7 +227,7 @@ Per-bucket reconciliation between Fastly's `/stats/service/{id}` log-emission co
 Every commit writes `metadata_location.txt` (unavoidable) and `table_summary.json` (skippable). The latter is content-hashed against `_table_summary_hash_cache`; identical payloads skip the PUT. Saves one FOS PUT per no-op commit in steady state. Cache is module-scope, process-lifetime.
 
 ### DuckDB Connection Pool ([backend/core/duckdb_pool.py](backend/core/duckdb_pool.py))
-Per-service LIFO pool replaces per-request `duckdb.connect()` + S3 / iceberg setup + view rebind (~50ms steady-state). Pool size is `DUCKDB_POOL_MAX_SIZE` (default 8). All pool connections open with `read_only=False` — `get_connection` forces this so cron writers and pool readers don't trip DuckDB's "different configuration" error on the same file. Optional per-connection tuning: `DUCKDB_POOL_CONN_MEMORY_LIMIT` (e.g. `256MB`) caps RSS growth under concurrent large scans; `DUCKDB_POOL_CONN_THREADS` reduces context-switching when `pool_size × per_conn_threads` exceeds physical cores. View-binding happens outside the pool lock to avoid deadlocking the FastAPI thread pool when an Iceberg snapshot reload blocks.
+Per-service LIFO pool replaces per-request `duckdb.connect()` + S3 / iceberg setup + view rebind (~50ms steady-state). Pool size is `DUCKDB_POOL_MAX_SIZE` (default 8). All pool connections open with `read_only=False` — `get_connection` forces this so cron writers and pool readers don't trip DuckDB's "different configuration" error on the same file. Optional per-connection tuning: `DUCKDB_POOL_CONN_MEMORY_LIMIT` (e.g. `256MB`) caps RSS growth under concurrent large scans. DuckDB `threads` is instance-global, not per-connection — it is set once from `DUCKDB_THREADS` and must never change at runtime (Trap #42). View-binding happens outside the pool lock to avoid deadlocking the FastAPI thread pool when an Iceberg snapshot reload blocks.
 
 **Pool wait observability** — `_Pool.acquire` records every checkout's wall-clock wait time to (a) the OTel `app.thread_wait_ms` histogram tagged `{outcome: reused | created | timeout, waited: true | false, service}` for off-box analysis via `docker compose logs backend | grep app.thread_wait_ms`, AND (b) a bounded in-process ring buffer (~1024 samples per service) consumed by `Pool.stats().wait` (p50/p95/p99/max/mean). `GET /api/admin/health-snapshot` exposes the per-service stats (plus `saturated_rejects_total` / `drain_rejects_total` pool-reject counters and the last-warmed timestamp); the `SystemHealthCard` on `/admin` renders top-level Pool wait p95 / Pool in-use / idle cards plus an expandable per-service table. ADR-03 escalation rule: p95 > 50ms ⇒ consider separate-process cron isolation; > 200ms flags red. Both paths are non-blocking (try/except around the recorder) so instrumentation can never break a checkout.
 
@@ -1074,6 +1074,27 @@ Always allow the first bounded chunk to run, then enforce the time limit before
 subsequent chunks. This guarantees forward progress without removing the
 per-tick bound. The regression is pinned in
 `tests/core/test_ingest_timing.py::TestIngestMaxSeconds::test_expired_listing_budget_still_attempts_first_batch`.
+
+### 42. DuckDB `threads` is instance-global — changing it at runtime deadlocks the process
+
+`SET threads` on any connection changes the thread count for every connection to
+that database instance. Each change makes DuckDB's `TaskScheduler::RelaunchThreads`
+join worker threads while holding the scheduler mutex. On 2026-10-07 the GCE
+backend froze: `get_connection` set `threads=DUCKDB_THREADS` (2), while the pool
+fresh-build path (`DUCKDB_POOL_CONN_THREADS`, default 1) and the insights
+prewarmer (`threads=1`) set it back. In gdb, one thread held the scheduler mutex
+and joined a worker. That worker waited on a DuckLake multi-file scan lock. The
+lock holder's nested metadata query was waiting on the scheduler mutex. Every
+later query, `SET`, and `LOAD ducklake` hung behind it, so the 60s attach-lock
+timeouts, `unhandled_error` on the dashboard, and permanently skipped
+`log_discovery`/`commit` ticks were all downstream symptoms.
+
+Set threads only through `_ensure_threads` in `backend/core/duckdb.py`, which
+issues `SET` only when the value differs. Never add per-connection or per-job
+thread overrides on a file-backed service connection. Throttle background work
+with worker counts instead. Separate `:memory:` connections are separate
+instances and may set their own value before running queries. `memory_limit` is
+also instance-global. Pinned by `tests/core/test_duckdb_global_threads.py`.
 
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
