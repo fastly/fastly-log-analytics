@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DuckDB scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking DuckDB's worker relaunch against an in-flight DuckLake scan. Threads are now set once from `DUCKDB_THREADS`; `DUCKDB_POOL_CONN_THREADS` is removed.
 - **Dashboard failed with `schema "lake" does not exist`** — returning a pooled connection detached `lake` from the shared per-service DuckDB instance, evicting it from sibling requests still mid-query. Pool release no longer detaches.
 - **High-scale source cursor stalled under multiple worker replicas** — every replica lists the same page, and a claim lost to a sibling counted as a failure, which blocked cursor advancement. Contended claims now count as duplicates; expired sibling leases are still recovered independently.
+- **High-scale deletion sweeps stalled ingest for minutes** — each worker ran its raw-source deletion sweep inline after every page, and each deletion re-verifies the archive in FOS (about 1 s), so a 100-object sweep blocked ingest for over a minute. Sweeps now run on a background thread that never overlaps itself.
 
 ### Breaking
 

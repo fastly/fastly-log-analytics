@@ -7,7 +7,7 @@ import os
 import time
 from argparse import ArgumentParser
 from dataclasses import dataclass
-from threading import Event
+from threading import Event, Thread
 from typing import Any
 
 from backend import config as app_config
@@ -67,6 +67,7 @@ class HighScaleWorkerLoop:
         self._sleeper = sleeper
         self._deletion_sweeper = deletion_sweeper
         self._deletion_sweep_limit = deletion_sweep_limit
+        self._deletion_thread: Thread | None = None
         self._last_system_cleanup = 0.0
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
@@ -87,14 +88,35 @@ class HighScaleWorkerLoop:
         self._run_system_cleanups()
         return tuple(results)
 
-    def _run_deletion_sweeps(self) -> None:
+    def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
         if self._deletion_sweeper is None:
+            return ()
+        return tuple((service_id, self._deletion_sweeper) for service_id in self._service_ids)
+
+    def _run_deletion_sweeps(self) -> None:
+        # Each deletion re-verifies the archive in FOS (~1s), so a full sweep
+        # takes minutes; running it inline stalled ingest pages and drove
+        # request lag into minutes. Sweep in the background, never overlapping.
+        targets = self._deletion_targets()
+        if not targets:
             return
-        for service_id in self._service_ids:
+        if self._deletion_thread is not None and self._deletion_thread.is_alive():
+            return
+        self._deletion_thread = Thread(
+            target=self._sweep_targets, args=(targets,), name="high-scale-deletion-sweep", daemon=True
+        )
+        self._deletion_thread.start()
+
+    def _sweep_targets(self, targets: tuple[tuple[str, HighScaleDeletionSweeper], ...]) -> None:
+        for service_id, sweeper in targets:
             try:
-                self._deletion_sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
+                sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
             except Exception:
                 logger.exception("high-scale deletion sweep failed", extra={"service_id": service_id})
+
+    def wait_for_deletion_sweep(self, timeout: float | None = None) -> None:
+        if self._deletion_thread is not None:
+            self._deletion_thread.join(timeout)
 
     def _run_system_cleanups(self) -> None:
         now = time.time()
@@ -127,6 +149,7 @@ class HighScaleWorkerLoop:
             self.run_once()
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
+                self.wait_for_deletion_sweep()
                 return
             if self._interval_seconds:
                 self._sleeper(self._interval_seconds)
@@ -266,6 +289,7 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         self._sleeper = time.sleep
         self._deletion_sweepers = deletion_sweepers
         self._deletion_sweep_limit = deletion_sweep_limit
+        self._deletion_thread: Thread | None = None
         self._last_system_cleanup = 0.0
 
     def run_once(self) -> tuple[WorkerPageResult, ...]:
@@ -286,14 +310,8 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
         self._run_system_cleanups()
         return tuple(results)
 
-    def _run_deletion_sweeps(self) -> None:
-        for service_id, sweeper in self._deletion_sweepers:
-            if sweeper is None:
-                continue
-            try:
-                sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
-            except Exception:
-                logger.exception("high-scale deletion sweep failed", extra={"service_id": service_id})
+    def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
+        return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
 
     def _run_system_cleanups(self) -> None:
         now = time.time()
