@@ -20,7 +20,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Evaluated on the Standard RUM interval derived from `rum.sync_interval_seconds` or the service sync interval, with a five-second minimum.
 - **Registration Gate:** Registered only when RUM is enabled and the deployment mode is Standard (`DEPLOYMENT_MODE=standard`).
-- **Active-Request Politeness Gate:** Evaluates `should_defer_cron("rum_sync", service_id)`. Non-manual ticks defer while active queries are running. `log_discovery` no longer has this gate, so it is a parity gap slated for removal (§10, gap 5).
+- **Active-Request Politeness Gate:** Removed (mirroring commit `5a7541fd`): RUM freshness requires that automated ticks proceed without deferral by active queries.
 - **Mutual Exclusion Rule:** Standard `rum_sync_{service_id}` is not registered in High-Scale mode; the distinct `rum_discovery_{service_id}` worker path owns that mode.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
