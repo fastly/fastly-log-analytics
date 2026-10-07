@@ -77,6 +77,16 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/usage/log-activity',
   'GET /api/usage/rum-breakdown',
   'GET /api/admin/compaction-stats',
+  // Backend-only maintenance endpoints for manually compacting rollups and
+  // merging partial-hour data; no frontend client calls these routes.
+  'POST /api/admin/consolidate-rollups',
+  'POST /api/admin/compact/:service_id',
+  'GET /api/admin/compaction-status/:service_id',
+  'GET /api/admin/compaction-status',
+  'POST /api/admin/partial-hour-merge/:service_id',
+  'POST /api/admin/partial-hour-merge',
+  'GET /api/admin/partial-hour-status/:service_id',
+  'GET /api/admin/partial-hour-status',
   'GET /api/admin/metric-history',
   'GET /api/admin/iceberg-tree',
   'GET /api/admin/usage-log/export',

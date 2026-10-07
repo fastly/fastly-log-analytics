@@ -1602,10 +1602,9 @@ def test_run_commit_skipped_when_start_cron_run_raises():
 
 def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     """Happy path: `commit_buffer` returns ``files_committed > 0`` →
-    `log_cron_run` records success with row counts AND `_run_metadata_sync`
-    is invoked to refresh the local cache. Pinned because losing the
-    auto-sync would leave the dashboard's "rows in lake" counter
-    stale for up to a full sync interval."""
+    `log_cron_run` records success with row counts AND metadata sync is
+    dispatched asynchronously. Pinned because losing the auto-sync would leave
+    the dashboard's "rows in lake" counter stale for up to a full sync interval."""
     from backend.cron.jobs.commit import _run_commit
 
     log_calls = []
@@ -1632,7 +1631,7 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
         # test sandbox.
         patch("backend.core.iceberg.update_iceberg_view"),
         patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
-        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync") as mock_dispatch,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1647,12 +1646,12 @@ def test_run_commit_success_path_logs_files_committed_and_triggers_sync():
     assert kwargs.get("rows_ingested") == 1500
     summary = kwargs.get("summary", "")
     assert "Committed 3" in summary
-    mock_sync.assert_called_once()
+    mock_dispatch.assert_called_once()
 
 
 def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     """When `files_committed == 0`, log success with "No new data to
-    commit" and do NOT invoke `_run_metadata_sync`. Pinned because
+    commit" and do NOT dispatch a metadata sync. Pinned because
     triggering an empty sync would burn CDN bandwidth and shave the
     DuckDB cache for no reason."""
     from backend.cron.jobs.commit import _run_commit
@@ -1677,7 +1676,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
             "backend.core.iceberg.commit_buffer",
             return_value={"files_committed": 0, "rows_committed": 0},
         ),
-        patch("backend.cron.jobs.metadata._run_metadata_sync") as mock_sync,
+        patch("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync") as mock_dispatch,
         patch("backend.cron_progress.cleanup_progress"),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -1690,7 +1689,7 @@ def test_run_commit_no_data_path_logs_success_without_triggering_sync():
     assert len(log_calls) == 1
     _, kwargs = log_calls[0]
     assert "No new data" in kwargs.get("summary", "")
-    mock_sync.assert_not_called()
+    mock_dispatch.assert_not_called()
 
 
 def test_run_commit_logs_error_when_commit_buffer_raises():
