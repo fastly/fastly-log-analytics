@@ -743,7 +743,10 @@ def _run_log_discovery_cron(
     # Each ingested raw log file = 1 billable Class A PutObject by Fastly's edge.
     # Synthesise those rows + flush in-process FOS/CDN calls + purge old entries.
     # Idempotent — safe to call after every sync, including after a retry.
-    if (sync_enabled or force) and run_id is not None:
+    # The whole phase rides the 60s heavy-refresh window: it costs ~3s and
+    # ran between every tick's last ingest pass and the next tick's first,
+    # widening the request-lag sawtooth. Usage Log reads at hourly grain.
+    if (sync_enabled or force) and run_id is not None and do_heavy_refresh:
         _log_and_add_progress(
             run_id,
             service_id,
@@ -780,23 +783,20 @@ def _run_log_discovery_cron(
         # Window is 26h so the Usage Log page's 24h view always shows fully
         # reconciled data (and survives a small clock-skew buffer). One
         # Fastly API call covers the whole window regardless of hours_back.
-        # Gated by do_heavy_refresh so a 1s log_period (5s tick) doesn't fire
-        # this every 5s — Usage Log reads at hourly grain so 60s lag is invisible.
-        if do_heavy_refresh:
-            try:
-                written = reconcile_fastly_stats(src, hours_back=26)
-                if written:
-                    if run_id is not None:
-                        _log_and_add_progress(
-                            run_id,
-                            service_id,
-                            job_name="usage_log",
-                            event={"type": "status", "message": f"Reconciled {written} hourly Fastly stats gap(s)"},
-                        )
-                    else:
-                        logger.info("[usage_log] %s: reconciled %d hourly stats gap(s)", service_id, written)
-            except Exception as e:
-                logger.warning("[usage_log] Fastly stats reconciliation failed for %s: %s", service_id, e)
+        try:
+            written = reconcile_fastly_stats(src, hours_back=26)
+            if written:
+                if run_id is not None:
+                    _log_and_add_progress(
+                        run_id,
+                        service_id,
+                        job_name="usage_log",
+                        event={"type": "status", "message": f"Reconciled {written} hourly Fastly stats gap(s)"},
+                    )
+                else:
+                    logger.info("[usage_log] %s: reconciled %d hourly stats gap(s)", service_id, written)
+        except Exception as e:
+            logger.warning("[usage_log] Fastly stats reconciliation failed for %s: %s", service_id, e)
 
         run_usage_log_cleanup(service_id)
 
@@ -816,21 +816,22 @@ def _run_log_discovery_cron(
     # this cron body. If a per-phase timeout is needed in the future,
     # use a cooperative cancel token through the I/O layer rather than
     # abandoning a thread.
-    _t0 = time.time()
-    try:
-        _usage_log_phase()
-    except Exception as e:
-        logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
-    if run_id is not None:
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="log_discovery",
-            event={
-                "type": "status",
-                "message": f"{elapsed()} usage_log phase: {int((time.time() - _t0) * 1000)}ms",
-            },
-        )
+    if do_heavy_refresh:
+        _t0 = time.time()
+        try:
+            _usage_log_phase()
+        except Exception as e:
+            logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
+        if run_id is not None:
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="log_discovery",
+                event={
+                    "type": "status",
+                    "message": f"{elapsed()} usage_log phase: {int((time.time() - _t0) * 1000)}ms",
+                },
+            )
 
     # ── 5. Final duration record ──────────────────────────────────────────────
     # The initial log_cron_run snapshot was taken before phases 1.5-4 (view

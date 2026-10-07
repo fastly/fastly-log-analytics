@@ -588,6 +588,39 @@ def test_sync_status_published_after_request_extents_refresh(
     fake_publisher.publish.assert_called_once_with("svc-1", {"latest_log_at": "2026-01-02T00:00:00Z"})
 
 
+@pytest.mark.parametrize("heavy", [False, True])
+def test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    heavy,
+):
+    """The ~3 s usage-log phase sat between every tick's last ingest pass and
+    the next tick's first, widening the request-lag sawtooth; it is idempotent
+    and read at hourly grain, so it rides the 60 s heavy-refresh window."""
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "_claim_heavy_refresh", lambda sid: heavy)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
+    )
+    backfill = MagicMock(return_value=0)
+    cleanup = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.backfill_fastly_edge_writes", backfill)
+    monkeypatch.setattr("backend.core.duckdb.reconcile_fastly_stats", MagicMock(return_value=0))
+    monkeypatch.setattr("backend.utils.usage_logger.run_usage_log_cleanup", cleanup)
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+
+    assert backfill.called is heavy
+    assert cleanup.called is heavy
+
+
 def test_manual_sync_all_clears_time_range(
     monkeypatch,
     stub_progress,

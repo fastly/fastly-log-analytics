@@ -60,9 +60,10 @@
    - Before each follow-up pass, the rows from the previous pass are published: view refresh, header-only `refresh_config_status`, and an SSE snapshot.
    - Before this, rows stayed invisible until the window closed, which added up to about 20 s of request lag.
 6. **Ingest Tracking Update:** Records successfully ingested files in PostgreSQL `ingested_files`.
-7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 30s):
+7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 60s, or on a forced run):
    - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
-   - Triggers `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation).
+   - Runs the usage-log phase: `backfill_fastly_edge_writes()`, `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation), and `run_usage_log_cleanup()`.
+   - The usage-log phase costs about 3 s. Running it on every tick delayed the next tick's first FOS poll and widened request lag; all three steps are idempotent and the Usage Log page reads at hourly grain.
 8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records a stable, zero-filled counter schema shared with RUM ingestion: `valid_records`, `malformed_records`, `corrupt_containers`, `quarantine_capture_failures`, `source_delete_failures`, and `cap_evictions`. It also records source-object counters for `objects_processed`, `objects_successful`, `objects_partial`, and `objects_failed`.
    - If records ingest successfully but FOS deletion fails after bounded retries, the
      object is counted as `objects_failed` and `source_delete_failures` is incremented.
@@ -106,7 +107,7 @@
 - **Audit Checklist:**
   - Confirm zero Class A API call proliferation (validate LIST pagination).
   - Verify `ingested_files` query uses primary index on `filename`.
-  - Confirm heavy refresh is strictly clamped to the 30s throttle window.
+  - Confirm heavy refresh is strictly clamped to the 60s throttle window.
 
 ---
 
@@ -145,7 +146,7 @@
 - [x] 2. Confirm execution records in `cron_runs` with status `success` and non-zero `files_ingested`.
 - [ ] 3. Verify the PostgreSQL `usage_log` table attributes FOS Class A LIST and Class B GET calls to `cron.log_discovery`.
 - [x] 4. Confirm new rows immediately queryable via `GET /api/dashboard/bundle`.
-- [ ] 5. Confirm heavy refresh phases (`update_top_values`, `reconcile_fastly_stats`) run no more than once per 60s.
+- [x] 5. Confirm heavy refresh phases (`update_top_values` and the usage-log phase) run no more than once per 60s. Pinned by `test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks`.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
 - [x] 7. In High-Scale mode, verify source objects transition `discovered → claimed → acknowledged` (`high_scale_source_objects` for the isolated worker plane; `ingest_ledger` for Celery).
 - [ ] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
