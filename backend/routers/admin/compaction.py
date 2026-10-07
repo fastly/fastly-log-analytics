@@ -19,6 +19,8 @@ from backend.models.admin import (
     OptimizeNowResponse,
     PartialHourMergeResponse,
     PartialHourStatusResponse,
+    RollupCompactResponse,
+    RollupStatusResponse,
 )
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
@@ -319,6 +321,72 @@ def consolidate_rollups(source: dict = Depends(get_source)) -> ConsolidateRollup
         days_bundled=days_bundled,
         cleaned_entries=cleaned_entries,
         duration_s=duration_s,
+    )
+
+
+@router.post(
+    "/admin/rollups/compact",
+    response_model=RollupCompactResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/compact/{service_id}",
+    response_model=RollupCompactResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_compact_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupCompactResponse:
+    """Manually trigger daily rollup compaction for closed days over a 30-day window."""
+    sid = service_id or source.get("name") or source.get("service_id")
+    from backend.cron.jobs.rollup_compact import _run_rollup_compact_daily
+
+    res = _run_rollup_compact_daily(sid, manual=True)
+    return RollupCompactResponse(**res)
+
+
+@router.get(
+    "/admin/rollups/status",
+    response_model=RollupStatusResponse,
+    response_model_exclude_unset=True,
+)
+@router.get(
+    "/admin/rollups/status/{service_id}",
+    response_model=RollupStatusResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_status(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupStatusResponse:
+    """Inspect the status of day and hour rollup bundles."""
+    sid = service_id or source.get("name") or source.get("service_id")
+    from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
+
+    day_root = _day_bundled_root(source)
+    hour_root = _hour_bundled_root(source)
+    days: list[str] = []
+    if os.path.isdir(day_root):
+        for entry in os.listdir(day_root):
+            if entry.startswith("day="):
+                days.append(entry[len("day=") :])
+            elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+                cand = entry[len("day_bundle_") : -len(".parquet")]
+                if len(cand) == 10 and cand not in days:
+                    days.append(cand)
+    days.sort()
+    hour_cnt = 0
+    if os.path.isdir(hour_root):
+        for entry in os.listdir(hour_root):
+            if entry.startswith("hour="):
+                hour_cnt += 1
+    return RollupStatusResponse(
+        service_id=sid,
+        days_bundled=len(days),
+        hour_bundles=hour_cnt,
+        latest_day_bundle=days[-1] if days else None,
+        earliest_day_bundle=days[0] if days else None,
     )
 
 

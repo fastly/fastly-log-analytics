@@ -1764,25 +1764,39 @@ class QueryRunner:
         # window fall through to per-field-hour for the in-window
         # portion (same fall-through as per-field-day).
         if os.path.isdir(bundled_day_root):
-            for day_entry in _cached_listdir(bundled_day_root):
-                if not day_entry.startswith("day="):
+            for entry in _cached_listdir(bundled_day_root):
+                b_day: str | None = None
+                bundle_path: str | None = None
+                if entry.startswith("day="):
+                    cand_day = entry[len("day=") :]
+                    if len(cand_day) == 10:
+                        cand1 = os.path.join(bundled_day_root, entry, "all_fields.parquet")
+                        cand2 = os.path.join(bundled_day_root, entry, f"day_bundle_{cand_day}.parquet")
+                        if os.path.isfile(cand1):
+                            b_day, bundle_path = cand_day, cand1
+                        elif os.path.isfile(cand2):
+                            b_day, bundle_path = cand_day, cand2
+                elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+                    cand_day = entry[len("day_bundle_") : -len(".parquet")]
+                    if len(cand_day) == 10:
+                        cand = os.path.join(bundled_day_root, entry)
+                        if os.path.isfile(cand):
+                            b_day, bundle_path = cand_day, cand
+                if not b_day or not bundle_path:
                     continue
-                day = day_entry[len("day=") :]
-                if len(day) != 10:
+                days_with_day_files_any.add(b_day)
+                if b_day >= active_day:
                     continue
-                days_with_day_files_any.add(day)
-                if day >= active_day:
+                if st_str_floor and b_day < st_str_floor[:10]:
                     continue
-                if st_str_floor and day < st_str_floor[:10]:
+                if et_str_floor and b_day > et_str_floor[:10]:
                     continue
-                if et_str_floor and day > et_str_floor[:10]:
+                if not _day_fully_in_window(b_day):
                     continue
-                if not _day_fully_in_window(day):
+                if b_day in bundled_days_set:
                     continue
-                bundle_path = os.path.join(bundled_day_root, day_entry, "all_fields.parquet")
-                if os.path.isfile(bundle_path):
-                    bundled_day_paths.append(bundle_path)
-                    bundled_days_set.add(day)
+                bundled_day_paths.append(bundle_path)
+                bundled_days_set.add(b_day)
 
         if os.path.isdir(bundled_hour_root):
             for hour_entry in _cached_listdir(bundled_hour_root):
@@ -3107,15 +3121,19 @@ class QueryRunner:
         import os
         from datetime import UTC, datetime, timedelta
 
-        from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
+        from backend.core.rollups._common import (
+            DAY_BUNDLE_FILENAME,
+            _day_bundled_root,
+            _hour_bundled_root,
+        )
 
         if svcconfig.is_durable_serving_mode(self.src) and not _rollup_coverage_ready(_rc_service_id(self.src)):
             return None
 
         hour_root = _hour_bundled_root(self.src)
-        if not os.path.isdir(hour_root):
-            return None
         day_root = _day_bundled_root(self.src)
+        if not os.path.isdir(hour_root) and not os.path.isdir(day_root):
+            return None
 
         active_hour_str = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         day_buckets: dict[str, list[str]] = {}
@@ -3135,11 +3153,19 @@ class QueryRunner:
         covered_hours = 0
         for day_str, hours_in_day in sorted(day_buckets.items()):
             day_file = os.path.join(day_root, f"day={day_str}", bundle_filename)
+            chosen_day = day_file if os.path.isfile(day_file) else None
+            if not chosen_day and bundle_filename == DAY_BUNDLE_FILENAME:
+                alt_day_file = os.path.join(day_root, f"day={day_str}", f"day_bundle_{day_str}.parquet")
+                flat_day_file = os.path.join(day_root, f"day_bundle_{day_str}.parquet")
+                if os.path.isfile(alt_day_file):
+                    chosen_day = alt_day_file
+                elif os.path.isfile(flat_day_file):
+                    chosen_day = flat_day_file
             # Use the per-day compacted file only when the window spans the
             # ENTIRE UTC day (24 in-window hours); a partial day would pick up
             # out-of-range hours. Per-hour fallback keeps the window correct.
-            if len(hours_in_day) == 24 and os.path.isfile(day_file):
-                rollup_paths.append(day_file)
+            if len(hours_in_day) == 24 and chosen_day:
+                rollup_paths.append(chosen_day)
                 covered_hours += 24
             else:
                 for hour_str in hours_in_day:

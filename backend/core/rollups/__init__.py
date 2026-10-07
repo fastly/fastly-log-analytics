@@ -127,6 +127,7 @@ from .day_bundles import (
     compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
+    retire_compacted_hour_bundles,
 )
 from .hour_bundles import (
     _cleanup_per_field_after_bundle,
@@ -216,6 +217,7 @@ __all__ = [
     "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
+    "retire_compacted_hour_bundles",
     "recompute_touched_hours",
     "backfill_rollups",
     "backfill_missing_hour_bundles",

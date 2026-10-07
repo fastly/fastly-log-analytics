@@ -222,18 +222,16 @@ def test_rollup_compact_logs_warning_when_bundle_step_fails(monkeypatch, stub_so
     from backend.core import duckdb as _db
 
     args, kwargs = _db.log_cron_run.call_args
-    # Still success — bundling is best-effort.
-    assert args[3] == "success"
+    # Subsystem errors log status="warning" with error_message listing failed subsystems per spec §5.8.
+    assert args[3] == "warning"
+    assert "day_bundles: disk full" in kwargs["error_message"]
     # Summary shows 0 bundled.
     assert "bundled 0 day" in kwargs["summary"]
 
 
 def test_rollup_compact_records_error_on_exception(monkeypatch, stub_source, stub_progress):
     _mock_rollups(monkeypatch)
-    monkeypatch.setattr(
-        "backend.core.rollups.compact_closed_days_to_daily",
-        MagicMock(side_effect=RuntimeError("manifest read failed")),
-    )
+    stub_progress["start_progress"].side_effect = RuntimeError("manifest read failed")
 
     compaction._run_rollup_compact_daily.__wrapped__("svc-1")
 

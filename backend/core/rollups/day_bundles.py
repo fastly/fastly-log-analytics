@@ -47,6 +47,22 @@ from ._common import (
 logger = logging.getLogger(__name__)
 
 
+def _link_day_bundle_alias(src_path: str, dst_path: str) -> None:
+    """Create a hardlink alias from src_path to dst_path, falling back to copy."""
+    try:
+        if os.path.exists(dst_path):
+            try:
+                os.remove(dst_path)
+            except OSError:
+                pass
+        os.link(src_path, dst_path)
+    except OSError:
+        try:
+            shutil.copyfile(src_path, dst_path)
+        except OSError as e:
+            logger.warning("[rollups] Failed to create alias %s -> %s: %s", src_path, dst_path, e)
+
+
 def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
     """Combine per-field day parquets into one bundled parquet per day.
 
@@ -125,9 +141,15 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
 
             bundle_dir = os.path.join(bundled_root, f"day={day}")
             bundle_path = os.path.join(bundle_dir, DAY_BUNDLE_FILENAME)
+            alias_dir_path = os.path.join(bundle_dir, f"day_bundle_{day}.parquet")
+            alias_root_path = os.path.join(bundled_root, f"day_bundle_{day}.parquet")
             if os.path.exists(bundle_path):
                 try:
                     if os.path.getmtime(bundle_path) >= max_src_mtime:
+                        if not os.path.exists(alias_dir_path):
+                            _link_day_bundle_alias(bundle_path, alias_dir_path)
+                        if not os.path.exists(alias_root_path):
+                            _link_day_bundle_alias(bundle_path, alias_root_path)
                         _cleanup_per_field_day_after_bundle(day_per_field_root, day, bundle_path, service_id)
                         continue
                 except OSError:
@@ -179,6 +201,8 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
 
             with _get_service_lock(lock_key):
                 os.replace(tmp_path, bundle_path)
+                _link_day_bundle_alias(bundle_path, alias_dir_path)
+                _link_day_bundle_alias(bundle_path, alias_root_path)
             _cleanup_per_field_day_after_bundle(day_per_field_root, day, bundle_path, service_id)
             rebuilt += 1
     finally:
@@ -187,7 +211,12 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
     return rebuilt
 
 
-def backfill_day_bundles(service_id: str, source: dict, max_days: int | None = None) -> int:
+def backfill_day_bundles(
+    service_id: str,
+    source: dict,
+    max_days: int | None = None,
+    lookback_days: int | None = None,
+) -> int:
     """One-shot bulk bundling for all closed days that don't yet have a
     per-day bundled file (or whose bundle is older than its source per-
     field files).
@@ -202,6 +231,12 @@ def backfill_day_bundles(service_id: str, source: dict, max_days: int | None = N
         return 0
 
     active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
     all_days: set[str] = set()
     try:
         for field_entry in os.listdir(day_per_field_root):
@@ -215,6 +250,8 @@ def backfill_day_bundles(service_id: str, source: dict, max_days: int | None = N
                     day = day_entry[len("day=") :]
                     if day >= active_day:
                         continue
+                    if cutoff_day is not None and day < cutoff_day:
+                        continue
                     all_days.add(day)
             except OSError:
                 continue
@@ -223,6 +260,8 @@ def backfill_day_bundles(service_id: str, source: dict, max_days: int | None = N
 
     to_bundle: list[str] = []
     for day in sorted(all_days):
+        if cutoff_day is not None and day < cutoff_day:
+            continue
         bundle_path = os.path.join(bundled_root, f"day={day}", DAY_BUNDLE_FILENAME)
         if not os.path.exists(bundle_path):
             to_bundle.append(day)
@@ -315,7 +354,11 @@ def _cleanup_per_field_day_after_bundle(
 # ── Closed-day compaction (item 17 / RC-9) ──────────────────────────────────
 
 
-def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour rollup parquet into per-day parquet.
 
     For each (field, closed-day) tuple where either (a) no per-day parquet
@@ -353,6 +396,12 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
         return 0
 
     active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
     lock_key = source.get("name", "default")
     rebuilt = 0
 
@@ -390,6 +439,8 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
                     continue
                 day = hour[:10]
                 if day == active_day:
+                    continue
+                if cutoff_day is not None and day < cutoff_day:
                     continue
                 bundle_path = os.path.join(bundled_hour_root_path, hour_entry, "all_fields.parquet")
                 if os.path.isfile(bundle_path):
@@ -446,6 +497,8 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
                 day = hour[:10]
                 if day == active_day:
                     continue
+                if cutoff_day is not None and day < cutoff_day:
+                    continue
                 hour_dir = os.path.join(field_hour_dir, hour_entry)
                 try:
                     for fname in os.listdir(hour_dir):
@@ -457,6 +510,8 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
             # Days touched by either per-field hour OR bundled-hour data.
             all_days = set(by_day.keys()) | set(hour_bundled_by_day.keys())
             for day in all_days:
+                if cutoff_day is not None and day < cutoff_day:
+                    continue
                 hour_paths = by_day.get(day, [])
                 bundled_paths = hour_bundled_by_day.get(day, [])
                 if not hour_paths and not bundled_paths:
@@ -547,7 +602,11 @@ def compact_closed_days_to_daily(service_id: str, source: dict) -> int:
 # ── origin_summary closed-day compaction ────────────────────────────────────
 
 
-def compact_origin_summary_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_origin_summary_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour origin_summary parquets into per-day files.
 
     For each closed UTC day where:
@@ -616,6 +675,7 @@ def compact_origin_summary_closed_days_to_daily(service_id: str, source: dict) -
         service_id,
         source,
         jobs=[(ORIGIN_SUMMARY_BUNDLE_FILENAME, ".tmp_os_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -623,7 +683,11 @@ def compact_origin_summary_closed_days_to_daily(service_id: str, source: dict) -
 # ── network_rtt closed-day compaction ───────────────────────────────────
 
 
-def compact_network_rtt_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_network_rtt_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour network_rtt parquets into per-day
     files at ``day_bundled/day=YYYY-MM-DD/network_rtt.parquet``.
 
@@ -657,6 +721,7 @@ def compact_network_rtt_closed_days_to_daily(service_id: str, source: dict) -> i
         service_id,
         source,
         jobs=[(NETWORK_RTT_BUNDLE_FILENAME, ".tmp_nr_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -664,7 +729,11 @@ def compact_network_rtt_closed_days_to_daily(service_id: str, source: dict) -> i
 # ── network_speed closed-day compaction ─────────────────────────────────
 
 
-def compact_network_speed_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_network_speed_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour network_speed parquets into
     per-day files at ``day_bundled/day=YYYY-MM-DD/network_speed.parquet``.
 
@@ -687,11 +756,16 @@ def compact_network_speed_closed_days_to_daily(service_id: str, source: dict) ->
         service_id,
         source,
         jobs=[(NETWORK_SPEED_BUNDLE_FILENAME, ".tmp_ns_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
 
-def compact_ngwaf_bots_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_ngwaf_bots_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour ngwaf_bots parquets into per-day
     files at ``day_bundled/day=YYYY-MM-DD/ngwaf_bots.parquet``.
 
@@ -713,6 +787,7 @@ def compact_ngwaf_bots_closed_days_to_daily(service_id: str, source: dict) -> in
         service_id,
         source,
         jobs=[(NGWAF_BOTS_BUNDLE_FILENAME, ".tmp_nb_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -720,7 +795,11 @@ def compact_ngwaf_bots_closed_days_to_daily(service_id: str, source: dict) -> in
 # ── verified_bots_ts closed-day compaction ──────────────────────────────
 
 
-def compact_verified_bots_ts_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_verified_bots_ts_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour verified_bots_ts parquets into
     per-day files at ``day_bundled/day=YYYY-MM-DD/verified_bots_ts.parquet``.
 
@@ -752,6 +831,7 @@ def compact_verified_bots_ts_closed_days_to_daily(service_id: str, source: dict)
         service_id,
         source,
         jobs=[(VERIFIED_BOTS_TS_BUNDLE_FILENAME, ".tmp_vbts_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -759,7 +839,11 @@ def compact_verified_bots_ts_closed_days_to_daily(service_id: str, source: dict)
 # ── origin_latency_ts closed-day compaction ─────────────────────────────
 
 
-def compact_origin_latency_ts_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_origin_latency_ts_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour origin_latency_ts parquets into per-day
     files at ``day_bundled/day=YYYY-MM-DD/origin_latency_ts.parquet``.
 
@@ -803,6 +887,7 @@ def compact_origin_latency_ts_closed_days_to_daily(service_id: str, source: dict
         service_id,
         source,
         jobs=[(ORIGIN_LATENCY_TS_BUNDLE_FILENAME, ".tmp_olts_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -810,7 +895,11 @@ def compact_origin_latency_ts_closed_days_to_daily(service_id: str, source: dict
 # ── perf_latency closed-day compaction ──────────────────────────────────
 
 
-def compact_perf_latency_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_perf_latency_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour perf_top_urls / perf_top_asns parquets
     into per-day files at ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
 
@@ -851,6 +940,7 @@ def compact_perf_latency_closed_days_to_daily(service_id: str, source: dict) -> 
             (PERF_TOP_URLS_BUNDLE_FILENAME, ".tmp_pl_", _copy_sql),
             (PERF_TOP_ASNS_BUNDLE_FILENAME, ".tmp_pl_", _copy_sql),
         ],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -858,7 +948,11 @@ def compact_perf_latency_closed_days_to_daily(service_id: str, source: dict) -> 
 # ── origin_dims (pop / oip / edge) closed-day compaction ────────────────────
 
 
-def compact_origin_dims_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_origin_dims_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour origin_pop / origin_ip / origin_path
     parquets into per-day files at ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
 
@@ -941,6 +1035,7 @@ def compact_origin_dims_closed_days_to_daily(service_id: str, source: dict) -> i
             (ORIGIN_IP_BUNDLE_FILENAME, ".tmp_od_", _ip_copy_sql),
             (ORIGIN_PATH_BUNDLE_FILENAME, ".tmp_od_", _path_copy_sql),
         ],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -948,7 +1043,11 @@ def compact_origin_dims_closed_days_to_daily(service_id: str, source: dict) -> i
 # ── security_dims (req_size / conn_reuse / topips / cov) closed-day compaction ─
 
 
-def compact_security_dims_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_security_dims_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour security_req_size / security_conn_reuse /
     security_topips / security_cov parquets into per-day files at
     ``day_bundled/day=YYYY-MM-DD/<name>.parquet``.
@@ -1017,6 +1116,7 @@ def compact_security_dims_closed_days_to_daily(service_id: str, source: dict) ->
             (SECURITY_TOPIPS_BUNDLE_FILENAME, ".tmp_sd_", _topips_copy_sql),
             (SECURITY_COV_BUNDLE_FILENAME, ".tmp_sd_", _cov_copy_sql),
         ],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -1024,7 +1124,11 @@ def compact_security_dims_closed_days_to_daily(service_id: str, source: dict) ->
 # ── perf_dims (ttl_dist) closed-day compaction ───────────────────────────────
 
 
-def compact_perf_dims_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_perf_dims_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour perf_ttl_dist parquets into per-day files
     at ``day_bundled/day=YYYY-MM-DD/perf_ttl_dist.parquet``.
 
@@ -1054,11 +1158,16 @@ def compact_perf_dims_closed_days_to_daily(service_id: str, source: dict) -> int
         service_id,
         source,
         jobs=[(PERF_TTL_DIST_BUNDLE_FILENAME, ".tmp_pd_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
 
-def compact_overview_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_overview_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour overview parquets into per-day files
     at ``day_bundled/day=YYYY-MM-DD/overview.parquet``.
 
@@ -1096,11 +1205,16 @@ def compact_overview_closed_days_to_daily(service_id: str, source: dict) -> int:
         service_id,
         source,
         jobs=[(OVERVIEW_BUNDLE_FILENAME, ".tmp_ov_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
 
-def compact_pop_health_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_pop_health_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     """Consolidate closed-day per-hour pop_health parquets into per-day files."""
 
     def _copy_sql(paths_sql: str, tmp_file: str) -> str:
@@ -1123,6 +1237,7 @@ def compact_pop_health_closed_days_to_daily(service_id: str, source: dict) -> in
         service_id,
         source,
         jobs=[(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _copy_sql)],
+        lookback_days=lookback_days,
         logger=logger,
     )
 
@@ -1130,7 +1245,11 @@ def compact_pop_health_closed_days_to_daily(service_id: str, source: dict) -> in
 import typing
 
 
-def compact_network_quality_closed_days_to_daily(service_id: str, source: dict) -> int:
+def compact_network_quality_closed_days_to_daily(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = None,
+) -> int:
     from ._common import (
         NETWORK_QUALITY_ASN_FILENAME,
         NETWORK_QUALITY_COUNTRY_FILENAME,
@@ -1160,5 +1279,130 @@ def compact_network_quality_closed_days_to_daily(service_id: str, source: dict) 
             (NETWORK_QUALITY_REGION_FILENAME, ".tmp_nq_", _build_sql("region", True)),
             (NETWORK_QUALITY_POP_FILENAME, ".tmp_nq_", _build_sql("pop", False)),
         ],
+        lookback_days=lookback_days,
         logger=logger,
     )
+
+
+def retire_compacted_hour_bundles(
+    service_id: str,
+    source: dict,
+    lookback_days: int | None = 30,
+) -> tuple[int, int]:
+    """Safely unlink the 24 hourly bundle files once the day bundle is verified.
+
+    For closed calendar days strictly before today and within lookback_days,
+    checks if a valid day bundle exists and passes read validation (non-zero row count).
+    If valid, safely unlinks constituent hour bundle files (all_fields.parquet)
+    under hour_bundled/hour=YYYY-MM-DD-HH/ and cleans up empty hour dirs.
+
+    Returns:
+        tuple[int, int]: (retired_files_count, retired_bytes_count)
+    """
+    from backend.core.duckdb import get_memory_connection
+    from backend.core.iceberg.view import _get_service_lock
+
+    from ._common import (
+        DAY_BUNDLE_FILENAME,
+        IP_SPREAD_BUNDLE_FILENAME,
+        _day_bundled_root,
+        _hour_bundled_root,
+    )
+
+    bundled_root = _day_bundled_root(source)
+    hour_bundled_root = _hour_bundled_root(source)
+    if not os.path.isdir(bundled_root) or not os.path.isdir(hour_bundled_root):
+        return 0, 0
+
+    active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
+    retired_files = 0
+    retired_bytes = 0
+    lock_key = source.get("name", "default")
+    dry_run = os.environ.get("ROLLUP_CLEANUP_DRY_RUN") == "1"
+
+    candidate_days: set[str] = set()
+    try:
+        for entry in os.listdir(bundled_root):
+            if entry.startswith("day="):
+                d = entry[len("day=") :]
+                if d < active_day and (cutoff_day is None or d >= cutoff_day):
+                    candidate_days.add(d)
+            elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
+                d = entry[len("day_bundle_") : -len(".parquet")]
+                if len(d) == 10 and d < active_day and (cutoff_day is None or d >= cutoff_day):
+                    candidate_days.add(d)
+    except OSError:
+        return 0, 0
+
+    con = get_memory_connection()
+    try:
+        for day in sorted(candidate_days):
+            bundle_path = os.path.join(bundled_root, f"day={day}", DAY_BUNDLE_FILENAME)
+            alt_bundle_path = os.path.join(bundled_root, f"day={day}", f"day_bundle_{day}.parquet")
+            flat_bundle_path = os.path.join(bundled_root, f"day_bundle_{day}.parquet")
+            valid_path = (
+                bundle_path
+                if os.path.isfile(bundle_path)
+                else (
+                    alt_bundle_path
+                    if os.path.isfile(alt_bundle_path)
+                    else (flat_bundle_path if os.path.isfile(flat_bundle_path) else None)
+                )
+            )
+            if not valid_path:
+                continue
+
+            # Read validation: verify day bundle can be read and has rows
+            try:
+                res = con.execute(f"SELECT count(*) FROM read_parquet('{valid_path}')").fetchone()
+                row_cnt = res[0] if res else 0
+                if not row_cnt or row_cnt <= 0:
+                    continue
+            except Exception as e:
+                logger.warning(
+                    "[rollups] %s: day bundle read validation failed for %s: %s",
+                    service_id,
+                    valid_path,
+                    e,
+                )
+                continue
+
+            # Candidate constituent hours for this day
+            for hour_idx in range(24):
+                hour_str = f"{day}-{hour_idx:02d}"
+                hour_dir = os.path.join(hour_bundled_root, f"hour={hour_str}")
+                if not os.path.isdir(hour_dir):
+                    continue
+                for target_filename in (DAY_BUNDLE_FILENAME, IP_SPREAD_BUNDLE_FILENAME):
+                    target_file = os.path.join(hour_dir, target_filename)
+                    if os.path.isfile(target_file):
+                        try:
+                            fsize = os.path.getsize(target_file)
+                            if not dry_run:
+                                with _get_service_lock(lock_key):
+                                    os.remove(target_file)
+                            retired_files += 1
+                            retired_bytes += fsize
+                        except OSError as e:
+                            logger.warning(
+                                "[rollups] %s: failed to unlink %s: %s",
+                                service_id,
+                                target_file,
+                                e,
+                            )
+
+                if not dry_run and os.path.isdir(hour_dir):
+                    try:
+                        os.rmdir(hour_dir)
+                    except OSError:
+                        pass
+    finally:
+        con.close()
+
+    return retired_files, retired_bytes

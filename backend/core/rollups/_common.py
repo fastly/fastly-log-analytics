@@ -921,6 +921,7 @@ def compact_closed_days(
     source: dict,
     *,
     jobs: list[tuple[str, str, Callable[[str, str], str]]],
+    lookback_days: int | None = None,
     logger: logging.Logger = logger,
 ) -> int:
     """Consolidate closed-day per-hour bundle parquets into per-day files.
@@ -932,6 +933,8 @@ def compact_closed_days(
       - walks ``hour_bundled/hour=YYYY-MM-DD-HH/<bundle_filename>``, grouping
         files by their ``YYYY-MM-DD`` prefix and skipping the active day (still
         being written);
+      - bounds historical days to ``lookback_days`` when specified (e.g. 30 days
+        for nightly compaction);
       - for each closed day, skips when the per-day file is already newer than
         every constituent hour file (mtime gate);
       - otherwise writes ``build_copy_sql(paths_sql, tmp_file)`` to a temp file
@@ -956,6 +959,12 @@ def compact_closed_days(
         return 0
 
     active_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    cutoff_day: str | None = None
+    if lookback_days is not None:
+        from datetime import timedelta
+
+        cutoff_day = (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+
     lock_key = source.get("name", "default")
 
     rebuilt = 0
@@ -975,6 +984,8 @@ def compact_closed_days(
                     day = hour_tok[:10]
                     if day == active_day:
                         continue
+                    if cutoff_day is not None and day < cutoff_day:
+                        continue
                     p = os.path.join(hour_root, hour_entry, bundle_filename)
                     if os.path.isfile(p):
                         hours_by_day.setdefault(day, []).append(p)
@@ -982,6 +993,8 @@ def compact_closed_days(
                 continue
 
             for day in sorted(hours_by_day):
+                if cutoff_day is not None and day < cutoff_day:
+                    continue
                 input_paths = sorted(hours_by_day[day])
                 if not input_paths:
                     continue

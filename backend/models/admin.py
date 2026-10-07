@@ -569,6 +569,30 @@ class ConsolidateRollupsResponse(_AdminMaintRead):
     duration_s: float | None = None
 
 
+class RollupCompactResponse(_AdminMaintRead):
+    """Result from POST /admin/rollups/compact/{service_id}."""
+
+    status: str | None = None
+    service_id: str | None = None
+    rebuilt: int | None = None
+    bundled: int | None = None
+    retired_files: int | None = None
+    retired_bytes: int | None = None
+    duration_s: float | None = None
+    summary: str | None = None
+    errors: list[str] | None = None
+
+
+class RollupStatusResponse(_AdminMaintRead):
+    """Rollup status from GET /admin/rollups/status."""
+
+    service_id: str | None = None
+    days_bundled: int | None = None
+    hour_bundles: int | None = None
+    latest_day_bundle: str | None = None
+    earliest_day_bundle: str | None = None
+
+
 class LocalCompactNowResponse(_AdminMaintRead):
     """``compact_local_partitions`` result dict."""
 

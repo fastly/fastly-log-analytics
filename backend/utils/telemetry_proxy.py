@@ -419,7 +419,9 @@ def _sign_request(method: str, url: str, headers: dict, body: bytes, service_id:
         import base64
         import hashlib
 
-        headers["Content-MD5"] = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
+        headers["Content-MD5"] = base64.b64encode(
+            hashlib.md5(body, usedforsecurity=False).digest()  # nosec B324
+        ).decode("ascii")
 
     credentials = Credentials(access_key, secret_key)
     aws_req = AWSRequest(method=method, url=url, headers=headers, data=body)

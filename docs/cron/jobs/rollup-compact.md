@@ -1,8 +1,3 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `rollup_compact_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
-
 # Background Job Specification: `rollup_compact_{service_id}`
 
 ## 1. Overview & Objectives
@@ -89,9 +84,9 @@
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Generate 24 hourly synthetic rollup bundles for a past UTC day.
-- [ ] 2. Trigger `POST /api/admin/rollups/compact/{service_id}`; confirm HTTP 200.
-- [ ] 3. Verify `day_bundle_YYYY-MM-DD.parquet` is created.
-- [ ] 4. Confirm the 24 individual hourly bundle files are retired/unlinked.
-- [ ] 5. Run a 7-day query on `/api/dashboard/bundle`; confirm query reads the day bundle directly.
-- [ ] 6. Confirm query response time is < 150ms.
+- [x] 1. Generate 24 hourly synthetic rollup bundles for a past UTC day.
+- [x] 2. Trigger `POST /api/admin/rollups/compact/{service_id}`; confirm HTTP 200.
+- [x] 3. Verify `day_bundle_YYYY-MM-DD.parquet` is created.
+- [x] 4. Confirm the 24 individual hourly bundle files are retired/unlinked.
+- [x] 5. Run a 7-day query on `/api/dashboard/bundle`; confirm query reads the day bundle directly.
+- [x] 6. Confirm query response time is < 150ms.
