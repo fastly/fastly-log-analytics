@@ -62,6 +62,7 @@
 6. **Ingest Tracking Update:** Records successfully ingested files in PostgreSQL `ingested_files`.
 7. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 60s, or on a forced run):
    - Triggers `update_top_values()` (100k reservoir sample backing autocomplete; short-circuits in <1ms via fingerprint cache if data has not changed).
+   - Runs after the header-only status refresh has been published, so this pass (about 5 s on a busy service) never delays the rows the tick just ingested.
    - Runs the usage-log phase: `backfill_fastly_edge_writes()`, `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation), and `run_usage_log_cleanup()`.
    - The usage-log phase costs about 3 s. Running it on every tick delayed the next tick's first FOS poll and widened request lag; all three steps are idempotent and the Usage Log page reads at hourly grain.
 8. **Progress & Status Update:** Emits `cron_progress` SSE event and records execution run in `cron_runs`. Any failed log line, quarantine-capture failure, or FOS deletion failure marks the run `error` (never `success` or `warning`). The run records a stable, zero-filled counter schema shared with RUM ingestion: `valid_records`, `malformed_records`, `corrupt_containers`, `quarantine_capture_failures`, `source_delete_failures`, and `cap_evictions`. It also records source-object counters for `objects_processed`, `objects_successful`, `objects_partial`, and `objects_failed`.

@@ -680,7 +680,7 @@ def _run_log_discovery_cron(
         )
     _t0 = time.time()
     try:
-        refresh_config_status(service_id, include_top_values=do_heavy_refresh)
+        refresh_config_status(service_id, include_top_values=False)
     except Exception:
         pass
 
@@ -699,16 +699,34 @@ def _run_log_discovery_cron(
         logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
 
     if run_id is not None:
-        _heavy = " (heavy)" if do_heavy_refresh else ""
         _log_and_add_progress(
             run_id,
             service_id,
             job_name="log_discovery",
             event={
                 "type": "status",
-                "message": f"{elapsed()} refresh_config_status{_heavy}: {int((time.time() - _t0) * 1000)}ms",
+                "message": f"{elapsed()} refresh_config_status: {int((time.time() - _t0) * 1000)}ms",
             },
         )
+
+    # Top values + schema run after publish: the pass costs ~5 s on a busy
+    # service and the extents it would publish are already persisted above.
+    if do_heavy_refresh:
+        _t0 = time.time()
+        try:
+            refresh_config_status(service_id, include_top_values=True)
+        except Exception:
+            pass
+        if run_id is not None:
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="log_discovery",
+                event={
+                    "type": "status",
+                    "message": f"{elapsed()} refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms",
+                },
+            )
 
     # ── 3. Invalidate dashboard cache ─────────────────────────────────────────
     # Gate on DASHBOARD_CACHE_TTL > 0: when the TTL is 0 (the current

@@ -563,8 +563,8 @@ def test_sync_status_published_after_request_extents_refresh(
         _make_ingest_events([{"type": "done", "new_files": 0, "rows_inserted": 0}]),
     )
 
-    def _fake_refresh_config_status(*args, **kwargs):
-        calls.append("refresh_config_status")
+    def _fake_refresh_config_status(*args, include_top_values=True, **kwargs):
+        calls.append(f"refresh_config_status(top_values={include_top_values})")
         status["latest_log_at"] = "2026-01-02T00:00:00Z"
 
     monkeypatch.setattr("backend.core.duckdb.refresh_config_status", _fake_refresh_config_status)
@@ -584,7 +584,14 @@ def test_sync_status_published_after_request_extents_refresh(
 
     sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
 
-    assert calls == ["refresh_config_status", "compute_sync_status_cached", "publish"]
+    # The heavy top-values pass (~5 s on GCE) runs after publish so it never
+    # holds freshly ingested rows back from the header.
+    assert calls == [
+        "refresh_config_status(top_values=False)",
+        "compute_sync_status_cached",
+        "publish",
+        "refresh_config_status(top_values=True)",
+    ]
     fake_publisher.publish.assert_called_once_with("svc-1", {"latest_log_at": "2026-01-02T00:00:00Z"})
 
 
