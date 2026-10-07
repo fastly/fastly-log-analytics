@@ -383,6 +383,104 @@ def test_page_objects_are_processed_concurrently_with_pool_backed_control_plane(
     assert control.cursor == "cursor-1"
 
 
+class _ContendedControl(_ThreadSafeControl):
+    """Every high-scale worker replica runs the same (service, domain) page,
+    so a sibling replica can hold the lease (claim returns claimed=False) or
+    finish the object between our terminal check and our claim (claim raises
+    "not claimable" because the row is now acknowledged)."""
+
+    def __init__(self, *, held: set[str], finished: set[str]) -> None:
+        super().__init__()
+        self.held = held
+        self.finished = finished
+        self.claimed: set[str] = set()
+
+    def claim_source(self, service_id: str, object_key: str, *args: object, **kwargs: object):
+        @dataclass
+        class _Claim:
+            claimed: bool
+            lease_generation: int = 1
+
+        if object_key in self.finished:
+            self.claimed.add(object_key)
+            raise ValueError(f"source object is not claimable: {object_key}")
+        return _Claim(object_key not in self.held)
+
+    def source(self, service_id: str, object_key: str):
+        if object_key in self.finished and object_key in self.claimed:
+
+            @dataclass
+            class _Source:
+                status: str = "acknowledged"
+
+            return _Source()
+        raise KeyError(object_key)
+
+
+class _CountingController:
+    def __init__(self) -> None:
+        self.keys: list[str] = []
+
+    def ingest(self, **kwargs: object) -> None:
+        self.keys.append(str(kwargs["object_key"]))
+
+
+def test_claims_lost_to_sibling_replicas_do_not_block_the_cursor() -> None:
+    """Regression: every replica lists the same page, so a page almost always
+    contains an object a sibling holds or just finished. Counting those as
+    "failed" froze the cursor and left high-scale ingest minutes behind."""
+    objects = (
+        SourceObjectDescriptor("raw/held.gz", "sha256:a", 4, "v1"),
+        SourceObjectDescriptor("raw/finished.gz", "sha256:b", 4, "v1"),
+        SourceObjectDescriptor("raw/mine.gz", "sha256:c", 4, "v1"),
+    )
+    control = _ContendedControl(held={"raw/held.gz"}, finished={"raw/finished.gz"})
+    controller = _CountingController()
+    coordinator = HighScaleWorkerCoordinator(
+        lister=_AnyPageLister(SourceObjectPage(objects, "cursor-1")),
+        reader=_Reader(),
+        controller=controller,  # type: ignore[arg-type]
+        ownership=None,
+        ledger=None,
+        worker_id="worker",
+        control_plane=control,  # type: ignore[arg-type]
+        page_size=10,
+    )
+
+    result = coordinator.run_page(service_id="svc", domain="request")
+
+    assert controller.keys == ["raw/mine.gz"]
+    assert result.processed == 1
+    assert result.duplicates == 2
+    assert result.failed == 0
+    assert control.cursor == "cursor-1"
+
+
+def test_unexpected_unclaimable_source_still_blocks_the_cursor() -> None:
+    """A "not claimable" error whose row is NOT terminal is a real failure."""
+
+    class _BrokenControl(_ThreadSafeControl):
+        def claim_source(self, *args: object, **kwargs: object):
+            raise ValueError("source object is not claimable: raw/x.gz")
+
+    control = _BrokenControl()
+    coordinator = HighScaleWorkerCoordinator(
+        lister=_AnyPageLister(SourceObjectPage((SourceObjectDescriptor("raw/x.gz", "sha256:x", 4, "v1"),), "cursor-1")),
+        reader=_Reader(),
+        controller=_CountingController(),  # type: ignore[arg-type]
+        ownership=None,
+        ledger=None,
+        worker_id="worker",
+        control_plane=control,  # type: ignore[arg-type]
+        page_size=10,
+    )
+
+    result = coordinator.run_page(service_id="svc", domain="request")
+
+    assert result.failed == 1
+    assert control.cursor == "cursor-0"
+
+
 def test_object_concurrency_rejects_non_positive_values() -> None:
     with pytest.raises(ValueError, match="object_concurrency"):
         HighScaleWorkerCoordinator(

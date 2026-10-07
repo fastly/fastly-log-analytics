@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **High-scale request lag reached minutes under load** — the isolated high-scale worker processed each page's source objects serially at about 3 s per object. Objects in a page now run concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4).
 - **DuckDB scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking DuckDB's worker relaunch against an in-flight DuckLake scan. Threads are now set once from `DUCKDB_THREADS`; `DUCKDB_POOL_CONN_THREADS` is removed.
 - **Dashboard failed with `schema "lake" does not exist`** — returning a pooled connection detached `lake` from the shared per-service DuckDB instance, evicting it from sibling requests still mid-query. Pool release no longer detaches.
+- **High-scale source cursor stalled under multiple worker replicas** — every replica lists the same page, and a claim lost to a sibling counted as a failure, which blocked cursor advancement. Contended claims now count as duplicates; expired sibling leases are still recovered independently.
 
 ### Breaking
 

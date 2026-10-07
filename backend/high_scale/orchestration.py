@@ -220,7 +220,7 @@ class HighScaleWorkerCoordinator:
                 processed += 1
             elif outcome == "missing":
                 missing += 1
-            else:
+            elif outcome != "duplicate":
                 failed += 1
         return processed, failed, missing
 
@@ -289,17 +289,26 @@ class HighScaleWorkerCoordinator:
             return "duplicate"
         try:
             if self._control is not None:
-                claim = self._control.claim_source(
-                    service_id,
-                    source.object_key,
-                    self._worker_id,
-                    expected_owner=expected_owner,
-                    expected_owner_epoch=expected_epoch,
-                    lease_seconds=self._lease_seconds,
-                    now=now,
-                )
+                # Every worker replica lists the same page, so losing a claim
+                # to a sibling is normal and must not block the cursor: a live
+                # lease is the sibling's work, and an expired one is picked up
+                # by _recover_expired_claims regardless of cursor position.
+                try:
+                    claim = self._control.claim_source(
+                        service_id,
+                        source.object_key,
+                        self._worker_id,
+                        expected_owner=expected_owner,
+                        expected_owner_epoch=expected_epoch,
+                        lease_seconds=self._lease_seconds,
+                        now=now,
+                    )
+                except ValueError:
+                    if self._already_terminal(service_id, source.object_key):
+                        return "duplicate"
+                    raise
                 if not claim.claimed:
-                    return "failed"
+                    return "duplicate"
             self._controller.ingest(
                 service_id=service_id,
                 domain=domain,
