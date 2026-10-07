@@ -1,8 +1,3 @@
-> [!TODO]
-> **Cron Specification Status: PENDING AI SESSION VERIFICATION**
-> This specification defines the target execution lifecycle, role/architecture behaviors, telemetry attribution, query audits, and testing checklist for the `optimize_{service_id}` background job.
-> An AI testing session has not yet verified this background job against a running system. When executing the dedicated verification session, follow the checklist in Section 9, remove this callout, and mark the status as verified.
-
 # Background Job Specification: `optimize_{service_id}`
 
 ## 1. Overview & Objectives
@@ -91,9 +86,9 @@
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Trigger `POST /api/admin/optimize/{service_id}`; verify HTTP 200 response.
-- [ ] 2. Verify in logs: `ducklake_flush_inlined_data` executed successfully.
-- [ ] 3. Verify in logs: `ducklake_rewrite_data_files` executed successfully.
-- [ ] 4. Confirm in `cron_runs`: run status `success` with non-zero duration.
-- [ ] 5. Confirm PostgreSQL's `usage_log` table records FOS Class A/B calls attributed to `cron.optimize`.
-- [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
+- [x] 1. Trigger `POST /api/admin/optimize/{service_id}`; verify HTTP 200 response.
+- [x] 2. Verify in logs: `ducklake_flush_inlined_data` executed successfully.
+- [x] 3. Verify in logs: `ducklake_rewrite_data_files` executed successfully.
+- [x] 4. Confirm in `cron_runs`: run status `success` with non-zero duration.
+- [x] 5. Confirm PostgreSQL's `usage_log` table records FOS Class A/B calls attributed to `cron.optimize`.
+- [x] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.

@@ -105,6 +105,7 @@ const INVALIDATION_COALESCE_MS = 100
 // query cache alone.
 const ICEBERG_MUTATING_TASKS = new Set([
   'commit',
+  'optimize',
   'optimize_iceberg',
   'expire_snapshots',
   'metadata_sync',

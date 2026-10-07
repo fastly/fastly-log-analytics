@@ -711,7 +711,10 @@ def _commit_buffer_impl(source: dict, progress_callback=None, table_name: str = 
 
 
 def optimize_table(
-    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
+    source: dict,
+    target_file_size_mb: int = 128,
+    min_files_per_partition: int | None = None,
+    table_name: str | None = None,
 ) -> dict:
     """Compact small Iceberg data files into larger ones using rewrite_data_files.
 
@@ -728,7 +731,7 @@ def optimize_table(
             "%s optimize_table: service lock held (reset or another writer in progress) — skipping this cycle",
             _core_mod._ICE,
         )
-        return {"error": "service busy (reset or another writer in progress)", "files_rewritten": 0}
+        return {"error": "service busy (reset or another writer in progress)", "files_rewritten": 0, "files_added": 0}
     try:
         return _optimize_table_impl(source, target_file_size_mb, min_files_per_partition, table_name=table_name)
     finally:
@@ -736,7 +739,10 @@ def optimize_table(
 
 
 def _optimize_table_impl(
-    source: dict, target_file_size_mb: int = 128, min_files_per_partition: int | None = None, table_name: str = "logs"
+    source: dict,
+    target_file_size_mb: int = 128,
+    min_files_per_partition: int | None = None,
+    table_name: str | None = None,
 ) -> dict:
     from backend.core.iceberg._ducklake import ducklake_table_name
 
@@ -751,29 +757,73 @@ def _optimize_table_impl(
             # catalog DB (the raw .gz is deleted after ingest). flush first so the
             # rewrite below has real files to compact.
             con.execute("CALL ducklake_flush_inlined_data('lake')").fetchall()
-            tbl = ducklake_table_name(source)
+            sid = source.get("service_id") or source.get("name", "default")
+            logger.info("[ducklake] %s: ducklake_flush_inlined_data executed successfully", sid)
 
-            # Merge adjacent small files into larger ones (bin-packing)
-            merge_rows = con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{tbl}')").fetchall()
+            if table_name and table_name not in ("logs", "all", "*"):
+                candidate_tables = [table_name]
+            else:
+                candidate_tables = ["logs", "client_vitals", "client_errors"]
 
-            # DuckLake rewrites data files with deleted rows / expired data
-            rewrite_rows = con.execute(f"CALL ducklake_rewrite_data_files('lake', '{tbl}')").fetchall()
+            total_merge_rows = []
+            total_rewrite_rows = []
+            partition_errors = []
+            tables_processed = []
 
-            files_rewritten = sum(int(r[2]) for r in merge_rows if len(r) >= 4) + sum(
-                int(r[2]) for r in rewrite_rows if len(r) >= 4
+            for t_name in candidate_tables:
+                tbl = ducklake_table_name(source, table_name=t_name)
+                if not _lake_columns(con, tbl):
+                    continue
+                tables_processed.append(t_name)
+                try:
+                    # Merge adjacent small files into larger ones (bin-packing)
+                    m_rows = con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{tbl}')").fetchall()
+                    total_merge_rows.extend(m_rows)
+                    logger.info(
+                        "[ducklake] %s: ducklake_merge_adjacent_files executed successfully for table %s", sid, tbl
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "%s optimize_table: merge failed on %s: %s",
+                        sid,
+                        tbl,
+                        exc,
+                    )
+                    partition_errors.append(f"{t_name} merge: {exc}")
+
+                try:
+                    # DuckLake rewrites data files with deleted rows / expired data
+                    r_rows = con.execute(f"CALL ducklake_rewrite_data_files('lake', '{tbl}')").fetchall()
+                    total_rewrite_rows.extend(r_rows)
+                    logger.info(
+                        "[ducklake] %s: ducklake_rewrite_data_files executed successfully for table %s", sid, tbl
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "%s optimize_table: rewrite failed on %s: %s",
+                        sid,
+                        tbl,
+                        exc,
+                    )
+                    partition_errors.append(f"{t_name} rewrite: {exc}")
+
+            logger.info("[ducklake] %s: ducklake_rewrite_data_files executed successfully", sid)
+
+            files_rewritten = sum(int(r[2]) for r in total_merge_rows if len(r) >= 4) + sum(
+                int(r[2]) for r in total_rewrite_rows if len(r) >= 4
             )
-            files_added = sum(int(r[3]) for r in merge_rows if len(r) >= 4) + sum(
-                int(r[3]) for r in rewrite_rows if len(r) >= 4
+            files_added = sum(int(r[3]) for r in total_merge_rows if len(r) >= 4) + sum(
+                int(r[3]) for r in total_rewrite_rows if len(r) >= 4
             )
 
             return {
                 "files_rewritten": files_rewritten,
                 "files_added": files_added,
-                "eligible_partitions": 1,
-                "partition_errors": [],
+                "eligible_partitions": len(tables_processed) or 1,
+                "partition_errors": partition_errors,
             }
     except Exception as e:
-        return {"error": str(e), "files_rewritten": 0}
+        return {"error": str(e), "files_rewritten": 0, "files_added": 0}
 
 
 def run_cloud_maintenance(source: dict) -> dict:

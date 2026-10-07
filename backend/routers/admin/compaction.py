@@ -50,6 +50,28 @@ def optimize_now(
 
 
 @router.post(
+    "/admin/optimize/{service_id}",
+    response_model=OptimizeNowResponse,
+    response_model_exclude_unset=True,
+)
+def optimize_service(
+    service_id: str,
+    source: dict = Depends(get_source),
+) -> OptimizeNowResponse:
+    """Trigger an immediate cloud lakehouse optimization pass for service_id.
+    Executes DuckLake durability flush, small-file merge, and data file compaction.
+    Logs execution in cron_runs and returns execution outcome.
+    """
+    from backend.cron.jobs.optimize import _run_optimize
+
+    sid = service_id or source.get("name") or source.get("service_id", "")
+    res = _run_optimize(sid, manual=True)
+    if isinstance(res, dict):
+        return OptimizeNowResponse(**res)
+    return OptimizeNowResponse(files_rewritten=0, files_added=0)
+
+
+@router.post(
     "/admin/backfill-bundle-rollups",
     response_model=BackfillBundleRollupsResponse,
     response_model_exclude_unset=True,
