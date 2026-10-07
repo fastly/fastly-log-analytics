@@ -126,7 +126,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 Every background job must participate in the comprehensive telemetry and audit harness:
 
 ### 5.1 Storage & Operational Logging
-1. **`cron_runs` Table in SQLite (`metadata.db`):**
+1. **`cron_runs` Table in PostgreSQL 16 (`cron_log`):**
    - Every execution records: `run_id`, `service_id`, `job_id`, `status` (`success`, `warning`, `error`), `started_at`, `duration_s`, `details_json`.
    - Result tallies (files ingested, rows committed, bytes compacted, memory reclaimed) must be recorded in `details_json`.
 2. **PostgreSQL `usage_log` Billing & Cost Telemetry:**
@@ -138,7 +138,7 @@ Every background job must participate in the comprehensive telemetry and audit h
 - **DuckDB Analytical SQL:** Every analytical query run during alerting, prewarming, or rollup generation must be wrapped with timing instrumentation and recorded in `telemetry_queries`.
 - **ClickHouse Operations:** Every query issued against ClickHouse (including `BACKUP TABLE`, projection aggregations, and partition merges) must register through `query_registry.register("ClickHouse", ...)` so operators can audit them in the Live Query Monitor.
 - **PostgreSQL Ledger Operations:** Distributed state transitions (`discovered` -> `claimed` -> `committed`) must use parameterized queries and record transaction durations.
-- **SQLite Database Access:** All reads and writes to SQLite databases must flow through `ThreadLocalPool` wrappers to prevent thread contention and record pool acquisition wait times (`app.thread_wait_ms`).
+- **PostgreSQL Metadata Access:** All reads and writes to operational metadata and state tables must flow through the PostgreSQL connection pool (`psycopg_pool.ConnectionPool`) per ADR-22, recording pool wait times (`app.thread_wait_ms`).
 
 ---
 
@@ -172,16 +172,17 @@ When verifying background jobs during automated test suites or dedicated AI test
     - `/api/admin/sync/{service_id}` (`log_discovery`)
     - `/api/admin/commit/{service_id}` (`commit`)
     - `/api/admin/compact/{service_id}` (`local_compact`)
+    - `/api/admin/rollups/compact/{service_id}` (`rollup_compact`)
     - `/api/admin/optimize/{service_id}` (`optimize`)
     - `/api/admin/expire-snapshots/{service_id}` (`expire`)
     - `/api/admin/full-sweep/{service_id}` (`full_sync`)
     - `/api/admin/gap-heal/{service_id}` (`gap_heal`)
     - `/api/admin/duckdb/recycle` (`duckdb_recycle`)
 - [ ] **3. `cron_runs` Verification:**
-  - Inspect `data/services/{service_id}.metadata.db` table `cron_runs`.
+  - Inspect PostgreSQL table `cron_runs` via `metadata.cron_log`.
   - Assert that execution status is `success` and `duration_s > 0`.
 - [ ] **4. Telemetry & Query Audit Verification:**
-  - Verify queries appear in Live Query Monitor (`/admin/queries`) under appropriate engines (`DuckDB`, `ClickHouse`, `PostgreSQL`, `SQLite`).
+  - Verify queries appear in Live Query Monitor (`/admin/queries`) under appropriate engines (`DuckDB`, `ClickHouse`, `PostgreSQL`).
   - Verify FOS operations are attributed in PostgreSQL's `usage_log` table.
 - [ ] **5. Dev Safety Verification (`FLA_DEV_NO_CRONS=1`):**
   - Launch application with `FLA_DEV_NO_CRONS=1`.

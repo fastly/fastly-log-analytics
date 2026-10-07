@@ -1,3 +1,6 @@
+> **Cron Specification Status: VERIFIED**
+> Verified on branch `release/v3.0.0-beta3`. 30-day deep pass, atomic replacement, flat and partitioned alias linking, hourly bundle retirement, zero-egress contracts, and test suite `tests/cron/test_rollup_compact_contract.py` certified.
+
 # Background Job Specification: `rollup_compact_{service_id}`
 
 ## 1. Overview & Objectives
