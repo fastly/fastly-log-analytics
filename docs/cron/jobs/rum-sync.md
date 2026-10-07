@@ -146,10 +146,7 @@ RUM and request ingestion now share strategy, discovery, deletion, error handlin
 | 8 | Bookkeeping parity | Durable row counts recorded per file per table (0 for files with no rows for that table). Retries unreadable files. |
 | 9 | DuckLake detach safety | `convert_rum_object` (and other convert functions) use `_ducklake_detach` in `finally` (Trap #35). |
 
-### Cleanup owed once the gaps close
+### Completed Cleanup (2026-10-07)
 
-- Duplicate `client_vitals` / `client_errors` rows written by the 2026-10-06
-  re-ingest (Local and likely GCE). Dedupe on the beacon's natural key, using
-  the same DuckLake delete path as retention, after a dry-run count.
-- Already-ingested raw objects still in `raw/rum/`. These are reclaimed by the
-  stranded-object sweep from gap 2, not by a one-off script.
+- **Duplicate rows deduplicated:** 516,223 duplicate rows removed on Local Standard, 177,943 duplicate rows removed on GCE Standard using `scripts/dedupe_rum_tables.py` on the beacon's natural key through the DuckLake delete path.
+- **Stranded raw objects:** Actively reclaimed by the inline stranded-object sweep from gap 2.
