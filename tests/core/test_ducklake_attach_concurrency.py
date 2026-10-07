@@ -194,32 +194,37 @@ def test_readonly_attach_reuses_live_readwrite_attach_without_detaching(tmp_path
             reader.close()
 
 
-def test_pool_release_attempts_ducklake_internal_alias_detach():
-    """Returning a pooled connection must release both the public ``lake``
-    alias and DuckLake's internal metadata alias. Leaving the internal
-    alias/file handle pinned caused the next checkout's ATTACH on a sibling
-    connection to fail with a unique file-handle conflict."""
+def test_pool_release_keeps_lake_attached_for_sibling_in_flight_connection(tmp_path):
+    """Releasing one pooled connection must not evict ``lake`` from a sibling.
+
+    Connections to the same service file share one DuckDB instance, so ATTACH
+    state is shared. A release-time ``DETACH lake`` removed the catalog from
+    every concurrently checked-out connection; the dashboard bundle's parallel
+    aggregates branch then failed with ``schema "lake" does not exist``
+    (GCE 2026-10-07).
+    """
     from backend.core.duckdb_pool import _Pool
 
-    class FakeConnection:
-        def __init__(self):
-            self.commands: list[str] = []
+    name = f"sibling{uuid.uuid4().hex[:8]}"
+    src = _make_committed_source(tmp_path, name)
+    pool = _Pool(name, max_size=2)
 
-        def execute(self, sql: str):
-            self.commands.append(sql)
-            if sql == "DETACH lake":
-                return self
-            if sql == "DETACH __ducklake_metadata_lake":
-                return self
-            raise AssertionError(f"unexpected SQL: {sql}")
+    first = pool.acquire(src, max_wait=10, skip_view_update=True)
+    second = pool.acquire(src, max_wait=10, skip_view_update=True)
+    try:
+        pool.release(first)
+        row = second.execute(
+            "SELECT snapshot_id FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
 
-    pool = _Pool("fake", max_size=1)
-    pool._in_use = 1
-    con = FakeConnection()
-
-    pool.release(con)  # type: ignore[arg-type]
-
-    assert con.commands[:2] == ["DETACH lake", "DETACH __ducklake_metadata_lake"]
+        reused = pool.acquire(src, max_wait=10, skip_view_update=True)
+        assert reused.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()[0] >= 1
+        pool.release(reused)
+    finally:
+        pool.release(second)
+        for con in list(pool._idle.queue):
+            con.close()
 
 
 def test_update_iceberg_view_locked_skips_reattach_when_lake_already_attached(tmp_path, monkeypatch):

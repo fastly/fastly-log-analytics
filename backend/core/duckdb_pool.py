@@ -461,7 +461,7 @@ class _Pool:
         # and the FastAPI thread pool then fills with stuck checkouts until
         # the backend stops accepting new connections.
         if reused_con is not None:
-            # Re-attach lake since release() detached it to free the process-wide lock
+            # Verify (or restore, after a file-mode writer's detach) the shared lake attach.
             from backend.core.iceberg._ducklake import _ducklake_attach
 
             if not _ducklake_attach(reused_con, src, read_only=True):
@@ -524,16 +524,11 @@ class _Pool:
             self._discard(con)
             return
 
-        # Detach lake from idle connections so background writers can acquire the process-wide lock.
-        # It gets re-attached on the next acquire(). Routed through _ducklake_detach so this
-        # mutation of the shared catalog state is itself serialized by _attach_lock — a raw,
-        # unlocked DETACH here can race with another connection's locked _ducklake_attach and
-        # rip "lake" out from under it mid-operation (see _ducklake.py's _attach_lock docstring;
-        # this was the root cause of production "Schema with name lake does not exist!" commit
-        # failures — this release() path is the highest-traffic unlocked DETACH in the codebase).
-        from backend.core.iceberg._ducklake import _ducklake_detach
-
-        _ducklake_detach(con, aliases=("lake", "__ducklake_metadata_lake"), service_id=self.service_key)
+        # Never DETACH lake here: connections to the same service file share one
+        # DuckDB instance, so a release-time detach evicts lake from every sibling
+        # still mid-query (AGENTS.md Trap #35). Writers don't need it — Postgres
+        # mode writes on a separate in-memory connection and file mode detaches
+        # and re-attaches itself in _ducklake_write_connection.
 
         # Sweep leftover per-conn TEMP tables before returning the conn
         # so they don't accumulate across requests (see
