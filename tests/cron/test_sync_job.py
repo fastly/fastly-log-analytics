@@ -711,6 +711,7 @@ def test_ingest_done_event_records_summary_and_recompute_rollups(
     )
 
     sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
+    assert sync_mod.wait_for_post_ingest_rollups("svc-1", timeout=5)
 
     success_calls = [c for c in log_cron.call_args_list if c.args[3] == "success"]
     assert success_calls, "expected log_cron_run success"
@@ -722,6 +723,91 @@ def test_ingest_done_event_records_summary_and_recompute_rollups(
     recompute.assert_called_once()
     _a, _b, hours_set = recompute.call_args.args
     assert hours_set == {"2026-06-15-09", "2026-06-15-10"}
+
+
+def test_rollup_recompute_does_not_block_discovery_tick(
+    monkeypatch,
+    stub_load_config,
+    stub_progress,
+    stub_post_ingest,
+    stub_usage_log_phase,
+):
+    """Closed-hour rollup rebuilds can take minutes; running them inline held
+    the 10 s discovery job (max_instances=1) and let the FOS backlog grow to
+    minutes of request lag. The tick must return while the rollup is still
+    running."""
+    import threading
+
+    from backend.cron.jobs import sync as sync_mod
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
+    release = threading.Event()
+    started = threading.Event()
+
+    def _slow_recompute(_sid, _src, _hours):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr("backend.core.rollups.recompute_touched_hours", _slow_recompute)
+    monkeypatch.setattr("backend.core.rollups.recompute_wellknown_bots_rollup", MagicMock(return_value=0))
+    monkeypatch.setattr(
+        "backend.core.ingest.ingest",
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 5,
+                    "deleted_files": 1,
+                    "touched_hours": ["2026-06-15-09"],
+                }
+            ]
+        ),
+    )
+
+    sync_mod._run_log_discovery_cron.__wrapped__("svc-block")
+
+    assert started.wait(5), "rollup recompute never started"
+    assert not sync_mod.wait_for_post_ingest_rollups("svc-block", timeout=0.05)
+    release.set()
+    assert sync_mod.wait_for_post_ingest_rollups("svc-block", timeout=5)
+
+
+def test_post_ingest_rollups_coalesce_hours_queued_while_running(monkeypatch):
+    """Hours queued while a pass is running fold into ONE follow-up pass on the
+    same worker, so a slow rollup never spawns a pile of concurrent rebuilds."""
+    import threading
+
+    from backend.cron.jobs import sync as sync_mod
+
+    calls: list[set[str]] = []
+    threads: set[str] = set()
+    release = threading.Event()
+    first_started = threading.Event()
+
+    def _recompute(_sid, _src, hours):
+        threads.add(threading.current_thread().name)
+        calls.append(set(hours))
+        if len(calls) == 1:
+            first_started.set()
+            release.wait(5)
+
+    monkeypatch.setattr("backend.core.rollups.recompute_touched_hours", _recompute)
+    monkeypatch.setattr("backend.core.rollups.recompute_wellknown_bots_rollup", MagicMock(return_value=0))
+
+    src = _fake_src()
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-09"})
+    assert first_started.wait(5)
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-10"})
+    sync_mod.schedule_post_ingest_rollups("svc-coalesce", src, {"2026-06-15-11", "2026-06-15-10"})
+    release.set()
+
+    assert sync_mod.wait_for_post_ingest_rollups("svc-coalesce", timeout=5)
+    assert calls == [{"2026-06-15-09"}, {"2026-06-15-10", "2026-06-15-11"}]
+    assert len(threads) == 1
 
 
 def test_ingest_exception_records_crashed(

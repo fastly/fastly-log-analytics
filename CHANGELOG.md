@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Standard-mode request lag exceeded one minute** — `log_discovery` ran hourly rollup recomputes inline (90–170 s on a busy service), so most ticks were skipped. Rollups now run on a per-service single-flight background worker that coalesces queued hours.
+- **High-scale request lag reached minutes under load** — the isolated high-scale worker processed each page's source objects serially at about 3 s per object. Objects in a page now run concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4).
 - **DuckDB scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking DuckDB's worker relaunch against an in-flight DuckLake scan. Threads are now set once from `DUCKDB_THREADS`; `DUCKDB_POOL_CONN_THREADS` is removed.
 
 ### Breaking

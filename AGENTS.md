@@ -1096,6 +1096,27 @@ with worker counts instead. Separate `:memory:` connections are separate
 instances and may set their own value before running queries. `memory_limit` is
 also instance-global. Pinned by `tests/core/test_duckdb_global_threads.py`.
 
+### 43. Request lag comes from serial work on the ingest tick, not the poll interval
+
+Freshness SLA is 10–20 s. Both regressions that broke it came from slow serial work
+hidden inside an ingest loop.
+
+**Standard.** `log_discovery` used to run `recompute_touched_hours` and
+`recompute_wellknown_bots_rollup` inline. On a busy service those take 90–170 s, so
+with `max_instances=1` most ticks were skipped, and lag rose past a minute. Rollups
+now go through `schedule_post_ingest_rollups` in `backend/cron/jobs/sync.py`, a
+per-service single-flight daemon worker that coalesces hours queued while it runs.
+**Do not move rollup or other heavy refresh work back onto the discovery tick.**
+
+**High-scale.** The isolated worker (`backend/high_scale/orchestration.py`
+`run_page`) processes about 3 s of round trips per 1–3 row object: FOS GET/PUT,
+about 15 Postgres control transitions and about 7 ClickHouse publish+verify pairs.
+Run serially, 6 pods managed about 100 objects/min, below the seeded arrival rate.
+Page objects now run on a bounded thread pool (`HIGH_SCALE_OBJECT_CONCURRENCY`,
+default 4). Concurrency is enabled only when a pool-backed `control_plane` is set;
+the SQLite ledger is not thread-safe. Size it against Postgres `max_connections`:
+pods × concurrency connections are added on top of the existing load.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{schema,manifest,publication,rows,export}.py` implements

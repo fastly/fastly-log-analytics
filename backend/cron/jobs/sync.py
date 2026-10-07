@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -93,6 +94,73 @@ def _ingest_with_adaptive_followups(
 
 
 # ── _run_service_cron (per-tick ingest) ──────────────────────────────────────
+
+
+_rollup_lock = threading.Lock()
+_rollup_pending: dict[str, set[str]] = {}
+_rollup_sources: dict[str, dict[str, Any]] = {}
+_rollup_workers: dict[str, threading.Thread] = {}
+
+
+def _post_ingest_rollup_worker(service_id: str) -> None:
+    from backend.core import rollups
+    from backend.utils.active_requests import yield_to_api
+
+    while True:
+        with _rollup_lock:
+            hours = _rollup_pending.pop(service_id, set())
+            src = _rollup_sources.get(service_id)
+            if not hours or src is None:
+                _rollup_workers.pop(service_id, None)
+                return
+        try:
+            yield_to_api()
+            rollups.recompute_touched_hours(service_id, src, hours)
+        except Exception as e:
+            logger.warning("[scheduler] %s: post-sync rollup recompute failed: %s", service_id, e)
+        # Wellknown-bots rollup is best-effort: the security reader has a
+        # live-SQL fallback for any hour without one.
+        try:
+            yield_to_api()
+            rollups.recompute_wellknown_bots_rollup(service_id, src, hours)
+        except Exception as e:
+            logger.warning("[scheduler] %s: post-sync bot rollup failed: %s", service_id, e)
+
+
+def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: set[str]) -> None:
+    """Queue closed-hour rollup recompute on a per-service single-flight worker.
+
+    Hours queued while a pass runs coalesce into one follow-up pass.
+    """
+    if not hours:
+        return
+    with _rollup_lock:
+        _rollup_pending.setdefault(service_id, set()).update(hours)
+        _rollup_sources[service_id] = src
+        if service_id in _rollup_workers:
+            return
+        worker = threading.Thread(
+            target=_post_ingest_rollup_worker,
+            args=(service_id,),
+            name=f"post-ingest-rollups:{service_id}",
+            daemon=True,
+        )
+        _rollup_workers[service_id] = worker
+    worker.start()
+
+
+def wait_for_post_ingest_rollups(service_id: str, timeout: float) -> bool:
+    """Return True once no rollup worker is running for ``service_id``."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with _rollup_lock:
+            worker = _rollup_workers.get(service_id)
+        if worker is None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        worker.join(min(remaining, 0.05))
 
 
 @cron_task("cron_log_discovery", job_name="log_discovery")
@@ -501,61 +569,19 @@ def _run_log_discovery_cron(
 
                         touched_hours = done_event.get("touched_hours", [])
                         if touched_hours:
-                            from backend.utils.active_requests import yield_to_api
-
-                            _t_roll = time.time()
-                            try:
-                                from backend.core.rollups import recompute_touched_hours
-
-                                yield_to_api()
-                                recompute_touched_hours(service_id, src, set(touched_hours))
-                                _log_and_add_progress(
-                                    run_id,
-                                    service_id,
-                                    job_name="log_discovery",
-                                    event={
-                                        "type": "status",
-                                        "message": f"{elapsed()} Rollups computed: {int((time.time() - _t_roll) * 1000)}ms",
-                                    },
-                                )
-                            except Exception as _re:
-                                logger.warning(
-                                    "[scheduler] %s: post-sync rollup recompute failed: %s",
-                                    service_id,
-                                    _re,
-                                )
-
-                            # Wellknown-bots rollup: pre-materialises the
-                            # 500-pattern UA-regex pre-filter that the
-                            # /api/security/aggregates wellknown_bots block
-                            # would otherwise re-run on the full window on
-                            # every request. Best-effort — the security
-                            # reader has a live-SQL fallback for any hour
-                            # that lacks a rollup, so a failure here only
-                            # forgoes the optimisation, not correctness.
-                            _t_bot = time.time()
-                            try:
-                                from backend.core.rollups import recompute_wellknown_bots_rollup
-
-                                yield_to_api()
-                                _bn = recompute_wellknown_bots_rollup(service_id, src, set(touched_hours))
-                                if _bn:
-                                    _log_and_add_progress(
-                                        run_id,
-                                        service_id,
-                                        job_name="log_discovery",
-                                        event={
-                                            "type": "status",
-                                            "message": f"{elapsed()} Bot rollups: {_bn} hours in "
-                                            f"{int((time.time() - _t_bot) * 1000)}ms",
-                                        },
-                                    )
-                            except Exception as _be:
-                                logger.warning(
-                                    "[scheduler] %s: post-sync bot rollup failed: %s",
-                                    service_id,
-                                    _be,
-                                )
+                            # Off-thread: closed-hour rollups take minutes on a
+                            # busy service, and holding this max_instances=1
+                            # job that long backs up FOS discovery (request lag).
+                            schedule_post_ingest_rollups(service_id, src, set(touched_hours))
+                            _log_and_add_progress(
+                                run_id,
+                                service_id,
+                                job_name="log_discovery",
+                                event={
+                                    "type": "status",
+                                    "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
+                                },
+                            )
 
         except Exception as e:
             log_text = _extract_log_text(run_id)

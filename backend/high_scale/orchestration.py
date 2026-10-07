@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -102,6 +103,7 @@ class HighScaleWorkerCoordinator:
         control_plane: SourceControlPlane | None = None,
         page_size: int = 100,
         lease_seconds: float = 300.0,
+        object_concurrency: int = 1,
     ) -> None:
         if not worker_id:
             raise ValueError("worker identity is required")
@@ -109,6 +111,8 @@ class HighScaleWorkerCoordinator:
             raise ValueError(f"page_size must be between 1 and {MAX_SOURCE_PAGE_SIZE}")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if object_concurrency <= 0:
+            raise ValueError("object_concurrency must be positive")
         self._lister = lister
         self._reader = reader
         self._controller = controller
@@ -118,6 +122,7 @@ class HighScaleWorkerCoordinator:
         self._control = control_plane
         self._page_size = page_size
         self._lease_seconds = lease_seconds
+        self._object_concurrency = object_concurrency
 
     def run_page(
         self,
@@ -158,15 +163,9 @@ class HighScaleWorkerCoordinator:
         duplicates = 0
         failed = recovery_failed
         missing = recovery_missing
-        for source in objects:
-            outcome = self._process_source(
-                service_id,
-                domain,
-                source,
-                expected_owner=current_owner,
-                expected_epoch=epoch,
-                now=now,
-            )
+        for outcome in self._process_sources(
+            service_id, domain, objects, expected_owner=current_owner, expected_epoch=epoch, now=now
+        ):
             if outcome == "processed":
                 processed += 1
             elif outcome == "duplicate":
@@ -224,6 +223,37 @@ class HighScaleWorkerCoordinator:
             else:
                 failed += 1
         return processed, failed, missing
+
+    def _process_sources(
+        self,
+        service_id: str,
+        domain: str,
+        sources: tuple[SourceObjectDescriptor, ...],
+        *,
+        expected_owner: str,
+        expected_epoch: int,
+        now: datetime | None,
+    ) -> list[str]:
+        def process(source: SourceObjectDescriptor) -> str:
+            return self._process_source(
+                service_id,
+                domain,
+                source,
+                expected_owner=expected_owner,
+                expected_epoch=expected_epoch,
+                now=now,
+            )
+
+        # Per-object work is round-trip bound (FOS GET/PUT plus ~15 Postgres
+        # and ~7 ClickHouse calls for a 1-3 row object), so a serial page
+        # cannot keep up with arrival rates. Only the pool-backed Postgres
+        # control plane is safe to share across threads; the SQLite ledger
+        # stays serial.
+        workers = min(self._object_concurrency, len(sources))
+        if self._control is None or workers <= 1:
+            return [process(source) for source in sources]
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="high-scale-object") as pool:
+            return list(pool.map(process, sources))
 
     def process_source(
         self,

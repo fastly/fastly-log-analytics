@@ -1,8 +1,8 @@
-> [!TODO]
-> **Cron Specification Status: IMPLEMENTATION IN PROGRESS; RUNTIME VERIFICATION PENDING**
-> The execution lifecycle, role/architecture behaviors, telemetry attribution, query audits,
-> quarantine contract, and testing checklist are complete. Implementation and live verification
-> remain deferred to the dedicated execution session.
+> [!NOTE]
+> **Cron Specification Status: IMPLEMENTED; RUNTIME VERIFICATION PARTIAL**
+> Items checked in §9 were verified against the live Remote Standard deployment. Unchecked
+> items remain open; item 3 is a known gap (discovery FOS calls are not yet attributed in
+> `usage_log`).
 
 # Background Job Specification: `log_discovery_{service_id}`
 
@@ -63,6 +63,13 @@
    - If records ingest successfully but FOS deletion fails after bounded retries, the
      object is counted as `objects_failed` and `source_delete_failures` is incremented.
    - Standard mode retains exact failed object keys from asynchronous batch deletion and its inline fallback; partial bulk-delete responses do not distribute failures across unrelated objects.
+9. **Post-Ingest Rollups (off-tick):** The touched hours are handed to a per-service,
+   single-flight background worker (`schedule_post_ingest_rollups` in
+   `backend/cron/jobs/sync.py`) that runs `recompute_touched_hours` and
+   `recompute_wellknown_bots_rollup`. Hours queued while a recompute is running are
+   coalesced into the next pass. These recomputes take 90–170 s on a busy service. Run
+   inline, they held the tick past its interval, so with `max_instances=1` most ticks
+   were skipped and request lag grew past a minute.
 
 ### High-Scale Mode:
 1. Issues FOS LIST on the five recent minute prefixes. The separate
@@ -72,7 +79,13 @@
 3. Claims ledger rows through `_ledger_claim_batch`, fencing each conversion attempt by its lease generation.
 4. Enqueues conversion tasks to Celery queue (`convert_batch_files.delay(...)`).
 5. **Stateless Workers:** Worker processes skip local DuckDB heavy refresh to avoid file-lock contention with readers; autocomplete cache updates run on the serving web-pod.
-6. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as a separate exact-byte item under `data/services/{service_id}/quarantine/`; corrupt gzip containers are captured as one complete gzip item. Metadata records request/RUM source type, original FOS key, line ordinal, byte offset/length when known, normalized error category, bounded error text, and SHA-256. The source FOS object is always deleted after processing, even if capture fails; capture failures are recorded and the run is marked `error`. Quarantine is diagnostic evidence, not a re-ingest queue. High-Scale workers and the serving backend share the evidence directory; PostgreSQL advisory locking serializes evidence writes and FIFO-cap enforcement across them.
+6. **Isolated High-Scale Worker Plane:** Services bound to the high-scale registry are
+   ingested by `backend/high_scale/worker.py` into ClickHouse, not by this job. Each page's
+   objects are processed concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4 per pod).
+   Per-object work is round-trip bound: FOS GET/PUT plus about 15 Postgres and 7 ClickHouse
+   calls, about 3 s for a 1–3 row object. Serial processing could not keep up with seeded
+   arrival rates.
+7. **Quarantine Handling:** Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as a separate exact-byte item under `data/services/{service_id}/quarantine/`; corrupt gzip containers are captured as one complete gzip item. Metadata records request/RUM source type, original FOS key, line ordinal, byte offset/length when known, normalized error category, bounded error text, and SHA-256. The source FOS object is always deleted after processing, even if capture fails; capture failures are recorded and the run is marked `error`. Quarantine is diagnostic evidence, not a re-ingest queue. High-Scale workers and the serving backend share the evidence directory; PostgreSQL advisory locking serializes evidence writes and FIFO-cap enforcement across them.
 
 ---
 
@@ -125,12 +138,12 @@
 
 ## 9. AI Session Automated Verification Checklist
 - [ ] 1. Trigger `POST /api/admin/sync/{service_id}` with synthetic `.gz` files in FOS; verify HTTP 200 response.
-- [ ] 2. Confirm execution records in `cron_runs` with status `success` and non-zero `files_ingested`.
+- [x] 2. Confirm execution records in `cron_runs` with status `success` and non-zero `files_ingested`.
 - [ ] 3. Verify the PostgreSQL `usage_log` table attributes FOS Class A LIST and Class B GET calls to `cron.log_discovery`.
-- [ ] 4. Confirm new rows immediately queryable via `GET /api/dashboard/bundle`.
+- [x] 4. Confirm new rows immediately queryable via `GET /api/dashboard/bundle`.
 - [ ] 5. Confirm heavy refresh phases (`update_top_values`, `reconcile_fastly_stats`) run no more than once per 60s.
 - [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
-- [ ] 7. In High-Scale mode, verify rows transition properly in `ingest_ledger` (`discovered → claimed`).
+- [x] 7. In High-Scale mode, verify source objects transition `discovered → claimed → acknowledged` (`high_scale_source_objects` for the isolated worker plane; `ingest_ledger` for Celery).
 - [ ] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
   immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
 

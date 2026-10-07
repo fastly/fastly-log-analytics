@@ -293,3 +293,104 @@ def test_domains_keep_independent_source_cursors() -> None:
     assert ownership.source_cursor_for("svc", "request") == "request-next"
     assert ownership.source_cursor_for("svc", "rum_vitals") == "rum-next"
     assert lister.cursors == [("request", INITIAL_SOURCE_CURSOR), ("rum_vitals", INITIAL_SOURCE_CURSOR)]
+
+
+class _ThreadSafeControl:
+    """Minimal pool-backed-control-plane stand-in: every method is safe to call
+    from the coordinator's object worker threads."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self.cursor: str | None = "cursor-0"
+
+    def owner(self, service_id: str):
+        @dataclass
+        class _Owner:
+            current_owner: str = "high_scale"
+            owner_epoch: int = 1
+            source_cursor: str | None = None
+
+        return _Owner()
+
+    def source_cursor_for(self, service_id: str, domain: str) -> str | None:
+        return self.cursor
+
+    def discover_source(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def claim_source(self, *args: object, **kwargs: object):
+        @dataclass
+        class _Claim:
+            claimed: bool = True
+            lease_generation: int = 1
+
+        return _Claim()
+
+    def source(self, service_id: str, object_key: str):
+        raise KeyError(object_key)
+
+    def advance_source_cursor(self, service_id: str, cursor: str, **kwargs: object) -> None:
+        with self._lock:
+            self.cursor = cursor
+
+
+class _BarrierController:
+    """Each ingest blocks until ``parties`` ingests are in flight at once, so a
+    serial coordinator breaks the barrier (timeout) and reports failures."""
+
+    def __init__(self, parties: int) -> None:
+        import threading
+
+        self.barrier = threading.Barrier(parties, timeout=5)
+
+    def ingest(self, **kwargs: object) -> None:
+        self.barrier.wait()
+
+
+@dataclass
+class _AnyPageLister:
+    page: SourceObjectPage
+
+    def list_source_objects(self, service_id: str, domain: str, *, page_size: int, cursor: str | None):
+        return self.page
+
+
+def test_page_objects_are_processed_concurrently_with_pool_backed_control_plane() -> None:
+    """Per-object ingest is round-trip bound (~3 s of FOS/Postgres/ClickHouse
+    calls for a 1-3 row object), so a serial page could not keep up with
+    seeded arrival rates — the high-scale request lag regression. Objects in
+    one page must overlap when the control plane is pool-backed."""
+    objects = tuple(SourceObjectDescriptor(f"raw/{i}.gz", f"sha256:{i}", 4, "v1") for i in range(4))
+    control = _ThreadSafeControl()
+    coordinator = HighScaleWorkerCoordinator(
+        lister=_AnyPageLister(SourceObjectPage(objects, "cursor-1")),
+        reader=_Reader(),
+        controller=_BarrierController(4),  # type: ignore[arg-type]
+        ownership=None,
+        ledger=None,
+        worker_id="worker",
+        control_plane=control,  # type: ignore[arg-type]
+        page_size=10,
+        object_concurrency=4,
+    )
+
+    result = coordinator.run_page(service_id="svc", domain="request")
+
+    assert result.processed == 4
+    assert result.failed == 0
+    assert control.cursor == "cursor-1"
+
+
+def test_object_concurrency_rejects_non_positive_values() -> None:
+    with pytest.raises(ValueError, match="object_concurrency"):
+        HighScaleWorkerCoordinator(
+            lister=_AnyPageLister(SourceObjectPage((), None)),
+            reader=_Reader(),
+            controller=_BarrierController(1),  # type: ignore[arg-type]
+            ownership=None,
+            ledger=None,
+            worker_id="worker",
+            object_concurrency=0,
+        )
