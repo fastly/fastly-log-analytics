@@ -537,6 +537,14 @@ class ExpireSnapshotsResponse(_AdminMaintRead):
     error: str | None = None
 
 
+class SyncStartResponse(_AdminMaintRead):
+    """Outcome and run ID from ``POST /admin/sync/{service_id}``."""
+
+    ok: bool = True
+    message: str | None = None
+    run_id: int | str | None = None
+
+
 class BackfillBundleRollupsResponse(_AdminMaintRead):
     """Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."""
 

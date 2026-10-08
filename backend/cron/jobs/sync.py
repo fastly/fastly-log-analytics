@@ -170,7 +170,7 @@ def wait_for_post_ingest_rollups(service_id: str, timeout: float) -> bool:
         worker.join(min(remaining, 0.05))
 
 
-@cron_task("cron_log_discovery", job_name="log_discovery")
+@cron_task("cron.log_discovery", job_name="log_discovery")
 def _run_log_discovery_cron(
     service_id: str,
     force: bool = False,

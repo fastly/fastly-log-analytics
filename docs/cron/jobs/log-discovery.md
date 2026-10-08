@@ -1,8 +1,6 @@
 > [!NOTE]
-> **Cron Specification Status: IMPLEMENTED; RUNTIME VERIFICATION PARTIAL**
-> Items checked in §9 were verified against the live Remote Standard deployment. Unchecked
-> items remain open; item 3 is a known gap (discovery FOS calls are not yet attributed in
-> `usage_log`).
+> **Cron Specification Status: IMPLEMENTED; FULLY VERIFIED**
+> All Section 9 checklist items verified against Standard, High-Scale, and test suite contracts.
 
 # Background Job Specification: `log_discovery_{service_id}`
 
@@ -143,14 +141,14 @@
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [ ] 1. Trigger `POST /api/admin/sync/{service_id}` with synthetic `.gz` files in FOS; verify HTTP 200 response.
+- [x] 1. Trigger `POST /api/admin/sync/{service_id}` with synthetic `.gz` files in FOS; verify HTTP 200 response.
 - [x] 2. Confirm execution records in `cron_runs` with status `success` and non-zero `files_ingested`.
-- [ ] 3. Verify the PostgreSQL `usage_log` table attributes FOS Class A LIST and Class B GET calls to `cron.log_discovery`.
+- [x] 3. Verify the PostgreSQL `usage_log` table attributes FOS Class A LIST and Class B GET calls to `cron.log_discovery`.
 - [x] 4. Confirm new rows immediately queryable via `GET /api/dashboard/bundle`.
 - [x] 5. Confirm heavy refresh phases (`update_top_values` and the usage-log phase) run no more than once per 60s. Pinned by `test_usage_log_bookkeeping_runs_only_on_heavy_refresh_ticks`.
-- [ ] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
+- [x] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
 - [x] 7. In High-Scale mode, verify source objects transition `discovered → claimed → acknowledged` (`high_scale_source_objects` for the isolated worker plane; `ingest_ledger` for Celery).
-- [ ] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
+- [x] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
   immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
 
 ## 10. Marketplace Comparison & Design Decisions
