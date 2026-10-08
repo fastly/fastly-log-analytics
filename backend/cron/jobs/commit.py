@@ -81,7 +81,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             meta_con = get_con(service_id)
             prev = meta_con.execute(
                 "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
-                "AND status != 'running' ORDER BY id DESC LIMIT 1",
+                "AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
                 (service_id,),
             ).fetchone()
             since_epoch = 0.0

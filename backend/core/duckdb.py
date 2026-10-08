@@ -214,21 +214,17 @@ def _load_httpfs(con: duckdb.DuckDBPyConnection):
     """
     global _httpfs_installed
     with _httpfs_lock:
-        if not _httpfs_installed:
-            try:
-                con.execute("LOAD httpfs;")
-            except duckdb.Error:
-                con.execute("INSTALL httpfs;")
-                _httpfs_installed = True
-                con.execute("LOAD httpfs;")
-            else:
-                _httpfs_installed = True
-            return
         try:
             con.execute("LOAD httpfs;")
-        except duckdb.InvalidInputException as e:
-            if "already registered secret type" not in str(e):
-                raise
+            _httpfs_installed = True
+        except duckdb.Error:
+            try:
+                con.execute("INSTALL httpfs;")
+                con.execute("LOAD httpfs;")
+                _httpfs_installed = True
+            except duckdb.InvalidInputException as e:
+                if "already registered secret type" not in str(e):
+                    raise
 
 
 def _proxy_target_for(source: dict) -> str:

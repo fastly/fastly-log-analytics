@@ -399,6 +399,10 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_cron_started ON cron_runs(started_at DESC)",
     # Covers status polls and startup reap_running_cron_runs without a task filter
     "CREATE INDEX IF NOT EXISTS idx_cron_status ON cron_runs(status)",
+    # Covers per-service task lookups and loose index scans
+    "CREATE INDEX IF NOT EXISTS idx_cron_runs_service_task_started ON cron_runs(service_id, task, started_at DESC, id DESC)",
+    # Covers per-service started_at pagination and probes
+    "CREATE INDEX IF NOT EXISTS idx_cron_runs_service_started ON cron_runs(service_id, started_at DESC, id DESC)",
     """CREATE TABLE IF NOT EXISTS asn_names (
         asn INTEGER PRIMARY KEY,
         name TEXT NOT NULL,

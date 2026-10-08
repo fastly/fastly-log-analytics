@@ -288,6 +288,12 @@ def _start_legacy_adoption(configs: list[dict]) -> None:
     ``ducklake_adopt`` rows in ``cron_runs``.
     """
     try:
+        from backend.cron.scheduler import dev_mode_no_crons
+
+        if dev_mode_no_crons():
+            logging.info("[fastapi] FLA_DEV_NO_CRONS=1 — skipping legacy DuckLake adoption sweep.")
+            return
+
         from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
 
         sids = [sid for cfg in configs if (sid := cfg.get("service_id") or cfg.get("name"))]
@@ -1276,8 +1282,9 @@ def health_check(
             # v3.0.0-beta1; match both so pre-upgrade history still satisfies the probe.
             cron_row = con.execute(
                 "SELECT status, started_at, error_message FROM cron_runs "
-                "WHERE task IN ('sync', 'log_discovery') AND status != 'running' "
-                "ORDER BY started_at DESC LIMIT 1"
+                "WHERE service_id = ? AND task IN ('sync', 'log_discovery') AND status != 'running' "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (sid,),
             ).fetchone()
             if cron_row:
                 svc_state["last_sync_status"] = cron_row["status"]
@@ -1299,8 +1306,9 @@ def health_check(
                 try:
                     stuck = con.execute(
                         "SELECT started_at FROM cron_runs "
-                        "WHERE task IN ('sync', 'log_discovery') AND status = 'running' "
-                        "ORDER BY started_at DESC LIMIT 1"
+                        "WHERE service_id = ? AND task IN ('sync', 'log_discovery') AND status = 'running' "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                        (sid,),
                     ).fetchone()
                     if stuck and stuck["started_at"]:
                         stuck_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=_STUCK_SYNC_RUNNING_MINS))
@@ -1341,7 +1349,7 @@ def health_check(
                         "SELECT task, error_message FROM ("
                         "  SELECT task, status, error_message, "
                         "         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn "
-                        f"  FROM cron_runs WHERE task IN ({placeholders}) AND status != 'running'"
+                        f"  FROM cron_runs WHERE service_id = ? AND task IN ({placeholders}) AND status != 'running'"
                         "  AND started_at >= ?"
                         # Boot-reap rows are lifecycle artifacts (the process
                         # stopped mid-run), not failing crons — a task that is
@@ -1350,7 +1358,7 @@ def health_check(
                         # window on every restart.
                         "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
                         ") WHERE rn = 1 AND status = 'error' LIMIT 1",
-                        (*critical_tasks, crit_cutoff),
+                        (sid, *critical_tasks, crit_cutoff),
                     ).fetchone()
                     if crit_row:
                         svc_state["status"] = "degraded"
