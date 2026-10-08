@@ -463,11 +463,11 @@ canonical diagnostics pass. Keep host-management SSH.
 ### Per-environment diagnostic identities
 
 `scripts.lib.admin_tls` reads `ADMIN_GATEWAY_ENDPOINTS`, an operator-local JSON
-mapping from `local-standard`, `local-high-scale`, `remote-standard` or
+mapping from `local-standard`, `remote-standard` or
 `remote-high-scale` to objects with exactly `origin`, `cert`, `key`, and `ca`.
 Each `origin` is an explicit HTTPS origin; paths point at operator-owned files.
 Configure different identities for Compose/GCE and Kubernetes as needed.
-Short aliases `local-std`, `local-hs`, `remote-std`, and `remote-hs` are accepted.
+Short aliases `local-std`, `remote-std`, and `remote-hs` are accepted.
 Never commit this JSON or keys.
 
 The single-target `ADMIN_GATEWAY_CLIENT_ORIGIN`, `ADMIN_GATEWAY_CLIENT_CERT`,

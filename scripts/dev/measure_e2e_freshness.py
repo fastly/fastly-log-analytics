@@ -19,7 +19,7 @@ This script does not measure FOS-object-to-serving freshness.
 
 Configure each target with FLA_FRESHNESS_<ENV>_SERVICE_ID,
 FLA_FRESHNESS_<ENV>_BACKEND_URL, and FLA_FRESHNESS_<ENV>_CDN_DOMAIN, where
-<ENV> is LOCAL_STD, LOCAL_HS, REMOTE_STD, or REMOTE_HS. Admin authentication
+<ENV> is LOCAL_STD, REMOTE_STD, or REMOTE_HS. Admin authentication
 comes from REMOTE_ADMIN_TOKEN, ADMIN_SHARED_SECRET, or ADMIN_TOKEN.
 """
 
@@ -47,7 +47,6 @@ from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, val
 
 ENVIRONMENTS = {
     "local-std": "Local Standard",
-    "local-hs": "Local High-Scale",
     "remote-std": "Remote Standard",
     "remote-hs": "Remote High-Scale",
 }
@@ -607,7 +606,7 @@ def measure_environment(
 def main():
     validate_admin_tls_config()
     parser = argparse.ArgumentParser(description="Measure edge-probe-to-active-serving visibility and delay")
-    parser.add_argument("--env", choices=["all", "local-std", "local-hs", "remote-std", "remote-hs"], default="all")
+    parser.add_argument("--env", choices=["all", "local-std", "remote-std", "remote-hs"], default="all")
     parser.add_argument("--requests", type=int, default=10, help="Number of edge requests to send")
     parser.add_argument("--rum-beacons", type=int, default=5, help="Number of RUM beacons to send")
     parser.add_argument("--timeout", type=float, default=45.0, help="Max wait seconds for ingest")

@@ -15,7 +15,6 @@ def test_custom_compose_tags_use_narrow_syntax_hook():
     assert tagged["args"] == ["--unsafe"]
     for filename in (
         "docker-compose.prod.yml",
-        "docker-compose.high-scale-local.yml",
         "docker-compose.admin-mtls.prod.yml",
     ):
         assert re.search(generic["exclude"], filename)

@@ -2,7 +2,7 @@
 """Multi-Environment Infrastructure & Data Pipeline Audit Tool.
 
 Audits all Fastly Log Analytics deployment environments (Local Standard,
-Local High-Scale, GCE Standard, Elevation High-Scale):
+GCE Standard, Elevation High-Scale):
   - Host & container vitals: CPU load, vCPUs, memory, data mount and root disk.
   - Scheduler & cron health: Scheduler tick freshness, in-flight runs, backlog detection,
     recent cron run errors/warnings.
@@ -98,14 +98,6 @@ ENVIRONMENTS: dict[str, EnvironmentConfig] = {
         frontend_url="http://127.0.0.1:80/dashboard",
         service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
         is_high_scale=False,
-    ),
-    "local-high-scale": EnvironmentConfig(
-        name="local-high-scale",
-        architecture="High-Scale (Local Docker Multipod)",
-        backend_url="http://127.0.0.1:8081",
-        frontend_url="http://127.0.0.1:8081/dashboard",
-        service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", ""),
-        is_high_scale=True,
     ),
     "remote-standard": EnvironmentConfig(
         name="remote-standard",

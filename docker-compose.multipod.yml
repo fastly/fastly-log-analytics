@@ -121,7 +121,7 @@ services:
     - API_PROXY_URL=http://backend:8000
     - NODE_OPTIONS=--max_old_space_size=1024
     - COMMIT_HASH=${COMMIT_HASH:-unknown}
-    - ENV_NAME=local-high-scale
+    - ENV_NAME=multipod-dev
     networks:
     - app-network
     restart: unless-stopped

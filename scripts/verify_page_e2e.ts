@@ -3,7 +3,7 @@
  *
  * Playwright E2E Verification with HAR recording and waterfall analysis.
  * Verifies all dashboard pages and modals across environments and roles:
- *  - Environments: local-standard, local-high-scale, gce-standard, elevation-high-scale
+ *  - Environments: local-standard, gce-standard, elevation-high-scale
  *  - Roles: admin, analyst-pii, analyst-no-pii
  *
  * Audits:

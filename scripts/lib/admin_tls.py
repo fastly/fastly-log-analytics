@@ -24,7 +24,6 @@ ALIASES = {
     "remote-hs": "remote-high-scale",
     "remote-std": "remote-standard",
     "local-std": "local-standard",
-    "local-hs": "local-high-scale",
 }
 
 
@@ -74,7 +73,7 @@ def _settings() -> dict[str, dict[str, str]]:
         if not isinstance(environment, str) or not isinstance(config, dict):
             raise ValueError("Admin TLS configuration must map environment strings to objects")
         environment = ALIASES.get(environment, environment)
-        if environment not in {"local-standard", "local-high-scale", "remote-standard", "remote-high-scale"}:
+        if environment not in {"local-standard", "remote-standard", "remote-high-scale"}:
             raise ValueError("Unknown admin TLS environment")
         if set(config) != {"origin", "cert", "key", "ca"} or not all(
             isinstance(value, str) and value for value in config.values()

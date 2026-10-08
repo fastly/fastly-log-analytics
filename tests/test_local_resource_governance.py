@@ -1,22 +1,20 @@
 """Local-stack DuckDB parallelism governance.
 
-The canonical ``deploy_test_all.sh`` runs TWO full analytical stacks
-(Local Standard + Local High-Scale) concurrently on one shared Colima
-host (6 vCPU). With ``DUCKDB_THREADS`` unset the backend defaults to
-``min(cpu_count, 8) = 6`` threads per DuckDB op and the pool defaults to
-8 connections, so in-process ingest/rollup/compaction/insights-prewarmer
-crons can fan out to ~48 CPU-bound DuckDB threads per stack. Two stacks
-then drive host load to ~100 on 6 cores and the single-threaded asyncio
-serving loop is starved so hard that even ``/api/health`` times out
-(measured: HTTP 000 at 20s+), which fails the dashboard-render verify.
+Local Standard runs on the shared Colima host (6 vCPU). With ``DUCKDB_THREADS`` unset
+the backend defaults to ``min(cpu_count, 8) = 6`` threads per DuckDB op and the pool defaults
+to 8 connections, so in-process ingest/rollup/compaction/insights-prewarmer
+crons can fan out to ~48 CPU-bound DuckDB threads. This can drive host load
+to ~100 on 6 cores and the single-threaded asyncio serving loop is starved so
+hard that even ``/api/health`` times out (measured: HTTP 000 at 20s+), which
+fails the dashboard-render verify.
 
 The ``.env`` file already expresses the intent (``DUCKDB_THREADS=4``) but
 compose never injects it — the backend services use an explicit
 ``environment:`` list with no ``env_file``, so the value never reaches
-the container. These tests pin the caps directly on the local compose
+the container. These tests pin the caps directly on the compose
 services so a future edit can't silently drop them and reintroduce the
 serving-loop starvation. Production (docker-compose.prod.yml) already
-caps the pool to 4; this brings the local stacks in line.
+caps the pool to 4; this brings the local stack in line.
 """
 
 from __future__ import annotations
@@ -93,7 +91,7 @@ def test_local_standard_backend_bounds_duckdb_parallelism():
     )
 
 
-def test_local_high_scale_backend_bounds_duckdb_parallelism():
+def test_multipod_backend_bounds_duckdb_parallelism():
     env = _service_env("docker-compose.multipod.yml", "backend")
     threads = _env_int(env, "DUCKDB_THREADS")
     pool = _env_int(env, "DUCKDB_POOL_MAX_SIZE")
@@ -105,7 +103,7 @@ def test_local_high_scale_backend_bounds_duckdb_parallelism():
     )
 
 
-def test_local_high_scale_worker_bounds_duckdb_parallelism():
+def test_multipod_worker_bounds_duckdb_parallelism():
     env = _service_env("docker-compose.multipod.yml", "worker")
     threads = _env_int(env, "DUCKDB_THREADS")
     assert threads is not None and 1 <= threads <= 2, (
@@ -150,7 +148,6 @@ def test_local_standard_backend_healthcheck_covers_cold_start():
 _INIT_REQUIRED_SERVICES = {
     "docker-compose.yml": ["backend"],
     "docker-compose.multipod.yml": ["backend", "worker"],
-    "docker-compose.high-scale-local.yml": ["high-scale-worker"],
 }
 
 

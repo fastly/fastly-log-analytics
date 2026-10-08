@@ -32,7 +32,7 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full distributed query execution, shard metrics, cluster topology. |
 | **Analyst Path B (Remote Share)** | Read-Only Access | Query facts viewable; client IPs masked (if enabled by invite setting). |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local high-scale engine replica. |
+| **Analyst Path A (JSON Join)** | Standalone Read-Only | Queries standalone engine replica (see ADR-17). |
 
 ---
 

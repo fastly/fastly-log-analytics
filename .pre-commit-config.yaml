@@ -54,12 +54,12 @@ repos:
         # Helm templates are Go templates, not
         # parseable YAML — `make deploy-validate` (helm lint/template)
         # validates those.
-        exclude: '^(docker-compose\.(prod|high-scale-local|admin-mtls\.prod)\.yml|deploy/chart/.*/templates/.*)$'
+        exclude: '^(docker-compose\.(prod|admin-mtls\.prod)\.yml|deploy/chart/.*/templates/.*)$'
       - id: check-yaml
         alias: check-compose-tagged-yaml
         name: Check tagged Compose YAML syntax
         args: [--unsafe]
-        files: '^docker-compose\.(prod|high-scale-local|admin-mtls\.prod)\.yml$'
+        files: '^docker-compose\.(prod|admin-mtls\.prod)\.yml$'
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements

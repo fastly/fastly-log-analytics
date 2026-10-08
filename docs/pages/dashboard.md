@@ -78,7 +78,7 @@ The system supports three distinct operational personas across the Dashboard:
   - If rollups are not yet compiled, missing, or partially behind, the backend **transparently falls back to scanning raw Parquet buffers and DuckLake tables**, logging an attributed notice in `telemetry_queries` without failing or interrupting the user experience.
 - **Stale View Handling:** Uses `execute_with_stale_view_retry` to recover from transient file swaps during active ingestion. Displays calm "Preparing your data" status rather than error toasts.
 
-### High-Scale Architecture (Local High-Scale / Elevation K8s)
+### High-Scale Architecture (Elevation K8s)
 - **Serving Path:** Ephemeral in-memory DuckDB instance or ClickHouse serving plane (per ADR-20/21).
 - **Data Layers:** Reads directly from committed DuckLake tables in Object Storage backed by PostgreSQL catalog metadata; local Parquet buffer is bypassed.
 - **Rollups & Pre-aggregations:** 7d/30d queries execute against precomputed Top-N rollups or ClickHouse materialized aggregates to maintain sub-second response times under 5M RPS load, with transparent raw MergeTree fallback if aggregates are compiling.

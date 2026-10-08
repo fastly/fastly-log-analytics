@@ -1,21 +1,19 @@
 """Guard: high-scale ClickHouse readers must not hardcode a database name.
 
 The ClickHouse client connects with a configured default database
-(``CLICKHOUSE_DATABASE`` → ``clickhouse_client`` settings.database), which is
-``fla_prototype`` for the local Docker high-scale stack and
-``fastly_log_analytics`` on the remote (Elevation) cluster. Table references
-must therefore stay UNQUALIFIED so they resolve against whatever default
-database the connection was opened with — exactly how ``rum.py`` has always
-worked.
+(``CLICKHOUSE_DATABASE`` → ``clickhouse_client`` settings.database), which can
+vary across environments (e.g. ``fastly_log_analytics`` on the remote Elevation
+cluster). Table references must therefore stay UNQUALIFIED so they resolve
+against whatever default database the connection was opened with — exactly how
+``rum.py`` has always worked.
 
 Regression: ``network.py`` / ``security.py`` / ``sessions.py`` /
 ``insights.py`` / ``cmcd.py`` / ``query.py`` hardcoded
 ``FROM fastly_log_analytics.<table>``. That silently worked on Elevation
-(whose DB is literally named ``fastly_log_analytics``) but on the local
-stack threw ``UNKNOWN_DATABASE``, which the readers swallow via a bare
-``except`` and render as "No data available" — the Network page showed no
-data on Local High-Scale for exactly this reason. This guard would have
-caught it and keeps the prod DB name from creeping back in.
+(whose DB is literally named ``fastly_log_analytics``) but on environments
+with an alternate database name threw ``UNKNOWN_DATABASE``, which the readers swallow
+via a bare ``except`` and render as "No data available". This guard keeps the
+prod DB name from creeping back in.
 """
 
 from __future__ import annotations

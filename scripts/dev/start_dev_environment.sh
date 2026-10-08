@@ -47,18 +47,8 @@ else
     echo -e "${GREEN}✅ Local Standard stack is already running.${RESET}"
 fi
 
-# 3. Check and start Local High-Scale stack
-echo -e "\n${BOLD}3. Checking Local High-Scale Docker stack...${RESET}"
-if ! docker compose -p fla-hs ps --format json | grep -q "running"; then
-    echo -e "${YELLOW}⚠️ Local High-Scale containers are not running. Starting high-scale stack...${RESET}"
-    docker compose -p fla-hs -f docker-compose.multipod.yml -f docker-compose.clickhouse-prototype.yml -f docker-compose.high-scale-local.yml up -d
-    echo -e "${GREEN}✅ Local High-Scale stack started.${RESET}"
-else
-    echo -e "${GREEN}✅ Local High-Scale stack is already running.${RESET}"
-fi
-
-# 4. Check and establish Remote Standard Connection (3001/8001)
-echo -e "\n${BOLD}4. Checking Remote Standard Connection (3001/8001)...${RESET}"
+# 3. Check and establish Remote Standard Connection (3001/8001)
+echo -e "\n${BOLD}3. Checking Remote Standard Connection (3001/8001)...${RESET}"
 if [ -z "${REMOTE_STANDARD_FORWARD_CMD}" ]; then
     echo -e "${YELLOW}⚠️ REMOTE_STANDARD_FORWARD_CMD is unset; skipping remote Standard forwarding.${RESET}"
 elif ! lsof -i :3001 &>/dev/null && ! lsof -i :8001 &>/dev/null; then
@@ -74,8 +64,8 @@ else
     echo -e "${GREEN}✅ Remote Standard connection is already active.${RESET}"
 fi
 
-# 5. Check and establish Remote High-Scale Connection (3002/8002)
-echo -e "\n${BOLD}5. Checking Remote High-Scale Connection (3002/8002)...${RESET}"
+# 4. Check and establish Remote High-Scale Connection (3002/8002)
+echo -e "\n${BOLD}4. Checking Remote High-Scale Connection (3002/8002)...${RESET}"
 if [ -z "${REMOTE_HIGH_SCALE_FORWARD_CMD}" ]; then
     echo -e "${YELLOW}⚠️ REMOTE_HIGH_SCALE_FORWARD_CMD is unset; skipping remote High-Scale forwarding.${RESET}"
 elif ! lsof -i :3002 &>/dev/null || ! lsof -i :8002 &>/dev/null; then
@@ -98,8 +88,8 @@ else
     echo -e "${GREEN}✅ Remote High-Scale connection is already active.${RESET}"
 fi
 
-# 6. Run final environment health audit
-echo -e "\n${BOLD}6. Performing Environment Health Audit...${RESET}"
+# 5. Run final environment health audit
+echo -e "\n${BOLD}5. Performing Environment Health Audit...${RESET}"
 python3 scripts/dev/audit_environments.py || true
 
 echo -e "\n${BOLD}${GREEN}🎉 DEV ENVIRONMENT SETUP PROCESS COMPLETE!${RESET}"

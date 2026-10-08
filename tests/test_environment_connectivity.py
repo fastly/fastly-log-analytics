@@ -1,4 +1,4 @@
-"""Integration test verifying all 4 environments are listening, healthy, and isolated.
+"""Integration test verifying all 3 active environments are listening, healthy, and isolated.
 
 Enforces that every deployment topology in Current_Project_State_and_Current_Goals.md:
 1. Is operational and reachable via its assigned port forward.
@@ -27,7 +27,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         any(not target.fastly_service_id for target in ENVIRONMENTS.values()),
-        reason="Environment connectivity tests require all four service ID environment variables",
+        reason="Environment connectivity tests require all three service ID environment variables",
     ),
 ]
 

@@ -1,4 +1,4 @@
-"""Disk-pressure state machine for the high-scale local serving volume.
+"""Disk-pressure state machine for the high-scale serving volume.
 
 Pure evaluation only. The caller (a periodic sampler, mirroring the
 standard-mode SystemHealthCard sampler) is responsible for reading real

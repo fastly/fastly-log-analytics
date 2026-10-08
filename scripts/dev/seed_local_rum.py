@@ -129,16 +129,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    service_ids = args.service_ids or [
-        value
-        for value in (
-            os.getenv("LOCAL_STANDARD_SERVICE_ID"),
-            os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID"),
-        )
-        if value
-    ]
+    service_ids = args.service_ids or [value for value in (os.getenv("LOCAL_STANDARD_SERVICE_ID"),) if value]
     if not service_ids:
-        parser.error("pass --service-id or set LOCAL_STANDARD_SERVICE_ID/LOCAL_HIGH_SCALE_SERVICE_ID")
+        parser.error("pass --service-id or set LOCAL_STANDARD_SERVICE_ID")
 
     for service_id in service_ids:
         seed_service_rum(service_id, args.files, args.rows)

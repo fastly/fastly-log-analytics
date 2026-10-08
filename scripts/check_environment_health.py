@@ -2,7 +2,7 @@
 """Multi-environment connectivity, health, and tenancy verification tool.
 
 Codified against Current_Project_State_and_Current_Goals.md:
-1. Validates that all 4 target environments are listening on their designated ports.
+1. Validates that all 3 target environments are listening on their designated ports.
 2. Asserts HTTP 200 health responses within latency budget (< 50ms).
 3. Asserts each environment resolves its authoritative Fastly service configuration.
 4. Asserts tenancy isolation guards (unauthorized / nonexistent services rejected).
@@ -65,18 +65,6 @@ ENVIRONMENTS: dict[str, EnvironmentTarget] = {
         frontend_url="http://127.0.0.1:80/dashboard",
         fastly_service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
         remediation_cmd="docker compose up -d",
-    ),
-    "local-high-scale": EnvironmentTarget(
-        name="local-high-scale",
-        architecture="High-Scale (Local Docker Multipod)",
-        backend_url="http://127.0.0.1:8081",
-        frontend_url="http://127.0.0.1:8081/dashboard",
-        fastly_service_id=os.getenv("LOCAL_HIGH_SCALE_SERVICE_ID", ""),
-        remediation_cmd=(
-            "docker compose -p fla-hs -f docker-compose.multipod.yml "
-            "-f docker-compose.clickhouse-prototype.yml "
-            "-f docker-compose.high-scale-local.yml up -d"
-        ),
     ),
     "remote-standard": EnvironmentTarget(
         name="remote-standard",
