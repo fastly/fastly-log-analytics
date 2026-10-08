@@ -86,7 +86,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
       // RUM settings
       const rumCfg = (service as any).rum || {}
-      const initialRumPeriod = rumCfg.log_period ?? (service as any).rum_log_period ?? 300
+      const initialRumPeriod = rumCfg.log_period ?? (service as any).rum_log_period ?? (service as any).log_period ?? 300
       setRumLogPeriod(String(initialRumPeriod))
       setRumDeleteAfter(rumCfg.delete_after ?? service.cron_sync?.delete_after ?? false)
     }

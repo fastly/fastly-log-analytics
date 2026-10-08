@@ -882,7 +882,9 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
     rum_log_period = None
     sample_rate = 100
     for endpoint in endpoints:
-        if "Fastly Log Analytics" in endpoint.name and "RUM" not in endpoint.name:
+        if (
+            "Fastly Log Analytics" in endpoint.name or "Fastly Object Storage Logs" in endpoint.name
+        ) and "RUM" not in endpoint.name:
             log_period = endpoint.period
         elif "RUM" in endpoint.name:
             rum_log_period = endpoint.period

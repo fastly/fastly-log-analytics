@@ -6632,6 +6632,8 @@ export interface components {
             cmcd_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /** Rum Log Period */
+            rum_log_period?: number | null;
             /**
              * Analyst Path A Supported
              * @default true
@@ -13045,6 +13047,8 @@ export interface components {
             rum?: {
                 [key: string]: unknown;
             } | null;
+            /** Rum Log Period */
+            rum_log_period?: number | null;
             /** Analyst Path A Supported */
             analyst_path_a_supported?: boolean | null;
             /** Is High Scale */

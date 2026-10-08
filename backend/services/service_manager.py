@@ -159,6 +159,17 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
         cron_stats = cached_status.get("cron_stats", {})
         log_row_count = cached_status.get("local_rows", 0)
 
+        rum_val = cfg.get("rum")
+        rum_dict: dict[str, Any] = rum_val if isinstance(rum_val, dict) else {}
+        rum_lp = rum_dict.get("log_period")
+        if rum_lp is None:
+            rum_lp = cfg.get("rum_log_period")
+        if rum_lp is not None:
+            try:
+                rum_lp = int(rum_lp)
+            except (ValueError, TypeError):
+                rum_lp = None
+
         result.append(
             {
                 "service_id": sid,
@@ -199,6 +210,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "logging_enabled": cfg.get("logging_enabled", True),
                 "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
                 "rum": cfg.get("rum"),
+                "rum_log_period": rum_lp,
                 "cmcd_enabled": bool((cfg.get("cmcd") or {}).get("enabled")),
             }
         )

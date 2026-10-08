@@ -268,6 +268,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="10">10 seconds (Ultra-Fast / High-Load)</SelectItem>
                       <SelectItem value="60">1 minute (Fastest)</SelectItem>
                       <SelectItem value="300">5 minutes (Recommended)</SelectItem>
                       <SelectItem value="600">10 minutes</SelectItem>
@@ -607,6 +608,7 @@ export function StorageStep({ s }: { s: WizardState }) {
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="10" className="text-xs">10 seconds (Ultra-Fast / High-Load)</SelectItem>
                       <SelectItem value="60" className="text-xs">1 minute (Fastest)</SelectItem>
                       <SelectItem value="300" className="text-xs">5 minutes (Recommended)</SelectItem>
                       <SelectItem value="600" className="text-xs">10 minutes</SelectItem>

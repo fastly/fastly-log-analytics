@@ -338,6 +338,7 @@ export function LogSyncSection({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="10" className="text-[11px]">10 seconds (Ultra-Fast / High-Load)</SelectItem>
                     <SelectItem value="60" className="text-[11px]">1 minute (Fastest)</SelectItem>
                     <SelectItem value="300" className="text-[11px]">5 minutes (Recommended)</SelectItem>
                     <SelectItem value="600" className="text-[11px]">10 minutes</SelectItem>

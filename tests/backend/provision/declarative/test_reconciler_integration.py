@@ -906,6 +906,43 @@ class TestBootstrapFeatureState:
         state = _bootstrap_featurestate_from_fastly("srv_test", "token")
         assert state.rum_enabled is True
 
+    @patch("backend.provision.declarative.reconciler.fastly")
+    @patch("backend.provision.declarative.reconciler.fastly_integration")
+    def test_bootstrap_detects_legacy_endpoint_name_and_rum_period(self, mock_fastly_int, mock_fastly):
+        """Verify bootstrap correctly extracts log_period and rum_log_period from Fastly Object Storage Logs endpoints."""
+        from backend.provision.declarative.diff import LoggingEndpoint
+        from backend.provision.declarative.reconciler import _bootstrap_featurestate_from_fastly
+
+        mock_fastly_int.fetch_active_version.return_value = 1
+        mock_fastly_int.fetch_snippets.return_value = []
+        mock_fastly_int.fetch_logging_endpoints.return_value = [
+            LoggingEndpoint(
+                name="Fastly Object Storage Logs",
+                endpoint_type="s3",
+                path="",
+                period=10,
+                response_condition="",
+                format_string="",
+                placement="",
+                response_object_name="",
+            ),
+            LoggingEndpoint(
+                name="Fastly Object Storage Logs (RUM)",
+                endpoint_type="s3",
+                path="",
+                period=10,
+                response_condition="",
+                format_string="",
+                placement="",
+                response_object_name="",
+            ),
+        ]
+        mock_fastly.return_value = {"items": []}
+
+        state = _bootstrap_featurestate_from_fastly("srv_test", "token")
+        assert state.log_period == 10
+        assert state.rum_log_period == 10
+
 
 class TestVarDeconfliction:
     """Test de-confliction of local variable declarations (Gotcha 2)."""

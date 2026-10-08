@@ -69,6 +69,7 @@ class ServiceConfig(BaseModel):
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
     rum: dict[str, Any] | None = None
+    rum_log_period: int | None = None
     analyst_path_a_supported: bool | None = None
     is_high_scale: bool | None = None
 

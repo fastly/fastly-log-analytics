@@ -226,6 +226,7 @@ class BootstrapService(BaseModel):
     access_level: str | None = None
     cmcd_enabled: bool | None = None
     rum_enabled: bool | None = None
+    rum_log_period: int | None = None
     analyst_path_a_supported: bool = True
     analyst_path_a_reason: str | None = None
 

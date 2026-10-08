@@ -46931,6 +46931,17 @@
             ],
             "title": "Rum Enabled"
           },
+          "rum_log_period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Log Period"
+          },
           "analyst_path_a_supported": {
             "type": "boolean",
             "title": "Analyst Path A Supported",
@@ -63739,6 +63750,17 @@
               }
             ],
             "title": "Rum"
+          },
+          "rum_log_period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Log Period"
           },
           "analyst_path_a_supported": {
             "anyOf": [
