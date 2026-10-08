@@ -103,12 +103,12 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
             return True
         rum_cfg = cfg.get("rum")
         rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-        # Mirrors the OR-pattern used elsewhere (e.g. routers/rum.py,
-        # cron/scheduler.py): the declarative enable_rum() path only ever
-        # sets the top-level rum_enabled flag, while the older imperative
-        # provisioning path also sets rum.enabled — either one means RUM is
-        # actually on for this service.
-        if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
+        rum_enabled = (
+            bool(rum_cfg["enabled"])
+            if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
+            else bool(cfg.get("rum_enabled", False))
+        )
+        if not rum_enabled:
             return True
         token = cfg.get("fastly_api_key", "")
 

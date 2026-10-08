@@ -1,8 +1,10 @@
 'use client'
 
 import React from 'react'
+import Link from 'next/link'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { Button, buttonVariants } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
@@ -109,10 +111,13 @@ interface LogSyncSectionProps {
   rumRetention: string
   setRumRetention: (v: string) => void
   rumEnabled: boolean
+  rumSyncEnabled?: boolean
+  setRumSyncEnabled?: (v: boolean) => void
   rumLogPeriod: string
   setRumLogPeriod: (v: string) => void
   rumDeleteAfter: boolean
   setRumDeleteAfter: (v: boolean) => void
+  serviceId?: string
 }
 
 export function LogSyncSection({
@@ -141,10 +146,13 @@ export function LogSyncSection({
   rumRetention,
   setRumRetention,
   rumEnabled,
+  rumSyncEnabled,
+  setRumSyncEnabled,
   rumLogPeriod,
   setRumLogPeriod,
   rumDeleteAfter,
   setRumDeleteAfter,
+  serviceId,
 }: LogSyncSectionProps) {
   return (
     <div className="space-y-4">
@@ -324,47 +332,84 @@ export function LogSyncSection({
           </div>
         )}
 
-        {rumEnabled && (
-          <div className="space-y-4 pt-3 border-t border-border/30">
-            <div className="text-[10px] font-semibold text-foreground/70 uppercase tracking-widest">RUM Beacon Sync</div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-1.5">
-                <Label htmlFor="rum-log-period" className="text-[11px] font-medium">RUM Log Period / Freshness</Label>
-                <p className="text-[10px] text-muted-foreground leading-tight h-6">
-                  Fastly edge rotation period for RUM beacons. Ingestion polls at derived frequency.
-                </p>
-                <Select value={rumLogPeriod} onValueChange={v => v && setRumLogPeriod(v)}>
-                  <SelectTrigger id="rum-log-period" className="h-7 text-[11px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10" className="text-[11px]">10 seconds (Ultra-Fast / High-Load)</SelectItem>
-                    <SelectItem value="60" className="text-[11px]">1 minute (Fastest)</SelectItem>
-                    <SelectItem value="300" className="text-[11px]">5 minutes (Recommended)</SelectItem>
-                    <SelectItem value="600" className="text-[11px]">10 minutes</SelectItem>
-                    <SelectItem value="900" className="text-[11px]">15 minutes</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Automated sync runs every {
-                    parseInt(rumLogPeriod) >= 60
-                      ? `${Math.max(5, Math.floor(parseInt(rumLogPeriod) / 2))}s`
-                      : `${Math.max(5, parseInt(rumLogPeriod))}s`
-                  } to ingest new beacons.
-                </p>
+        <div className="space-y-4 pt-3 border-t border-border/30">
+          <div className="text-[10px] font-semibold text-foreground/70 uppercase tracking-widest">RUM Beacon Sync</div>
+
+          {rumEnabled ? (
+            <>
+              <div className="flex items-center justify-between p-3 border rounded-md bg-muted/10">
+                <div className="space-y-0.5 pr-4">
+                  <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-rum-sync">Enable RUM Beacon Sync</Label>
+                  <p className="text-[10px] text-muted-foreground">
+                    Polls FOS for new RUM beacon logs and ingests them into DuckLake.
+                  </p>
+                </div>
+                <Switch
+                  id="enable-rum-sync"
+                  checked={rumSyncEnabled ?? false}
+                  onCheckedChange={setRumSyncEnabled}
+                />
               </div>
 
-              <div className="grid gap-1.5">
-                <Label className="text-[11px] font-semibold cursor-pointer" htmlFor="rum-delete-after">Auto-delete RUM Logs</Label>
-                <p className="text-[10px] text-muted-foreground leading-tight">Remove raw .gz files after ingestion.</p>
-                <div className="flex items-center gap-2 pt-2">
-                  <Switch id="rum-delete-after" checked={rumDeleteAfter} onCheckedChange={setRumDeleteAfter} />
-                  <span className="text-[11px] text-muted-foreground">{rumDeleteAfter ? 'Enabled' : 'Disabled'}</span>
+              <div
+                className={`space-y-4 pl-4 border-l-2 transition-opacity ${
+                  rumSyncEnabled ? 'opacity-100 border-primary' : 'opacity-40 border-muted pointer-events-none'
+                }`}
+              >
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="rum-log-period" className="text-[11px] font-medium">RUM Log Period / Freshness</Label>
+                    <p className="text-[10px] text-muted-foreground leading-tight h-6">
+                      Fastly edge rotation period for RUM beacons. Ingestion polls at derived frequency.
+                    </p>
+                    <Select value={rumLogPeriod} onValueChange={v => v && setRumLogPeriod(v)}>
+                      <SelectTrigger id="rum-log-period" className="h-7 text-[11px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="10" className="text-[11px]">10 seconds (Ultra-Fast / High-Load)</SelectItem>
+                        <SelectItem value="60" className="text-[11px]">1 minute (Fastest)</SelectItem>
+                        <SelectItem value="300" className="text-[11px]">5 minutes (Recommended)</SelectItem>
+                        <SelectItem value="600" className="text-[11px]">10 minutes</SelectItem>
+                        <SelectItem value="900" className="text-[11px]">15 minutes</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Automated sync runs every {
+                        parseInt(rumLogPeriod) >= 60
+                          ? `${Math.max(5, Math.floor(parseInt(rumLogPeriod) / 2))}s`
+                          : `${Math.max(5, parseInt(rumLogPeriod))}s`
+                      } to ingest new beacons.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-1.5">
+                    <Label className="text-[11px] font-semibold cursor-pointer" htmlFor="rum-delete-after">Auto-delete RUM Logs</Label>
+                    <p className="text-[10px] text-muted-foreground leading-tight">Remove raw .gz files after ingestion.</p>
+                    <div className="flex items-center gap-2 pt-2">
+                      <Switch id="rum-delete-after" checked={rumDeleteAfter} onCheckedChange={setRumDeleteAfter} />
+                      <span className="text-[11px] text-muted-foreground">{rumDeleteAfter ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
+            </>
+          ) : (
+            <div className="rounded-md border border-dashed border-border/80 bg-muted/20 p-3 space-y-2">
+              <p className="text-xs text-muted-foreground">
+                Real User Monitoring is not currently enabled on Fastly edge for this service. Enable RUM on your edge service to collect client vitals and error beacons.
+              </p>
+              <div>
+                <Link
+                  href={serviceId ? `/admin/rum?service=${serviceId}` : '/admin/rum'}
+                  className={buttonVariants({ variant: 'outline', size: 'sm' })}
+                >
+                  Configure RUM
+                </Link>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   )

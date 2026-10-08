@@ -23,6 +23,7 @@ import {
   Bot,
   ChevronDown,
   KeyRound,
+  Eye,
 } from 'lucide-react'
 import { formatBytes } from '@/lib/format'
 
@@ -44,6 +45,7 @@ export interface ServiceColumnDeps {
   setTeardownService: (s: ServiceConfig) => void
   setInviteService: (s: ServiceConfig) => void
   openNgwaf: (s: ServiceConfig) => void
+  openRum?: (s: ServiceConfig) => void
   openCredentials: (s: ServiceConfig) => void
 }
 
@@ -58,6 +60,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
     setTeardownService,
     setInviteService,
     openNgwaf,
+    openRum,
     openCredentials,
   } = deps
 
@@ -219,6 +222,11 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 <DropdownMenuItem onClick={() => setSettingsService(service)}>
                   <Settings2 className="mr-2 h-4 w-4" /> Log Settings
                 </DropdownMenuItem>
+                {openRum && (
+                  <DropdownMenuItem onClick={() => openRum(service)}>
+                    <Eye className="mr-2 h-4 w-4" /> RUM Configuration
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={() => openNgwaf(service)}>
                   <Bot className="mr-2 h-4 w-4" /> NGWAF Config
                 </DropdownMenuItem>

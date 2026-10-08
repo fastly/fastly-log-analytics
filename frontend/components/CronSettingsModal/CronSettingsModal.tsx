@@ -56,6 +56,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
   const [syncIntervalMins, setSyncIntervalMins] = useState('2')
   const [pollingMode, setPollingMode] = useState<'regular' | 'adaptive'>('regular')
+  const [rumSyncEnabled, setRumSyncEnabled] = useState(false)
   const [rumLogPeriod, setRumLogPeriod] = useState('300')
   const [rumDeleteAfter, setRumDeleteAfter] = useState(false)
 
@@ -86,6 +87,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
       // RUM settings
       const rumCfg = service.rum as Record<string, unknown> | null | undefined
+      const rumSyncVal = typeof rumCfg?.enabled === 'boolean' ? rumCfg.enabled : undefined
+      setRumSyncEnabled(rumSyncVal ?? service.rum_enabled ?? false)
       const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
       const initialRumPeriod = rumPeriodVal ?? service.rum_log_period ?? service.log_period ?? 300
       setRumLogPeriod(String(initialRumPeriod))
@@ -137,6 +140,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       } : {}),
       ...(service.rum_enabled ? {
         rum: {
+          enabled: rumSyncEnabled,
           log_period: parseInt(rumLogPeriod),
           delete_after: rumDeleteAfter,
         },
@@ -224,10 +228,13 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
                 rumRetention={rumRetention}
                 setRumRetention={setRumRetention}
                 rumEnabled={service.rum_enabled ?? false}
+                rumSyncEnabled={rumSyncEnabled}
+                setRumSyncEnabled={setRumSyncEnabled}
                 rumLogPeriod={rumLogPeriod}
                 setRumLogPeriod={setRumLogPeriod}
                 rumDeleteAfter={rumDeleteAfter}
                 setRumDeleteAfter={setRumDeleteAfter}
+                serviceId={service.service_id}
               />
 
               {service.ngwaf_workspace_id && (

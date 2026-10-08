@@ -66,6 +66,14 @@ export function ServicesTable() {
     [setActiveServiceId, queryClient, router],
   )
 
+  const openRum = React.useCallback(
+    (s: ServiceConfig) => {
+      setActiveServiceId(s.service_id)
+      router.push(`/admin/rum?service=${s.service_id}`)
+    },
+    [setActiveServiceId, router],
+  )
+
   const { data: services, isLoading, isError, error } = useQuery({
     queryKey: ['services'],
     queryFn: async ({ signal }) => {
@@ -85,9 +93,10 @@ export function ServicesTable() {
       setTeardownService,
       setInviteService,
       openNgwaf: setNgwafService,
+      openRum,
       openCredentials,
     }),
-    [activeServiceId, switchToService, services?.services?.length],
+    [activeServiceId, switchToService, services?.services?.length, openRum, openCredentials],
   )
 
   return (

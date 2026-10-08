@@ -390,10 +390,11 @@ def test_contract_7_kill_switch_protection(gap_heal_test_source, monkeypatch):
     assert len(start_calls) == 0, "FLA_DEV_NO_CRONS=1 must refuse gap_heal execution"
 
 
-def test_contract_8_telemetry_and_usage_log_attribution():
+def test_contract_8_telemetry_and_usage_log_attribution(monkeypatch):
     """Checklist Item 8:
     Verify @cron_task("gap_heal", job_name="gap_heal") sets process_context to "gap_heal".
     """
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     from backend.utils.telemetry import get_process_context
 
     captured_context = []

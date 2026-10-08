@@ -67,8 +67,14 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-    rum_cfg = cfg.get("rum") or {}
-    if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
+    rum_cfg = cfg.get("rum")
+    rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+    rum_enabled = (
+        bool(rum_cfg["enabled"])
+        if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
+        else bool(cfg.get("rum_enabled", False))
+    )
+    if not rum_enabled:
         return
 
     src = get_source_for_service(service_id)
@@ -201,8 +207,14 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
     if not cfg:
         return
 
-    rum_cfg = cfg.get("rum") or {}
-    if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
+    rum_cfg = cfg.get("rum")
+    rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+    rum_enabled = (
+        bool(rum_cfg["enabled"])
+        if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
+        else bool(cfg.get("rum_enabled", False))
+    )
+    if not rum_enabled:
         return
 
     run_id = None

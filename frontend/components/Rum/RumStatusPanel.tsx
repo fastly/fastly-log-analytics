@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle } from 'lucide-react';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
@@ -23,7 +24,18 @@ interface RumStatus {
 }
 
 export function RumStatusPanel() {
-  const serviceId = useServiceStore((s) => s.activeServiceId);
+  const searchParams = useSearchParams();
+  const queryServiceId = searchParams?.get('service');
+  const storeServiceId = useServiceStore((s) => s.activeServiceId);
+  const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId);
+
+  useEffect(() => {
+    if (queryServiceId && queryServiceId !== storeServiceId) {
+      setActiveServiceId(queryServiceId);
+    }
+  }, [queryServiceId, storeServiceId, setActiveServiceId]);
+
+  const serviceId = queryServiceId || storeServiceId;
   const isAnalyst = useIsAnalyst();
   const [isEnableOpen, setIsEnableOpen] = useState(false);
   const [isDisableOpen, setIsDisableOpen] = useState(false);

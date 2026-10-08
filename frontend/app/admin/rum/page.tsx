@@ -6,6 +6,7 @@
  * - Admin-only access
  */
 
+import { Suspense } from 'react';
 import { Metadata } from 'next';
 import { RumStatusPanel } from '@/components/Rum/RumStatusPanel';
 
@@ -23,7 +24,9 @@ export default function RumAdminPage() {
         </p>
       </div>
 
-      <RumStatusPanel />
+      <Suspense fallback={null}>
+        <RumStatusPanel />
+      </Suspense>
     </div>
   );
 }

@@ -580,6 +580,34 @@ def test_sync_jobs_registers_rum_jobs_when_rum_enabled_nested():
     assert "rum_commit_svc-rum-nested" in s._job_ids
 
 
+def test_sync_jobs_does_not_register_rum_jobs_when_rum_disabled_in_nested():
+    """RUM sync and commit jobs are NOT registered when `rum.enabled` is False, even if `rum_enabled` is True on root."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-disabled",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum_enabled": True,
+        "rum": {"enabled": False},
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-disabled")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+    ):
+        s._sync_jobs()
+
+    assert "rum_sync_svc-rum-disabled" not in s._job_ids
+    assert "rum_commit_svc-rum-disabled" not in s._job_ids
+
+
 def test_resolve_rum_sync_interval():
     """Verify RUM sync interval resolution rules."""
     from backend.cron.scheduler import _resolve_rum_sync_interval
