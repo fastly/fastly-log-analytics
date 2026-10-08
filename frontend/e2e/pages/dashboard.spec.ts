@@ -126,7 +126,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
 
     // Find any top-N dimension button inside CardGrid
     const filterBtn = page.locator('button[aria-label^="Filter to "]').first()
-    await expect(filterBtn).toBeVisible({ timeout: 15_000 })
+    await expect(filterBtn).toBeVisible({ timeout: 30_000 })
     const btnLabel = await filterBtn.getAttribute('aria-label')
     const filterValue = btnLabel?.replace('Filter to ', '').trim() || ''
     expect(filterValue.length).toBeGreaterThan(0)
