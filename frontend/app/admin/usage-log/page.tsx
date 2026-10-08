@@ -78,7 +78,7 @@ async function UsageLogPageContent({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <UsageLogClient />
+      <UsageLogClient initialServiceId={serviceId} initialNowMs={nowMs} />
     </HydrationBoundary>
   )
 }

@@ -85,10 +85,12 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       setNgwafRetention(String(service.cron_ngwaf?.log_retention_days ?? 7))
 
       // RUM settings
-      const rumCfg = (service as any).rum || {}
-      const initialRumPeriod = rumCfg.log_period ?? (service as any).rum_log_period ?? (service as any).log_period ?? 300
+      const rumCfg = service.rum as Record<string, unknown> | null | undefined
+      const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
+      const initialRumPeriod = rumPeriodVal ?? service.rum_log_period ?? service.log_period ?? 300
       setRumLogPeriod(String(initialRumPeriod))
-      setRumDeleteAfter(rumCfg.delete_after ?? service.cron_sync?.delete_after ?? false)
+      const rumDeleteVal = typeof rumCfg?.delete_after === 'boolean' ? rumCfg.delete_after : undefined
+      setRumDeleteAfter(rumDeleteVal ?? service.cron_sync?.delete_after ?? false)
     }
     reset()
   }, [service, open, reset, isAnalyst])
