@@ -217,7 +217,6 @@ async function globalSetup() {
           frontendPort: E2E_FRONTEND_PORT,
           registryPath: oauthRegistryPath,
         }),
-        FLA_SKIP_LEGACY_ADOPTION: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.

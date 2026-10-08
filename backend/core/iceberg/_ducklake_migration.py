@@ -67,10 +67,6 @@ _ADOPT_BATCH_SIZE = 200
 # rows). Reads as a normal cron row in /api/cron-runs and the Cron UI.
 ADOPTION_TASK = "ducklake_adopt"
 
-# Opt-out for operators who want to drive the adoption by hand via
-# POST /api/admin/ducklake/migrate instead of on boot.
-_SKIP_ENV = "FLA_SKIP_LEGACY_ADOPTION"
-
 
 def _legacy_data_dirs(src: dict, cache_dir: str) -> list[str]:
     """Candidate directories holding the old pyiceberg-era parquet.
@@ -426,10 +422,6 @@ def run_legacy_adoption_once(service_id: str, *, force: bool = False) -> dict | 
     """
     from backend.core.metadata.cron_log import log_cron_run, start_cron_run
 
-    if not force and os.environ.get(_SKIP_ENV) == "1":
-        logger.info("[ducklake] %s: legacy adoption skipped (%s=1)", service_id, _SKIP_ENV)
-        return None
-
     if not force:
         try:
             if legacy_adoption_completed(service_id):
@@ -504,9 +496,6 @@ def start_legacy_adoption_sweep(service_ids: list[str]) -> threading.Thread | No
     ``ducklake_adopt`` rows in ``cron_runs``.
     """
     if not service_ids:
-        return None
-    if os.environ.get(_SKIP_ENV) == "1":
-        logger.info("[ducklake] legacy adoption sweep skipped (%s=1)", _SKIP_ENV)
         return None
     thread = threading.Thread(
         target=_adoption_sweep,

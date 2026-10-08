@@ -69,7 +69,7 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 Upgrading is code-and-restart: the app migrates itself.
 
 - **The Postgres metadata schema is created at startup** when `METADATA_DSN` is set — by the backend lifespan and by each Celery worker, idempotently and safe against several pods booting at once. `scripts/setup_pg_schema.py` still works and remains the explicit ops command for provisioning a database ahead of a deploy.
-- **Pre-3.0 log history is adopted into DuckLake on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred. Progress and outcome appear as `ducklake_adopt` rows in `cron_runs` (Cron UI). A failure is recorded there and never blocks startup; retry with `POST /api/admin/ducklake/migrate`, which also serves as the manual trigger. Set `FLA_SKIP_LEGACY_ADOPTION=1` to opt out and drive it by hand.
+- **Pre-3.0 log history is adopted into DuckLake on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred. Progress and outcome appear as `ducklake_adopt` rows in `cron_runs` (Cron UI). A failure is recorded there and never blocks startup; retry with `POST /api/admin/ducklake/migrate`, which also serves as the manual trigger.
 
 ### Known limitations
 

@@ -143,10 +143,6 @@ services:
       # ceiling, not host/container capacity. 1GB x 4 pooled connections
       # worst-case = 4GB, still well under the 6/11/12GB budget above.
       - DUCKDB_POOL_CONN_MEMORY_LIMIT=1GB
-      # Existing deployments that have completed the v3 migration can opt
-      # out of the boot-time legacy Iceberg adoption sweep. Keep the actual
-      # decision in the host-local .env because fresh installs may need it.
-      - FLA_SKIP_LEGACY_ADOPTION=${FLA_SKIP_LEGACY_ADOPTION:-}
       # Optional emergency switch for the local active-hour optimization.
       # Readers fall back to the existing live scan when this is disabled.
       - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}

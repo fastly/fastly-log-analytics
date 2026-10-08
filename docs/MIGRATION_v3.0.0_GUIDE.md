@@ -120,8 +120,6 @@ The Helm chart defaults to single-node and installs cleanly with no flags. Selec
 curl -X POST 'http://localhost/api/admin/ducklake/migrate?service=SERVICE_ID'
 ```
 
-To opt out of automatic adoption entirely and drive it by hand, set `FLA_SKIP_LEGACY_ADOPTION=1`.
-
 **Adoption is safe to re-run.** It dedupes against files already registered, so a second run adopts nothing and leaves your row count unchanged.
 
 **Postgres metadata queries fail with `relation "cron_runs" does not exist`.** The schema was not created. Run `scripts/setup_pg_schema.py` with `METADATA_DSN` set.

@@ -10,7 +10,6 @@ instead of taking the process down.
 
 from __future__ import annotations
 
-import os
 import uuid
 
 import pyarrow as pa
@@ -327,20 +326,6 @@ def test_boot_adoption_failure_is_recorded_and_never_raises(adoption_source, mon
     assert mig.legacy_adoption_completed(sid) is False
 
 
-def test_boot_adoption_respects_the_opt_out(adoption_source, monkeypatch):
-    from backend.core.iceberg import _ducklake_migration as mig
-
-    sid = adoption_source["name"]
-    monkeypatch.setenv("FLA_SKIP_LEGACY_ADOPTION", "1")
-
-    assert mig.run_legacy_adoption_once(sid) is None
-    assert mig.start_legacy_adoption_sweep([sid]) is None
-    assert _adoption_runs(sid) == []
-
-    # The explicit admin endpoint still works — it is the "run it now" button.
-    assert mig.run_legacy_adoption_once(sid, force=True) is not None
-
-
 def test_adoption_sweep_runs_in_the_background_and_covers_every_service(adoption_source):
     from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
 
@@ -368,4 +353,3 @@ def test_empty_service_list_starts_no_thread():
     from backend.core.iceberg._ducklake_migration import start_legacy_adoption_sweep
 
     assert start_legacy_adoption_sweep([]) is None
-    assert os.environ.get("FLA_SKIP_LEGACY_ADOPTION") != "1"
