@@ -1230,10 +1230,22 @@ def test_full_sweep_defers_when_active_requests_present(monkeypatch, stub_load_c
     start_cron.assert_not_called()
 
 
-def test_full_sweep_warning_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress):
+def test_full_sweep_error_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress):
     """When corrupt rows are quarantined during a full sweep, the cron run status
-    must transition to 'warning' and the summary must flag the quarantine."""
+    must transition to 'error' and the summary must flag the quarantine."""
     from backend.cron.jobs import sync as sync_mod
+
+    counters = {
+        "valid_records": 50,
+        "malformed_records": 3,
+        "corrupt_containers": 0,
+        "quarantine_capture_failures": 0,
+        "source_delete_failures": 0,
+        "objects_processed": 1,
+        "objects_successful": 0,
+        "objects_partial": 1,
+        "objects_failed": 0,
+    }
 
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
@@ -1242,16 +1254,29 @@ def test_full_sweep_warning_status_on_corrupt_rows(monkeypatch, stub_load_config
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
     monkeypatch.setattr(
         "backend.core.ingest.ingest",
-        _make_ingest_events([{"type": "done", "new_files": 1, "rows_inserted": 50, "corrupt_rows": 3}]),
+        _make_ingest_events(
+            [
+                {
+                    "type": "done",
+                    "new_files": 1,
+                    "rows_inserted": 50,
+                    "corrupt_rows": 3,
+                    "outcome_counters": counters,
+                    "corrupt_details": ["malformed line 1"],
+                }
+            ]
+        ),
     )
 
     sync_mod._run_full_sweep.__wrapped__("svc-1")
 
     log_cron.assert_called_once()
     args, kwargs = log_cron.call_args
-    assert args[3] == "warning", "Corrupt rows must report warning status"
+    assert args[3] == "error", "Corrupt rows must report error status"
     assert "quarantined" in kwargs.get("summary", "").lower()
     assert kwargs.get("corrupt_rows") == 3
+    assert kwargs.get("outcome_counters") == counters
+    assert kwargs.get("error_message") == "malformed line 1"
 
 
 def test_full_sweep_adaptive_budget_scales_with_buffer_backlog(monkeypatch, stub_load_config, stub_progress):

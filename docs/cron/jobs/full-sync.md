@@ -26,7 +26,7 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Full S3 LIST on FOS raw prefix, cross-checks SQLite `ingested_files`, ingests missing `.gz` files into local buffer. | Exclusive per-service ingest lock. Active-request deferral (`should_defer_cron("full_sync", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Full S3 LIST on FOS raw prefix, cross-checks PostgreSQL `ingested_files` (per ADR-22), ingests missing `.gz` files into local buffer. | Exclusive per-service ingest lock. Active-request deferral (`should_defer_cron("full_sync", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
 | **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers / Web Pod | Full S3 LIST via `discover_prefix`, bulk inserts unrecorded keys into PostgreSQL `ingest_ledger`, dispatches worker conversion tasks. | Distributed PostgreSQL row locks. Celery queue-depth adaptive throttling. |
 
 ---
@@ -98,8 +98,12 @@
 ---
 
 ## 9. Automated Verification Matrix
-- [x] 1. Active request deferral verified via `test_full_sweep_defers_when_active_requests_present`.
-- [x] 2. Quarantined corrupt rows trigger `warning` status verified via `test_full_sweep_warning_status_on_corrupt_rows`.
-- [x] 3. Dynamic budget scaling with buffer backlog verified via `test_full_sweep_adaptive_budget_scales_with_buffer_backlog` and `test_full_sweep_adaptive_budget_scales_up_when_buffer_clean`.
-- [x] 4. Accurate duration finalization verified via `test_full_sweep_finalizes_duration`.
-- [x] 5. Dynamic rescheduling and 6-hour interval configuration verified in `test_scheduler.py`.
+- [x] 1. Manual API trigger `POST /api/admin/full-sweep/{service_id}` returns HTTP 200 with `run_id`, requires admin authorization, and denies Analyst Path A/B with HTTP 403. Verified in `test_contract_1_manual_trigger_endpoint`.
+- [x] 2. Execution records in `cron_runs` with status `success`, duration, non-zero `files_downloaded`, and structured `outcome_counters`. Verified in `test_contract_2_cron_runs_records_success_and_outcome_counters`.
+- [x] 3. Usage log attributes FOS Class A LIST calls to `cron.full_sync` under `process_context="cron.full_sync"`. Verified in `test_contract_3_usage_log_attribution_cron_full_sync`.
+- [x] 4. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute. Verified in `test_contract_4_safety_gate_under_fla_dev_no_crons`.
+- [x] 5. Active-request deferral when `should_defer_cron("full_sync", service_id)` is True, bypassed when `force=True`. Verified in `test_contract_5_active_request_deferral_and_force_bypass` and `test_full_sweep_defers_when_active_requests_present`.
+- [x] 6. Adaptive queue-depth and buffer backlog budgeting scaling in Standard and High-Scale modes. Verified in `test_contract_6_adaptive_budget_scaling`, `test_full_sweep_adaptive_budget_scales_with_buffer_backlog`, and `test_full_sweep_adaptive_budget_scales_up_when_buffer_clean`.
+- [x] 7. In High-Scale mode, `discover_prefix(service_id)` executes full prefix LIST with `originating_task="full_sync"`. Verified in `test_contract_7_high_scale_mode_prefix_discovery_attribution` and `test_high_scale_full_sweep_attributes_discovery_to_its_own_run`.
+- [x] 8. Corrupt rows / quarantine failures transition status to `error` with structured outcome counters. Verified in `test_contract_8_corrupt_rows_and_quarantine_outcome_counters` and `test_full_sweep_error_status_on_corrupt_rows`.
+- [x] 9. Scheduler registration, rescheduling, and disabling via `provisioning.cron_full_sweep`. Verified in `test_contract_9_scheduler_registration_reschedule_and_disabling`.

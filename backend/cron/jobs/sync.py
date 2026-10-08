@@ -882,11 +882,13 @@ _FULL_SWEEP_DEFAULT_MAX_FILES = 20_000
 _FULL_SWEEP_DEFAULT_MAX_SECONDS = 900
 
 
-@cron_task("full_sync", job_name="full_sync")
+@cron_task("cron.full_sync", job_name="full_sync")
 def _run_full_sweep(
     service_id: str,
     max_files: int = _FULL_SWEEP_DEFAULT_MAX_FILES,
     max_seconds: int = _FULL_SWEEP_DEFAULT_MAX_SECONDS,
+    run_id: int | None = None,
+    force: bool = False,
 ) -> None:
     """Daily catch-net: full LIST over raw/request/ to pick up late-arriving files.
 
@@ -923,11 +925,12 @@ def _run_full_sweep(
     if src is None or src.get("access_level") == "read_only":
         return
 
-    if should_defer_cron("full_sync", service_id):
+    if not force and should_defer_cron("full_sync", service_id):
         return
 
     try:
-        run_id = start_cron_run(src, "full_sync")
+        if run_id is None:
+            run_id = start_cron_run(src, "full_sync")
     except RuntimeError as e:
         logger.info("⏭️  \x1b[95m[full_sync]\x1b[0m %s: skipping — %s", service_id, e)
         return
@@ -1009,6 +1012,9 @@ def _run_full_sweep(
             )
             logger.exception("[full_sync] %s: ledger sweep failed", service_id)
         finally:
+            from backend.cron_progress import end_progress
+
+            end_progress(run_id)
             finalize_cron_duration(src, run_id, sweep_started)
         return
 
@@ -1025,6 +1031,10 @@ def _run_full_sweep(
     )
 
     start_time_exec = time.time()
+
+    def elapsed() -> str:
+        return f"[{time.time() - start_time_exec:.1f}s]"
+
     processed_files = 0
     inserted_rows = 0
     corrupt_rows = 0
@@ -1058,6 +1068,7 @@ def _run_full_sweep(
                     corrupt_rows=corrupt_rows,
                     run_id=run_id,
                     log_output=_extract_log_text(run_id),
+                    outcome_counters=event.get("outcome_counters"),
                 )
                 end_progress(run_id)
                 return
@@ -1065,6 +1076,25 @@ def _run_full_sweep(
         new_files = done_event.get("new_files", 0)
         rows = done_event.get("rows_inserted", 0)
         corrupt_rows_cnt = done_event.get("corrupt_rows", 0)
+        corrupt_details = done_event.get("corrupt_details", [])
+        corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
+        outcome_counters = done_event.get("outcome_counters")
+        has_ingest_errors = bool(
+            (corrupt_rows_cnt > 0)
+            or (
+                outcome_counters
+                and any(
+                    outcome_counters.get(key, 0)
+                    for key in (
+                        "malformed_records",
+                        "corrupt_containers",
+                        "quarantine_capture_failures",
+                        "source_delete_failures",
+                        "objects_failed",
+                    )
+                )
+            )
+        )
         # full_sync is the whole-bucket backstop for the stranded-delete reconcile,
         # so it can reclaim strands of any age; record + surface that count too.
         reclaimed = done_event.get("deleted_files", 0)
@@ -1077,7 +1107,7 @@ def _run_full_sweep(
             summary += f"; ⚠ {corrupt_rows_cnt} corrupt row(s) quarantined"
         if reclaimed:
             summary += f"; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
-        status = "warning" if corrupt_rows_cnt > 0 else "success"
+        status = "error" if has_ingest_errors else "success"
         log_cron_run(
             src,
             "full_sync",
@@ -1088,10 +1118,37 @@ def _run_full_sweep(
             rows_ingested=rows,
             corrupt_rows=corrupt_rows_cnt,
             summary=summary,
+            error_message=corrupt_message,
             run_id=run_id,
             log_output=_extract_log_text(run_id),
+            outcome_counters=outcome_counters,
         )
         _log_and_add_progress(run_id, service_id, job_name="full_sync", event={"type": "done", "message": summary})
+
+        if done_event.get("rows_inserted", 0) > 0:
+            from backend.cron.jobs._common import refresh_view_and_warm_pool
+            from backend.utils.active_requests import yield_to_api
+
+            yield_to_api()
+            refresh_view_and_warm_pool(
+                src,
+                service_id,
+                log_prefix=f"{elapsed()} ",
+                progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="full_sync", event=ev),
+            )
+
+        touched_hours = done_event.get("touched_hours", [])
+        if touched_hours:
+            schedule_post_ingest_rollups(service_id, src, set(touched_hours))
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="full_sync",
+                event={
+                    "type": "status",
+                    "message": f"{elapsed()} Rollups queued for {len(touched_hours)} hour(s)",
+                },
+            )
     except Exception as e:
         log_cron_run(
             src,
