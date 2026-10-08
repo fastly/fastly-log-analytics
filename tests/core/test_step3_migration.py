@@ -363,3 +363,61 @@ def test_migrate_admin_endpoint_registered():
     paths = app.openapi()["paths"]
     assert "/api/admin/ducklake/migrate" in paths
     assert "post" in paths["/api/admin/ducklake/migrate"]
+
+
+def test_adopt_handles_schema_evolution_missing_and_extra_columns(migration_source):
+    """Parquet files with evolved schemas (missing columns or extra columns)
+    must be adopted without failing on DuckLake schema mismatch."""
+    from datetime import datetime
+
+    from backend.core.iceberg._ducklake import _ducklake_attach, _ducklake_detach
+
+    src = migration_source
+    cache_dir = src["_cache_dir_override"]
+
+    # File 1: has col_a, col_b
+    t1 = pa.Table.from_arrays(
+        [
+            pa.array([datetime(2026, 8, 30, 12, 0, tzinfo=UTC), datetime(2026, 8, 30, 12, 1, tzinfo=UTC)]),
+            pa.array(["10.0.0.1", "10.0.0.2"]),
+        ],
+        names=["timestamp", "ip"],
+    )
+    p1 = os.path.join(cache_dir, "data", "timestamp_hour=2026-08-30-12", "file1.parquet")
+    os.makedirs(os.path.dirname(p1), exist_ok=True)
+    pq.write_table(t1, p1)
+
+    # First adoption creates table with columns [timestamp, ip]
+    res1 = adopt_iceberg_to_ducklake(src["name"])
+    assert res1["adopted_files"] == 1
+    assert res1["rows_adopted"] == 2
+
+    # Manually add a column to the DuckLake table (simulating newer schema, e.g. cmcd_su)
+    con = get_connection(src)
+    try:
+        _ducklake_detach(con, service_id=src["name"])
+        _ducklake_attach(con, src, read_only=False)
+        table = ducklake_table_name(src)
+        con.execute(f'ALTER TABLE lake."{table}" ADD COLUMN cmcd_su VARCHAR')
+    finally:
+        _ducklake_detach(con, service_id=src["name"])
+        con.close()
+
+    # File 2: legacy file missing cmcd_su (and has extra column extra_col)
+    t2 = pa.Table.from_arrays(
+        [
+            pa.array([datetime(2026, 8, 30, 13, 0, tzinfo=UTC)]),
+            pa.array(["10.0.0.3"]),
+            pa.array(["some_value"]),
+        ],
+        names=["timestamp", "ip", "extra_col"],
+    )
+    p2 = os.path.join(cache_dir, "data", "timestamp_hour=2026-08-30-13", "file2.parquet")
+    os.makedirs(os.path.dirname(p2), exist_ok=True)
+    pq.write_table(t2, p2)
+
+    # Second adoption should succeed with allow_missing and ignore_extra_columns
+    res2 = adopt_iceberg_to_ducklake(src["name"])
+    assert res2["adopted_files"] == 1
+    assert res2["rows_adopted"] == 1
+    assert _lake_count(src) == 3

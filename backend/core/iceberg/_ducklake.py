@@ -539,4 +539,6 @@ def _ducklake_add_data_files(con, s3_paths: list[str], alias: str = "lake", tabl
     if not _IDENT_RE.match(table):
         raise ValueError(f"invalid ducklake table name: {table!r}")
     paths_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in s3_paths)
-    con.execute(f"CALL ducklake_add_data_files('{alias}', '{table}', [{paths_str}]);")
+    con.execute(
+        f"CALL ducklake_add_data_files('{alias}', '{table}', [{paths_str}], allow_missing := true, ignore_extra_columns := true);"
+    )
