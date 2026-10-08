@@ -192,32 +192,30 @@ def _load_legacy_table(src: dict, identifier: tuple):
     return None
 
 
-def _legacy_iceberg_data_files(src: dict, table_name: str = "logs") -> list[str]:
-    """Live data-file URIs at the legacy table's current snapshot.
+def _legacy_iceberg_data_files_with_counts(src: dict, table_name: str = "logs") -> dict[str, int]:
+    """Live data-file URIs with row counts at the legacy table's current snapshot.
 
-    Walks the snapshot's manifests the way the pre-v3
-    ``manifest._get_cached_or_scan_metadata`` did, skipping ``DELETED``
-    entries. Returns ``[]`` for a service that never had a legacy table
-    (fresh v3) or whose table is empty. Raises ``RuntimeError`` when the
-    table exists but cannot be read — enumeration is all-or-nothing so a
-    mid-walk failure can never yield a partial adoption.
+    Walks the snapshot's manifests, extracting the data file path and PyIceberg's
+    recorded `record_count`. Skips `DELETED` entries. Returns `{}` for a service
+    that never had a legacy table (fresh v3) or whose table is empty.
+    Raises `RuntimeError` when the table exists but cannot be read.
     """
     from backend.core.iceberg import _core as _core_mod
 
     identifier = _core_mod._table_identifier(src, table_name=table_name)
     table = _load_legacy_table(src, identifier)
     if table is None:
-        return []
+        return {}
 
     try:
         snapshot = table.current_snapshot()
     except Exception as e:
         raise RuntimeError(f"legacy Iceberg table {identifier} has an unreadable snapshot: {e}") from e
     if snapshot is None:
-        return []
+        return {}
 
     io = table.io
-    paths: list[str] = []
+    paths_with_counts: dict[str, int] = {}
     deleted = 0
     try:
         for manifest in snapshot.manifests(io):
@@ -229,7 +227,8 @@ def _legacy_iceberg_data_files(src: dict, table_name: str = "logs") -> list[str]
                     continue
                 file_path = entry.data_file.file_path
                 if file_path:
-                    paths.append(file_path)
+                    rec_count = getattr(entry.data_file, "record_count", 0) or 0
+                    paths_with_counts[file_path] = rec_count
     except Exception as e:
         raise RuntimeError(
             f"legacy Iceberg table {identifier} manifests could not be read: {e}. Refusing to adopt a partial set."
@@ -238,10 +237,23 @@ def _legacy_iceberg_data_files(src: dict, table_name: str = "logs") -> list[str]
     logger.info(
         "[ducklake] %s: legacy Iceberg table lists %d live data file(s) (%d deleted entries skipped)",
         src.get("name"),
-        len(paths),
+        len(paths_with_counts),
         deleted,
     )
-    return paths
+    return paths_with_counts
+
+
+def _legacy_iceberg_data_files(src: dict, table_name: str = "logs") -> list[str]:
+    """Live data-file URIs at the legacy table's current snapshot.
+
+    Walks the snapshot's manifests the way the pre-v3
+    ``manifest._get_cached_or_scan_metadata`` did, skipping ``DELETED``
+    entries. Returns ``[]`` for a service that never had a legacy table
+    (fresh v3) or whose table is empty. Raises ``RuntimeError`` when the
+    table exists but cannot be read — enumeration is all-or-nothing so a
+    mid-walk failure can never yield a partial adoption.
+    """
+    return list(_legacy_iceberg_data_files_with_counts(src, table_name=table_name).keys())
 
 
 def adopt_iceberg_to_ducklake(service_id: str) -> dict:
@@ -270,11 +282,23 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
 
     # FOS (or the local warehouse) first — see the module docstring on why
     # this is a preference, not a union.
-    data_files = [_normalize_data_path(p) for p in _legacy_iceberg_data_files(src)]
+    legacy_file_counts: dict[str, int] = {}
+    legacy_files = _legacy_iceberg_data_files_with_counts(src)
+    data_files = [_normalize_data_path(p) for p in legacy_files.keys()]
+    legacy_file_counts = {_normalize_data_path(p): count for p, count in legacy_files.items()}
     origin = "iceberg_table"
     if not data_files:
-        data_files = _local_legacy_files(src, cache_dir)
+        local_files = _local_legacy_files(src, cache_dir)
+        data_files = [_normalize_data_path(p) for p in local_files]
         origin = "local_dirs" if data_files else "none"
+        if data_files:
+            import pyarrow.parquet as pq
+
+            for p in data_files:
+                try:
+                    legacy_file_counts[p] = pq.read_metadata(p).num_rows
+                except Exception:
+                    legacy_file_counts[p] = 0
     else:
         local_only = _local_legacy_files(src, cache_dir)
         if local_only:
@@ -338,30 +362,27 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
                 "candidate_files": len(data_files),
             }
 
-        pre_row = con.execute(f"SELECT count(*) FROM {table_ident}").fetchone()
-        pre_count = int(pre_row[0]) if pre_row else 0
-
         adopted = 0
-        expected_rows = 0
+        expected_rows = sum(legacy_file_counts.get(p, 0) for p in to_adopt)
         for i in range(0, len(to_adopt), _ADOPT_BATCH_SIZE):
             batch = to_adopt[i : i + _ADOPT_BATCH_SIZE]
-            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in batch)
-            batch_rows_res = con.execute(
-                f"SELECT count(*) FROM read_parquet([{paths_sql}], union_by_name=true)"
-            ).fetchone()
-            batch_rows = int(batch_rows_res[0]) if batch_rows_res else 0
             _ducklake_add_data_files(con, batch, alias="lake", table=table)
             adopted += len(batch)
-            expected_rows += batch_rows
 
-        post_row = con.execute(f"SELECT count(*) FROM {table_ident}").fetchone()
-        post_count = int(post_row[0]) if post_row else 0
-
-        delta = post_count - pre_count
-        if delta != expected_rows:
+        # Validate that all adopted files are registered in DuckLake's catalog.
+        # This checks the catalog metadata table in milliseconds, avoiding
+        # an expensive multi-minute S3 table scan across thousands of remote files.
+        new_already = {
+            _normalize_data_path(r[0])
+            for r in con.execute(
+                f"SELECT data_file FROM ducklake_list_files('lake', '{escape_sql_literal(table)}')"
+            ).fetchall()
+        }
+        missing = [p for p in to_adopt if p not in new_already]
+        if missing:
             raise ValueError(
-                f"Migration validation failed for {service_id}: lake count delta {delta} "
-                f"!= adopted files' row count {expected_rows} (pre={pre_count}, post={post_count})"
+                f"Migration validation failed for {service_id}: {len(missing)} files "
+                f"failed to register in DuckLake catalog"
             )
 
         logger.info(
