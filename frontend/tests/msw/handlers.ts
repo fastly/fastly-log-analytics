@@ -529,6 +529,16 @@ export const handlers = [
   ),
   http.post(`${API_BASE}/api/admin/duckdb/recycle`, ok({ ok: true, status: 'skipped' })),
   http.get(`${API_BASE}/api/admin/duckdb/status`, ok({ ok: true, memory: {}, barrier: { is_active: false, active_paths: [] }, pools: {}, retired_pools: [] })),
+  http.post(
+    `${API_BASE}/api/admin/optimize/:service_id`,
+    ok({
+      files_rewritten: 0,
+      files_added: 0,
+      eligible_partitions: 0,
+      partition_errors: [],
+      error: null,
+    }),
+  ),
   http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, ok({ ok: true, service_id: 'svc-default', stats: {} })),
   http.get(`${API_BASE}/api/admin/ngwaf/status`, ok({ ok: true })),
 
