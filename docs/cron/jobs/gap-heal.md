@@ -102,3 +102,4 @@
 - [x] 6. Severe loss 15-minute throttle verified via `test_run_gap_heal_severe_uses_15min_throttle`.
 - [x] 7. Dynamic rescheduling on `interval_minutes` config change verified via `test_sync_jobs_reschedules_gap_heal_when_interval_changed`.
 - [x] 8. Kill switch protection verified via `test_run_gap_heal_refuses_when_kill_switch_on`.
+- [x] 9. Manual trigger endpoint `POST /api/admin/gap-heal/{service_id}`, run_id reuse, and force bypass verified via `tests/cron/test_gap_heal_contract.py`.

@@ -1226,7 +1226,7 @@ _GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
         name="elevated",
         min_gap_pct=0.10,
         min_lost_lines=10_000,
-        throttle_hours=1.0,
+        throttle_hours=2.0,
         sweep_max_files=_FULL_SWEEP_DEFAULT_MAX_FILES,
         sweep_max_seconds=_FULL_SWEEP_DEFAULT_MAX_SECONDS,
     ),
@@ -1269,7 +1269,11 @@ def _mark_gap_heal_triggered(service_id: str) -> None:
 
 
 @cron_task("gap_heal", job_name="gap_heal")
-def _run_gap_heal(service_id: str) -> None:
+def _run_gap_heal(
+    service_id: str,
+    run_id: int | None = None,
+    force: bool = False,
+) -> None:
     """Periodic gap detector that triggers a full_sweep when sustained loss
     is observed between Fastly's authoritative ``requests`` counts and
     our ingested rows.
@@ -1299,11 +1303,12 @@ def _run_gap_heal(service_id: str) -> None:
     if src is None or src.get("access_level") == "read_only":
         return
 
-    if should_defer_cron("gap_heal", service_id):
+    if not force and should_defer_cron("gap_heal", service_id):
         return
 
     try:
-        run_id = start_cron_run(src, "gap_heal")
+        if run_id is None:
+            run_id = start_cron_run(src, "gap_heal")
     except RuntimeError as e:
         logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: skipping — %s", service_id, e)
         return
@@ -1371,7 +1376,7 @@ def _run_gap_heal(service_id: str) -> None:
         # ``backend.cron.jobs.sync._last_successful_gap_heal_trigger``
         # intercept the call.
         last_heal = _last_successful_gap_heal_trigger(service_id)
-        if band.throttle_hours > 0 and last_heal is not None:
+        if not force and band.throttle_hours > 0 and last_heal is not None:
             elapsed_hours = (time.time() - last_heal) / 3600.0
             if elapsed_hours < band.throttle_hours:
                 msg = (
@@ -1421,6 +1426,7 @@ def _run_gap_heal(service_id: str) -> None:
             service_id,
             max_files=band.sweep_max_files,
             max_seconds=band.sweep_max_seconds,
+            force=force,
         )
     except Exception as e:
         log_cron_run(

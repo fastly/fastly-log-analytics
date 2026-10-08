@@ -72,6 +72,36 @@ def full_sweep_service(
     return SyncStartResponse(**res)
 
 
+@router.post(
+    "/admin/gap-heal/{service_id}",
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def gap_heal_service(
+    service_id: str,
+    force: bool = Query(default=True, description="Force gap heal evaluation even if throttled or active requests"),
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run gap heal.")
+
+    from backend.cron.jobs.sync import _run_gap_heal
+    from backend.repositories.dashboard import invalidate_service
+    from backend.utils.router_utils import start_or_resume_cron
+
+    invalidate_service(source["name"])
+    res = start_or_resume_cron(
+        source,
+        "gap_heal",
+        _run_gap_heal,
+        target_kwargs={"force": force},
+        success_msg="Gap heal evaluation started.",
+        in_progress_msg="Gap heal already running.",
+    )
+    return SyncStartResponse(**res)
+
+
 @router.post("/admin/ingest-logs")
 def ingest_endpoint(
     start_time: str | None = Query(default=None),
