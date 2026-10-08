@@ -107,7 +107,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `metadata_cleanup_{id}` | Daily 03:15 UTC | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
 | `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
 | `insights_prewarmer_{id}` | Every 240 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
-| `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) |
+| `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
 | `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (request parity unified); [High-Scale mode](jobs/rum-discovery.md) |
