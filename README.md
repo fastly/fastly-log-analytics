@@ -127,6 +127,7 @@ You run the application as a central web-accessible server on a dedicated VM (or
 - **Automated provisioning** — wizard creates the bucket, access keys, CDN-fronting service, and logging endpoint
 - **CDN-accelerated reads** — every FOS read goes through a Fastly service to minimize egress and maximize caching
 - **Crash-safe ingestion** — buffered locally, atomically committed; interrupted imports never corrupt the table
+- **Retention and storage maintenance** — configurable request/RUM retention, DuckLake snapshot expiry, and local cache/rollup cleanup with admin-triggered runs; see the [Cron 8 specification](docs/cron/jobs/expire.md)
 - **Schema evolution** — new and missing JSON fields handled gracefully; corrupt lines isolated and surfaced
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side

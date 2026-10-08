@@ -15,12 +15,13 @@ Every scheduled background job in this system must adhere to these non-negotiabl
    - Every database query (DuckDB analytical SQL, ClickHouse MergeTree DDL/DML, and PostgreSQL metadata operations), cloud storage API call (FOS S3 Class A PUT/DELETE and Class B GET/LIST), Fastly API call (Edge Stats, NGWAF signals), and DNS PTR resolution must be timed, attributed, and recorded.
 3. **Multi-Engine Accounting & Observability:**
    - Jobs that interact with **ClickHouse** must register queries with `query_registry.register("ClickHouse", ...)` so they appear in the Live Query Monitor.
-   - Jobs that interact with **DuckLake / DuckDB** must record execution durations in `telemetry_queries`.
+   - DuckDB statements are timed and attributed through the query registry and Live Query Monitor; slow-query records are persisted for post-run inspection. `telemetry_queries` is page-load telemetry, not the cron query audit surface.
    - Jobs that perform FOS S3 operations must record Class A / Class B counts in PostgreSQL's `usage_log` table.
    - Jobs that modify operational metadata must use the shared PostgreSQL connection pool and its query instrumentation.
 4. **Strict Concurrency & Pod Safety:**
-   - Long-running cloud write jobs (`optimize`, `expire`, `commit`) must acquire exclusive per-service distributed or file-based locks.
+   - Long-running cloud write jobs (`optimize`, `expire`, `commit`) must prevent overlapping executions for the same service using the job's lease or lock; a task-scoped lease does not serialize every cron type.
    - In distributed deployments (`DEPLOYMENT_MODE=high_throughput`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
+   - Cron 8 (`expire`) also stays on the serving pod's APScheduler in High-Scale mode; it is not routed through RedBeat or Celery.
 5. **Local-Only Safety Gate (`FLA_DEV_NO_CRONS=1`):**
    - Development environments and AI test sessions must be capable of running safely without racing production FOS buckets or generating external write costs.
    - When `FLA_DEV_NO_CRONS=1` is set, all cloud-writing jobs (`log_discovery`, `commit`, `optimize`, `expire`, `full_sync`, `gap_heal`) are completely bypassed. Only local-safe jobs (`local_compact`, `rollup_compact`, `rollup_heal`, `partial_hour_merge`, `duckdb_recycle`, `metric_snapshot`) are permitted to run.
@@ -100,7 +101,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `rollup_heal_{id}` | Hourly at :05 | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) |
 | `rollup_compact_{id}` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) |
 | `optimize_{id}` | Daily 04:00 UTC | APScheduler | RedBeat / Worker | Admin | [optimize.md](jobs/optimize.md) (Verified) |
-| `expire_{id}` | Hourly | APScheduler | Worker / Pod | Admin | [expire.md](jobs/expire.md) |
+| `expire_{id}` | Hourly | APScheduler | Serving-pod APScheduler | Admin | [expire.md](jobs/expire.md) (Verified) |
 | `full_sync_{id}` | Every 6h (:30 UTC) | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) |
 | `gap_heal_{id}` | Every 30 min | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) |
 | `metadata_cleanup_{id}` | Daily 03:15 UTC | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) |
@@ -127,8 +128,8 @@ Every background job must participate in the comprehensive telemetry and audit h
 
 ### 5.1 Storage & Operational Logging
 1. **`cron_runs` Table in PostgreSQL 16 (`cron_log`):**
-   - Every execution records: `run_id`, `service_id`, `job_id`, `status` (`success`, `warning`, `error`), `started_at`, `duration_s`, `details_json`.
-   - Result tallies (files ingested, rows committed, bytes compacted, memory reclaimed) must be recorded in `details_json`.
+   - Every execution records its status (`success`, `warning`, `error`), duration, summary, error message, and applicable typed counters such as `files_deleted_fos`, `rows_ingested`, and `outcome_counters`. There is no `details_json` column.
+   - Job-specific result tallies belong in the supported summary/counter fields; do not assume arbitrary JSON detail columns.
 2. **PostgreSQL `usage_log` Billing & Cost Telemetry:**
    - Any job executing FOS operations must record Class A (PUT, DELETE, LIST) and Class B (GET) calls with exact operation attributes.
 3. **`cron_progress` Server-Sent Events (SSE):**
