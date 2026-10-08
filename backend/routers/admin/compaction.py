@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from backend.deps import get_source
@@ -13,6 +13,7 @@ from backend.models.admin import (
     BackfillBundleRollupsResponse,
     CompactionStatsResponse,
     ConsolidateRollupsResponse,
+    ExpireSnapshotsResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
     MetadataStorageResponse,
@@ -69,6 +70,25 @@ def optimize_service(
     if isinstance(res, dict):
         return OptimizeNowResponse(**res)
     return OptimizeNowResponse(files_rewritten=0, files_added=0)
+
+
+@router.post(
+    "/admin/expire-snapshots/{service_id}",
+    response_model=ExpireSnapshotsResponse,
+    response_model_exclude_unset=True,
+)
+def expire_snapshots_service(
+    service_id: str,
+    source: dict = Depends(get_source),
+) -> ExpireSnapshotsResponse:
+    """Trigger an immediate DuckLake retention and snapshot-expiry pass."""
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run cloud maintenance.")
+
+    from backend.cron.jobs.expire import _run_expire_snapshots
+
+    result = _run_expire_snapshots(service_id, manual=True)
+    return ExpireSnapshotsResponse(**result)
 
 
 @router.post(

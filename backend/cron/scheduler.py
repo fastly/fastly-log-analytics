@@ -1331,7 +1331,7 @@ class Scheduler:
             # recoverability — the 2026-08 rollback was recovered precisely
             # because old metadata still existed — so it is operator-tunable
             # (``cron_sync.keep_snapshot_days``) and stays at 7 by default.
-            if compact_cfg.get("enabled", True):
+            if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
                 exp_job_id = f"expire_{service_id}"
                 seen_ids.add(exp_job_id)
                 expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))

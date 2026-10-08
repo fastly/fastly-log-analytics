@@ -525,6 +525,18 @@ class OptimizeNowResponse(_AdminMaintRead):
     error: str | None = None
 
 
+class ExpireSnapshotsResponse(_AdminMaintRead):
+    """Outcome and counters from ``POST /admin/expire-snapshots/{service_id}``."""
+
+    status: str | None = None
+    service_id: str | None = None
+    summary: str | None = None
+    retention_deleted_rows: int | None = None
+    snapshots_expired: int | None = None
+    files_unlinked: int | None = None
+    error: str | None = None
+
+
 class BackfillBundleRollupsResponse(_AdminMaintRead):
     """Per-kind bundle counts from ``POST /admin/backfill-bundle-rollups``."""
 

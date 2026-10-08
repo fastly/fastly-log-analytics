@@ -992,27 +992,40 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
     """
     out: dict[str, Any] = {}
     cutoff = datetime.now(UTC) - timedelta(days=keep_snapshot_days)
+    snapshot_errors: list[str] = []
+    snapshots_before: int | None = None
+    snapshots_after: int | None = None
 
-    before_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
-    snapshots_before = int(before_row[0]) if before_row else 0
-    out["snapshots_before"] = snapshots_before
+    try:
+        before_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
+        snapshots_before = int(before_row[0]) if before_row else 0
+        out["snapshots_before"] = snapshots_before
+    except Exception as e:
+        snapshot_errors.append(str(e))
+        logger.warning("[ducklake] %s: could not count snapshots before expiry: %s", source.get("name"), e)
 
-    if snapshots_before == 0:
+    try:
+        con.execute("CALL ducklake_expire_snapshots('lake', older_than => ?)", [cutoff]).fetchall()
+    except Exception as e:
+        snapshot_errors.append(str(e))
+        logger.warning("[ducklake] %s: snapshot expiry failed: %s", source.get("name"), e)
+
+    try:
+        after_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
+        snapshots_after = int(after_row[0]) if after_row else 0
+        out["snapshots_after"] = snapshots_after
+    except Exception as e:
+        snapshot_errors.append(str(e))
+        logger.warning("[ducklake] %s: could not count snapshots after expiry: %s", source.get("name"), e)
+
+    if snapshots_before is not None and snapshots_after is not None:
         out["snapshots_expired_before_days"] = keep_snapshot_days
-        out["snapshots_after"] = 0
-        out["snapshots_expired_count"] = 0
-        out["snapshot_expiry_note"] = "no snapshots present in the DuckLake catalog"
-        logger.info("[ducklake] %s: no snapshots present to expire", source.get("name"))
-        return out
-
-    con.execute("CALL ducklake_expire_snapshots('lake', older_than => ?)", [cutoff]).fetchall()
-
-    after_row = con.execute("SELECT count(*) FROM ducklake_snapshots('lake')").fetchone()
-    snapshots_after = int(after_row[0]) if after_row else 0
-    snapshots_expired = max(0, snapshots_before - snapshots_after)
-    out["snapshots_expired_before_days"] = keep_snapshot_days
-    out["snapshots_after"] = snapshots_after
-    out["snapshots_expired_count"] = snapshots_expired
+        out["snapshots_expired_count"] = max(0, snapshots_before - snapshots_after)
+        if snapshots_before == 0:
+            out["snapshot_expiry_note"] = "no snapshots present in the DuckLake catalog"
+            logger.info("[ducklake] %s: no snapshots present to expire", source.get("name"))
+    if snapshot_errors:
+        out["snapshot_expiry_error"] = "; ".join(snapshot_errors)
 
     # Measured, not assumed: expiry alone reclaims NO bytes. It deletes catalog
     # snapshot rows and moves the parquet it unreferenced onto the catalog's
@@ -1033,7 +1046,6 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
     # possible after the daily optimize job's ducklake_rewrite_data_files
     # supersedes those files — which is also what physically removes rows that
     # step 1 deleted (until then they persist behind delete files).
-    files_cleaned: int | None = None
     try:
         cleaned = con.execute("CALL ducklake_cleanup_old_files('lake', older_than => ?)", [cutoff]).fetchall()
         files_cleaned = len(cleaned)
@@ -1042,20 +1054,21 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
         logger.warning("[ducklake] %s: old-file cleanup after expiry failed: %s", source.get("name"), e)
         out["data_file_cleanup_error"] = str(e)
 
-    if snapshots_expired > 0 or files_cleaned:
+    snapshots_expired = out.get("snapshots_expired_count", 0)
+    if snapshots_expired > 0 or out.get("data_files_cleaned", 0):
         out["snapshot_expiry_note"] = (
             "catalog metadata entries only; parquet is not deleted by the expiry itself — "
             f"ducklake_cleanup_old_files (older_than={keep_snapshot_days}d) unlinked "
-            f"{files_cleaned if files_cleaned is not None else 'unknown'} file(s), and rows deleted "
+            f"{out.get('data_files_cleaned', 'unknown')} file(s), and rows deleted "
             "by retention persist physically until the daily ducklake_rewrite_data_files rewrite"
         )
         logger.info(
-            "[ducklake] %s: expired %d snapshots (%d -> %d), unlinked %s file(s)",
+            "[ducklake] %s: expired %d snapshots (%s -> %s), unlinked %s file(s)",
             source.get("name"),
             snapshots_expired,
             snapshots_before,
             snapshots_after,
-            files_cleaned,
+            out.get("data_files_cleaned", "unknown"),
         )
     return out
 
@@ -1090,14 +1103,16 @@ def _run_ducklake_maintenance(
 
 
 def _run_cloud_maintenance_impl(source: dict) -> dict:
-    """Run weekly maintenance: retention deletion, snapshot expiry, local purges.
+    """Run retention deletion, snapshot expiry, and independent local purges.
 
     1. Deletes rows from the DuckLake tables older than ``data_retention_days``
        (default 30) / ``rum_retention_days``.
     2. Expires DuckLake catalog snapshots older than ``keep_snapshot_days``
        (default 7) and unlinks the parquet that expiry unreferenced.
-    3. Deletes local cache Parquet older than ``cache_retention_days`` (90).
+    3. Deletes local cache Parquet older than ``cache_retention_days`` (90)
+       and orphaned temp files older than two hours.
     4. Deletes local rollup Parquet older than ``rollup_retention_months`` (12).
+    5. Preserves local quarantine evidence; it has no age-based expiry.
 
     Steps 1 and 2 were pyiceberg-based until v3.0.0-beta1. Since the commit path
     moved to DuckLake they operated on a catalog that receives no commits, so
@@ -1121,7 +1136,11 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-    results: dict[str, Any] = {}
+    results: dict[str, Any] = {
+        "local_cache_files_deleted": 0,
+        "local_temp_files_deleted": 0,
+        "local_rollup_files_deleted": 0,
+    }
 
     # 1. Retention deletion + 2. snapshot expiry, both against DuckLake.
     results.update(
@@ -1133,24 +1152,27 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         )
     )
 
-    # 3. Clean up local cache
-    if cache_retention_days > 0:
-        try:
-            from backend.core.duckdb import _cache_dir
+    # 3. Clean up local cache and orphaned temporary files.
+    cache_errors: list[str] = []
+    try:
+        from backend.core.duckdb import _cache_dir
 
-            cache_root = _cache_dir(source)
-            candidate_dirs = [os.path.join(cache_root, "data"), os.path.join(cache_root, "buffer")]
-            for t_name in _RUM_BEACON_TABLES:
-                candidate_dirs.append(os.path.join(cache_root, f"data_{t_name}"))
+        cache_root = _cache_dir(source)
+        candidate_dirs = [os.path.join(cache_root, "data"), os.path.join(cache_root, "buffer")]
+        for t_name in _RUM_BEACON_TABLES:
+            candidate_dirs.append(os.path.join(cache_root, f"data_{t_name}"))
 
-            cache_cutoff = datetime.now(UTC) - timedelta(days=cache_retention_days)
-            tmp_cutoff = datetime.now(UTC) - timedelta(hours=2)
-            deleted_files = 0
-            deleted_tmp_files = 0
+        cache_cutoff = datetime.now(UTC) - timedelta(days=cache_retention_days)
+        tmp_cutoff = datetime.now(UTC) - timedelta(hours=2)
 
+        def record_cache_walk_error(error: OSError) -> None:
+            cache_errors.append(str(error))
+            logger.warning("[iceberg] Local cache scan failed: %s", error)
+
+        if cache_retention_days > 0:
             for c_dir in candidate_dirs:
                 if os.path.exists(c_dir):
-                    for root, _, files in os.walk(c_dir):
+                    for root, _, files in os.walk(c_dir, onerror=record_cache_walk_error):
                         for file in files:
                             if not file.endswith(".parquet"):
                                 continue
@@ -1159,31 +1181,30 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
                                 mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
                                 if mtime < cache_cutoff:
                                     os.remove(filepath)
-                                    deleted_files += 1
-                            except Exception:
-                                pass
+                                    results["local_cache_files_deleted"] += 1
+                            except Exception as e:
+                                cache_errors.append(f"{filepath}: {e}")
+                                logger.warning("[iceberg] Could not remove expired cache file %s: %s", filepath, e)
                     _core_mod._prune_empty_dirs(c_dir)
 
-            # Clean stale orphaned temp files across cache_root older than 2 hours
-            if os.path.exists(cache_root):
-                for root, _, files in os.walk(cache_root):
-                    for file in files:
-                        if file.endswith((".tmp", ".part", ".bad.jsonl.tmp")):
-                            filepath = os.path.join(root, file)
-                            try:
-                                mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
-                                if mtime < tmp_cutoff:
-                                    os.remove(filepath)
-                                    deleted_tmp_files += 1
-                            except Exception:
-                                pass
-
-            results["local_cache_files_deleted"] = deleted_files
-            if deleted_tmp_files > 0:
-                results["local_temp_files_deleted"] = deleted_tmp_files
-        except Exception as e:
-            logger.warning("[iceberg] Local cache cleanup skipped: %s", e)
-            results["local_cache_error"] = str(e)
+        if os.path.exists(cache_root):
+            for root, _, files in os.walk(cache_root, onerror=record_cache_walk_error):
+                for file in files:
+                    if file.endswith((".tmp", ".part", ".bad.jsonl.tmp")):
+                        filepath = os.path.join(root, file)
+                        try:
+                            mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
+                            if mtime < tmp_cutoff:
+                                os.remove(filepath)
+                                results["local_temp_files_deleted"] += 1
+                        except Exception as e:
+                            cache_errors.append(f"{filepath}: {e}")
+                            logger.warning("[iceberg] Could not remove orphaned temp file %s: %s", filepath, e)
+    except Exception as e:
+        cache_errors.append(str(e))
+        logger.warning("[iceberg] Local cache cleanup failed: %s", e)
+    if cache_errors:
+        results["local_cache_error"] = "; ".join(cache_errors)
 
     # 4. Clean up old rollups
     rollup_retention_months = int(cron_sync.get("rollup_retention_months") or 12)
@@ -1195,8 +1216,8 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
             if os.path.exists(rollup_dir):
                 # Approximation: 30 days per month
                 rollup_cutoff = datetime.now(UTC) - timedelta(days=rollup_retention_months * 30)
-                deleted_rollups = 0
-                for root, _, files in os.walk(rollup_dir):
+                rollup_errors: list[str] = []
+                for root, _, files in os.walk(rollup_dir, onerror=lambda e: rollup_errors.append(str(e))):
                     for file in files:
                         if not file.endswith(".parquet"):
                             continue
@@ -1205,47 +1226,23 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
                             mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=UTC)
                             if mtime < rollup_cutoff:
                                 os.remove(filepath)
-                                deleted_rollups += 1
-                        except Exception:
-                            pass
+                                results["local_rollup_files_deleted"] += 1
+                        except Exception as e:
+                            rollup_errors.append(f"{filepath}: {e}")
+                            logger.warning("[iceberg] Could not remove expired rollup %s: %s", filepath, e)
                 _core_mod._prune_empty_dirs(rollup_dir)
-                results["local_rollup_files_deleted"] = deleted_rollups
+                if rollup_errors:
+                    results["local_rollup_error"] = "; ".join(rollup_errors)
         except Exception as e:
             logger.warning("[iceberg] Local rollup cleanup skipped: %s", e)
             results["local_rollup_error"] = str(e)
 
-    # 5. Clean up expired quarantined files in FOS and metadata
-    quarantine_retention_days = int(cron_sync.get("quarantine_retention_days", 30))
-    if quarantine_retention_days > 0:
-        try:
-            from backend.core.metadata import delete_quarantined_rows, get_expired_quarantined_files
-
-            service_id = str(source.get("service_id") or source.get("name") or "")
-            if service_id:
-                expired = get_expired_quarantined_files(service_id, retention_days=quarantine_retention_days)
-                if expired:
-                    from backend.core.duckdb import _get_fos_client
-                    from backend.core.ingest import _delete_objects_robust
-
-                    fos_client = _get_fos_client(source)
-                    keys_to_delete = []
-                    ids_to_delete = []
-                    for row in expired:
-                        if row.get("error_key"):
-                            keys_to_delete.append(row["error_key"])
-                        if row.get("meta_key"):
-                            keys_to_delete.append(row["meta_key"])
-                        ids_to_delete.append(row["id"])
-                    purged_fos = 0
-                    if keys_to_delete and source.get("bucket"):
-                        purged_fos = _delete_objects_robust(fos_client, source["bucket"], keys_to_delete)
-                    if ids_to_delete:
-                        delete_quarantined_rows(service_id, ids_to_delete)
-                    results["quarantined_files_purged"] = len(expired)
-                    results["quarantined_fos_objects_deleted"] = purged_fos
-        except Exception as e:
-            logger.warning("[iceberg] Quarantine cleanup skipped: %s", e)
-            results["quarantine_cleanup_error"] = str(e)
+    results["retention_deleted_rows"] = sum(
+        int(results.get(key, 0) or 0)
+        for key in ("data_rows_deleted", "rum_log_rows_deleted", "rum_beacon_rows_deleted")
+    )
+    results["snapshots_expired"] = int(results.get("snapshots_expired_count", 0) or 0)
+    results["files_unlinked"] = int(results.get("data_files_cleaned", 0) or 0)
 
     return results
 
