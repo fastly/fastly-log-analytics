@@ -455,7 +455,7 @@ class Scheduler:
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
                 "(sync/full_sweep/gap_heal/commit/optimize/expire/ngwaf_sync/metadata_cleanup/"
                 "bot_data_refresh/rdns/alerts). Registering ONLY local-safe jobs (local_compact, "
-                "rollup_compact) that touch the local cache only. "
+                "rollup_compact, insights_prewarmer) that touch the local cache only. "
                 "HTTP API calls (including /api/admin/rebuild-local-view) remain functional."
             )
             self._register_dev_local_safe_jobs()
@@ -599,7 +599,7 @@ class Scheduler:
         if not cron_ip.get("enabled", True):
             return
 
-        interval_seconds = int(cron_ip.get("interval_seconds", 300))
+        interval_seconds = int(cron_ip.get("interval_seconds", 240))
         ip_job_id = f"insights_prewarmer_{service_id}"
         seen_ids.add(ip_job_id)
         if ip_job_id in self._job_ids:
@@ -667,12 +667,12 @@ class Scheduler:
         """FLA_DEV_NO_CRONS allowlist: register ONLY the local-only jobs.
 
         ``local_compact`` + ``rollup_compact`` + ``rollup_heal`` +
-        ``partial_hour_merge`` rewrite the local parquet cache and never
-        touch the shared FOS bucket or send anything outbound, so they're
-        safe to run against a dev backend that reads the same FOS bucket as
-        prod. Everything else stays gated off (see :func:`dev_mode_no_crons`);
-        the FOS-writing jobs (``optimize``/``commit``/``expire``) are
-        deliberately NOT here.
+        ``partial_hour_merge`` + ``insights_prewarmer`` rewrite or prewarm
+        the local cache and never touch the shared FOS bucket or send
+        anything outbound, so they're safe to run against a dev backend that
+        reads the same FOS bucket as prod. Everything else stays gated off
+        (see :func:`dev_mode_no_crons`); the FOS-writing jobs
+        (``optimize``/``commit``/``expire``) are deliberately NOT here.
 
         Mirrors the trigger config of the same jobs in :meth:`_sync_jobs` —
         keep them in sync. Runs once at startup;
@@ -689,6 +689,7 @@ class Scheduler:
         from backend.cron.jobs.partial_hour import _run_partial_hour_merge
         from backend.high_scale.registry import get_high_scale_service_registry
 
+        seen_ids: set[str] = set()
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id", "")
             if not service_id:
@@ -701,6 +702,8 @@ class Scheduler:
                     "⏭️  [scheduler] (dev-local) Skipping legacy local jobs for high-scale service %s.", service_id
                 )
                 continue
+
+            prov = cfg.get("provisioning", {})
 
             # local_compact — local-only parquet compaction, always-on
             # (no config/access gate), every 2 min (or LOCAL_COMPACT_INTERVAL_MIN). Matches _sync_jobs.
@@ -788,6 +791,11 @@ class Scheduler:
                     )
                     self._job_ids[rh_job_id] = rh_job_id
                     logger.info("🩹 [scheduler] (dev-local) Registered %s (hourly at :05).", rh_job_id)
+
+            # insights_prewarmer — local-safe read-only cache prewarmer,
+            # populates in-memory cache, never touches FOS or writes data.
+            # Permitted under FLA_DEV_NO_CRONS=1.
+            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
 
         # DuckDB instance recycle is local-safe (closes/reopens local conns,
         # no FOS writes) → safe under the dev kill switch. Still OFF unless
