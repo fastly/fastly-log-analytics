@@ -6,7 +6,6 @@ from fastapi import Depends, HTTPException, Query
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import SyncStartResponse
-from backend.utils.router_utils import make_error
 
 from ._router import router
 
@@ -25,10 +24,7 @@ def sync_service(
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
     if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("read_only", "Read-only services cannot run log discovery."),
-        )
+        raise HTTPException(status_code=403, detail="Read-only services cannot run log discovery.")
 
     from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
     from backend.repositories.dashboard import invalidate_service
@@ -58,10 +54,7 @@ def full_sweep_service(
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
     if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("read_only", "Read-only services cannot run full sweep."),
-        )
+        raise HTTPException(status_code=403, detail="Read-only services cannot run full sweep.")
 
     from backend.cron.jobs.sync import _run_full_sweep
     from backend.repositories.dashboard import invalidate_service
@@ -91,10 +84,7 @@ def gap_heal_service(
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
     if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("read_only", "Read-only services cannot run gap heal."),
-        )
+        raise HTTPException(status_code=403, detail="Read-only services cannot run gap heal.")
 
     from backend.cron.jobs.sync import _run_gap_heal
     from backend.repositories.dashboard import invalidate_service

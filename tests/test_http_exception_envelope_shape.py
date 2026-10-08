@@ -31,6 +31,10 @@ ROUTERS = Path(__file__).resolve().parent.parent / "backend" / "routers"
 # possible so the frontend can pattern-match on a machine-readable code.
 ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (415, "Unsupported Media Type"),
+    (403, "Read-only services cannot run log discovery."),
+    (403, "Read-only services cannot run full sweep."),
+    (403, "Read-only services cannot run gap heal."),
+    (403, "Read-only services cannot run cloud maintenance."),
 }
 
 # All four envelope helpers return the canonical `{"error": code, ...}`

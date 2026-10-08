@@ -23,7 +23,7 @@ from backend.models.admin import (
     RollupCompactResponse,
     RollupStatusResponse,
 )
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
 from ._router import router
 
@@ -83,10 +83,7 @@ def expire_snapshots_service(
 ) -> ExpireSnapshotsResponse:
     """Trigger an immediate DuckLake retention and snapshot-expiry pass."""
     if source.get("access_level") == "read_only":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("read_only", "Read-only services cannot run cloud maintenance."),
-        )
+        raise HTTPException(status_code=403, detail="Read-only services cannot run cloud maintenance.")
 
     from backend.cron.jobs.expire import _run_expire_snapshots
 
