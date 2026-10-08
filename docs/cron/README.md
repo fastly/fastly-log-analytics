@@ -105,7 +105,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `full_sync_{id}` | Every 6h (:30 UTC) | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
 | `gap_heal_{id}` | Every 30 min | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
 | `metadata_cleanup_{id}` | Daily 03:15 UTC | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
-| `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) |
+| `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
 | `insights_prewarmer_{id}` | Every 240 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) |
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) |
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) |

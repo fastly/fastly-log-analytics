@@ -42,7 +42,7 @@
    - Loads source via `get_source_for_service(service_id)`.
    - Checks `should_defer_cron("alerts", service_id)`. If active user queries are currently hitting DuckDB, defers until next interval to avoid query contention.
 2. **Alert Rule Fetch & Early Exit:**
-   - Reads active alert configurations from `metadata.db` table `alerts`.
+   - Reads active alert configurations from PostgreSQL 16 table `alerts` via `backend.core.metadata` (per ADR-22).
    - Filters to `enabled_alerts = [a for a in alerts if a["enabled"]]`. If empty, logs `skipped` with summary "No alerts configured" and exits without opening DuckDB.
 3. **Execution & Progress Initialization:**
    - Opens read-only DuckDB connection `get_connection(src, read_only=True)`.
@@ -71,7 +71,7 @@
 - **100% Query & API Call Capture:**
   - **DuckDB Analytical Queries:** Every threshold query is instrumented via `track_query` with latency attribution under category `"alerts"`.
   - **Webhook Dispatches:** Outbound HTTP calls use bounded timeouts (5s) and catch network errors to prevent crashing the evaluation loop.
-  - **SQLite Operations:** Updates to `alerts` table execute through `ThreadLocalPool`.
+  - **PostgreSQL 16 Operations:** Updates to `alerts` table execute through the pooled PostgreSQL connection (`backend.core.metadata.pg_connection`) per ADR-22.
 - **Timing & Resource Budgets:**
   - Threshold query duration: < 100ms per alert rule.
   - Overall job execution: < 1.0 second across all rules.
@@ -103,3 +103,4 @@
 - [x] 5. Dynamic rescheduling on `cron_alerts.interval_seconds` change verified via `test_sync_jobs_reschedules_alerts_evaluation_when_interval_changed`.
 - [x] 6. Job disabled when `cron_alerts.enabled = False` verified via `test_sync_jobs_skips_alerts_evaluation_when_disabled`.
 - [x] 7. Unregistered when 0 alerts configured verified via `test_run_service_alerts_evaluation_skips_when_no_alerts_configured`.
+- [x] 8. Full contract test suite verified in `tests/cron/test_alerts_evaluation_contract.py` (19 passed: FLA_DEV_NO_CRONS kill-switch, registration gating, politeness deferral, zero-alert short-circuit without DuckDB, DuckDB metrics evaluation with `track_query` category "alerts", stale-data suppression (>30m), resilient per-alert error handling, two-phase timestamp/state export before outbound webhooks, multi-channel dispatch with bounded timeouts, execution status contract, progress SSE emission, and duration finalization).

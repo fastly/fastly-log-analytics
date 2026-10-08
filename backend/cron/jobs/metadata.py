@@ -682,8 +682,13 @@ def _run_share_audit_purge() -> str:
 def _run_service_alerts_evaluation(service_id: str) -> None:
     """Evaluate all enabled alerts for a specific service."""
     from backend.core.duckdb import get_connection, get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.repositories import alerts as alert_repo
     from backend.utils.active_requests import should_defer_cron
+
+    if dev_mode_no_crons():
+        logger.info("⏸️  \x1b[93m[alerts]\x1b[0m %s: dev_mode_no_crons active, skipping alerts evaluation.", service_id)
+        return
 
     start = time.monotonic()
 
@@ -699,7 +704,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     _display = _display_label(src, service_id)
     logger.info("🏎️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
 
-    # Fetch alerts from per-service metadata SQLite (no DuckDB needed).
+    # Fetch alerts from PostgreSQL metadata (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)
     enabled_alerts = [a for a in alerts if a["enabled"]]
     # DuckDB connection is only needed if we actually have alerts to evaluate.
