@@ -69,6 +69,5 @@ export function pickInsightsDefault(
   if (h < 24) return { window: '4', baseline: '1' } //  ~4–24h: last 4h vs previous hour
   if (h < 48) return { window: '4', baseline: '24' } // ~1–2d: last 4h vs previous day
   if (h < 168) return { window: '24', baseline: '24' } // ~2–7d: day over day
-  if (h < 720) return { window: '1', baseline: '168' } // ≥7d: today's static default (1h vs 7d)
-  return { window: '1', baseline: '720' } //                   ≥30d: 1h vs 30d
+  return { window: '1', baseline: '168' } //              ≥7d: prior 7 day period (1h vs 7d)
 }

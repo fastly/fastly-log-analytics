@@ -45,7 +45,7 @@
    - Checks `should_defer_cron("insights_prewarmer", service_id)`. If active user requests are running on the dashboard, defers to avoid DuckDB thread/CPU contention.
 2. **Adaptive Parameter Resolution:**
    - Reads cached extent status via `svcconfig.get_status(src["name"])`.
-   - Derives `(window_hours, baseline_hours)` adaptively from `history_hours_from_earliest(...)` using `pick_insights_default`. (e.g. >= 30d history defaults to 1h/720h, matching the frontend picker).
+   - Derives `(window_hours, baseline_hours)` adaptively from `history_hours_from_earliest(...)` using `pick_insights_default`. (e.g. >= 7d history defaults to 1h/168h, matching the frontend picker).
 3. **Execution & Progress Initialization:**
    - Calls `start_cron_run(src, "insights_prewarmer")`.
    - Initializes live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="insights_prewarmer")`.

@@ -25,7 +25,7 @@ describe('pickInsightsDefault', () => {
     [36, '4', '24'],
     [96, '24', '24'],
     [200, '1', '168'],
-    [800, '1', '720'],
+    [800, '1', '168'],
   ])('history %sh -> window %s / baseline %s', (h, w, b) => {
     expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
   })
@@ -43,7 +43,7 @@ describe('pickInsightsDefault', () => {
     [167.999, '24', '24'],
     [168, '1', '168'],
     [719.999, '1', '168'],
-    [720, '1', '720'],
+    [720, '1', '168'],
   ])('boundary %sh -> %s / %s', (h, w, b) => {
     expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
   })

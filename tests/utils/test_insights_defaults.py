@@ -46,8 +46,8 @@ _NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
         (167.9, (24.0, 24.0)),
         (168.0, (1.0, 168.0)),
         (719.9, (1.0, 168.0)),
-        (720.0, (1.0, 720.0)),  # ≥30 d: the shape the prewarm regression missed
-        (1270.0, (1.0, 720.0)),
+        (720.0, (1.0, 168.0)),  # ≥30 d defaults to prior 7-day period (1h vs 168h)
+        (1270.0, (1.0, 168.0)),
     ],
 )
 def test_band_table(history_hours: float, expected: tuple[float, float]) -> None:
@@ -103,7 +103,7 @@ def test_ts_band_table_matches_python_mirror() -> None:
         r"if\s*\(\s*h\s*<\s*([\d.]+)\s*\)\s*return\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}"
     )
     ts_bands = [(float(u), float(w), float(b)) for u, w, b in band_re.findall(body)]
-    assert len(ts_bands) >= 6, (
+    assert len(ts_bands) >= 5, (
         f"parsed only {len(ts_bands)} bands from {_TS_SOURCE} — the picker was "
         "reformatted or restructured; update this parser AND verify "
         "backend/utils/insights_defaults.py still mirrors it"

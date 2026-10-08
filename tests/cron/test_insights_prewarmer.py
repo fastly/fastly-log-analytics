@@ -190,11 +190,10 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
 
 
 def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
-    """A service with ≥30 d of history warms the (1, 720) pair the adaptive
-    frontend default will actually request — NOT the static (1, 168). This is
-    the regression test for the stranded prewarm: the /api/insights cache key
-    includes window+baseline, so warming the wrong pair is a guaranteed miss
-    for every default page load."""
+    """A service with ≥7 d of history warms the (1, 168) pair the adaptive
+    frontend default will actually request. This ensures the /api/insights
+    cache key (which includes window+baseline) hits immediately for every
+    default page load."""
     from datetime import UTC, datetime, timedelta
 
     earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
@@ -207,9 +206,9 @@ def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
     stub_cron_run["get_status"].assert_called_once_with(stub_source["name"])
     kwargs = get_insights_mock.call_args.kwargs
     assert kwargs["window_hours"] == 1.0
-    assert kwargs["baseline_hours"] == 720.0
+    assert kwargs["baseline_hours"] == 168.0
     # The warmed shape is surfaced in the cron_runs summary for prod audit.
-    assert "1h/720h" in stub_cron_run["log"].call_args.kwargs["summary"]
+    assert "1h/168h" in stub_cron_run["log"].call_args.kwargs["summary"]
 
 
 def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_cron_run):
@@ -240,7 +239,7 @@ def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_
     assert get_insights_mock.call_count == 2  # admin + 1 analyst shape
     analyst_call = next(c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None)
     assert analyst_call.kwargs["window_hours"] == 1.0
-    assert analyst_call.kwargs["baseline_hours"] == 720.0
+    assert analyst_call.kwargs["baseline_hours"] == 168.0
     assert analyst_call.kwargs["clamp_cache_key"] == "||24"
     assert analyst_call.kwargs["mask_ips"] is True
 

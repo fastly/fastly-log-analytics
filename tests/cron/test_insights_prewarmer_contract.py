@@ -344,21 +344,21 @@ def test_contract_politeness_deferral_when_active_queries(base_context):
 def test_contract_adaptive_parameter_resolution(base_context):
     """Requirement 7: Derives (window_hours, baseline_hours) adaptively via pick_insights_default
     from service log history extents:
-    - >= 30 days history -> (1.0, 720.0)
+    - >= 7 days history -> (1.0, 168.0) (prior 7-day period)
     - ~2 hours history -> (1.0, 1.0)
     - empty / None history -> fallback (1.0, 168.0)
     """
     mock_get_insights = MagicMock(return_value={})
 
-    # Case A: >= 30 days history
+    # Case A: >= 7 days history (e.g. 45 days) -> defaults to prior 7-day period (1h/168h)
     earliest_30d = (datetime.now(UTC) - timedelta(days=45)).isoformat()
     base_context["get_status"].return_value = {"earliest_log_at": earliest_30d}
 
     with patch("backend.repositories.insights.get_insights", mock_get_insights):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-prewarm-contract")
         kwargs_a = mock_get_insights.call_args.kwargs
-        assert (kwargs_a["window_hours"], kwargs_a["baseline_hours"]) == (1.0, 720.0)
-        assert "1h/720h" in base_context["log_run"].call_args.kwargs["summary"]
+        assert (kwargs_a["window_hours"], kwargs_a["baseline_hours"]) == (1.0, 168.0)
+        assert "1h/168h" in base_context["log_run"].call_args.kwargs["summary"]
 
     mock_get_insights.reset_mock()
     base_context["log_run"].reset_mock()

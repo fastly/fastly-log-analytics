@@ -37,17 +37,16 @@ STATIC_DEFAULT: tuple[float, float] = (1.0, 168.0)
 
 # (history_upper_bound_hours, window_hours, baseline_hours). Half-open bands
 # over available history — an exact boundary selects the higher bucket, and
-# the final +inf band is the ≥30 d shape. Values are floats because the
-# client sends ``parseFloat`` of the dropdown tokens, so these produce
-# byte-identical cache-key fragments.
+# the final +inf band is the ≥7 d shape (comparing recent 1 h against the prior
+# 7-day period). Values are floats because the client sends ``parseFloat``
+# of the dropdown tokens, so these produce byte-identical cache-key fragments.
 _BANDS: tuple[tuple[float, float, float], ...] = (
     (1.0, 0.25, 1.0),
     (4.0, 1.0, 1.0),
     (24.0, 4.0, 1.0),
     (48.0, 4.0, 24.0),
     (168.0, 24.0, 24.0),
-    (720.0, 1.0, 168.0),
-    (math.inf, 1.0, 720.0),
+    (math.inf, 1.0, 168.0),
 )
 
 
