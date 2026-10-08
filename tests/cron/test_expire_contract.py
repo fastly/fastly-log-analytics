@@ -8,17 +8,22 @@ politeness, manual-trigger, and dev-safety requirements in
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import duckdb
 import pytest
 from fastapi import HTTPException
 
 from backend.core import duckdb as duckdb_mod
 from backend.core import iceberg as iceberg_mod
 from backend.core.iceberg import buffer as buffer_mod
+from backend.core.query_attribution import current_attribution
+from backend.core.query_registry import query_registry
 from backend.cron.jobs import expire
 from backend.cron.scheduler import Scheduler
+from backend.utils.telemetry import process_context_scope
 
 
 def _source(tmp_path, service_id: str = "svc-expire-contract") -> dict:
@@ -361,6 +366,50 @@ def test_expire_cron_context_attributes_queries_and_flushes_usage(monkeypatch):
     assert attribution.kind == "cron"
     assert attribution.cron_job == "expire_snapshots"
     assert flush_contexts == ["cron:expire_snapshots"]
+
+
+def test_ducklake_maintenance_sql_is_registered_with_cron_attribution(monkeypatch):
+    src = {"name": "svc-expire-contract", "service_id": "svc-expire-contract"}
+    raw_con = duckdb.connect(":memory:")
+
+    @contextmanager
+    def write_connection(_source):
+        yield raw_con
+
+    def expire(con, _source, _keep_snapshot_days):
+        con.execute("SELECT 1 AS cron_expire_probe").fetchone()
+        return {"snapshots_expired_count": 0, "data_files_cleaned": 0}
+
+    registered = []
+    register = query_registry.register
+
+    def capture_register(*args, **kwargs):
+        registered.append((args, kwargs, current_attribution.get()))
+        return register(*args, **kwargs)
+
+    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", write_connection)
+    monkeypatch.setattr(buffer_mod, "_ducklake_expire_snapshots", expire)
+    monkeypatch.setattr(query_registry, "register", capture_register)
+
+    try:
+        with process_context_scope("cron:expire_snapshots"):
+            result = buffer_mod._run_ducklake_maintenance(
+                src,
+                data_retention_days=0,
+                rum_retention_days=0,
+                keep_snapshot_days=7,
+            )
+    finally:
+        raw_con.close()
+
+    matching = [item for item in registered if item[0][1] == "SELECT 1 AS cron_expire_probe"]
+    assert matching, "Cron 8 maintenance SQL was not registered"
+    call = matching[0]
+    assert result == {"snapshots_expired_count": 0, "data_files_cleaned": 0}
+    assert call[0][0] == "DuckDB"
+    assert call[1]["service_id"] == src["service_id"]
+    assert call[2].kind == "cron"
+    assert call[2].cron_job == "expire_snapshots"
 
 
 def test_expire_politeness_gate_applies_to_cron_but_manual_trigger_bypasses(monkeypatch):

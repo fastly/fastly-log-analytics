@@ -48,6 +48,7 @@ from backend.core import metadata as _meta_mod
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
+from backend.core.query_instrumentation import InstrumentedDuckDBConnection
 
 
 def __getattr__(name: str):
@@ -1084,7 +1085,11 @@ def _run_ducklake_maintenance(
     """
     out: dict[str, Any] = {}
     try:
-        with _ducklake_write_connection(source) as con:
+        with _ducklake_write_connection(source) as raw_con:
+            con = InstrumentedDuckDBConnection(
+                raw_con,
+                service_id=source.get("service_id") or source.get("name", "default"),
+            )
             if data_retention_days > 0 or rum_retention_days > 0:
                 try:
                     out.update(_ducklake_retention_delete(con, source, data_retention_days, rum_retention_days))
