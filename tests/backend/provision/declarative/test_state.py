@@ -37,6 +37,26 @@ class TestFeatureStateValidation:
             state = FeatureState.from_config(cfg)
             assert state.log_period == period
 
+    def test_featurestate_validates_rum_log_period_range(self):
+        """Verify rum_log_period is within valid range [1, 3600]."""
+        cfg_too_low = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "sample_rate": 100,
+            "rum_log_period": 0,
+        }
+        with pytest.raises(ValueError, match="rum_log_period.*1.*3600"):
+            FeatureState.from_config(cfg_too_low)
+
+        cfg_too_high = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "sample_rate": 100,
+            "rum_log_period": 4000,
+        }
+        with pytest.raises(ValueError, match="rum_log_period.*1.*3600"):
+            FeatureState.from_config(cfg_too_high)
+
     def test_featurestate_validates_sample_rate_range(self):
         """Verify sample_rate is within valid range [1, 100]."""
         cfg = {
@@ -359,3 +379,33 @@ class TestFeatureStateDualFormatBackwardCompat:
         state = FeatureState.from_config(cfg)
         # Flat format should win per line 175 in state.py
         assert state.cmcd.enabled is True
+
+    def test_featurestate_extracts_rum_log_period(self):
+        """Verify rum_log_period is extracted from nested rum dict or flat field."""
+        cfg_nested = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "rum": {"enabled": True, "log_period": 300},
+        }
+        state_nested = FeatureState.from_config(cfg_nested)
+        assert state_nested.rum_log_period == 300
+
+        cfg_flat = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "rum_enabled": True,
+            "rum_log_period": 600,
+        }
+        state_flat = FeatureState.from_config(cfg_flat)
+        assert state_flat.rum_log_period == 600
+
+    def test_featurestate_to_dict_includes_rum_log_period(self):
+        """Verify to_dict() includes rum_log_period."""
+        cfg = {
+            "service_id": "srv_test",
+            "log_period": 60,
+            "rum_log_period": 300,
+        }
+        state = FeatureState.from_config(cfg)
+        d = state.to_dict()
+        assert d["rum_log_period"] == 300

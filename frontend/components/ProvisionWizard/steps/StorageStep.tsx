@@ -250,6 +250,32 @@ export function StorageStep({ s }: { s: WizardState }) {
                   />
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-6 pt-1">
+                <div className="space-y-1.5">
+                  <LabelWithInfo
+                    label="RUM Log Period"
+                    info="How often Fastly will flush RUM beacon logs to your bucket. 5 minutes is recommended for balanced latency and storage efficiency."
+                  />
+                  <Select
+                    value={String(config.rum_log_period || 300)}
+                    onValueChange={(v) =>
+                      setConfig({ ...config, rum_log_period: Number(v) || 300 })
+                    }
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue>
+                        {(val) => PERIOD_LABELS[String(val)] || val}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="60">1 minute (Fastest)</SelectItem>
+                      <SelectItem value="300">5 minutes (Recommended)</SelectItem>
+                      <SelectItem value="600">10 minutes</SelectItem>
+                      <SelectItem value="900">15 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -561,6 +587,35 @@ export function StorageStep({ s }: { s: WizardState }) {
                 </div>
               )}
             </div>
+
+            {config.rum_enabled && config.logging_enabled !== false && (
+              <div className="grid grid-cols-2 gap-6 pt-1">
+                <div className="space-y-1.5">
+                  <LabelWithInfo
+                    label="RUM Log Period"
+                    info="Fastly edge rotation period for RUM beacons. Ingestion polls at a derived frequency (e.g. 5m flush polls every 150s). You can configure a longer period than request logs to batch beacons and optimize file writes."
+                  />
+                  <Select
+                    value={String(config.rum_log_period || 300)}
+                    onValueChange={(v) =>
+                      setConfig({ ...config, rum_log_period: Number(v) || 300 })
+                    }
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue>
+                        {(val) => PERIOD_LABELS[String(val)] || val}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="60" className="text-xs">1 minute (Fastest)</SelectItem>
+                      <SelectItem value="300" className="text-xs">5 minutes (Recommended)</SelectItem>
+                      <SelectItem value="600" className="text-xs">10 minutes</SelectItem>
+                      <SelectItem value="900" className="text-xs">15 minutes</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
 
             {config.rum_enabled && s.selectedService?.id && (
               <div className="pt-1">

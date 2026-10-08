@@ -680,6 +680,13 @@ def provision_execute(req: ProvisionExecuteRequest):
         if cond_err:
             raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_err))
         cfg["rum"]["custom_condition"] = rum_cond
+        if getattr(req, "rum_log_period", None) is not None:
+            try:
+                rum_period_val = parse_period(str(req.rum_log_period))
+                cfg["rum"]["log_period"] = rum_period_val
+                cfg["rum_log_period"] = rum_period_val
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=make_error("invalid_rum_log_period", str(e)))
 
     try:
         cfg["log_period"] = parse_period(cfg["log_period"])

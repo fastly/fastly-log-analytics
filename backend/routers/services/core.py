@@ -171,12 +171,19 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
             rum_incoming = body_payload.get("rum")
             if rum_incoming is not None:
                 rum_config = cfg.setdefault("rum", {})
-                rum_config.update({k: v for k, v in rum_incoming.items() if v is not None})
+                sent_rum = {k: v for k, v in rum_incoming.items() if v is not None}
+                # When log_period is explicitly sent without sync_interval_seconds,
+                # drop stale sync_interval_seconds so derived interval calculation takes effect.
+                if "log_period" in sent_rum and "sync_interval_seconds" not in sent_rum:
+                    rum_config.pop("sync_interval_seconds", None)
+                rum_config.update(sent_rum)
                 if not rum_config.get("cid_salt"):
                     import secrets
 
                     rum_config["cid_salt"] = secrets.token_hex(32)
                 cfg["rum"] = rum_config
+                if "log_period" in sent_rum:
+                    cfg["rum_log_period"] = sent_rum["log_period"]
 
             yield json.dumps({"type": "progress", "current": 2, "total": 4})
             yield json.dumps({"type": "status", "message": "Saving settings to local database..."})

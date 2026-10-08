@@ -68,6 +68,7 @@ export interface ProvisionConfig {
   cmcd_version: number;
   logging_enabled: boolean;
   rum_enabled: boolean;
+  rum_log_period: number;
   log_retention_days: number;
   rum_retention_days: number;
   cache_retention_days: number;
@@ -91,6 +92,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   edge_only: true,
   custom_condition: "",
   log_period: 60,
+  rum_log_period: 300,
   cdn_service_name: "",
   cdn_prefix: "",
   cdn_shield: "iad-va-us",
@@ -221,6 +223,8 @@ export const PERIOD_LABELS: Record<string, string> = {
   "60": "1 minute",
   "120": "2 minutes",
   "300": "5 minutes",
+  "600": "10 minutes",
+  "900": "15 minutes",
 };
 
 export interface ProvisionWizardProps {

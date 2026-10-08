@@ -68,6 +68,7 @@ class ServiceConfig(BaseModel):
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
+    rum: dict[str, Any] | None = None
     analyst_path_a_supported: bool | None = None
     is_high_scale: bool | None = None
 
@@ -170,6 +171,7 @@ class RumSettingsPartial(BaseModel):
     """Partial-update for RUM-specific config (sync interval + retention)."""
 
     enabled: bool | None = None
+    log_period: int | None = None
     sync_interval_seconds: int | None = None
     commit_interval_mins: int | None = None
     delete_after: bool | None = None

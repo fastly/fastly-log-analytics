@@ -56,7 +56,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
 
   const [syncIntervalMins, setSyncIntervalMins] = useState('2')
   const [pollingMode, setPollingMode] = useState<'regular' | 'adaptive'>('regular')
-  const [rumSyncIntervalSeconds, setRumSyncIntervalSeconds] = useState('60')
+  const [rumLogPeriod, setRumLogPeriod] = useState('300')
   const [rumDeleteAfter, setRumDeleteAfter] = useState(false)
 
   const isAnalyst = service?.access_level === 'read_only'
@@ -85,9 +85,10 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       setNgwafRetention(String(service.cron_ngwaf?.log_retention_days ?? 7))
 
       // RUM settings
-      const syncIntervalsecs = service.cron_sync?.interval_mins ? service.cron_sync.interval_mins * 60 : 60
-      setRumSyncIntervalSeconds(String(syncIntervalsecs))
-      setRumDeleteAfter(service.cron_sync?.delete_after ?? false)
+      const rumCfg = (service as any).rum || {}
+      const initialRumPeriod = rumCfg.log_period ?? (service as any).rum_log_period ?? 300
+      setRumLogPeriod(String(initialRumPeriod))
+      setRumDeleteAfter(rumCfg.delete_after ?? service.cron_sync?.delete_after ?? false)
     }
     reset()
   }, [service, open, reset, isAnalyst])
@@ -134,7 +135,7 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
       } : {}),
       ...(service.rum_enabled ? {
         rum: {
-          sync_interval_seconds: parseInt(rumSyncIntervalSeconds),
+          log_period: parseInt(rumLogPeriod),
           delete_after: rumDeleteAfter,
         },
       } : {}),
@@ -221,8 +222,8 @@ export function CronSettingsModal({ service, open, onOpenChange }: CronSettingsM
                 rumRetention={rumRetention}
                 setRumRetention={setRumRetention}
                 rumEnabled={service.rum_enabled ?? false}
-                rumSyncIntervalSeconds={rumSyncIntervalSeconds}
-                setRumSyncIntervalSeconds={setRumSyncIntervalSeconds}
+                rumLogPeriod={rumLogPeriod}
+                setRumLogPeriod={setRumLogPeriod}
                 rumDeleteAfter={rumDeleteAfter}
                 setRumDeleteAfter={setRumDeleteAfter}
               />

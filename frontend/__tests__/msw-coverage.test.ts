@@ -111,6 +111,12 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/reset-rum',
   'POST /api/provision/teardown',
   'PATCH /api/provision/services/:service_id/ngwaf-workspace',
+  // Admin manual-cron trigger endpoints — covered by backend contract tests and Playwright E2E.
+  'POST /api/admin/expire-snapshots/:service_id',
+  'POST /api/admin/metadata-cleanup/:service_id',
+  'POST /api/admin/sync/:service_id',
+  'POST /api/admin/full-sweep/:service_id',
+  'POST /api/admin/gap-heal/:service_id',
 
   // Session-scoring sub-endpoints — the page hits the two composite
   // endpoints (scoring/analytics, scoring/config) which ARE in

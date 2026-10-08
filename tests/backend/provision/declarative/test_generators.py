@@ -287,6 +287,24 @@ class TestLoggingEndpointGeneration:
         assert len(rum) == 1, "Should have RUM endpoint when RUM enabled"
         assert "raw/rum/" in rum[0].path
         assert rum[0].response_condition == "rum_log_condition"
+        assert rum[0].period == 60  # falls back to log_period when rum_log_period is None
+
+    def test_generator_rum_endpoint_respects_rum_log_period(self):
+        """Verify RUM endpoint uses rum_log_period when configured."""
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "rum_log_period": 300,
+                "fos_prefix": "raw",
+            }
+        )
+        endpoints = desired_logging_endpoints(state)
+        rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
+        assert len(rum) == 1
+        assert rum[0].period == 300
 
     def test_generator_rum_endpoint_not_created_when_disabled(self):
         """Verify RUM endpoint is not created when rum_enabled=False."""

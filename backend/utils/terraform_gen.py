@@ -99,6 +99,11 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         period = int(cfg.get("log_period", 3600))
     except (TypeError, ValueError):
         period = 3600
+    try:
+        rum_period_val = cfg.get("rum_log_period") or (cfg.get("rum") or {}).get("log_period")
+        rum_period = int(rum_period_val) if rum_period_val is not None else None
+    except (TypeError, ValueError):
+        rum_period = None
     cdn_service_name = cfg.get("cdn_service_name", "Fastly Log Analysis CDN Proxy")
     cdn_prefix = cfg.get("cdn_prefix", bucket)
     cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"
@@ -122,6 +127,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     fs_cfg = {
         "service_id": service_id,
         "log_period": period,
+        "rum_log_period": rum_period,
         "sample_rate": sample_rate,
         "edge_only": edge_only,
         "custom_condition": custom_condition,

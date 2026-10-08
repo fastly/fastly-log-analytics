@@ -115,6 +115,7 @@ class FeatureState:
 
     # Feature Toggles & Parameter Blocks
     rum_enabled: bool = False
+    rum_log_period: int | None = None  # Rotation period for RUM logs in seconds (e.g. 300)
     faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
     rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
 
@@ -141,6 +142,9 @@ class FeatureState:
         # endpoints() shares this one field between them).
         if not (1 <= self.log_period <= 3600):
             raise ValueError(f"log_period must be in range [1, 3600], got {self.log_period}")
+
+        if self.rum_log_period is not None and not (1 <= self.rum_log_period <= 3600):
+            raise ValueError(f"rum_log_period must be in range [1, 3600], got {self.rum_log_period}")
 
         # Validate sample_rate range
         if not (1 <= self.sample_rate <= 100):
@@ -225,6 +229,10 @@ class FeatureState:
         logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
         rum_cfg = cfg.get("rum", {})
         rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
+        rum_log_period_raw = rum_cfg.get("log_period") if isinstance(rum_cfg, dict) else None
+        if rum_log_period_raw is None:
+            rum_log_period_raw = cfg.get("rum_log_period")
+        rum_log_period = int(rum_log_period_raw) if rum_log_period_raw is not None else None
         faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
         rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
 
@@ -357,6 +365,7 @@ class FeatureState:
             logging_endpoint_name=logging_endpoint_name,
             rum_endpoint_name=rum_endpoint_name,
             rum_enabled=rum_enabled,
+            rum_log_period=rum_log_period,
             faro_version=faro_version,
             rum_custom_condition=rum_custom_condition,
             cmcd=cmcd_config,
@@ -387,6 +396,7 @@ class FeatureState:
             "logging_endpoint_name": self.logging_endpoint_name,
             "rum_endpoint_name": self.rum_endpoint_name,
             "rum_enabled": self.rum_enabled,
+            "rum_log_period": self.rum_log_period,
             "faro_version": self.faro_version,
             "rum_custom_condition": self.rum_custom_condition,
             "cmcd_enabled": self.cmcd.enabled,

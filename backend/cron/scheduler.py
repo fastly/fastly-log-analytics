@@ -11,6 +11,7 @@ compat shim was retired 2026-07-06 — import directly from here or from
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logging.getLogger("pyiceberg.io").setLevel(logging.WARNING)
 import os
@@ -79,6 +80,38 @@ def partial_hour_merge_interval_sec() -> int:
 
 def dev_local_crons_enabled() -> bool:
     return os.environ.get("FLA_DEV_LOCAL_CRONS", "true").lower() in ("1", "true", "yes")
+
+
+def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], default_request_interval: int) -> int:
+    """Resolve the RUM ingest sync/discovery interval in seconds.
+
+    If an operator explicitly configured ``sync_interval_seconds`` in RUM settings,
+    respect it for backwards-compatibility.
+    Otherwise, derive the sync interval from the RUM log rotation period:
+      - If rum_log_period >= 60: max(5, rum_log_period // 2)
+      - If rum_log_period < 60: max(5, rum_log_period)
+    If no RUM log period is configured, fall back to the request log sync interval.
+    """
+    if "sync_interval_seconds" in rum_cfg and rum_cfg["sync_interval_seconds"] is not None:
+        try:
+            return max(5, int(rum_cfg["sync_interval_seconds"]))
+        except (ValueError, TypeError):
+            pass
+
+    rum_log_period = rum_cfg.get("log_period")
+    if rum_log_period is None:
+        rum_log_period = cfg.get("rum_log_period")
+
+    if rum_log_period is not None:
+        try:
+            period_val = int(rum_log_period)
+            if period_val >= 60:
+                return max(5, period_val // 2)
+            return max(5, period_val)
+        except (ValueError, TypeError):
+            pass
+
+    return max(5, int(default_request_interval))
 
 
 def _display_name(src: dict, fallback: str) -> str:
@@ -995,7 +1028,7 @@ class Scheduler:
             if rum_enabled and svcconfig.is_high_throughput_mode(src):
                 from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
-                rum_disc_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))
+                rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"
                 seen_ids.add(rum_disc_job_id)
                 if rum_disc_job_id not in self._job_ids:
@@ -1032,7 +1065,7 @@ class Scheduler:
                     self._job_ids[rum_sweep_job_id] = rum_sweep_job_id
                     logger.info("🧹 [scheduler] Registered ledger_rum_sweep job %s (every 15m).", rum_sweep_job_id)
             elif rum_enabled:
-                rum_sync_interval_secs = max(5, int(rum_cfg.get("sync_interval_seconds", interval_seconds)))
+                rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_sync_job_id = f"rum_sync_{service_id}"
                 seen_ids.add(rum_sync_job_id)
 

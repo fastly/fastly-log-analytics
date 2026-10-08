@@ -568,7 +568,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 name=state.rum_endpoint_name,
                 endpoint_type="s3",
                 path=log_paths.rum_log_path(),
-                period=state.log_period,
+                period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
                 response_condition="rum_log_condition",
                 format_string=rum_format,
                 placement=None,

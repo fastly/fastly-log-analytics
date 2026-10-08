@@ -580,6 +580,61 @@ def test_sync_jobs_registers_rum_jobs_when_rum_enabled_nested():
     assert "rum_commit_svc-rum-nested" in s._job_ids
 
 
+def test_resolve_rum_sync_interval():
+    """Verify RUM sync interval resolution rules."""
+    from backend.cron.scheduler import _resolve_rum_sync_interval
+
+    # Explicit sync_interval_seconds in rum_cfg takes precedence
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 45}, {}, 60) == 45
+    assert _resolve_rum_sync_interval({"sync_interval_seconds": 2}, {}, 60) == 5  # min 5s clamp
+
+    # Derived from rum_log_period (nested in rum_cfg or flat in cfg)
+    assert _resolve_rum_sync_interval({"log_period": 300}, {}, 60) == 150  # 300 // 2
+    assert _resolve_rum_sync_interval({"log_period": 60}, {}, 60) == 30  # 60 // 2
+    assert _resolve_rum_sync_interval({"log_period": 600}, {}, 60) == 300  # 600 // 2
+    assert _resolve_rum_sync_interval({"log_period": 10}, {}, 60) == 10  # < 60: max(5, 10)
+    assert _resolve_rum_sync_interval({"log_period": 3}, {}, 60) == 5  # < 60: min 5s clamp
+
+    # From flat cfg when rum_cfg has no log_period
+    assert _resolve_rum_sync_interval({}, {"rum_log_period": 300}, 60) == 150
+
+    # Fallback to default request interval when rum_log_period not configured
+    assert _resolve_rum_sync_interval({}, {}, 120) == 120
+    assert _resolve_rum_sync_interval({}, {}, 2) == 5  # min 5s clamp
+
+
+def test_sync_jobs_schedules_rum_sync_with_derived_interval():
+    """Verify rum_sync job is added to the scheduler with the interval derived from rum_log_period."""
+    from backend.cron.scheduler import Scheduler
+
+    cfg = {
+        "service_id": "svc-rum-derived",
+        "log_period": 60,
+        "access_level": "read_write",
+        "rum": {"enabled": True, "log_period": 300},
+        "provisioning": {
+            "cron_sync": {"enabled": True},
+        },
+    }
+
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-rum-derived")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch.object(s._sched, "add_job") as mock_add_job,
+    ):
+        s._sync_jobs()
+
+    # Find the call to add rum_sync job
+    rum_sync_calls = [
+        call for call in mock_add_job.call_args_list if call.kwargs.get("id") == "rum_sync_svc-rum-derived"
+    ]
+    assert len(rum_sync_calls) == 1
+    assert rum_sync_calls[0].kwargs["seconds"] == 150  # 300 // 2
+
+
 # ── _log_and_add_progress ─────────────────────────────────────────────────
 
 

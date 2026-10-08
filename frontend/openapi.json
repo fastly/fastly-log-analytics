@@ -58321,6 +58321,17 @@
             "title": "Rum Enabled",
             "default": false
           },
+          "rum_log_period": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum Log Period"
+          },
           "faro_version": {
             "anyOf": [
               {
@@ -59502,6 +59513,17 @@
               }
             ],
             "title": "Enabled"
+          },
+          "log_period": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Period"
           },
           "sync_interval_seconds": {
             "anyOf": [
@@ -63705,6 +63727,18 @@
               }
             ],
             "title": "Rum Enabled"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rum"
           },
           "analyst_path_a_supported": {
             "anyOf": [

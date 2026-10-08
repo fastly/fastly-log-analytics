@@ -11179,6 +11179,8 @@ export interface components {
              * @default false
              */
             rum_enabled: boolean;
+            /** Rum Log Period */
+            rum_log_period?: string | null;
             /** Faro Version */
             faro_version?: string | null;
             /** Rum Custom Condition */
@@ -11711,6 +11713,8 @@ export interface components {
         RumSettingsPartial: {
             /** Enabled */
             enabled?: boolean | null;
+            /** Log Period */
+            log_period?: number | null;
             /** Sync Interval Seconds */
             sync_interval_seconds?: number | null;
             /** Commit Interval Mins */
@@ -13037,6 +13041,10 @@ export interface components {
             logging_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /** Rum */
+            rum?: {
+                [key: string]: unknown;
+            } | null;
             /** Analyst Path A Supported */
             analyst_path_a_supported?: boolean | null;
             /** Is High Scale */

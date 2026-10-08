@@ -109,8 +109,8 @@ interface LogSyncSectionProps {
   rumRetention: string
   setRumRetention: (v: string) => void
   rumEnabled: boolean
-  rumSyncIntervalSeconds: string
-  setRumSyncIntervalSeconds: (v: string) => void
+  rumLogPeriod: string
+  setRumLogPeriod: (v: string) => void
   rumDeleteAfter: boolean
   setRumDeleteAfter: (v: boolean) => void
 }
@@ -141,8 +141,8 @@ export function LogSyncSection({
   rumRetention,
   setRumRetention,
   rumEnabled,
-  rumSyncIntervalSeconds,
-  setRumSyncIntervalSeconds,
+  rumLogPeriod,
+  setRumLogPeriod,
   rumDeleteAfter,
   setRumDeleteAfter,
 }: LogSyncSectionProps) {
@@ -329,21 +329,28 @@ export function LogSyncSection({
             <div className="text-[10px] font-semibold text-foreground/70 uppercase tracking-widest">RUM Beacon Sync</div>
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-1.5">
-                <Label htmlFor="rum-sync-interval" className="text-[11px] font-medium">RUM Sync Frequency</Label>
+                <Label htmlFor="rum-log-period" className="text-[11px] font-medium">RUM Log Period / Freshness</Label>
                 <p className="text-[10px] text-muted-foreground leading-tight h-6">
-                  How often to sync RUM beacon logs from FOS.
+                  Fastly edge rotation period for RUM beacons. Ingestion polls at derived frequency.
                 </p>
-                <Select value={rumSyncIntervalSeconds} onValueChange={v => v && setRumSyncIntervalSeconds(v)}>
-                  <SelectTrigger id="rum-sync-interval" className="h-7 text-[11px]">
+                <Select value={rumLogPeriod} onValueChange={v => v && setRumLogPeriod(v)}>
+                  <SelectTrigger id="rum-log-period" className="h-7 text-[11px]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="30" className="text-[11px]">every 30 seconds</SelectItem>
-                    <SelectItem value="60" className="text-[11px]">every 60 seconds</SelectItem>
-                    <SelectItem value="120" className="text-[11px]">every 2 minutes</SelectItem>
-                    <SelectItem value="300" className="text-[11px]">every 5 minutes</SelectItem>
+                    <SelectItem value="60" className="text-[11px]">1 minute (Fastest)</SelectItem>
+                    <SelectItem value="300" className="text-[11px]">5 minutes (Recommended)</SelectItem>
+                    <SelectItem value="600" className="text-[11px]">10 minutes</SelectItem>
+                    <SelectItem value="900" className="text-[11px]">15 minutes</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Automated sync runs every {
+                    parseInt(rumLogPeriod) >= 60
+                      ? `${Math.max(5, Math.floor(parseInt(rumLogPeriod) / 2))}s`
+                      : `${Math.max(5, parseInt(rumLogPeriod))}s`
+                  } to ingest new beacons.
+                </p>
               </div>
 
               <div className="grid gap-1.5">

@@ -34,8 +34,8 @@ test('polling mode selector exposes Adaptive LIST-cost disclosure and updates th
       rumRetention="30"
       setRumRetention={vi.fn()}
       rumEnabled={false}
-      rumSyncIntervalSeconds="60"
-      setRumSyncIntervalSeconds={vi.fn()}
+      rumLogPeriod="300"
+      setRumLogPeriod={vi.fn()}
       rumDeleteAfter={false}
       setRumDeleteAfter={vi.fn()}
     />,

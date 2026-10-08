@@ -879,11 +879,13 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
             pass
 
     log_period = 60
+    rum_log_period = None
     sample_rate = 100
     for endpoint in endpoints:
         if "Fastly Log Analytics" in endpoint.name and "RUM" not in endpoint.name:
             log_period = endpoint.period
-            break
+        elif "RUM" in endpoint.name:
+            rum_log_period = endpoint.period
 
     return FeatureState(
         service_id=service_id,
@@ -894,6 +896,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
         fos_prefix="raw",
         fos_endpoint="fos.example.com",
         rum_enabled=rum_enabled,
+        rum_log_period=rum_log_period,
         cmcd=CmcdConfig(enabled=cmcd_enabled),
         scoring=ScoringConfig(
             enabled=scoring_enabled,
