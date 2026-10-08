@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import Depends, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
-from backend.deps import get_source
+from backend.deps import get_source, require_admin
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
     CompactionStatsResponse,
@@ -653,7 +653,12 @@ def metadata_storage(source: dict = Depends(get_source)):
 # response_model intentionally omitted: SSE stream (EventSourceResponse),
 # not a JSON body — event shapes are documented in the docstring.
 @router.post("/admin/metadata-cleanup")
-def metadata_cleanup_now(source: dict = Depends(get_source)):
+@router.post("/admin/metadata-cleanup/{service_id}")
+def metadata_cleanup_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+    _admin: None = Depends(require_admin),
+):
     """Trigger an immediate metadata cleanup, streaming progress as SSE.
 
     Equivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but
@@ -682,7 +687,7 @@ def metadata_cleanup_now(source: dict = Depends(get_source)):
     from backend.core.duckdb import log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
 
-    service_id = source["name"]
+    service_id = service_id or source.get("name") or source.get("service_id", "")
     cfg = svcconfig.load_config(service_id) or {}
     retention = cfg.get("metadata_retention") or {}
 

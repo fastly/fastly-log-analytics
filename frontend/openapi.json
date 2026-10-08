@@ -23347,15 +23347,31 @@
         }
       }
     },
-    "/api/admin/metadata-cleanup": {
+    "/api/admin/metadata-cleanup/{service_id}": {
       "post": {
         "tags": [
           "admin"
         ],
         "summary": "Metadata Cleanup Now",
         "description": "Trigger an immediate metadata cleanup, streaming progress as SSE.\n\nEquivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but\non-demand. The DELETE phase is fast; VACUUM rewrites the whole file\nand on a multi-GB metadata.db can take minutes. Streaming gives the\noperator real-time feedback instead of a 5-minute hang behind a\nspinning button.\n\nEvent shapes (between SSE ``data:`` lines):\n\n    {\"type\": \"status\",   \"message\": str}\n    {\"type\": \"progress\", \"current\": int, \"total\": int, \"message\": str}\n    {\"type\": \"done\",     \"message\": str, \"result\": {...}}\n    {\"type\": \"error\",    \"message\": str}\n\nWrites a row to ``cron_runs`` with task=``metadata_cleanup`` so the\nmanual run shows up on the Data Management schedule + history grid\nalongside the scheduled cron's runs.",
-        "operationId": "metadata_cleanup_now_api_admin_metadata_cleanup_post",
+        "operationId": "metadata_cleanup_now_api_admin_metadata_cleanup__service_id__post",
         "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
           {
             "name": "service",
             "in": "query",
@@ -23386,6 +23402,182 @@
                 }
               ],
               "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/metadata-cleanup": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Metadata Cleanup Now",
+        "description": "Trigger an immediate metadata cleanup, streaming progress as SSE.\n\nEquivalent to the daily ``metadata_cleanup`` cron at 03:15 UTC but\non-demand. The DELETE phase is fast; VACUUM rewrites the whole file\nand on a multi-GB metadata.db can take minutes. Streaming gives the\noperator real-time feedback instead of a 5-minute hang behind a\nspinning button.\n\nEvent shapes (between SSE ``data:`` lines):\n\n    {\"type\": \"status\",   \"message\": str}\n    {\"type\": \"progress\", \"current\": int, \"total\": int, \"message\": str}\n    {\"type\": \"done\",     \"message\": str, \"result\": {...}}\n    {\"type\": \"error\",    \"message\": str}\n\nWrites a row to ``cron_runs`` with task=``metadata_cleanup`` so the\nmanual run shows up on the Data Management schedule + history grid\nalongside the scheduled cron's runs.",
+        "operationId": "metadata_cleanup_now_api_admin_metadata_cleanup_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
             }
           },
           {

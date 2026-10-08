@@ -1404,7 +1404,7 @@ class Scheduler:
             # the first two and 7d for cron_runs. See
             # backend.core.metadata_db.cleanup_metadata.
             cleanup_cfg = prov.get("cron_metadata_cleanup", {})
-            if cleanup_cfg.get("enabled", True):
+            if cleanup_cfg.get("enabled", True) and not dev_mode_no_crons():
                 cleanup_job_id = f"metadata_cleanup_{service_id}"
                 seen_ids.add(cleanup_job_id)
                 cron_hour = int(cleanup_cfg.get("cron_hour", 3))

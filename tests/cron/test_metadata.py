@@ -374,7 +374,6 @@ def test_metadata_cleanup_happy_path_emits_progress_and_finalizes(monkeypatch, s
     )
     monkeypatch.setattr("backend.core.metadata.cleanup_metadata", cleanup_mock)
     monkeypatch.setattr("backend.core.metric_snapshots.purge_old", MagicMock())
-    monkeypatch.setattr("backend.core.metadata.quarantine.get_expired_quarantined_files", MagicMock(return_value=[]))
 
     start_prog = MagicMock()
     end_prog = MagicMock()

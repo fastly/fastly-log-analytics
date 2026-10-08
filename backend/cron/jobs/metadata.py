@@ -923,7 +923,15 @@ def _run_metadata_cleanup(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
     from backend.core.metadata import cleanup_metadata
+    from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.active_requests import should_defer_cron
+
+    color = JOB_COLORS.get("metadata_cleanup", "")
+    label = f"{color}[metadata_cleanup]{RESET_COLOR}"
+
+    if dev_mode_no_crons():
+        logger.info("⏸️  %s %s: dev_mode_no_crons active, skipping metadata cleanup.", label, service_id)
+        return
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -936,8 +944,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
     retention = cfg.get("metadata_retention") or {}
 
     _display = _display_label(src, service_id)
-    color = JOB_COLORS.get("metadata_cleanup", "")
-    label = f"{color}[metadata_cleanup]{RESET_COLOR}"
 
     start_ts = time.time()
     try:
@@ -993,30 +999,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
             metric_snapshots.purge_old(retention_days=30)
         except Exception as e:
             logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
-
-        try:
-            from backend.core.metadata.quarantine import delete_quarantined_rows, get_expired_quarantined_files
-
-            expired = get_expired_quarantined_files(service_id, retention_days=14)
-            if expired:
-                from backend.core.duckdb import _get_fos_client
-                from backend.core.ingest import _delete_objects_robust
-
-                if src.get("access_level") != "read_only":
-                    fos_client = _get_fos_client(src)
-                    keys_to_delete = []
-                    ids_to_delete = []
-                    for row in expired:
-                        keys_to_delete.append(row["error_key"])
-                        keys_to_delete.append(row["meta_key"])
-                        ids_to_delete.append(row["id"])
-                    if keys_to_delete:
-                        _delete_objects_robust(fos_client, src["bucket"], keys_to_delete)
-                    if ids_to_delete:
-                        delete_quarantined_rows(service_id, ids_to_delete)
-                    logger.info("[metadata_cleanup] %s: purged %d expired quarantined files", service_id, len(expired))
-        except Exception as e:
-            logger.debug("[metadata_cleanup] quarantine purge failed: %s", e)
 
         log_cron_run(
             src,
