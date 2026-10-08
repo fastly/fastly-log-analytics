@@ -99,7 +99,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `partial_hour_merge_{id}` | Every 30 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](jobs/partial-hour-merge.md) |
 | `rollup_heal_{id}` | Hourly at :05 | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) |
 | `rollup_compact_{id}` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) |
-| `optimize_{id}` | Daily 04:00 UTC | APScheduler | RedBeat / Worker | Admin | [optimize.md](jobs/optimize.md) |
+| `optimize_{id}` | Daily 04:00 UTC | APScheduler | RedBeat / Worker | Admin | [optimize.md](jobs/optimize.md) (Verified) |
 | `expire_{id}` | Hourly | APScheduler | Worker / Pod | Admin | [expire.md](jobs/expire.md) |
 | `full_sync_{id}` | Every 6h (:30 UTC) | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) |
 | `gap_heal_{id}` | Every 30 min | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) |
@@ -110,7 +110,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
 | `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (request parity unified); [High-Scale mode](jobs/rum-discovery.md) |
-| `rum_commit_{id}` | Every 5 min | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) |
+| `rum_commit_{id}` | Post-sync immediate & 1m periodic | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) |
 | `ledger_rum_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) |
 | `metric_snapshot` | Every 60 sec | APScheduler | Pod APScheduler | Global / Admin | [metric-snapshot.md](jobs/metric-snapshot.md) |
 | `rdns_enrichment` | Every 5 min | APScheduler | Pod APScheduler | Global / Admin | [rdns-enrichment.md](jobs/rdns-enrichment.md) |
