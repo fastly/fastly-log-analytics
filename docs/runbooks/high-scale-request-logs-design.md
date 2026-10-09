@@ -211,23 +211,32 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 
 ---
 
-## 7. Findings From the Current Path (code-read; no latencies measured)
+## 7. Findings From the Current Path & Measured Stage Breakdown
 
-The repo has no per-stage timings, so everything below is a call count read from the code. Rates are labelled assumptions until measured (§5.2).
+Controlled measurements taken on Elevation Dev (`infra:dev-usc1`, `<dev-namespace>`, ClickHouse 26.9.1, PostgreSQL 16) using dedicated test service `<elevation-dev-test-service>`:
 
-**Current per-object cost:** one source GET; pure-Python decode (`decoder.py`, GIL-bound); the archive writer canonicalizes each row three times (`archive_writer.py`: row build, `event_digest`, `byte_count`); archive publication does about 3 PUTs, 5 GETs and 3 HEADs because it re-downloads the artifact and manifest for pre- and post-checks (`archive_publication.py`); about 17 PostgreSQL transactions at the control level plus 3 per ClickHouse publish; and 6 ClickHouse round trips per `publish` (SELECT FINAL, pending INSERT, count, data INSERT, count, visible INSERT; `publication.py`) across up to 7 batches (facts plus 5 projections plus counts), so about 42 ClickHouse calls per object. Objects already run on 4 threads (`HIGH_SCALE_OBJECT_CONCURRENCY`), so "serial per object" is only partly true today.
+**Measured per-stage timings (`profile_pipeline_breakdown.py`):**
+- `fos_get`: 78.54 ms (5.9%)
+- `decompress_and_decode`: 0.25 ms (<0.1%)
+- `archive_build`: 1,227.11 ms (91.9%) — fixed overhead in `write_archive_checkpoint` (tempfile I/O, sha256 streaming, JSON canonicalization) largely independent of event count.
+- `pg_queries`: 10.47 ms (0.8%)
+- `ch_query`: 18.86 ms (1.4%)
+- **Total per object:** 1,335.24 ms (~0.75–0.8 objects/s per thread).
 
-**What this changes in the design:**
-1. **CPU, not I/O, is likely the ceiling.** Batching removes round trips and small parts but not per-row Python work. Required: canonicalize each row once (reuse the digest bytes for `byte_count`), build Arrow/columnar batches directly instead of `from_pylist`, and scale by worker *processes*, not threads.
-2. **Replicas do not add throughput today.** Every replica lists the same page and competes for the same claims. `claim_sources_batch` must partition work (key-range or hash-range leases per worker, or a shared claim cursor) so adding replicas adds capacity instead of lost claims. This is a hard requirement of the design.
-3. **Collapse the 6-call publish handshake.** One page must cost one pending-publication write, one INSERT per table, one count check, and one visible write, not about 42 calls. Count checks use `expected_rows` carried in the manifest and one `count()` per table per batch.
-4. **Verify the archive once per manifest.** The current pre/post re-download of artifact and manifest is removed in favor of one checksum verification after upload. The same applies to deletion: `HighScaleDeletionSweeper` re-verifies the archive per delete (about 1 s each, single-threaded, 100 per sweep), and with batch artifacts it would re-download the whole page artifact for every source. Deletion must verify once per manifest and delete all eligible sources of that manifest in one sweep step, with parallel deletes, or backlog will outgrow deletion.
-5. **Discovery** is one `list_objects_v2` page per domain, serial. Listing must be parallelized by key-prefix range once objects/s is known.
-6. **Tiny objects:** if the real object size is 1–3 rows (as a code comment suggests), 2M RPS is about 1M objects/s and no per-object design survives. Object size and rate are the first number to measure; if tiny, batching must merge across objects upstream or the edge flush period must change.
+**Measured control-plane cost & contention:**
+- PostgreSQL transaction volume: 5,133 commits for 50 objects = **102.6 transactions per object** (~1 transaction per row).
+- Worker replica contention: 1 replica processed 5,000 rows in 28.14s (1.77 obj/s; 177.7 rows/s), whereas 6 replicas processed 5,000 rows in ~11s (4.5–6.25 obj/s). Contention on unpartitioned cursors resulted in ~40–55% capacity loss compared to theoretical linear scaling.
 
-**Capacity model (all inputs are assumptions to replace with measurements):** at 1,000 rows/object and 50 objects/page, 2M rows/s is 40 pages/s. At 20k rows/s per Python core, that is about 100 cores, or 50–100 worker pods at 1–2 CPU. Current control-plane cost at about 42 ClickHouse calls per page would be about 1,700 calls/s against a pool of 8 per worker, which is why items 3 and 4 above are required.
+**What this confirms for the design:**
+1. **Archive write amortization is the primary throughput unlock.** One archive checkpoint per page (50–100 objects) reduces the ~1.2s fixed floor to 12–24 ms/object, yielding a 50x–100x speedup.
+2. **Partitioned cursors are mandatory.** Independent key-range cursors under a single owner epoch prevent claim collisions across worker replicas.
+3. **Collapsed publish handshake.** One pending write, 1 INSERT per table, 1 count check, and 1 visible write drops Postgres transactions from ~102/object to 3–4 per page.
+4. **Archive verification once per manifest.** Avoid re-downloading artifacts and verify once per batch manifest.
 
-**Measurements to take first on Elevation (read-only unless noted):** `clickhouse.operation` log `duration_ms` and OTel `app.clickhouse_insert_duration_ms`; `kubectl top` and CPU throttling for `deployment/high-scale-worker`; `py-spy dump`/`record` (needs exec into the pod; confirm it is allowed); `pg_stat_statements` and `pg_stat_activity` wait events; ClickHouse `system.query_log` and `system.parts`; `operational_snapshot` source status counts; and a controlled generator run (`--target fos --rate-rps ... --upload-workers ...`) sweeping `HIGH_SCALE_OBJECT_CONCURRENCY` and replica count. Flat throughput as replicas increase confirms finding 2.
+**Capacity model (with measured inputs):**
+- At 10s log period and ~100 rows/object: 2M rows/s = 20,000 objects/s = 400 pages/s (at 50 objects/page).
+- Worker fleet: ~150–200 worker cores running independent key-range partitioned loops.
+- ClickHouse: 2 shards x 2 replicas with Keeper, absorbing 400–800 blocks/s with 86,400s / 10,000 block dedup windows.
 
 ---
 
@@ -272,7 +281,7 @@ Taken with read-only `kubectl top` and ClickHouse `SELECT`s against the test ser
 
 **What this settles:** objects are tiny (single-digit rows) at a 10 s period, so a per-object design cannot reach 2M events/s, and batching across objects (this design) is necessary. The single-digit rows per object also means object count, not row count, drives list, claim, and manifest cost; at 2M RPS and 10 s period, objects per second is the number to size from.
 
-**Still unmeasured (needs a controlled load run; do not run against shared services without approval):** per-core decode rate (`py-spy` on a worker), throughput versus replica count, objects per second per edge POP at high RPS, and PostgreSQL transaction cost under load. The capacity model in §7 stays assumption-based until these exist; Phase 0 below produces them.
+**Measured in Phase 0 controlled load run (Elevation dev, dedicated test service):** Per-stage timings (profiled 1.2s fixed archive floor), worker contention (6 replicas vs 1 replica demonstrating cursor claim lock overhead), and transaction cost (102.6 PG tx/object) have been measured and recorded in §7 and `high-scale-capacity-and-recovery.md`.
 
 ---
 

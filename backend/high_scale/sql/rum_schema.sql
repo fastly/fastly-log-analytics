@@ -19,8 +19,9 @@ CREATE TABLE IF NOT EXISTS rum_vitals_facts
     country LowCardinality(String)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/rum_vitals_facts', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(event_timestamp))
-ORDER BY (service_id, event_timestamp, event_id);
+PARTITION BY toYYYYMMDD(event_timestamp)
+ORDER BY (service_id, toStartOfHour(event_timestamp), event_timestamp)
+TTL toDateTime(event_timestamp) + INTERVAL 30 DAY;
 
 CREATE TABLE IF NOT EXISTS rum_error_facts
 (
@@ -42,5 +43,6 @@ CREATE TABLE IF NOT EXISTS rum_error_facts
     country LowCardinality(String)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/rum_error_facts', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(event_timestamp))
-ORDER BY (service_id, event_timestamp, event_id);
+PARTITION BY toYYYYMMDD(event_timestamp)
+ORDER BY (service_id, toStartOfHour(event_timestamp), event_timestamp)
+TTL toDateTime(event_timestamp) + INTERVAL 30 DAY;

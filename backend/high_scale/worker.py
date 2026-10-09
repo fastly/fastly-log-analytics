@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from argparse import ArgumentParser
 from dataclasses import dataclass
@@ -146,13 +147,21 @@ class HighScaleWorkerLoop:
             raise ValueError("max_iterations must be non-negative")
         iterations = 0
         while not self._stop_event.is_set():
-            self.run_once()
+            results = self.run_once()
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
                 self.wait_for_deletion_sweep()
                 return
-            if self._interval_seconds:
-                self._sleeper(self._interval_seconds)
+            if self._interval_seconds > 0:
+                page_size = getattr(self._coordinator, "_page_size", None)
+                has_full_page = (
+                    page_size is not None
+                    and page_size > 0
+                    and any(r.page is not None and r.page.discovered >= page_size for r in results)
+                )
+                if not has_full_page:
+                    sleep_dur = random.uniform(0.5, 1.0) * self._interval_seconds
+                    self._sleeper(sleep_dur)
 
     def stop(self) -> None:
         self._stop_event.set()

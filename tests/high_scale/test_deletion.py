@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from backend.core.high_scale_contracts import ArchiveState
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.archive_models import (
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchiveSourceEntry,
+    ArchiveSourceObject,
+)
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import (
     DeletionController,
@@ -263,4 +268,92 @@ def _manifest_for(manifest_id: str, *, now: datetime) -> ArchiveManifest:
         now - timedelta(days=1),
         now - timedelta(hours=1),
         3,
+    )
+
+
+def test_delete_manifest_sources_multi_source() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    ledger = HighScaleLedger()
+    try:
+        now = datetime(2026, 9, 10, tzinfo=UTC)
+        sources = [
+            ArchiveSourceEntry(
+                key=f"raw/request/part_{i}.gz",
+                checksum=f"sha256:source_{i}",
+                size_bytes=10,
+                row_start=i * 5,
+                row_count=5,
+                deletion_deadline=now - timedelta(hours=1) if i < 2 else now + timedelta(hours=1),
+            )
+            for i in range(3)
+        ]
+        manifest = ArchiveManifest(
+            "manifest-batch",
+            artifact=ArchiveArtifact(
+                "s3://archive/artifacts/manifest-batch.parquet",
+                _checksum(b"batch_data"),
+                10,
+                15,
+                10,
+                "sha256:events",
+                "request.v1",
+                "normalize.v1",
+            ),
+            coverage_start=now - timedelta(days=3),
+            coverage_end=now - timedelta(days=2),
+            retention_deadline=now - timedelta(days=1),
+            deletion_authorization_deadline=now - timedelta(hours=1),
+            archive_epoch=3,
+            service_id="svc",
+            domain="request",
+            sources=sources,
+        )
+
+        for s in sources:
+            store.put(s.key, b"raw_gz")
+            ledger.discover("svc", "request", s.key, s.checksum, size_bytes=s.size_bytes)
+            claim = ledger.claim("svc", s.key, "worker")
+            ledger.record_counts("svc", s.key, accepted_rows=s.row_count, malformed_rows=0)
+            ledger.mark_appended("svc", s.key, claim.lease_generation)
+            ledger.mark_archived("svc", s.key, claim.lease_generation, manifest.manifest_id, 3)
+            ledger.acknowledge("svc", s.key, manifest.manifest_id)
+
+        publication.publish(manifest, b"batch_data")
+
+        controller = DeletionController(store, publication, ledger)
+        deleted = controller.delete_manifest_sources(manifest, current_owner_epoch=3, now=now)
+
+        # First 2 sources had deletion_deadline in past -> deleted
+        assert set(deleted) == {"raw/request/part_0.gz", "raw/request/part_1.gz"}
+        assert not store.exists("raw/request/part_0.gz")
+        assert not store.exists("raw/request/part_1.gz")
+        # 3rd source had deletion_deadline in future -> preserved
+        assert store.exists("raw/request/part_2.gz")
+    finally:
+        ledger.close()
+
+
+def test_sweeper_groups_by_manifest_and_deletes_batch() -> None:
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    manifest = _manifest_for("m1", now=now)
+    control = MagicMock()
+    control.deletable_sources.return_value = [
+        MagicMock(archive_manifest_id="m1", object_key="raw/1.gz"),
+        MagicMock(archive_manifest_id="m1", object_key="raw/2.gz"),
+    ]
+    control.archive_manifest.return_value = MagicMock(manifest=manifest, owner_epoch=3)
+
+    controller = MagicMock(spec=DeletionController)
+    controller.delete_manifest_sources.return_value = ["raw/1.gz", "raw/2.gz"]
+
+    sweeper = HighScaleDeletionSweeper(control=control, controller=controller)
+    result = sweeper.sweep(service_id="svc", now=now)
+
+    assert result == DeletionSweepResult(deleted=2, skipped=0)
+    controller.delete_manifest_sources.assert_called_once_with(
+        manifest,
+        current_owner_epoch=3,
+        source_keys=["raw/1.gz", "raw/2.gz"],
+        now=now,
     )

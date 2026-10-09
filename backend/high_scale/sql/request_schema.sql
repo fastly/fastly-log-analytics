@@ -17,8 +17,9 @@ CREATE TABLE IF NOT EXISTS request_facts
     cmcd Map(String, String)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/request_facts', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(event_timestamp))
-ORDER BY (service_id, event_timestamp, event_id)
+PARTITION BY toYYYYMMDD(event_timestamp)
+ORDER BY (service_id, toStartOfHour(event_timestamp), event_timestamp)
+TTL toDateTime(event_timestamp) + INTERVAL 30 DAY
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS request_aggregates
@@ -32,5 +33,6 @@ CREATE TABLE IF NOT EXISTS request_aggregates
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/request_aggregates', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(bucket_start))
-ORDER BY (service_id, bucket_start, dimension, value, batch_id);
+PARTITION BY toYYYYMMDD(bucket_start)
+ORDER BY (service_id, bucket_start, dimension, value, batch_id)
+TTL bucket_start + INTERVAL 30 DAY;

@@ -439,3 +439,117 @@ def test_high_scale_can_disable_a_workload_and_secret_creation_is_explicit():
     assert len([doc for doc in docs if doc["kind"] == "Deployment" and "-high-scale-" in doc["metadata"]["name"]]) == 1
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
     assert secret["stringData"]["CLICKHOUSE_URL"] == "external-service"
+
+
+# ── ClickHouse Helm Chart Gates ───────────────────────────────────────────────
+
+CHART_CLICKHOUSE = "./deploy/chart/clickhouse/"
+
+
+def _helm_clickhouse(*set_args: str) -> subprocess.CompletedProcess:
+    cmd = ["helm", "template", "test-release", CHART_CLICKHOUSE]
+    for arg in set_args:
+        cmd += ["--set", arg]
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _render_clickhouse(*set_args: str) -> list[dict]:
+    result = _helm_clickhouse(*set_args)
+    assert result.returncode == 0, f"helm template failed: {result.stderr}"
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def _render_clickhouse_error(*set_args: str) -> str:
+    result = _helm_clickhouse(*set_args)
+    assert result.returncode != 0, f"expected helm template to fail, got:\n{result.stdout}"
+    return result.stderr
+
+
+def test_clickhouse_single_node_default_renders():
+    """Single-node default renders StatefulSet, config, secret, service, macros."""
+    docs = _render_clickhouse()
+    kinds = [doc["kind"] for doc in docs]
+    assert "StatefulSet" in kinds
+    assert "Service" in kinds
+    assert "ConfigMap" in kinds
+    assert "Secret" in kinds
+
+    # Default is single-node, 1 shard, 1 replica, no keeper
+    sts_docs = [doc for doc in docs if doc["kind"] == "StatefulSet"]
+    assert len(sts_docs) == 1
+    shard0 = sts_docs[0]
+    assert shard0["metadata"]["name"] == "test-release-clickhouse-shard-0"
+    assert shard0["spec"]["replicas"] == 1
+
+    # No keeper resources rendered
+    assert not any("keeper" in doc["metadata"]["name"] for doc in docs)
+
+    # ConfigMap contains dedup settings and system-log overrides
+    main_cfg = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "test-release-clickhouse-config"
+    )
+    dedup_xml = main_cfg["data"]["dedup.xml"]
+    assert "<replicated_deduplication_window>10000</replicated_deduplication_window>" in dedup_xml
+    assert "<replicated_deduplication_window_seconds>86400</replicated_deduplication_window_seconds>" in dedup_xml
+
+    syslogs_xml = main_cfg["data"]["system-logs.xml"]
+    assert '<trace_log remove="1"/>' in syslogs_xml
+    assert '<processors_profile_log remove="1"/>' in syslogs_xml
+
+    # Macros ConfigMap contains single-node macros
+    macro_cfg = next(doc for doc in docs if doc["kind"] == "ConfigMap" and "macros" in doc["metadata"]["name"])
+    assert "<shard>01</shard>" in macro_cfg["data"]["macros.xml"]
+    assert "<replica>01</replica>" in macro_cfg["data"]["macros.xml"]
+
+
+def test_clickhouse_clustered_2x2_renders_shards_replicas_keeper_macros():
+    """2-shard x 2-replica values file renders correct macros, Keeper, and dedup-window settings."""
+    docs = _render_clickhouse("shards=2", "replicas=2", "keeper.enabled=true")
+
+    # 2 ClickHouse StatefulSets (one per shard) each with 2 replicas
+    ch_sts = [doc for doc in docs if doc["kind"] == "StatefulSet" and "shard" in doc["metadata"]["name"]]
+    assert len(ch_sts) == 2
+    for sts in ch_sts:
+        assert sts["spec"]["replicas"] == 2
+
+    # Keeper StatefulSet with 3 replicas and Headless Service
+    keeper_sts = next(doc for doc in docs if doc["kind"] == "StatefulSet" and "keeper" in doc["metadata"]["name"])
+    assert keeper_sts["spec"]["replicas"] == 3
+    assert any(doc["kind"] == "Service" and "keeper" in doc["metadata"]["name"] for doc in docs)
+
+    # Remote servers config references shards and keeper
+    main_cfg = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "test-release-clickhouse-config"
+    )
+    remote_xml = main_cfg["data"]["remote-servers.xml"]
+    assert "test-release-clickhouse-shard-0-0" in remote_xml
+    assert "test-release-clickhouse-shard-1-0" in remote_xml
+    assert "test-release-clickhouse-keeper-0" in remote_xml
+
+    # Dedup settings present
+    dedup_xml = main_cfg["data"]["dedup.xml"]
+    assert "<replicated_deduplication_window>10000</replicated_deduplication_window>" in dedup_xml
+    assert "<replicated_deduplication_window_seconds>86400</replicated_deduplication_window_seconds>" in dedup_xml
+
+    # Shard macros rendered for shard 0 and shard 1
+    macro_cfgs = {
+        doc["metadata"]["name"]: doc["data"]["macros.xml"]
+        for doc in docs
+        if doc["kind"] == "ConfigMap" and "macros" in doc["metadata"]["name"]
+    }
+    assert "<shard>01</shard>" in macro_cfgs["test-release-clickhouse-shard-0-macros"]
+    assert "<shard>02</shard>" in macro_cfgs["test-release-clickhouse-shard-1-macros"]
+
+
+def test_clickhouse_rejects_invalid_topology():
+    """Bad shard/replica combinations fail at helm template."""
+    assert "shards must be at least 1" in _render_clickhouse_error("shards=0")
+    assert "replicas must be at least 1" in _render_clickhouse_error("replicas=0")
+    assert "clustering requires keeper.enabled=true" in _render_clickhouse_error(
+        "shards=2", "replicas=2", "keeper.enabled=false"
+    )
+    assert "keeper.replicas must be at least 1" in _render_clickhouse_error("keeper.enabled=true", "keeper.replicas=0")

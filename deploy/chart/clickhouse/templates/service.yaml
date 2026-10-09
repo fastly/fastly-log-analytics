@@ -1,0 +1,40 @@
+{{- include "clickhouse.validate" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-svc
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  - name: http
+    port: {{ .Values.service.httpPort }}
+    targetPort: http
+    protocol: TCP
+  - name: tcp
+    port: {{ .Values.service.tcpPort }}
+    targetPort: tcp
+    protocol: TCP
+  selector:
+    {{- include "clickhouse.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-headless
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+  - name: http
+    port: {{ .Values.service.httpPort }}
+    targetPort: http
+  - name: tcp
+    port: {{ .Values.service.tcpPort }}
+    targetPort: tcp
+  selector:
+    {{- include "clickhouse.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse

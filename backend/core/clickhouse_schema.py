@@ -13,7 +13,7 @@ from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseCl
 from backend.core.metadata import pg_connection
 from backend.core.metadata.clickhouse_ddl import CLICKHOUSE_CONTROL_DDL
 
-CLICKHOUSE_SCHEMA_VERSION = 1
+CLICKHOUSE_SCHEMA_VERSION = 2
 FACT_TYPES = (
     ("service_id", "String"),
     ("batch_id", "String"),

@@ -14,5 +14,6 @@ CREATE TABLE IF NOT EXISTS security_minute_dimensions
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/security_minute_dimensions', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(bucket_start))
-ORDER BY (service_id, bucket_start, dimension, value, batch_id);
+PARTITION BY toYYYYMMDD(bucket_start)
+ORDER BY (service_id, bucket_start, dimension, value, batch_id)
+TTL bucket_start + INTERVAL 30 DAY;

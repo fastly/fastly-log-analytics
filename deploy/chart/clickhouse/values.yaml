@@ -1,0 +1,62 @@
+shards: 1
+replicas: 1
+
+image:
+  repository: artifacts.secretcdn.net/fastly-docker/clickhouse/clickhouse-server
+  tag: "26.9.1"
+  pullPolicy: IfNotPresent
+
+auth:
+  username: fla_user
+  password: fla_password_123
+  database: fastly_log_analytics
+  existingSecret: ""
+
+keeper:
+  enabled: false
+  replicas: 3
+  image:
+    repository: artifacts.secretcdn.net/fastly-docker/clickhouse/clickhouse-keeper
+    tag: "26.9.1"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+config:
+  replicatedDeduplicationWindow: 10000
+  replicatedDeduplicationWindowSeconds: 86400
+  disableSystemLogs:
+    - trace_log
+    - processors_profile_log
+  systemLogsTtl: "event_date + INTERVAL 1 DAY"
+  logger:
+    level: information
+    size: 1000M
+    count: 10
+
+persistence:
+  enabled: true
+  size: 100Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+service:
+  type: ClusterIP
+  httpPort: 8123
+  tcpPort: 9000

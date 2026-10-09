@@ -159,30 +159,142 @@ class HighScaleWorkerCoordinator:
         )
         for source in objects:
             self._discover(service_id, domain, source, current_owner, epoch)
-        processed = recovered
-        duplicates = 0
-        failed = recovery_failed
-        missing = recovery_missing
-        for outcome in self._process_sources(
-            service_id, domain, objects, expected_owner=current_owner, expected_epoch=epoch, now=now
-        ):
-            if outcome == "processed":
-                processed += 1
-            elif outcome == "duplicate":
-                duplicates += 1
-            elif outcome == "missing":
-                missing += 1
-            else:
-                failed += 1
+
         next_cursor = page.next_cursor
         if next_cursor is None:
             if objects:
                 next_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
             elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
                 next_cursor = listing_cursor
-        # A "missing" source is a durably recorded terminal failure, not a
-        # transient one — it must not block every later object in the stream
-        # behind it the way a real (retryable) failure does.
+
+        use_batch = (
+            getattr(self._controller, "batch_capable", None) is True
+            or getattr(self._controller, "batch_enabled", None) is True
+        )
+
+        if not use_batch:
+            processed = recovered
+            duplicates = 0
+            failed = recovery_failed
+            missing = recovery_missing
+            for outcome in self._process_sources(
+                service_id, domain, objects, expected_owner=current_owner, expected_epoch=epoch, now=now
+            ):
+                if outcome == "processed":
+                    processed += 1
+                elif outcome == "duplicate":
+                    duplicates += 1
+                elif outcome == "missing":
+                    missing += 1
+                else:
+                    failed += 1
+            if failed == 0:
+                self._advance_cursor(service_id, domain, next_cursor, current_owner, epoch)
+            return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
+
+        processed = recovered
+        duplicates = 0
+        failed = recovery_failed
+        missing = recovery_missing
+
+        active_sources: list[SourceObjectDescriptor] = []
+        for s in objects:
+            if self._already_terminal(service_id, s.object_key):
+                duplicates += 1
+            else:
+                active_sources.append(s)
+
+        if active_sources:
+            if self._control is not None and hasattr(self._control, "claim_sources_batch"):
+                keys = tuple(s.object_key for s in active_sources)
+                claims = self._control.claim_sources_batch(
+                    service_id,
+                    keys,
+                    self._worker_id,
+                    expected_owner=current_owner,
+                    expected_owner_epoch=epoch,
+                    lease_seconds=self._lease_seconds,
+                    now=now,
+                )
+                claimed_keys = {c.object_key for c in claims}
+            else:
+                claimed_keys = set()
+                for s in active_sources:
+                    c = self._ledger.claim(service_id, s.object_key, self._worker_id)
+                    if c.claimed:
+                        claimed_keys.add(s.object_key)
+
+            to_read: list[SourceObjectDescriptor] = []
+            for s in active_sources:
+                if s.object_key in claimed_keys:
+                    to_read.append(s)
+                else:
+                    duplicates += 1
+
+            if to_read:
+
+                def read_one(
+                    src: SourceObjectDescriptor,
+                ) -> tuple[SourceObjectDescriptor, bytes | None, str | None, bool]:
+                    try:
+                        data = self._reader.read_source_object(service_id, domain, src.object_key)
+                        return (src, data, None, False)
+                    except SourceObjectMissingError as exc:
+                        return (src, None, str(exc), True)
+                    except Exception as exc:
+                        return (src, None, str(exc), False)
+
+                workers = min(self._object_concurrency, len(to_read))
+                if workers <= 1:
+                    read_results = [read_one(s) for s in to_read]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="high-scale-batch-reader") as pool:
+                        read_results = list(pool.map(read_one, to_read))
+
+                valid_payloads: list[tuple[SourceObjectDescriptor, bytes]] = []
+                for src, data, err, is_missing in read_results:
+                    if is_missing:
+                        self._mark_missing(
+                            service_id,
+                            object_key=src.object_key,
+                            expected_owner=current_owner,
+                            expected_epoch=epoch,
+                            error=err or "missing",
+                            now=now,
+                        )
+                        missing += 1
+                    elif err is not None:
+                        logger.exception(
+                            "high-scale source read failed",
+                            extra={
+                                "service_id": service_id,
+                                "domain": domain,
+                                "object_key": src.object_key,
+                                "error": err,
+                            },
+                        )
+                        failed += 1
+                    elif data is not None:
+                        valid_payloads.append((src, data))
+
+                if valid_payloads:
+                    try:
+                        batch_next_cursor = None if failed > 0 else next_cursor
+                        batch_res = self._controller.ingest_batch(
+                            service_id=service_id,
+                            domain=domain,
+                            sources_payloads=valid_payloads,
+                            next_cursor=batch_next_cursor,
+                            now=now,
+                        )
+                        processed += batch_res.sources_count
+                    except Exception:
+                        logger.exception(
+                            "high-scale batch ingest failed",
+                            extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
+                        )
+                        failed += len(valid_payloads)
+
         if failed == 0:
             self._advance_cursor(service_id, domain, next_cursor, current_owner, epoch)
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)

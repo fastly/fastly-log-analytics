@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from backend.core.field_registry import DuckType, try_get
 from backend.high_scale.archive_models import ArchiveSourceObject
 from backend.high_scale.schema import build_event_id, build_request_event_id, build_rum_event_id
 
@@ -93,8 +94,81 @@ def _decode_payload(payload: bytes) -> bytes:
     return payload
 
 
+_FIELD_ALIASES: dict[str, str] = {
+    "resp_body_size": "resp_bytes",
+    "req_body_size": "req_size",
+    "response_bytes": "resp_bytes",
+    "status_code": "status",
+    "client_ip": "ip",
+}
+
+
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
-    if domain == "rum_vitals":
+    if domain == "request":
+        custom_fields = event.setdefault("custom_fields", {})
+        cmcd = event.setdefault("cmcd", {})
+
+        keys_to_check = [
+            k
+            for k in list(event.keys())
+            if k
+            not in {
+                "service_id",
+                "domain",
+                "source_object_key",
+                "source_object_version",
+                "line_ordinal",
+                "transform_version",
+                "raw_json",
+                "event_id",
+                "custom_fields",
+                "cmcd",
+            }
+        ]
+
+        for k in keys_to_check:
+            val = event[k]
+            if k.startswith("cmcd_") or k.startswith("cmcd."):
+                cmcd[k] = str(val) if val is not None else ""
+                short_k = k[5:]
+                if short_k:
+                    cmcd[short_k] = str(val) if val is not None else ""
+                continue
+
+            field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
+            if field is not None:
+                if field.duck_type in (
+                    DuckType.UTINYINT,
+                    DuckType.USMALLINT,
+                    DuckType.UINTEGER,
+                    DuckType.UBIGINT,
+                    DuckType.BIGINT,
+                    DuckType.INTEGER,
+                ):
+                    if val not in (None, ""):
+                        try:
+                            event[k] = int(val)
+                        except (ValueError, TypeError):
+                            pass
+                elif field.duck_type in (DuckType.FLOAT, DuckType.DOUBLE):
+                    if val not in (None, ""):
+                        try:
+                            event[k] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                elif field.duck_type == DuckType.BOOLEAN:
+                    if isinstance(val, str):
+                        event[k] = val.lower() in ("true", "1", "t", "yes")
+                    elif val is not None:
+                        event[k] = bool(val)
+                elif field.duck_type == DuckType.VARCHAR:
+                    if val is not None and not isinstance(val, str):
+                        event[k] = str(val)
+            else:
+                if k in {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}:
+                    continue
+                custom_fields[k] = str(val) if val is not None else ""
+    elif domain == "rum_vitals":
         client_id = event.get("rum_cid") or event.get("client_id") or ""
         metric_name = event.get("rum_metric_name") or event.get("metric_name") or ""
         raw_metric_value = event.get("rum_metric_value", event.get("metric_value"))

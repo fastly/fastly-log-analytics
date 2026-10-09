@@ -82,7 +82,30 @@ Not every scheduled job routes to Celery workers in this mode — jobs that read
 
 RUM beacon ingest (`client_vitals`/`client_errors`) has its own APScheduler job (`rum_sync_{id}`) mirroring the default-mode diagram above; porting it to the ledger data plane is tracked separately.
 
+### High-Scale Request Logs Architecture (ADR-21 / Elevation)
+
+For high-volume production services streaming up to 2M RPS, the high-scale data plane (`backend/high_scale/`) provides low-latency ingestion (<15s edge-to-dashboard freshness) with strict durability and isolation guarantees:
+
+```mermaid
+graph TD
+    A[Fastly Object Storage] -->|Gzipped Logs| W[High-Scale Worker Page Loop]
+    W -->|Concurrent Arrow Decode| M[In-Memory Record Batches]
+    M -->|1. Write & Verify Parquet Artifact| FOS["FOS Archive Storage (Authority)"]
+    M -->|2. Register batch manifest| PG[(PostgreSQL Control Plane)]
+    M -->|3. Bulk INSERT pending rows| CH[(ClickHouse Cluster)]
+    M -->|4. Publish gate: pending -> visible| CH
+    W -->|5. Acknowledge batch sources| PG
+    CH -->|Low-Latency Analytics| S[FastAPI Serving Tier]
+```
+
+1. **FOS Archive as Canonical Authority:** FOS archive Parquet is the sole source of durable truth. All ClickHouse tables, projections, and aggregate rollups can be reconstructed 100% from the archive manifests without retaining or re-fetching raw `.gz` logs.
+2. **Batched Page Pipeline:** Ingestion processes pages of 50–100 objects concurrently in Arrow memory, writing a single merged Parquet archive to FOS per page. This amortizes the ~1.2s S3 PUT and SHA-256 verification overhead across the whole batch.
+3. **Partitioned Key-Range Cursors:** Sources are partitioned by key hash (`hash(source_key) % partition_count`) under an owner epoch in Postgres `control_cursors`. Worker replicas claim partition ranges without row-lock contention on `sources`.
+4. **Order of Operations & Publication Gate:** Execution strictly enforces: Archive Write → Checksum Verify → Manifest Commit → Bulk ClickHouse INSERT (`pending`) → Count Check & Visibility Gate (`visible`) → Postgres Batch Acknowledge. Readers query only `visible` rows; row-count mismatches or uncommitted writes are never exposed.
+5. **Decoupled Batch Deletion:** Source deletions are queued and processed asynchronously using a verified manifest cache (`batch_{manifest_id}`), guaranteeing retention cleanup without stalling the ingest tick.
+
 ---
+
 
 ## 3. VCL Log Format & Modular Field Groups
 

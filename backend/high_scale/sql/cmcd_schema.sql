@@ -9,5 +9,6 @@ CREATE TABLE IF NOT EXISTS cmcd_projection_facts
     cmcd Map(String, String)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/cmcd_projection_facts', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(event_timestamp))
-ORDER BY (service_id, event_timestamp, projection_key);
+PARTITION BY toYYYYMMDD(event_timestamp)
+ORDER BY (service_id, toStartOfHour(event_timestamp), event_timestamp, projection_key)
+TTL toDateTime(event_timestamp) + INTERVAL 30 DAY;

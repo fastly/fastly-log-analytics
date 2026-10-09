@@ -9,7 +9,8 @@ source-deletion authorization.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Mapping
+import json
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,7 +20,12 @@ from psycopg_pool import ConnectionPool
 
 from backend.core.high_scale_contracts import ArchiveState, validate_archive_transition
 from backend.core.metadata.pg_connection import get_pg_pool
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.archive_models import (
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchiveSourceEntry,
+    ArchiveSourceObject,
+)
 from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
 
 SCHEMA_DDL = """
@@ -41,6 +47,16 @@ CREATE TABLE IF NOT EXISTS high_scale_source_cursors (
     source_cursor TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (service_id, domain),
+    FOREIGN KEY (service_id) REFERENCES high_scale_ownership(service_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS high_scale_partition_cursors (
+    service_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    partition_id TEXT NOT NULL DEFAULT 'default',
+    source_cursor TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (service_id, domain, partition_id),
     FOREIGN KEY (service_id) REFERENCES high_scale_ownership(service_id) ON DELETE CASCADE
 );
 
@@ -121,6 +137,7 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
             'source_deleted'
         )
     ),
+    sources_json TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CHECK (coverage_end >= coverage_start),
@@ -128,8 +145,25 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     CHECK (deletion_authorization_deadline >= retention_deadline)
 );
 
+ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
+
 CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx
     ON high_scale_archive_manifests (service_id, source_key);
+
+CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
+    manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    source_checksum TEXT NOT NULL,
+    source_size BIGINT NOT NULL CHECK (source_size >= 0),
+    source_version TEXT,
+    row_start BIGINT NOT NULL CHECK (row_start >= 0),
+    row_count BIGINT NOT NULL CHECK (row_count >= 0),
+    deletion_deadline TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (manifest_id, source_key)
+);
+
+CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_sources_key_idx
+    ON high_scale_archive_manifest_sources (source_key);
 
 CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
     batch_id TEXT PRIMARY KEY,
@@ -349,6 +383,73 @@ class PostgresControlPlane:
         _require_text(service_id, "service_id")
         with self.transaction(read_only=True) as connection:
             return self._owner(connection, service_id)
+
+    def get_partition_source_cursor(
+        self,
+        service_id: str,
+        domain: str,
+        partition_id: str = "default",
+    ) -> str:
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT source_cursor
+                FROM high_scale_partition_cursors
+                WHERE service_id=%s AND domain=%s AND partition_id=%s
+                """,
+                (service_id, domain, partition_id),
+            ).fetchone()
+            if row is not None:
+                return str(row[0])
+            if partition_id == "default":
+                legacy = connection.execute(
+                    """
+                    SELECT source_cursor
+                    FROM high_scale_source_cursors
+                    WHERE service_id=%s AND domain=%s
+                    """,
+                    (service_id, domain),
+                ).fetchone()
+                if legacy is not None:
+                    return str(legacy[0])
+            return ""
+
+    def advance_partition_source_cursor(
+        self,
+        service_id: str,
+        domain: str,
+        cursor: str,
+        expected_owner_epoch: int,
+        partition_id: str = "default",
+    ) -> None:
+        _require_text(service_id, "service_id")
+        _require_text(domain, "domain")
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            connection.execute(
+                """
+                INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at)
+                VALUES (%s, %s, %s, %s, clock_timestamp())
+                ON CONFLICT (service_id, domain, partition_id) DO UPDATE
+                SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+                """,
+                (service_id, domain, partition_id, cursor),
+            )
+            if partition_id == "default":
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor, updated_at)
+                    VALUES (%s, %s, %s, clock_timestamp())
+                    ON CONFLICT (service_id, domain) DO UPDATE
+                    SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+                    """,
+                    (service_id, domain, cursor),
+                )
 
     def advance_source_cursor(
         self,
@@ -647,6 +748,72 @@ class PostgresControlPlane:
             )
             return SourceClaim(source.object_id, True, generation)
 
+    def claim_sources_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        worker_id: str,
+        lease_seconds: float = 300.0,
+        expected_owner_epoch: int = 1,
+        *,
+        expected_owner: str | None = None,
+        now: datetime | None = None,
+    ) -> tuple[SourceObjectRecord, ...]:
+        _require_text(service_id, "service_id")
+        _require_text(worker_id, "worker_id")
+        if expected_owner_epoch <= 0 or lease_seconds <= 0:
+            raise ValueError("owner epoch and lease duration must be positive")
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        lease_until = observed + timedelta(seconds=lease_seconds)
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if expected_owner is not None and owner.current_owner != expected_owner:
+                raise ValueError("owner does not match source claim fence")
+            if not object_keys:
+                return ()
+            rows = connection.execute(
+                """
+                SELECT * FROM high_scale_source_objects
+                WHERE service_id=%s AND object_key = ANY(%s)
+                FOR UPDATE
+                """,
+                (service_id, list(object_keys)),
+            ).fetchall()
+            claimed_records: list[SourceObjectRecord] = []
+            keys_to_claim: list[str] = []
+            for row in rows:
+                source = _source_from_row(row)
+                if source.status == "source_deleted":
+                    continue
+                if source.status not in {"discovered", "claimed"}:
+                    continue
+                if source.lease_until is not None and source.lease_until > observed:
+                    if source.owner == worker_id:
+                        claimed_records.append(source)
+                    continue
+                keys_to_claim.append(source.object_key)
+            if keys_to_claim:
+                connection.execute(
+                    """
+                    UPDATE high_scale_source_objects
+                    SET status='claimed', owner=%s, lease_until=%s,
+                        lease_generation=lease_generation + 1, owner_epoch=%s, updated_at=clock_timestamp()
+                    WHERE service_id=%s AND object_key = ANY(%s)
+                    """,
+                    (worker_id, lease_until, expected_owner_epoch, service_id, keys_to_claim),
+                )
+                updated_rows = connection.execute(
+                    """
+                    SELECT * FROM high_scale_source_objects
+                    WHERE service_id=%s AND object_key = ANY(%s)
+                    """,
+                    (service_id, keys_to_claim),
+                ).fetchall()
+                for row in updated_rows:
+                    claimed_records.append(_source_from_row(row))
+            return tuple(claimed_records)
+
     def mark_source_missing(
         self,
         service_id: str,
@@ -928,9 +1095,52 @@ class PostgresControlPlane:
         manifest.validate()
         if owner_epoch <= 0:
             raise ValueError("owner epoch must be positive")
+        service_id = getattr(manifest, "service_id", None)
+        if not service_id and getattr(manifest, "source", None) is not None:
+            service_id = manifest.source.service_id
+        if not service_id:
+            raise ValueError("service_id is required on manifest")
+        domain = getattr(manifest, "domain", None)
+        if not domain and getattr(manifest, "source", None) is not None:
+            domain = manifest.source.domain
+        if not domain:
+            domain = "request"
         with self.transaction() as connection:
-            owner = self._locked_owner(connection, manifest.source.service_id)
+            owner = self._locked_owner(connection, service_id)
             _check_epoch(owner, owner_epoch)
+            if getattr(manifest, "source", None) is not None:
+                source_key = manifest.source.object_key
+                source_checksum = manifest.source.checksum
+                source_size = manifest.source.size_bytes
+                source_version = manifest.source.version
+            elif getattr(manifest, "sources", None):
+                first = manifest.sources[0]
+                source_key = first.key
+                source_checksum = first.checksum
+                source_size = first.size_bytes
+                source_version = first.version
+            else:
+                source_key = ""
+                source_checksum = ""
+                source_size = 0
+                source_version = None
+            sources_json = (
+                json.dumps(
+                    [
+                        {
+                            "key": s.key,
+                            "checksum": s.checksum,
+                            "size_bytes": s.size_bytes,
+                            "row_start": s.row_start,
+                            "row_count": s.row_count,
+                            "version": s.version,
+                        }
+                        for s in manifest.sources
+                    ]
+                )
+                if getattr(manifest, "sources", None)
+                else None
+            )
             connection.execute(
                 """
                 INSERT INTO high_scale_archive_manifests (
@@ -938,21 +1148,21 @@ class PostgresControlPlane:
                     source_version, artifact_uri, artifact_checksum, artifact_size, row_count,
                     byte_count, canonical_digest, schema_version, transform_version,
                     coverage_start, coverage_end, retention_deadline,
-                    deletion_authorization_deadline, archive_epoch, owner_epoch, state
+                    deletion_authorization_deadline, archive_epoch, owner_epoch, state, sources_json
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (manifest_id) DO NOTHING
                 """,
                 (
                     manifest.manifest_id,
-                    manifest.source.service_id,
-                    manifest.source.domain,
-                    manifest.source.object_key,
-                    manifest.source.checksum,
-                    manifest.source.size_bytes,
-                    manifest.source.version,
+                    service_id,
+                    domain,
+                    source_key,
+                    source_checksum,
+                    source_size,
+                    source_version,
                     manifest.artifact.uri,
                     manifest.artifact.checksum,
                     manifest.artifact.size_bytes,
@@ -968,8 +1178,30 @@ class PostgresControlPlane:
                     manifest.archive_epoch,
                     owner_epoch,
                     state.value,
+                    sources_json,
                 ),
             )
+            if getattr(manifest, "sources", None):
+                for src in manifest.sources:
+                    connection.execute(
+                        """
+                        INSERT INTO high_scale_archive_manifest_sources (
+                            manifest_id, source_key, source_checksum, source_size,
+                            source_version, row_start, row_count, deletion_deadline
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (manifest_id, source_key) DO NOTHING
+                        """,
+                        (
+                            manifest.manifest_id,
+                            src.key,
+                            src.checksum,
+                            src.size_bytes,
+                            src.version,
+                            src.row_start,
+                            src.row_count,
+                            manifest.deletion_authorization_deadline,
+                        ),
+                    )
             result = self._archive_manifest(connection, manifest.manifest_id)
             if result.manifest != manifest or result.owner_epoch != owner_epoch:
                 raise ValueError("archive manifest identity changed")
@@ -1080,14 +1312,32 @@ class PostgresControlPlane:
             ):
                 raise RuntimeError(f"stale or missing claim for {object_key}")
             manifest = self._locked_archive_manifest(connection, manifest_id)
+            source_matched = False
+            if manifest.manifest.source is not None:
+                if (
+                    manifest.manifest.source.object_key == object_key
+                    and manifest.manifest.source.checksum == source.checksum
+                    and manifest.manifest.source.version == source.version
+                ):
+                    source_matched = True
+            if not source_matched and manifest.manifest.sources:
+                if any(
+                    s.key == object_key and s.checksum == source.checksum and s.version == source.version
+                    for s in manifest.manifest.sources
+                ):
+                    source_matched = True
+            manifest_service = getattr(manifest.manifest, "service_id", None) or (
+                manifest.manifest.source.service_id if manifest.manifest.source else ""
+            )
+            manifest_domain = getattr(manifest.manifest, "domain", None) or (
+                manifest.manifest.source.domain if manifest.manifest.source else ""
+            )
             if (
                 manifest.state is not ArchiveState.MANIFEST_COMMITTED
                 or manifest.owner_epoch != owner_epoch
-                or manifest.manifest.source.service_id != service_id
-                or manifest.manifest.source.domain != source.domain
-                or manifest.manifest.source.object_key != object_key
-                or manifest.manifest.source.checksum != source.checksum
-                or manifest.manifest.source.version != source.version
+                or manifest_service != service_id
+                or manifest_domain != source.domain
+                or not source_matched
             ):
                 raise ValueError("archive manifest is not committed for source")
             connection.execute(
@@ -1114,6 +1364,54 @@ class PostgresControlPlane:
                 (source.object_id,),
             )
 
+    def acknowledge_sources_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        next_cursor: str | None = None,
+        domain: str = "request",
+        partition_id: str = "default",
+    ) -> None:
+        _require_text(service_id, "service_id")
+        _require_text(manifest_id, "manifest_id")
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            owner = self._locked_owner(connection, service_id)
+            _check_epoch(owner, expected_owner_epoch)
+            if object_keys:
+                connection.execute(
+                    """
+                    UPDATE high_scale_source_objects
+                    SET status='acknowledged', archive_manifest_id=%s, lease_until=NULL, updated_at=clock_timestamp()
+                    WHERE service_id=%s AND object_key = ANY(%s)
+                    """,
+                    (manifest_id, service_id, list(object_keys)),
+                )
+            if next_cursor is not None:
+                connection.execute(
+                    """
+                    INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at)
+                    VALUES (%s, %s, %s, %s, clock_timestamp())
+                    ON CONFLICT (service_id, domain, partition_id) DO UPDATE
+                    SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+                    """,
+                    (service_id, domain, partition_id, next_cursor),
+                )
+                if partition_id == "default":
+                    connection.execute(
+                        """
+                        INSERT INTO high_scale_source_cursors (service_id, domain, source_cursor, updated_at)
+                        VALUES (%s, %s, %s, clock_timestamp())
+                        ON CONFLICT (service_id, domain) DO UPDATE
+                        SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()
+                        """,
+                        (service_id, domain, next_cursor),
+                    )
+
     def authorize_source_delete(
         self,
         service_id: str,
@@ -1138,7 +1436,12 @@ class PostgresControlPlane:
             ):
                 raise ValueError(f"source deletion is not authorized for {object_key}")
             manifest = self._locked_archive_manifest(connection, manifest_id)
-            if manifest.manifest.source.object_key != object_key:
+            source_matched = False
+            if manifest.manifest.source is not None and manifest.manifest.source.object_key == object_key:
+                source_matched = True
+            elif manifest.manifest.sources and any(s.key == object_key for s in manifest.manifest.sources):
+                source_matched = True
+            if not source_matched:
                 raise ValueError("archive manifest does not match source")
             if manifest.state is not ArchiveState.DELETION_ELIGIBLE:
                 raise ValueError("archive manifest is not deletion eligible")
@@ -1218,14 +1521,27 @@ class PostgresControlPlane:
             )
             manifest = self._locked_archive_manifest(connection, manifest_id)
             if manifest.state is ArchiveState.DELETION_ELIGIBLE:
-                connection.execute(
-                    """
-                    UPDATE high_scale_archive_manifests
-                    SET state=%s, updated_at=clock_timestamp()
-                    WHERE manifest_id=%s AND owner_epoch=%s
-                    """,
-                    (ArchiveState.SOURCE_DELETED.value, manifest_id, expected_owner_epoch),
-                )
+                all_deleted = True
+                if manifest.manifest.sources:
+                    source_keys = [s.key for s in manifest.manifest.sources]
+                    count_not_deleted = connection.execute(
+                        """
+                        SELECT count(*) FROM high_scale_source_objects
+                        WHERE service_id=%s AND object_key = ANY(%s) AND status != 'source_deleted'
+                        """,
+                        (service_id, source_keys),
+                    ).fetchone()
+                    if count_not_deleted and count_not_deleted[0] > 0:
+                        all_deleted = False
+                if all_deleted:
+                    connection.execute(
+                        """
+                        UPDATE high_scale_archive_manifests
+                        SET state=%s, updated_at=clock_timestamp()
+                        WHERE manifest_id=%s AND owner_epoch=%s
+                        """,
+                        (ArchiveState.SOURCE_DELETED.value, manifest_id, expected_owner_epoch),
+                    )
 
     def _transition_source(
         self,
@@ -1360,7 +1676,10 @@ def _batch_claim_from_row(row: Mapping[str, Any] | Any) -> BatchClaim:
     )
 
 
-def _archive_from_row(row: Mapping[str, Any] | Any) -> ArchiveManifestRecord:
+def _archive_from_row(
+    row: Mapping[str, Any] | Any,
+    source_rows: Sequence[Any] | None = None,
+) -> ArchiveManifestRecord:
     source = ArchiveSourceObject(
         service_id=str(_row_value(row, "service_id", 1)),
         domain=str(_row_value(row, "domain", 2)),
@@ -1379,15 +1698,56 @@ def _archive_from_row(row: Mapping[str, Any] | Any) -> ArchiveManifestRecord:
         schema_version=str(_row_value(row, "schema_version", 13)),
         transform_version=str(_row_value(row, "transform_version", 14)),
     )
+    resolved_sources = None
+    sources_json_val = _row_value_optional(row, "sources_json", 24)
+    raw_deadline = _row_value(row, "deletion_authorization_deadline", 18)
+    fallback_deadline = datetime.fromisoformat(raw_deadline) if isinstance(raw_deadline, str) else raw_deadline
+    if sources_json_val:
+        data = json.loads(sources_json_val) if isinstance(sources_json_val, str) else sources_json_val
+
+        def _parse_entry_deadline(item: dict[str, Any]) -> datetime:
+            val = item.get("deletion_deadline")
+            if val is not None:
+                return datetime.fromisoformat(val) if isinstance(val, str) else val
+            return fallback_deadline
+
+        resolved_sources = tuple(
+            ArchiveSourceEntry(
+                key=str(item["key"]),
+                checksum=str(item["checksum"]),
+                size_bytes=int(item["size_bytes"]),
+                row_start=int(item["row_start"]),
+                row_count=int(item["row_count"]),
+                deletion_deadline=_parse_entry_deadline(item),
+                version=item.get("version"),
+            )
+            for item in data
+        )
+    elif source_rows:
+        resolved_sources = tuple(
+            ArchiveSourceEntry(
+                key=str(_row_value(sr, "source_key", 0)),
+                checksum=str(_row_value(sr, "source_checksum", 1)),
+                size_bytes=int(_row_value(sr, "source_size", 2)),
+                row_start=int(_row_value(sr, "row_start", 3)),
+                row_count=int(_row_value(sr, "row_count", 4)),
+                deletion_deadline=fallback_deadline,
+                version=_row_value(sr, "source_version", 5),
+            )
+            for sr in source_rows
+        )
     manifest = ArchiveManifest(
         manifest_id=str(_row_value(row, "manifest_id", 0)),
         source=source,
+        sources=resolved_sources if resolved_sources else (),
         artifact=artifact,
         coverage_start=_row_value(row, "coverage_start", 15),
         coverage_end=_row_value(row, "coverage_end", 16),
         retention_deadline=_row_value(row, "retention_deadline", 17),
         deletion_authorization_deadline=_row_value(row, "deletion_authorization_deadline", 18),
         archive_epoch=int(_row_value(row, "archive_epoch", 19)),
+        service_id=str(_row_value(row, "service_id", 1)),
+        domain=str(_row_value(row, "domain", 2)),
     )
     return ArchiveManifestRecord(
         manifest,
@@ -1402,13 +1762,21 @@ def _row_value(row: Mapping[str, Any] | Any, key: str, index: int) -> Any:
     return row[index]
 
 
+def _row_value_optional(row: Mapping[str, Any] | Any, key: str, index: int | None = None) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key)
+    if index is not None and hasattr(row, "__len__") and len(row) > index:
+        return row[index]
+    return None
+
+
 def _check_epoch(owner: OwnerEpochRecord, expected_epoch: int) -> None:
     _check_epoch_value(owner.owner_epoch, expected_epoch)
 
 
 def _check_epoch_value(actual: int, expected: int) -> None:
     if actual != expected:
-        raise ValueError("owner epoch does not match fence")
+        raise ValueError("owner epoch mismatch: stale owner epoch; owner epoch does not match fence")
 
 
 def _source_object_id(service_id: str, domain: str, object_key: str, checksum: str) -> str:

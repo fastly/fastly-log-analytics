@@ -10,8 +10,9 @@ CREATE TABLE IF NOT EXISTS rum_vitals_aggregates
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/rum_vitals_aggregates', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(bucket_start))
-ORDER BY (service_id, bucket_start, dimension, value, batch_id);
+PARTITION BY toYYYYMMDD(bucket_start)
+ORDER BY (service_id, bucket_start, dimension, value, batch_id)
+TTL bucket_start + INTERVAL 30 DAY;
 
 CREATE TABLE IF NOT EXISTS rum_error_aggregates
 (
@@ -24,5 +25,6 @@ CREATE TABLE IF NOT EXISTS rum_error_aggregates
     publication_state Enum8('pending' = 1, 'visible' = 2)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/rum_error_aggregates', '{replica}')
-PARTITION BY (service_id, toYYYYMMDD(bucket_start))
-ORDER BY (service_id, bucket_start, dimension, value, batch_id);
+PARTITION BY toYYYYMMDD(bucket_start)
+ORDER BY (service_id, bucket_start, dimension, value, batch_id)
+TTL bucket_start + INTERVAL 30 DAY;

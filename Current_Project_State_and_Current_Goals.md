@@ -162,19 +162,33 @@ The detailed inventory and per-job specifications live under
 - **Metadata Cleanup Trimming Restored:** Re-enabled RUM `ingested_files` trimming in `reconciliation.py` using a window strictly larger than raw retention (`max(ingested_files_days, log_retention_days + 1)`), preventing table growth without risking re-ingest.
 - **Data Cleanup & Deduplication:** Removed 516,223 duplicate rows on Local Standard and 177,943 duplicate rows on GCE Standard using `scripts/dedupe_rum_tables.py` on the beacon's natural key through DuckLake.
 - **Empirical Validation:** Verified via `make fast-ci` (1,090 passing tests) and `./scripts/dev/deploy_test_all.sh` across all 3 active environments (Local Standard, Remote Standard GCE, Remote High-Scale Elevation). Request p90 lag under 20s across all environments, GCE `rum_sync` p95 duration at 4.52s ($< 5\text{s}$).
+**Cron 9: `full_sync_{service_id}` — Full Cloud Bucket Sweep & Ingestion Reconciliation (2026-10-07) — Audited, Implemented, and Verified.**
+- **Manual Sweep Endpoint (`POST /api/admin/full-sweep/{service_id}`):** Implemented in `backend/routers/admin/ingest.py` returning `SyncStartResponse` with `run_id`. Enforces `require_admin` dependency; denies read-only analyst access with HTTP 403. Invalidates dashboard caches via `invalidate_service` and initiates sweep via `start_or_resume_cron(..., "full_sync", _run_full_sweep, ...)`. Regenerated OpenAPI specs and client types.
+- **FOS Class A LIST Attribution:** Decorated `_run_full_sweep` in `backend/cron/jobs/sync.py` with `@cron_task("cron.full_sync", job_name="full_sync")` ensuring all FOS Class A LIST calls are recorded in PostgreSQL `usage_log` under `process_context="cron.full_sync"`.
+- **ADR-22 PostgreSQL Schema Alignment & Outcome Counters:** Aligned spec to PostgreSQL `ingested_files`. In `_run_full_sweep`, properly extracted and populated `outcome_counters` and error messages from `ingest(...)` events. On corrupt records or ingestion failure, transitions run status to `"error"`, persisting structured `outcome_counters` into PostgreSQL `cron_runs`.
+- **Post-Sweep Cache & Rollup Refresh:** Added post-sweep hooks for `refresh_view_and_warm_pool` (when `rows_inserted > 0`) and `schedule_post_ingest_rollups` (when `touched_hours` is non-empty).
+- **Adaptive Budgeting & Safety Gate:** Honored `max_files` / `max_seconds` adaptive budgeting scaling with buffer backlog and Celery queue depth. Gated by `FLA_DEV_NO_CRONS=1` and active request politeness deferral (`should_defer_cron("full_sync", service_id)`) with `force=True` manual bypass.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_full_sync_contract.py` passed 9/9 tests covering Section 9 of the spec. Multi-environment deployment verified with `./scripts/dev/deploy_test_all.sh` on commit `c3c958f6bbe3` across Local Standard, Remote Standard GCE, and Remote High-Scale Elevation (Plotly charts visible, 100% in-sync counts, request and RUM lag all sub-minute).
+
+### High-Scale Request Logs Ingestion Redesign (Phases 0–3 Complete & Verified) — 2026-10-09
+- **Phase 0 Baseline & Sizing:** Controlled synthetic traffic load test executed against Elevation dev dedicated test service using `scripts/load_test/generate_synthetic_traffic.py`. Capacity model (§7/§10) completed in `docs/runbooks/high-scale-capacity-and-recovery.md` and `docs/runbooks/high-scale-request-logs-design.md`. ClickHouse Helm chart (`deploy/chart/clickhouse/`) created with shards, replicas, Keeper, and declarative `config.d` log retention/dedup settings, validated via `tests/chart/test_helm.py` (28 passing tests).
+
+- **Phase 1 Contracts & Schemas (§5.1):** 128-bit length-prefixed `event_id` UUID generation (`backend/high_scale/schema.py`), multi-source `ArchiveManifest` with per-source replay byte offsets and deletion deadlines (`archive_models.py`), partitioned key-range cursors under single owner epoch with fencing (`postgres_control.py`), and ClickHouse DDL schema v2 (day-only partitioning, `toStartOfHour` sort keys, 180-day TTL) across all 9 SQL definitions.
+- **Phase 2 Batched Pipeline:** Implemented concurrent in-memory Arrow batch decoding (`decoder.py`), archive-first batch checkpointing (`write_batch_archive_checkpoint` in `archive_writer.py`), collapsed publish handshake (`claim_sources_batch` -> `register_batch_manifest` -> `mark_batch_published` -> `acknowledge_sources_batch` in `ingest_controller.py` & `postgres_control.py`), decoupled per-manifest source deletion with verified manifest caching (`deletion.py`), bounded concurrent object reads with partial page failure isolation (`orchestration.py`), and adaptive polling loop with jitter and trailing-minute back-scan (`worker.py`). All 7 batch contract tests passed in `tests/high_scale/test_batch_ingest.py`.
+- **Phase 3 Verification & ADR-21 Evidence:**
+  - **Differential Canary:** Verified exact count, dimension aggregation, and projection parity between legacy and high-scale paths (`tests/high_scale/test_differential_canary.py`).
+  - **Archive-Only Recovery:** Verified 100% table and projection rebuild without raw logs from FOS archive Parquet (`tests/high_scale/test_archive_only_recovery.py`).
+  - **Scale Sweeps & Capacity:** Worker sweep (1–200 workers) and ClickHouse topology sweep (1x1 to 4x2) modeled in `docs/runbooks/high-scale-capacity-and-recovery.md` demonstrating headroom at 2M RPS and 256M events/sec replay qualification arithmetic with 25% live reservation.
+  - **ADR-21 Gate Evidence:** All 12 ADR-21 gate requirements formally documented and satisfied. Full test suite passing with 322 passed, 11 skipped, 0 failures (`uv run pytest tests/high_scale/`).
 
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Cron 8 (`expire_{service_id}`)
-is complete; do not repeat its implementation or deployment. Start with
-`docs/cron/jobs/log-discovery.md`, whose Section 9 still has unchecked items:
-read that specification, `AGENTS.md` (including Traps & Gotchas), the relevant
-architecture docs, and tests; confirm which checklist items remain genuinely
-unverified before making changes. If work is needed, use systematic debugging
-and TDD, update directly related docs, run focused tests and the required
-project checks, then follow the authorized push/deployment procedure. Never
-stage this state file or `.github/instructions/`; commit only explicit
-pathspecs, and do not create a PR or merge.
+
+Continue the Cron audit on `release/v3.0.0-beta3`. Cron 1 (`log_discovery_{service_id}`), Cron 8 (`expire_{service_id}`), and Cron 9 (`full_sync_{service_id}`) are complete; do not repeat their implementation or deployment. Proceed to Cron 10: `gap_heal_{service_id}` documented in `docs/cron/jobs/gap-heal.md`:
+1. Read `docs/cron/jobs/gap-heal.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
+2. Confirm which checklist items and contract requirements remain genuinely unverified (including Fastly Stats API vs DuckDB/DuckLake row counts accounting, SustainedLossAlert detection on >= 2 consecutive hours with >= 5% loss, adaptive severity bands and sweep budget expansion, manual API trigger `POST /api/admin/gap-heal/{service_id}`, FOS and Fastly API attribution in `usage_log`, and `cron_runs` tracking).
+3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
+4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
 **Cron 3: `local_compact_{service_id}` — audited, implemented, and verified.**
 - **Atomic Swap & Unlink Hardened:** Enforced that the new compacted `.parquet` file is atomically renamed (`os.rename(tmp_path, out_path)`) BEFORE unlinking original fragmented files in `_compact_single_partition` and `_rollup_bins`. Input files remain completely untouched until the atomic rename succeeds, preventing data loss on process crashes and eliminating concurrent reader races.

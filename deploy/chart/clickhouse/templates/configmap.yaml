@@ -1,0 +1,80 @@
+{{- include "clickhouse.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-config
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+data:
+  logger-override.xml: |
+    <clickhouse>
+      <logger>
+        <level>{{ .Values.config.logger.level }}</level>
+        <size>{{ .Values.config.logger.size }}</size>
+        <count>{{ .Values.config.logger.count }}</count>
+      </logger>
+    </clickhouse>
+
+  dedup.xml: |
+    <clickhouse>
+      <merge_tree>
+        <replicated_deduplication_window>{{ .Values.config.replicatedDeduplicationWindow }}</replicated_deduplication_window>
+        <replicated_deduplication_window_seconds>{{ .Values.config.replicatedDeduplicationWindowSeconds }}</replicated_deduplication_window_seconds>
+      </merge_tree>
+    </clickhouse>
+
+  system-logs.xml: |
+    <clickhouse>
+      {{- range .Values.config.disableSystemLogs }}
+      <{{ . }} remove="1"/>
+      {{- end }}
+    </clickhouse>
+
+  {{- if or .Values.keeper.enabled (or (gt (int .Values.shards) 1) (gt (int .Values.replicas) 1)) }}
+  remote-servers.xml: |
+    <clickhouse>
+      <remote_servers>
+        <default>
+          {{- range $s := until (int .Values.shards) }}
+          <shard>
+            <internal_replication>true</internal_replication>
+            {{- range $r := until (int $.Values.replicas) }}
+            <replica>
+              <host>{{ include "clickhouse.fullname" $ }}-shard-{{ $s }}-{{ $r }}.{{ include "clickhouse.fullname" $ }}-headless</host>
+              <port>{{ $.Values.service.tcpPort }}</port>
+            </replica>
+            {{- end }}
+          </shard>
+          {{- end }}
+        </default>
+      </remote_servers>
+      <zookeeper>
+        {{- range $k := until (int .Values.keeper.replicas) }}
+        <node>
+          <host>{{ include "clickhouse.fullname" $ }}-keeper-{{ $k }}.{{ include "clickhouse.fullname" $ }}-keeper-headless</host>
+          <port>9181</port>
+        </node>
+        {{- end }}
+      </zookeeper>
+    </clickhouse>
+  {{- end }}
+---
+{{- range $s := until (int .Values.shards) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clickhouse.fullname" $ }}-shard-{{ $s }}-macros
+  labels:
+    {{- include "clickhouse.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: shard-{{ $s }}
+data:
+  macros.xml: |
+    <clickhouse>
+      <macros>
+        <cluster>default</cluster>
+        <shard>{{ printf "%02d" (add $s 1) }}</shard>
+        <replica>{{ if eq (int $.Values.replicas) 1 }}01{{ else }}{replica}{{ end }}</replica>
+      </macros>
+    </clickhouse>
+---
+{{- end }}
