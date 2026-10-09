@@ -20,7 +20,7 @@ until the migration and recovery evidence described below exists.
 | CMCD | request-row analytics | request-row analytics | request-event projection |
 | DuckLake writers | allowed | allowed | prohibited |
 
-The high-scale plane owns one source cursor and one owner epoch per service.
+The high-scale plane owns one owner epoch per service and, per the 2026-10-09 amendment below, one source cursor per key-range partition of that service.
 Cutover requires a drained old owner, a durable cursor handoff, and an
 atomic cutover record. Rollback is allowed only when the replacement archive
 is replayable and the prior owner has not lost source coverage.
@@ -38,6 +38,8 @@ artifact_uploading -> artifact_verified -> manifest_prepared
 > one artifact and a list of source entries (key, version, checksum, row range,
 > deletion deadline); replay and deletion remain per source. See
 > [high-scale-request-logs-design.md](../runbooks/high-scale-request-logs-design.md).
+
+> **Amendment (2026-10-09):** a service may have several source cursors, one per key-range partition, all under the single owner epoch, so one hot service can be ingested in parallel. Cutover and handoff apply to all partition cursors together. See the same design.
 
 A manifest records service and domain, exact source identity and version,
 artifact identity, row and byte counts, per-domain counts, schema and
