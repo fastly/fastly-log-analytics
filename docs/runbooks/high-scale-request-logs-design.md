@@ -169,6 +169,13 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 - `test_batch_idempotency.py`: replaying the same page (same `manifest_id`-derived `batch_id`, `event_id`s and dedup token) leaves row counts unchanged, and the publish step catches a mismatch between `expected_rows` and `visible_rows`. A retry under a *different* `batch_id` is not protected by tokens, so this is prevented by deriving `batch_id` from `manifest_id` and tested as such.
 - `test_partial_page_failure.py`: one bad object holds the cursor; successful siblings are not re-ingested; the bad object is retried or quarantined.
 - `test_fencing.py`: a stale-epoch worker cannot commit a manifest, publish, or acknowledge.
+- `test_partitioned_cursors.py`: several key-range cursors under one owner epoch advance independently; a stale epoch fences all of them; a partition failure holds only its own cursor; cutover and handoff move all partition cursors together.
+- `test_late_key_backscan.py`: an object that lands behind the cursor (within `period` plus margin) is ingested by the trailing-minute back-scan and never double counted.
+- `test_event_id.py`: `event_id` is deterministic, 128-bit, length-prefix-unambiguous (`("ab","c")` differs from `("a","bc")`), and stable across retries and versions of the same source.
+- `test_batch_manifest.py`: a manifest with N sources round-trips; per-source replay and deletion honor each source's deadline; deleting one source does not re-verify the other N-1 artifacts.
+- `test_publication_gate.py`: readers never see `pending` rows; an `expected_rows` vs `visible_rows` mismatch blocks `visible`.
+- Chart tests (`tests/chart/test_helm.py`): the single-node default renders; a 2-shard x 2-replica values file renders correct macros, Keeper, and dedup-window settings; bad shard/replica combinations fail at `helm template`.
+- Differential canary (non-unit): the batched path and the existing path produce identical row counts and aggregates for the same sources.
 - `test_field_registry_reuse.py`: normalization parity with `LOG_FIELD_CATALOG`.
 - `test_maintenance_suppression.py`: a maintenance failure (HTTP 413) does not stop the worker loop (behavior already implemented; this pins it).
 - `test_recovery.py`: expired-claim recovery and deduplication.
@@ -300,6 +307,12 @@ Exit: `tests/high_scale/` suite from §5.1 passes; a single-service run on Eleva
 2. Differential canary against the existing path (row counts and aggregates match), behind a per-service flag; rollback is the flag (§9.7).
 3. Archive-only recovery test and the remaining ADR-21 gate evidence.
 Exit: ADR-21 gate evidence complete; runtime mode may then be proposed for enablement (separate decision).
+
+### Definition of done (end to end)
+- All §5.1 tests pass under `make test-ci`; `make ci` and `make verify` pass with every ratchet intact (coverage 86%, ESLint ceiling, security-regression floor 206, import-contracts, openapi-drift).
+- Elevation dev: source-to-visible p95 within the 5 s pipeline budget and edge-to-dashboard about 10–15 s at the measured load; no `pending` batch older than the lease; ClickHouse parts per partition stay below the delay threshold.
+- Capacity model filled from measurements (§7, §10) and recorded in `high-scale-capacity-and-recovery.md`; differential canary clean; archive-only recovery test passed.
+- ADR-21 amendments reflect the final design, `AGENTS.md` and `docs/ARCHITECTURE.md` are updated where behavior changed, and no infra-private strings are in tracked files (`infra-leak-sweep`).
 
 ### Hand-off notes
 - **Source of truth for DDL** is `backend/high_scale/sql/*.sql`; snippets in §3 are abridged.
