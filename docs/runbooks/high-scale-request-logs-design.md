@@ -4,7 +4,7 @@
 - **Author:** Engineering Team
 - **Status:** Proposed (not yet implemented; supersedes the ADR-21 per-source manifest, see §6.1)
 - **Target Scale:** 2,000,000 RPS on Fastly Edge
-- **Target Latency:** < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services) and is upstream of this budget, so edge-to-dashboard freshness is at least `period` plus this pipeline's latency. Below ~10 s end-to-end needs a streaming endpoint (see §8).
+- **Target Latency:** < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Log delivery is FOS only (decision: no streaming endpoints). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services; sub-10 s confirmed working) and is upstream of this budget, so edge-to-dashboard freshness is `period` plus pipeline latency. Reaching < 5s end-to-end means lowering `period`, which raises object count (see §8).
 - **Primary Environment:** Elevation Kubernetes (namespace from `ELEVATION_NAMESPACE`)
 - **Relevant Standards & ADRs:**
   - [ADR-14: DuckLake Replacement](../adr/14-ducklake-replacement.md)
@@ -199,7 +199,7 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 1. **Decision: this design supersedes the ADR-21 per-source manifest.** `ArchiveManifest` (`backend/high_scale/archive_models.py`) currently holds a single `ArchiveSourceObject`. It becomes a batch manifest: one artifact plus a list of source entries, each with key, version, checksum, row range, and deletion deadline. Replay and deletion stay per source. ADR-21 carries an amendment note pointing here. Implementation work: change `ArchiveManifest`, `register_archive_manifest`, and the deletion ledger to iterate source entries.
 2. **Runtime mode is not enabled.** The rest of ADR-21 still stands: the `high_scale` mode stays gated on operator selection, a continuous-ingest vertical slice, an archive-only recovery test, a differential canary, and rollback evidence. This design does not enable it.
 3. **Partitioning and sharding** for `request_facts` at 2M RPS (§3.2).
-4. **Fastly flush period** versus the freshness budget: see §8. With FOS delivery, edge-to-dashboard freshness is at least `period` (10 s on the test services, 60 s code default) plus pipeline latency, so < 5s edge-to-dashboard needs a sub-5 s `period` (operator-confirmed that sub-10 s periods work on FOS; the lower floor is untested) or a streaming endpoint.
+4. **Fastly flush period** versus the freshness budget: see §8. Decision: FOS is the only log delivery path. Edge-to-dashboard freshness is `period` plus pipeline latency, so < 5s requires a sub-5 s `period` (sub-10 s confirmed working; the lower floor is untested) and a pipeline that absorbs the resulting object rate.
 
 ---
 
@@ -226,8 +226,8 @@ The repo has no per-stage timings, so everything below is a call count read from
 ## 8. Findings From Fastly Log Delivery (official docs; unverified items flagged)
 
 1. **Flush period:** the S3/object-storage logging `period` defaults to 3600 s and "how frequently log files are finalized so they can be available for reading". This repo's code default is 60 s (`log_period`, `backend/config.py`) and is configurable per service; the test services use 10 s. No documented minimum was found. Operator-confirmed: periods below 10 s work on FOS; the floor is untested, and tiny periods multiply object count, so test empirically. `file_max_bytes` (minimum 1 MiB) forces earlier rotation at high volume, so object count scales with traffic.
-   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`. At the 10 s test setting the floor is about 10 s plus pipeline latency, and at the 60 s default about 60 s. The < 5 s target is therefore only meaningful as FOS-landing-to-visible. A true < 5 s edge-to-dashboard target needs a sub-5 s `period` (sub-10 s confirmed working; lower floor untested) or a streaming endpoint.
-2. **Streaming alternatives** (batched by `request_max_entries` / `request_max_bytes`): HTTPS (`period` default 5 s) meets the budget but needs a public TLS receiver sized for 2M RPS that handles its own backpressure and loss; Kafka is the best fit for a durable, replayable buffer but needs a Kafka cluster and drops FOS-as-archive (the archive would be written from the consumer). Per-endpoint delivery guarantees are unverified. No "real-time log streaming to ClickHouse" endpoint was found in the docs. This is a product decision to make before building, not something the worker design settles.
+   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`. At the 10 s test setting the floor is about 10 s plus pipeline latency, and at the 60 s default about 60 s. The < 5 s target is therefore stated as FOS-landing-to-visible; true edge-to-dashboard < 5 s additionally requires a sub-5 s `period`, whose cost is more, smaller objects (§7 item 6, §10).
+2. **Streaming endpoints (HTTPS, Kafka) are out of scope by decision:** FOS is the only log delivery path, which also keeps the FOS archive as the recovery authority (ADR-21). They are not an escape hatch for the freshness target; the levers are `period`, `file_max_bytes`, and pipeline efficiency.
 3. **Delivery guarantees:** Fastly documents no at-least-once or no-loss guarantee for S3/FOS. Assume both duplicates and loss are possible. The ledger checksum dedup in this design is the correct defense; loss detection needs a count reconciliation against edge-side stats.
 4. **Object count at 2M RPS:** whether files are per POP, per cache server, or per process is not documented (unverified), so objects per second is unknown. Measure it; it drives claim contention and LIST cost (§7).
 5. **Keys and cursoring** (`backend/provision/log_paths.py`): layout is `raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/<ts>-<uid>.log.gz`. The minute is the file *creation* time, not the request time, and the object becomes listable only at finalization, up to `period` later. A lexicographic cursor can therefore pass a key before its object appears. The back-scan in §9.1 is required, not optional: re-list trailing minute prefixes (`minute_list_prefix`) for at least `period` plus a safety margin, and keep `full_sync` as the backstop. `S3SourceObjectLister` mixes a NextToken cursor with a `StartAfter` terminal cursor; a NextToken cursor past a late-landing key is a real gap risk. FOS behavior was not tested.
@@ -273,10 +273,10 @@ Taken with read-only `kubectl top` and ClickHouse `SELECT`s against the test ser
 Order matters: each phase has an exit test. Do not start a phase before the previous exit is met. Use the owning agents in `.claude/agents` where noted.
 
 ### Phase 0: Decisions and measurement (no production code)
-1. **Delivery path decision (owner: you/lead):** keep FOS file delivery with a short `period`, or add a streaming endpoint (HTTPS/Kafka). Default recommendation: FOS with a short period first, since it keeps the archive-as-authority model; revisit if Phase 0 measurements show object count is unmanageable.
+1. **Delivery path (decided):** FOS file delivery only; no streaming endpoints. Open sub-question: choose the `period` (10 s today; test 5 s and lower) by measuring objects/s versus freshness gain.
 2. **Load run on a dedicated test service:** use the generator (`--target fos --rate-rps ... --upload-workers ...`, `scripts/generate_synthetic_traffic.py`) to measure: objects/s and rows/object at target-like RPS and 10 s / 5 s periods; `py-spy` split of decode / archive / PG / ClickHouse in a worker; throughput versus replica count (confirms claim contention); PG transaction cost (`pg_stat_statements`). Agent: `perf-expert`.
 3. **Fill in the §7 capacity model** with the measured numbers and record the worker/ClickHouse sizing.
-Exit: capacity model with measured inputs, delivery decision recorded in §6.
+Exit: capacity model with measured inputs and a chosen `period` recorded in §6.
 
 ### Phase 1: Contracts (small, test-first)
 1. Batch manifest: change `ArchiveManifest` to hold a list of source entries (§6.1); update `register_archive_manifest`, the deletion ledger, and serialization. Agent: `data-etl-expert`.
