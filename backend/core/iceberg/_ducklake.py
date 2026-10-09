@@ -126,17 +126,12 @@ def _is_local_only(source: dict) -> bool:
 def _default_data_path(source: dict) -> str:
     """Default DuckLake DATA_PATH for ``source``.
 
-    High-throughput workers and the serving pod may not share a filesystem,
+    High-scale workers and the serving pod may not share a filesystem,
     so cloud-backed sources use durable FOS storage in that topology. Standard
     deployments keep analytical data local for low-latency reads.
     """
     force_local = os.getenv("DUCKLAKE_LOCAL_STORAGE", "").lower() in ("1", "true", "yes")
-    if (
-        config.is_high_throughput_mode(source)
-        and not force_local
-        and source.get("bucket")
-        and not _is_local_only(source)
-    ):
+    if config.is_high_scale_mode(source) and not force_local and source.get("bucket") and not _is_local_only(source):
         prefix = (source.get("prefix") or "").strip("/")
         base = f"{prefix}/ducklake" if prefix else "ducklake"
         return f"s3://{source['bucket']}/{base}/"
@@ -188,7 +183,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             "1",
             "true",
             "yes",
-        ) or config.is_high_throughput_mode(source)
+        ) or config.is_high_scale_mode(source)
         if not allow_remote and not source.get("allow_remote_parquet_scan"):
             local_fallback = _default_data_path(source)
             logger.error(

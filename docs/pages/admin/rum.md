@@ -36,7 +36,7 @@ The **Admin RUM Ingestion** page configures and monitors Real User Monitoring (R
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Ingest Jobs** | Managed via APScheduler (`rum_sync_{id}`, `rum_commit_{id}`). | Managed via RedBeat & Celery (`rum_discovery_{id}`, `ledger_rum_sweep_{id}`). |
 | **Storage Tables** | Local DuckLake `lake.client_vitals` & `lake.client_errors`. | Postgres DuckLake or ClickHouse RUM tables. |

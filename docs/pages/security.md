@@ -38,7 +38,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `security_dims` / `verified_bots_ts` rollups. | Reads Postgres DuckLake / ClickHouse security tables. |
 | **Bot Enrichment** | Local SQLite `ngwaf_bot_cache.db` and `rdns_cache.db`. | Centralized threat cache / Postgres bot tables. |

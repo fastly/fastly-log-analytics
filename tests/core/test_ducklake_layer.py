@@ -685,9 +685,9 @@ def test_ducklake_failsafe_blocks_remote_s3_parquet_scan(tmp_path, monkeypatch, 
     # 1. Standard mode defaults to local disk even with a bucket present.
     assert dl._default_data_path(src) == local_expected
 
-    # High-throughput workers may not share /app/data with the serving pod, so
+    # High-scale workers may not share /app/data with the serving pod, so
     # their default must be durable object storage.
-    hs_src = {**src, "deployment_mode": "high_throughput", "prefix": "logs"}
+    hs_src = {**src, "deployment_mode": "high_scale", "prefix": "logs"}
     assert dl._default_data_path(hs_src) == "s3://fos-some-bucket/logs/ducklake/"
     monkeypatch.setenv("DUCKLAKE_LOCAL_STORAGE", "1")
     assert dl._default_data_path(hs_src) == local_expected

@@ -9,7 +9,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `ledger_rum_sweep_{service_id}`
 - **Category:** Distributed State Machine Crash Recovery & RUM Dead-Letter Sweep
-- **Purpose:** Acts as the automated crash-net for distributed RUM beacon ingestion in `DEPLOYMENT_MODE=high_throughput`. It scans PostgreSQL `ingest_ledger` for orphaned `rum` claims, resets timed-out items, re-dispatches worker tasks to Celery `q.ingest` with queue-depth safety, and tracks quarantined/dead-letter items.
+- **Purpose:** Acts as the automated crash-net for distributed RUM beacon ingestion in `DEPLOYMENT_MODE=high_scale`. It scans PostgreSQL `ingest_ledger` for orphaned `rum` claims, resets timed-out items, re-dispatches worker tasks to Celery `q.ingest` with queue-depth safety, and tracks quarantined/dead-letter items.
 - **Why It Runs:** RUM beacon conversion can fail due to malformed client telemetry, browser extensions corrupting JSON payloads, or Celery worker evictions. This sweeper guarantees that transient worker failures do not drop RUM beacons and that poison-pill beacons are quarantined without blocking the distributed pipeline.
 - **Ownership boundary:** `rum_discovery_{service_id}` owns discovery and initial dispatch; RUM conversion workers own record validation, quarantine capture, durable publication, and source acknowledgement. This sweep only repairs ledger state and redispatches eligible work; it never re-parses payloads or performs a second commit.
 
@@ -18,7 +18,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Every 15 minutes (`minutes=15`).
-- **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "high_throughput"`.
+- **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "high_scale"`.
 - **Worker Routing:** Evaluated via RedBeat on the Celery worker fleet (`_REDBEAT_JOB_PREFIXES`).
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=300s`.
@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Not applicable in synchronous SQLite mode. Cleanly skips if called. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Worker | Scans PostgreSQL `ingest_ledger` where `object_key LIKE '%raw/rum/%'`. | PostgreSQL row-level locks on `ingest_ledger`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Worker | Scans PostgreSQL `ingest_ledger` where `object_key LIKE '%raw/rum/%'`. | PostgreSQL row-level locks on `ingest_ledger`. |
 
 ---
 
@@ -45,7 +45,7 @@
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Prerequisite & Mode Checks:**
    - Checks `dev_mode_no_crons()`; skips if `FLA_DEV_NO_CRONS=1`.
-   - Confirms `is_high_throughput_mode(src)` and active RUM configuration (`rum_enabled`).
+   - Confirms `is_high_scale_mode(src)` and active RUM configuration (`rum_enabled`).
    - Confirms service is `read_write`.
 2. **Progress Lifecycle Start:**
    - Calls `start_cron_run(src, "ledger_rum_sweep")` returning `run_id`.

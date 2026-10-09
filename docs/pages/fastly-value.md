@@ -38,7 +38,7 @@ The **Fastly Value** page provides executive and financial visibility into CDN R
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + daily/hourly rollups. | Reads Postgres DuckLake or ClickHouse aggregate tables. |
 | **Rollup Optimization** | Uses precomputed `origin_summary` and `day_bundles` for 30d/90d historical ROI calculation. | Uses pre-aggregated rollup tables. |

@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `ledger_sweep_{service_id}`
 - **Category:** Distributed State Machine Crash Recovery & Dead-Letter Management
-- **Purpose:** Acts as the automated crash-net for High-Scale (`DEPLOYMENT_MODE=high_throughput`) distributed ingestion. It scans PostgreSQL `ingest_ledger` to reclaim stuck worker claims, re-dispatches stranded tasks with queue-depth guards, records permanently failing objects as `dead_letter`/`quarantined`, and diffs FOS to catch up on unrecorded keys. Per-line evidence follows the shared local quarantine contract and is captured by the worker at conversion time.
+- **Purpose:** Acts as the automated crash-net for High-Scale (`DEPLOYMENT_MODE=high_scale`) distributed ingestion. It scans PostgreSQL `ingest_ledger` to reclaim stuck worker claims, re-dispatches stranded tasks with queue-depth guards, records permanently failing objects as `dead_letter`/`quarantined`, and diffs FOS to catch up on unrecorded keys. Per-line evidence follows the shared local quarantine contract and is captured by the worker at conversion time.
 - **Why It Runs:** Distributed Celery workers can crash, lose network connectivity, or be killed by Kubernetes OOMKilled events mid-conversion. Without an autonomous ledger sweeper, claimed log batches would remain permanently stuck in `claimed` status, creating silent data holes in the lakehouse.
 
 ---
@@ -24,7 +24,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Not applicable in synchronous SQLite mode. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`UPDATE ... WHERE status='claimed'`). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Worker | Connects to PostgreSQL `METADATA_DSN`; queries and mutates `ingest_ledger` state machine. | PostgreSQL row-level locks (`UPDATE ... WHERE status='claimed'`). |
 
 ---
 
@@ -39,7 +39,7 @@
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Prerequisite Check:**
-   - Loads config and verifies `is_high_throughput_mode(src)`. Exits immediately if standard mode.
+   - Loads config and verifies `is_high_scale_mode(src)`. Exits immediately if standard mode.
 2. **Progress & Telemetry Initialization:**
    - Calls `start_cron_run(src, "ledger_sweep")`.
    - Initializes live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="ledger_sweep")`.

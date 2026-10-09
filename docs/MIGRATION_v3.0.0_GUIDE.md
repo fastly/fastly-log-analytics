@@ -15,7 +15,7 @@ Read [Before you upgrade](#before-you-upgrade) first — it is short, and one it
 | | You are here if | What you do |
 |---|---|---|
 | **Standard** (default) | You run one instance — the v2.x default. `DEPLOYMENT_MODE=standard`. | Pull, restart. Nothing else. |
-| **High-throughput** (opt-in) | You want ingestion to fan out across many workers. | Provision Postgres + valkey, set three env vars, restart. |
+| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | Provision Postgres + valkey, set env vars, restart. |
 
 Single node remains the default and is fully supported. Scaled ingest is opt-in; you are not required to move to it, and **nothing about your v2.x deployment stops working if you don't**.
 
@@ -80,19 +80,20 @@ curl -s 'http://localhost/api/health?deep=1'   # expect "status": "ok"
 
 ---
 
-## Path B — high-throughput deployment (`DEPLOYMENT_MODE=high_throughput`)
+## Path B — high-scale deployment (`DEPLOYMENT_MODE=high_scale`)
 
-Only take this path if you actually need ingestion to scale across workers. It requires two datastores you provide.
+Only take this path if you actually need ingestion to scale across workers. It requires datastores you provide.
 
 ### Prerequisites
 
 - **Postgres** — for the DuckLake catalog and the metadata backend. They may share one instance and even one database (every DuckLake table is `ducklake_`-prefixed and cannot collide with the metadata schema).
 - **valkey/Redis** — the Celery broker and the SSE backplane.
+- **ClickHouse** — the high-scale analytical engine.
 
 ### Configuration
 
 ```bash
-DEPLOYMENT_MODE=high_throughput
+DEPLOYMENT_MODE=high_scale
 DUCKLAKE_CATALOG=postgresql://USER:PASS@HOST:5432/DBNAME
 METADATA_DSN=postgresql://USER:PASS@HOST:5432/DBNAME
 CELERY_BROKER_URL=redis://HOST:6379/0

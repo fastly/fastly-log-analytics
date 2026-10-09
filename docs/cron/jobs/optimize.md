@@ -22,7 +22,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to DuckLake catalog, executes `ducklake_flush_inlined_data`, `ducklake_merge_adjacent_files`, and `ducklake_rewrite_data_files` against FOS `ducklake/`. | Exclusive per-service write lock. Gated by `FLA_DEV_NO_CRONS=1` (writes FOS). Yields via `should_defer_cron("optimize")` if user queries are active. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat / Celery Worker | Dispatches cloud table rewrite task across Celery workers or executes via shared Postgres catalog. | PostgreSQL transaction lock. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat / Celery Worker | Dispatches cloud table rewrite task across Celery workers or executes via shared Postgres catalog. | PostgreSQL transaction lock. |
 
 ---
 

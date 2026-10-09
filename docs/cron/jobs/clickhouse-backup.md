@@ -5,7 +5,7 @@
 > This background job is officially **retired** from scheduled background execution.
 >
 > **Architectural Decision Rationale:**
-> Fastly Object Storage (FOS) and the DuckLake lakehouse catalog are the authoritative, durable source of truth for all telemetry, logs, and RUM data. ClickHouse acts strictly as an ephemeral analytical serving projection and query accelerator in `DEPLOYMENT_MODE=high_throughput`.
+> Fastly Object Storage (FOS) and the DuckLake lakehouse catalog are the authoritative, durable source of truth for all telemetry, logs, and RUM data. ClickHouse acts strictly as an ephemeral analytical serving projection and query accelerator in `DEPLOYMENT_MODE=high_scale`.
 >
 > Running periodic scheduled backups of ClickHouse tables duplicated data, consumed unnecessary disk space, and created unnecessary failure modes. In the event of ClickHouse node failure or data loss, ClickHouse state is fully, reliably reconstructible on-demand directly from FOS sealed artifacts via the bounded administrative replay pipeline (`POST /api/admin/clickhouse/replay` and `backend.core.clickhouse_publication.full_rebuild`).
 

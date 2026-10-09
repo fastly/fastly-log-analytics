@@ -10,7 +10,7 @@ Validates the complete execution contract specified in docs/cron/jobs/local-comp
   7. Concurrent queries during compaction never hit FileNotFoundError.
   8. ENOSPC disk pre-check safely aborts without data modification.
   9. Scheduler registration under FLA_DEV_NO_CRONS=1 and LOCAL_COMPACT_INTERVAL_MIN.
- 10. High-throughput mode Celery rollup recompute via ingest_ledger.
+ 10. High-scale mode Celery rollup recompute via ingest_ledger.
 """
 
 from __future__ import annotations
@@ -333,13 +333,13 @@ def test_contract_scheduler_dev_no_crons_and_interval_override(monkeypatch):
     assert lc_call.kwargs.get("minutes") == 5
 
 
-def test_contract_high_throughput_mode_recomputes_rollups_from_ledger(monkeypatch):
+def test_contract_high_scale_mode_recomputes_rollups_from_ledger(monkeypatch):
     """Verify High-Scale pod top-N recompute path triggered by _run_local_compact."""
-    service_id = "svc-high-throughput"
+    service_id = "svc-high-scale"
     src = {
         "name": service_id,
         "service_id": service_id,
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
         "provisioning": {"access_level": "read_write"},
     }
 

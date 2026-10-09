@@ -37,7 +37,7 @@ The **Usage & Cost** page provides complete operational visibility into Fastly O
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Usage Ledger** | Local SQLite `usage_log.db` (`usage_log` & `usage_log_hourly_summary`). | Postgres / SQLite distributed usage ledger. |
 | **Reconciliation Data** | Fastly `/stats/service` aggregated via `reconcile_fastly_stats`. | Fastly API stats matched with Postgres ledger. |

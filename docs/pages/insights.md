@@ -39,7 +39,7 @@ The **Insights** page runs 45 automated anomaly and pattern detectors comparing 
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Anomaly Compute** | DuckDB window functions & ratio comparisons over local data. | Postgres DuckLake / ClickHouse analytical queries. |
 | **Prewarming Cache** | Pod-local memory and disk cache populated by `insights_prewarmer`. | Shared Redis or pod-local cache. |

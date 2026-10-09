@@ -575,7 +575,7 @@ def measure_environment(
             "correlated_to_probe_marker": False,
         },
         "configured_polling": polling,
-        "deployment_mode": "high_throughput" if is_high_scale else "standard",
+        "deployment_mode": "high_scale" if is_high_scale else "standard",
         "rum_enabled": rum_enabled,
         "wall_clock_delays": {
             "header_seconds": round(header_detected_at, 1) if header_detected_at else None,

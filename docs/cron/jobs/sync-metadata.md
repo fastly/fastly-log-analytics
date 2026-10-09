@@ -25,7 +25,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process on Analyst) | Reads cloud catalog pointers from FOS `ducklake/` or `iceberg/meta/`, updates local DuckDB view. | Read/write connection to local DuckDB view. Active request politeness gate (`should_defer_cron`) defers scheduled runs during active dashboard queries. Permitted under `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | N/A (See ADR-17) | Known limitation in v3.0.0-beta1: DuckLake catalog requires Postgres discovery; see ADR-17 for proposed analyst cloud discovery. | N/A |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | N/A (See ADR-17) | Known limitation in v3.0.0-beta1: DuckLake catalog requires Postgres discovery; see ADR-17 for proposed analyst cloud discovery. | N/A |
 
 ---
 

@@ -27,7 +27,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Calls Fastly NGWAF API, enriches with known bot signatures, upserts into `data/ngwaf_bot_cache.db`. | Local SQLite thread-local pool lock. Gated by `FLA_DEV_NO_CRONS=1` (outbound API suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Calls NGWAF API and populates shared/local SQLite bot cache. | Local SQLite lock; decorated with `@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")`. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Calls NGWAF API and populates shared/local SQLite bot cache. | Local SQLite lock; decorated with `@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")`. |
 
 ---
 

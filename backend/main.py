@@ -571,10 +571,8 @@ async def _application_lifespan(app: FastAPI):
     ensure_pg_schema()
 
     # Deployment-mode sanity: DEPLOYMENT_MODE is the single gate for the
-    # high-throughput data
-    # plane (jobs must NOT key off CELERY_BROKER_URL truthiness — setting the
-    # broker URL for the SSE backplane alone must not reroute ingestion), and
-    # celery mode requires a multi-writer (Postgres) DuckLake catalog.
+    # high-scale data plane (standard vs high_scale), and
+    # high_scale mode requires a multi-writer (Postgres) DuckLake catalog.
     svcconfig.validate_deployment_mode()
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
@@ -1240,42 +1238,6 @@ def health_check(
                 (sid,),
             ).fetchone()
             last_ingest = row["last_ingest"] if row else None
-
-            # Celery/ledger mode writes ingest_ledger, never ingested_files —
-            # without this branch a celery-mode service is either
-            # healthy-while-dead (fresh service: last_ingest NULL forever) or
-            # permanently degraded (migrated service: last_ingest frozen at
-            # cutover). Freshness = the newest ledger commit; a backlog of
-            # non-terminal rows older than the stale cutoff degrades even when
-            # discovery keeps succeeding (workers dead / queue wedged).
-            if config.DEPLOYMENT_MODE == "high_throughput":
-                try:
-                    lrow = con.execute(
-                        "SELECT max(committed_at) AS c FROM ingest_ledger WHERE service_id = ?",
-                        (sid,),
-                    ).fetchone()
-                    if lrow and lrow["c"]:
-                        ledger_ingest = iso_z(datetime.fromtimestamp(float(lrow["c"]), UTC))
-                        if not last_ingest or str(ledger_ingest).replace(" ", "T").rstrip("Z") > str(
-                            last_ingest
-                        ).replace(" ", "T").rstrip("Z"):
-                            last_ingest = ledger_ingest
-                    stalled = con.execute(
-                        "SELECT count(*) AS n, min(discovered_at) AS oldest FROM ingest_ledger "
-                        "WHERE service_id = ? AND status IN ('discovered', 'claimed') "
-                        "AND discovered_at IS NOT NULL AND discovered_at < ?",
-                        (sid, (datetime.now(UTC) - timedelta(minutes=stale_minutes)).timestamp()),
-                    ).fetchone()
-                    if stalled and stalled["n"]:
-                        svc_state["status"] = "degraded"
-                        oldest = iso_z(datetime.fromtimestamp(float(stalled["oldest"]), UTC))
-                        svc_state["reason"] = (
-                            f"{stalled['n']} discovered file(s) not converted since {oldest} — "
-                            "ingest workers stalled or queue wedged"
-                        )
-                except Exception:
-                    pass
-
             svc_state["last_ingest"] = last_ingest
 
             has_service_id = False

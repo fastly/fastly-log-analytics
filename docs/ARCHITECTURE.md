@@ -39,7 +39,7 @@ To provide real-time query speed without waiting for a commit, the DuckDB `logs`
 
 ## 2. Ingest Pipeline & Atomic Guarantees
 
-There are two supported deployment modes selected by `DEPLOYMENT_MODE`. Standard uses the synchronous ingest data plane; high-throughput uses the ledger-backed Celery data plane. Both write through the same DuckLake commit path and unified `logs` view — they differ in scheduling and fan-out, not in where data ends up.
+There are two supported deployment modes selected by `DEPLOYMENT_MODE`: `standard` (synchronous DuckDB + DuckLake ingest) and `high_scale` (ClickHouse and dedicated micro-batching workers). The legacy `DEPLOYMENT_MODE=high_throughput` was removed and superseded by `high_scale`.
 
 ### Default mode: per-service APScheduler
 
@@ -60,9 +60,9 @@ graph TD
 3.  **Commit Promotion:** Once the Parquet buffer is written successfully, the database transfers the records into `ingested_files` and clears the `ingest_in_flight` table.
 4.  **Idempotent Auto-Recovery:** Upon any startup or tick cycle, the ingest system inspects left-over entries in the in-flight table. If the corresponding buffer exists, it is promoted; otherwise, it is dropped and queued for clean re-download on the next LIST tick.
 
-### `DEPLOYMENT_MODE=high_throughput`: the ledger data plane
+### High-Scale Data Plane (`DEPLOYMENT_MODE=high_scale`)
 
-For horizontally-scaled ingestion (many Celery workers pulling from FOS concurrently — the 100k-1M RPS target), discovery and conversion fan out across worker processes instead of running in one pod's scheduler loop:
+For horizontally-scaled ingestion in Kubernetes clusters, `DEPLOYMENT_MODE=high_scale` uses ClickHouse and dedicated micro-batching workers (see ADR-21 below). The intermediate `DEPLOYMENT_MODE=high_throughput` Celery ledger pipeline was removed and superseded by this architecture. Historical reference for the Celery ledger design: [ADR-16](adr/16-ingest-ledger.md).
 
 ```mermaid
 graph TD

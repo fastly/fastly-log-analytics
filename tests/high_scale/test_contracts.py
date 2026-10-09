@@ -133,7 +133,7 @@ def test_migration_fence_requires_drain_before_cutover_and_rollback() -> None:
     fence = MigrationFence(
         service_id="service",
         owner_epoch=7,
-        current_owner="high_throughput",
+        current_owner="standard",
         next_owner="high_scale",
         source_cursor="raw/request/file.gz#42",
         drain_complete=True,
@@ -146,7 +146,7 @@ def test_migration_fence_requires_drain_before_cutover_and_rollback() -> None:
     undrained = MigrationFence(
         service_id="service",
         owner_epoch=7,
-        current_owner="high_throughput",
+        current_owner="standard",
         next_owner="high_scale",
         source_cursor="raw/request/file.gz#42",
         cutover_committed=True,

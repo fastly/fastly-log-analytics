@@ -70,7 +70,7 @@ resources:
 
 # Fairness is intentionally expressed as scheduling policy, not as an
 # application/runtime mode. Operators can tune these per environment without
-# changing the existing standard/high_throughput startup paths.
+# changing the existing standard/high_scale startup paths.
 workloadFairness:
   priorityClassName: ""
   topologySpreadConstraints: []

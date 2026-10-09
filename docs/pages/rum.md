@@ -38,7 +38,7 @@ The **Real User Monitoring (RUM)** page captures browser-side telemetry delivere
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckLake tables `lake.client_vitals` and `lake.client_errors`. | Reads Postgres DuckLake or ClickHouse RUM tables. |
 | **Ingest Pipeline** | Driven by `rum_sync_{id}` and `rum_commit_{id}`. | Driven by `rum_discovery_{id}` and Celery workers. |

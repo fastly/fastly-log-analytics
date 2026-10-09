@@ -38,7 +38,7 @@ The **Edge Performance** page analyzes end-to-end delivery latency across Fastly
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `perf_dims` / `perf_latency` rollups. | Reads Postgres DuckLake / ClickHouse percentile aggregates. |
 | **Percentile Engine** | `approx_quantile(time_elapsed, [0.5, 0.9, 0.95, 0.99])`. | ClickHouse/Postgres t-digest / quantile approximations. |

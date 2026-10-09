@@ -38,7 +38,7 @@ The **Assets & Origin Shielding** page provides detailed caching diagnostics bro
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `origin_summary` / `perf_dims` rollups. | Reads Postgres DuckLake or ClickHouse asset tables. |
 | **Shield Evaluation** | Filter queries comparing `pop` vs `shield` headers. | Pre-aggregated shield dimension tables. |

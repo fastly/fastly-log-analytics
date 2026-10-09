@@ -64,7 +64,7 @@ never templated leaves the pod stuck in CreateContainerConfigError.
 */}}
 {{- define "fastly-log-analytics.managedSecret" -}}
 {{- if .Values.secrets.existingSecret -}}
-{{- else if or (eq .Values.config.deploymentMode "high_throughput") .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl -}}
+{{- else if or (eq .Values.config.deploymentMode "high_scale") .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl -}}
 true
 {{- end -}}
 {{- end }}
@@ -94,13 +94,13 @@ Name of the PVC holding configs/data/cache.
 Env block shared by backend, worker, and beat: broker/DSN via secretKeyRef
 plus the DuckLake settings.
 
-In celery mode both keys are marked non-optional. That is the only check the
+In high-scale mode the metadata DSN is marked non-optional. That is the only check the
 chart has left for a pre-created secrets.existingSecret it cannot read: a
 missing key stops the pod at CreateContainerConfigError naming the key,
 instead of starting it and letting validate_deployment_mode() CrashLoop it.
 */}}
 {{- define "fastly-log-analytics.sharedEnv" -}}
-{{- $highThroughput := eq .Values.config.deploymentMode "high_throughput" -}}
+{{- $highScale := eq .Values.config.deploymentMode "high_scale" -}}
 - name: DEPLOYMENT_MODE
   value: {{ .Values.config.deploymentMode | quote }}
 - name: SCHEDULER_MODE
@@ -111,13 +111,13 @@ instead of starting it and letting validate_deployment_mode() CrashLoop it.
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: CELERY_BROKER_URL
-      optional: {{ not $highThroughput }}
+      optional: true
 - name: METADATA_DSN
   valueFrom:
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: METADATA_DSN
-      optional: {{ not $highThroughput }}
+      optional: {{ not $highScale }}
 {{- end }}
 {{- if .Values.config.ducklakeCatalog }}
 - name: DUCKLAKE_CATALOG

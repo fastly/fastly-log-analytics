@@ -307,7 +307,7 @@ def test_contract_6_adaptive_budget_scaling(full_sync_test_source, monkeypatch):
     assert mock_ingest.call_args.kwargs["max_seconds"] == 1200
 
     # High-Scale mode: Celery queue depth > 5000 scales down to 5000
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr(
         "backend.celery_status.celery_queue_depths",
         lambda: ({"fastly:discovery": 6000, "fastly:convert": 100}, True),
@@ -324,7 +324,7 @@ def test_contract_7_high_scale_mode_prefix_discovery_attribution(full_sync_test_
     In High-Scale mode, discover_prefix executes full prefix LIST with originating_task="full_sync".
     """
     service_id = full_sync_test_source["service_id"]
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: full_sync_test_source)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *a, **kw: 999)

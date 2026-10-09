@@ -37,7 +37,7 @@ The **SQL Query Pad** provides an interactive SQL analytical development interfa
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **SQL Engine** | DuckDB in-process connection from pool with self-healing retry (`execute_with_stale_view_retry`). | Ephemeral read-only DuckDB connection over Postgres DuckLake catalog. |
 | **AST Validator** | Python SQLGlot / DuckDB EXPLAIN validation. | AST validator blocking non-SELECT queries. |

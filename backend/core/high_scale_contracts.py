@@ -1,8 +1,7 @@
-"""Contracts for the future high-scale data plane.
+"""Contracts for the high-scale data plane.
 
-This module deliberately does not enable a runtime deployment mode. It records
-the ownership and safety boundary that a high-scale implementation must satisfy
-before it can replace the existing standard or high-throughput paths.
+This module records the ownership and safety boundary that the high-scale
+implementation satisfies.
 """
 
 from __future__ import annotations

@@ -12,7 +12,7 @@ Validates the complete execution contract specified in docs/cron/jobs/partial-ho
      and re-accumulated from active-hour raw buffer files.
   7. Concurrent queries and reader resilience: transient I/O or corrupt files gracefully fall back
      to full live scan without FileNotFoundError or query failures.
-  8. High-throughput mode: exits in < 1ms with 0 files when buffer is empty.
+  8. High-scale mode: exits in < 1ms with 0 files when buffer is empty.
   9. Scheduler registration under FLA_DEV_NO_CRONS=1 and PARTIAL_HOUR_MERGE_INTERVAL_SEC override.
  10. QueryRunner active-hour speed layer integration: narrows live scan window and loads partial rows.
 """
@@ -336,11 +336,11 @@ def test_contract_concurrent_reader_resilience(mock_ph_env):
     assert len(read_counts) > 0
 
 
-def test_contract_high_throughput_mode_noop_in_sub_millisecond(mock_ph_env):
+def test_contract_high_scale_mode_noop_in_sub_millisecond(mock_ph_env):
     """High-Scale Mode: Detects 0 files in < 1ms and records successful cron run."""
     src = mock_ph_env["source"]
     service_id = mock_ph_env["service_id"]
-    src["deployment_mode"] = "high_throughput"
+    src["deployment_mode"] = "high_scale"
 
     # Empty buffer dir
     stats = ph.merge_partial_hour(service_id, src, ["status"])

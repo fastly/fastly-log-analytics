@@ -27,7 +27,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads committed/buffered logs for closed hours, writes missing bundles into `rollups/{service_id}/hour_bundles/`. | Exclusive per-service rollup lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). Yields via `should_defer_cron` if user queries are active. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Generates missing hour rollups from DuckLake view. Incremental startup catch-up capped via `max_missing_hours=1` until complete lookback coverage is verified. | Pod-local lock; never dispatched to Celery workers. Yields via `should_defer_cron` if user queries are active. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Generates missing hour rollups from DuckLake view. Incremental startup catch-up capped via `max_missing_hours=1` until complete lookback coverage is verified. | Pod-local lock; never dispatched to Celery workers. Yields via `should_defer_cron` if user queries are active. |
 
 ---
 

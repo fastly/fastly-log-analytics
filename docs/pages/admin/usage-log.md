@@ -37,7 +37,7 @@ The **Admin FOS Usage Ledger** page provides granular auditability into Fastly O
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Ledger Storage** | Unified PostgreSQL 16 metadata database. | Unified PostgreSQL 16 metadata database. |
 | **Lock Isolation** | PostgreSQL MVCC keeps usage-log writers from blocking dashboard readers. | PostgreSQL MVCC keeps usage-log writers from blocking dashboard readers. |

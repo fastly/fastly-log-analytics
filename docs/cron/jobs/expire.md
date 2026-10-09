@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to DuckLake catalog, issues SQL deletes, expires snapshots, unlinks unreferenced cloud files, cleans local cache. | Atomic per-service/per-task `expire_snapshots` lease in PostgreSQL `job_runs`. Gated by `FLA_DEV_NO_CRONS=1` (writes/deletes FOS). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Serving-pod APScheduler | Executes snapshot expiry against the Postgres DuckLake catalog. It is not dispatched to RedBeat or Celery; the snapshot log is catalog-wide under shared Postgres. | Atomic per-service `expire_snapshots` lease in PostgreSQL `job_runs`; DuckLake write connection for catalog mutations. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Serving-pod APScheduler | Executes snapshot expiry against the Postgres DuckLake catalog. It is not dispatched to RedBeat or Celery; the snapshot log is catalog-wide under shared Postgres. | Atomic per-service `expire_snapshots` lease in PostgreSQL `job_runs`; DuckLake write connection for catalog mutations. |
 
 ---
 

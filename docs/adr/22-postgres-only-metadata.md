@@ -1,14 +1,14 @@
 # ADR-22 — PostgreSQL-Only Unified Metadata and Catalog Storage
 
-**Status:** Accepted  
-**Decided by:** v3.0.0 PostgreSQL unification, superseding [ADR-15](15-multi-writer-topology.md) and amending [ADR-14](14-ducklake-replacement.md)  
-**Date:** 2026-09-24  
+**Status:** Accepted
+**Decided by:** v3.0.0 PostgreSQL unification, superseding [ADR-15](15-multi-writer-topology.md) and amending [ADR-14](14-ducklake-replacement.md)
+**Date:** 2026-09-24
 
 ---
 
 ## Context
 
-[ADR-15](15-multi-writer-topology.md) introduced a dual-mode storage topology: single-pod "standard" deployments used per-service SQLite files (`data/services/<id>.metadata.db`, `usage_log.db`, `remote_share.db`, `system_metrics.db`), while multi-pod "high_throughput" deployments used PostgreSQL via `METADATA_DSN` and a Postgres DuckLake catalog.
+[ADR-15](15-multi-writer-topology.md) introduced a dual-mode storage topology: single-pod "standard" deployments used per-service SQLite files (`data/services/<id>.metadata.db`, `usage_log.db`, `remote_share.db`, `system_metrics.db`), while multi-pod "high_scale" deployments used PostgreSQL via `METADATA_DSN` and a Postgres DuckLake catalog.
 
 In practice, maintaining dual-mode branching across every persistence layer caused severe operational and architectural liabilities:
 1. **Concurrency and Lock Contention:** SQLite's file-level locking (`SQLITE_BUSY`, WAL writer locks) caused cron sync writers to block reader endpoints for seconds at a time.
@@ -22,7 +22,7 @@ As part of the breaking `v3.0.0` major release, we decided to eliminate SQLite e
 
 ## Decision
 
-PostgreSQL 16 is now the sole, mandatory metadata and catalog storage engine for all deployment modes (`DEPLOYMENT_MODE=standard` and `DEPLOYMENT_MODE=high_throughput`). Every deployment requires valid `METADATA_DSN` and `DUCKLAKE_CATALOG` environment variables.
+PostgreSQL 16 is now the sole, mandatory metadata and catalog storage engine for all deployment modes (`DEPLOYMENT_MODE=standard` and `DEPLOYMENT_MODE=high_scale`). Every deployment requires valid `METADATA_DSN` and `DUCKLAKE_CATALOG` environment variables.
 
 ### 1. File-by-File Migration Summary
 
@@ -52,7 +52,7 @@ PostgreSQL 16 is now the sole, mandatory metadata and catalog storage engine for
   - Completely deleted `sqlite_pool.py` and its unit tests (`tests/core/test_sqlite_pool.py`).
 - **`backend/core/iceberg/_ducklake.py` & `backend/config.py`:**
   - Deleted local `.ducklake` file fallback in `_ducklake_attach()`; `DUCKLAKE_CATALOG` must be a Postgres DSN in all deployment modes.
-  - `config.validate_deployment_mode()` now requires `METADATA_DSN` and `DUCKLAKE_CATALOG` in both `standard` and `high_throughput` modes.
+  - `config.validate_deployment_mode()` now requires `METADATA_DSN` and `DUCKLAKE_CATALOG` in both `standard` and `high_scale` modes.
 - **Infrastructure (`docker-compose.yml`, `docker-compose.prod.yml`):**
   - Added a `postgres:16-alpine` service to local `docker-compose.yml` (on bridge network `app-network`, healthy dependency for `backend`).
   - Added a hardened `postgres:16-alpine` service to `docker-compose.prod.yml` using `network_mode: host`, loopback-only binding (`listen_addresses=127.0.0.1`), persistent storage on `/mnt/app-data/postgres`, and no default fallback password.

@@ -36,7 +36,7 @@ The **Admin Live Share Management** page provides complete administrative contro
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Share DB** | Local SQLite singleton `data/system/remote_share.db`. | Shared Postgres or SQLite remote share database. |
 | **Session Tracking** | In-memory token registry + SQLite session table. | Centralized session state table with TTL expiration. |

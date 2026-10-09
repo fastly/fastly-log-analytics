@@ -2,7 +2,7 @@
 
 The router only describes work.  It does not query ClickHouse, read the
 archive, or enqueue a job, which keeps route selection safe to use from both
-the existing standard routes and the opt-in high-throughput plane.
+the existing standard routes and the opt-in high-scale plane.
 """
 
 from __future__ import annotations

@@ -14,14 +14,14 @@ def _durable_source(tmp_path):
         "name": "durable-svc",
         "service_id": "durable-svc",
         "duckdb_path": str(tmp_path / "must-not-open.duckdb"),
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
         "bucket": "bucket",
         "prefix": "logs",
     }
 
 
 def test_durable_serving_uses_ephemeral_connection_and_never_opens_native_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
     source = _durable_source(tmp_path)
 
@@ -42,7 +42,7 @@ def test_durable_serving_uses_ephemeral_connection_and_never_opens_native_file(m
 
 
 def test_durable_serving_uses_writable_temp_directory(monkeypatch, tmp_path):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
     temp_dir = tmp_path / "duckdb-temp"
     monkeypatch.setenv("DUCKDB_TEMP_DIRECTORY", str(temp_dir))
@@ -64,7 +64,7 @@ def test_durable_serving_uses_writable_temp_directory(monkeypatch, tmp_path):
 
 
 def test_durable_serving_rejects_writable_connection(monkeypatch, tmp_path):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
 
     with pytest.raises(RuntimeError, match="only permits read-only"):
@@ -80,7 +80,7 @@ def test_sync_file_mode_keeps_native_service_path(monkeypatch, tmp_path):
 
 
 def test_durable_serving_holder_skips_file_backed_pool(monkeypatch, tmp_path):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
     source = _durable_source(tmp_path)
     fake_con = MagicMock()
@@ -101,7 +101,7 @@ def test_durable_serving_holder_skips_file_backed_pool(monkeypatch, tmp_path):
 
 
 def test_durable_view_does_not_consult_local_buffers(monkeypatch, tmp_path):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", "postgresql://pg/ducklake")
     source = _durable_source(tmp_path)
     source["log_fields"] = {}

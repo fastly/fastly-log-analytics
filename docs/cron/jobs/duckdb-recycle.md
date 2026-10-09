@@ -26,7 +26,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Cycles idle connections in `backend.core.duckdb_pool`; forces memory garbage collection and C-allocator heap trim. | Connection pool lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Cycles web serving pool connections; never scheduled to Celery workers. | Local pool lock. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Cycles web serving pool connections; never scheduled to Celery workers. | Local pool lock. |
 
 ---
 

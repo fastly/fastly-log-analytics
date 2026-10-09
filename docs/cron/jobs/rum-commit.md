@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads local RUM Parquet buffer, writes to FOS `ducklake/rum/`, commits to DuckLake catalog tables `client_vitals` and `client_errors`. | Exclusive per-service RUM commit lock. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Disabled | Handled by `rum_discovery_{service_id}` → Celery conversion/publication; recovery is owned by `ledger_rum_sweep_{service_id}`. | PostgreSQL ledger state and worker publication ownership. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Disabled | Handled by `rum_discovery_{service_id}` → Celery conversion/publication; recovery is owned by `ledger_rum_sweep_{service_id}`. | PostgreSQL ledger state and worker publication ownership. |
 
 ---
 

@@ -36,7 +36,7 @@ The **Admin Overview** page is the administrative mission control for Fastly Log
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Sync Status** | Reads local SQLite `cron_runs` and APScheduler job state. | Reads RedBeat Celery status and Postgres `ingest_ledger`. |
 | **Manual Trigger** | Invokes local job function directly in background thread. | Dispatches Celery task to worker queue. |

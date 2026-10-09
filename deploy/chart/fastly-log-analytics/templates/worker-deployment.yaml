@@ -1,4 +1,4 @@
-{{- if eq .Values.config.deploymentMode "high_throughput" -}}
+{{- if eq .Values.config.deploymentMode "high_scale" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

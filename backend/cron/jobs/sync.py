@@ -269,7 +269,7 @@ def _run_log_discovery_cron(
             logger.info("[scheduler] %s: skipping sync — %s", service_id, str(e))
             return
 
-        if svcconfig.is_high_throughput_mode(src):
+        if svcconfig.is_high_scale_mode(src):
             # Celery/ledger data plane: run discovery INLINE (this job already
             # executes on a worker via RedBeat in external mode) so the
             # cron_runs row carries the real outcome — files discovered, real
@@ -288,7 +288,7 @@ def _run_log_discovery_cron(
                     0.0,
                     "error",
                     run_id=run_id,
-                    error_message="DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL",
+                    error_message="DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL",
                     summary="Celery ingest misconfigured: no broker URL",
                 )
                 return
@@ -946,7 +946,7 @@ def _run_full_sweep(
     if max_files == _FULL_SWEEP_DEFAULT_MAX_FILES:
         if configured_max_files is not None:
             effective_max_files = int(configured_max_files)
-        elif svcconfig.is_high_throughput_mode(src):
+        elif svcconfig.is_high_scale_mode(src):
             try:
                 from backend.celery_status import celery_queue_depths
 
@@ -976,7 +976,7 @@ def _run_full_sweep(
     if max_seconds == _FULL_SWEEP_DEFAULT_MAX_SECONDS and configured_max_seconds is not None:
         effective_max_seconds = int(configured_max_seconds)
 
-    if svcconfig.is_high_throughput_mode(src):
+    if svcconfig.is_high_scale_mode(src):
         # Celery data plane: the catch-net is a full-prefix LIST diffed into
         # the ingest_ledger (converts fan out from there). Running the v2
         # file-based ingest here would open the per-service .duckdb from a

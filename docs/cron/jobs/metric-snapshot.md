@@ -10,7 +10,7 @@
 - **Job Identifier:** `metric_snapshot`
 - **Category:** Host, Runtime & Connection Pool Observability
 - **Purpose:** Samples container-level and host-level operational vitals every 60 seconds (CPU 1-minute load, resident memory %, disk usage %, DuckDB connection pool wait times, cron durations, ingest lag, active query count, DuckLake admission times, Celery queue depths, Celery worker counts, and ingest ledger status tallies).
-- **Storage Target:** Stored into SQLite `data/system/system_metrics.db` (standard mode) or shared PostgreSQL `metric_snapshots` (multi-pod high-throughput mode) to drive the System Health sparklines and Trends tab (`/admin/trends`).
+- **Storage Target:** Stored into SQLite `data/system/system_metrics.db` (standard mode) or shared PostgreSQL `metric_snapshots` (multi-pod high-scale mode) to drive the System Health sparklines and Trends tab (`/admin/trends`).
 - **Why It Runs:** Real-time visibility into internal application health is essential for diagnosing query bottlenecks, memory growth, and disk exhaustion. Without high-frequency sampling, resource contention or DuckDB connection starvation cannot be correlated with analytical query loads.
 
 ---
@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Samples OS vitals via `os` / `/proc` / `shutil`, probes DuckDB pool status, writes to SQLite `data/system/system_metrics.db`. | Local SQLite write lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Samples pod-local runtime vitals and connection pools, queries PostgreSQL ledger and Celery broker queues; writes to PostgreSQL `metric_snapshots`. | PostgreSQL connection pool. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Samples pod-local runtime vitals and connection pools, queries PostgreSQL ledger and Celery broker queues; writes to PostgreSQL `metric_snapshots`. | PostgreSQL connection pool. |
 
 ---
 
@@ -52,7 +52,7 @@
 3. **Query Engine & Queue Probing:**
    - Queries `query_registry.summary()` for `active_query_count`.
    - Probes Celery queue depths (`celery_queue_depth_{queue}`, `celery_broker_reachable`) and inspects active workers and tasks.
-   - In high-throughput mode: probes PostgreSQL `ingest_ledger_summary()` for ledger status counts.
+   - In high-scale mode: probes PostgreSQL `ingest_ledger_summary()` for ledger status counts.
 4. **OS Metric Probing:**
    - Reads 1-minute load average via `os.getloadavg()`.
    - Reads memory used percentage via `/proc/meminfo` (Linux).

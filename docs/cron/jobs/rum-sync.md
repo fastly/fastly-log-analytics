@@ -33,7 +33,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads FOS `raw/rum/**/*.gz`, parses vitals and errors into local Parquet buffers `cache/{bucket}/rum/`. | Per-service RUM ingest lock. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Disabled | Handled by `rum_discovery_{service_id}` through RedBeat and Celery workers; see the separate job specification. | N/A |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Disabled | Handled by `rum_discovery_{service_id}` through RedBeat and Celery workers; see the separate job specification. | N/A |
 
 ---
 

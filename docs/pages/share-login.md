@@ -36,7 +36,7 @@ The **Analyst Share Login** page is the secure entry point for external analysts
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Auth Database** | Local SQLite singleton `data/system/remote_share.db`. | Shared Postgres or SQLite remote share database. |
 | **Password Hashing** | Argon2id (with legacy scrypt verification fallback). | Argon2id password hashing. |

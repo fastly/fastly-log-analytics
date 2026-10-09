@@ -7,7 +7,6 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-from backend import config
 from backend.models.admin import HealthSnapshotResponse
 
 from ._router import router
@@ -271,27 +270,8 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         except Exception:
             out["fos"] = None
 
-    # ── Celery Metrics ───────────────────────────────────────────────
-    try:
-        if config.DEPLOYMENT_MODE == "high_throughput":
-            from backend.celery_app import app as celery_app
-            from backend.celery_status import celery_queue_depths
-
-            i = celery_app.control.inspect(timeout=0.5)
-            active = i.active()
-            worker_count = len(active) if active else 0
-
-            queues, broker_reachable = celery_queue_depths()
-            out["celery"] = {
-                "queue_depth": sum(queues.values()),
-                "active_workers": worker_count,
-                "broker_reachable": broker_reachable,
-            }
-        else:
-            out["celery"] = None
-    except Exception as e:
-        logger.warning("[health] Celery probe failed: %s", str(e)[:200])
-        out["celery"] = None
+    # ── Celery Metrics (Deprecated) ──────────
+    out["celery"] = None
 
     return out
 

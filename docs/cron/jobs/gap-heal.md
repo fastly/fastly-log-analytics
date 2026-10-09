@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries Fastly `/stats/service` and compares with DuckDB row counts; triggers `_run_full_sweep` if sustained loss occurs. | Read-only accounting query. Active-request deferral (`should_defer_cron("gap_heal", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers / Web Pod | Compares Fastly API metrics against `ingest_ledger` / DuckLake counts; enqueues sweep tasks via `discover_prefix`. | Distributed PostgreSQL locking. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Workers / Web Pod | Compares Fastly API metrics against `ingest_ledger` / DuckLake counts; enqueues sweep tasks via `discover_prefix`. | Distributed PostgreSQL locking. |
 
 ---
 

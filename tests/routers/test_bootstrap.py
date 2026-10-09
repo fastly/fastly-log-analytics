@@ -85,11 +85,11 @@ def test_bootstrap_projects_path_a_capability_for_sync_services(client, tmp_path
 
 
 def test_bootstrap_projects_path_a_capability_for_celery_services(client, tmp_path, monkeypatch):
-    """Celery/DuckLake services advertise Path A as unavailable with the Path B remedy."""
+    """High-scale services advertise Path A as unavailable with the Path B remedy."""
     from backend import config
 
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
-    monkeypatch.setattr(config, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(config, "DEPLOYMENT_MODE", "high_scale")
     config.save_config(MOCK_SERVICE_ID, {"service_id": MOCK_SERVICE_ID, "raw_layout_version": 3})
 
     response = client.get("/api/bootstrap", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
@@ -97,7 +97,7 @@ def test_bootstrap_projects_path_a_capability_for_celery_services(client, tmp_pa
     service = response.json()["services"][0]
     assert service["analyst_path_a_supported"] is False
     assert service["analyst_path_a_reason"] == (
-        "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+        "Independent analyst access is unavailable for high-scale services. "
         "Use live shared-instance analyst access (Path B)."
     )
 

@@ -43,7 +43,7 @@ _bootstrap_inflight: dict[str, asyncio.Future] = {}
 _HEADER_BADGE_CACHE_TTL_S = 30.0
 _header_badge_cache: dict[str, tuple[float, dict | None, dict | None, dict]] = {}
 _ANALYST_PATH_A_UNSUPPORTED_REASON = (
-    "Independent analyst access is unavailable for scalable Celery/DuckLake services. "
+    "Independent analyst access is unavailable for high-scale services. "
     "Use live shared-instance analyst access (Path B)."
 )
 

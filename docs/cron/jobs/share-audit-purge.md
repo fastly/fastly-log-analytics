@@ -24,7 +24,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to `data/system/remote_share.db`, executes SQL deletes, checkpoints WAL. | ThreadLocalPool connection lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Prunes remote share database on web serving pod; never scheduled to Celery workers. | Local SQLite lock. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Prunes remote share database on web serving pod; never scheduled to Celery workers. | Local SQLite lock. |
 
 ---
 

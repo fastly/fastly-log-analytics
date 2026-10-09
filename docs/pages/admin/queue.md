@@ -37,7 +37,7 @@ The **Admin Task Queue & Ingest Ledger** page provides deep operational visibili
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Queue Backend** | Shows simulated in-process APScheduler task queues. | Queries live Celery broker (Valkey/Redis) & Postgres `ingest_ledger`. |
 | **Ledger Operations** | Reads SQLite `ingested_files`. | Full distributed `ingest_ledger` table with recovery actions. |

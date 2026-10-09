@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Removed `DEPLOYMENT_MODE=high_throughput`** — The intermediate Celery ledger mode has been completely removed in favor of `DEPLOYMENT_MODE=standard` (sync DuckDB + DuckLake) and `DEPLOYMENT_MODE=high_scale` (ClickHouse and dedicated micro-batching workers). Setting `DEPLOYMENT_MODE=high_throughput` is explicitly rejected at boot and Helm template time.
 - The legacy `GET /api/admin/quarantine/export` and
   `GET /api/admin/quarantine/{quarantine_id}/download` endpoints were removed.
   Quarantine now exposes paginated per-item evidence and exact-byte downloads

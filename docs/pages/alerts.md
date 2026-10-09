@@ -37,7 +37,7 @@ The **Alerts** page manages automated anomaly detection rules, threshold trigger
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Alert Engine** | Evaluated by in-process APScheduler job `alerts_evaluation_{id}`. | Evaluated by pod-local APScheduler against shared lake. |
 | **Alert State DB** | Per-service SQLite `metadata.db` (`alerts` & `alert_history` tables). | Shared Postgres or per-service SQLite database. |

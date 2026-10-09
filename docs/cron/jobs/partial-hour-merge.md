@@ -27,7 +27,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Scans local buffer files for current UTC hour in `cache/{bucket}/buffer/`, incrementally aggregates into `rollups/partial_hour/hour=<H>/all_fields.parquet`. | Pod-local rollup write lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). Yields via `should_defer_cron` if user queries are active. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Because Celery workers write directly into the shared DuckLake table, local buffer directories are empty. The job detects 0 local files and exits in < 1ms. Active-hour queries on the web pod query DuckLake directly with partition pruning (~150-250ms). | Pod-local execution; read-only DuckLake connection. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Because Celery workers write directly into the shared DuckLake table, local buffer directories are empty. The job detects 0 local files and exits in < 1ms. Active-hour queries on the web pod query DuckLake directly with partition pruning (~150-250ms). | Pod-local execution; read-only DuckLake connection. |
 
 ---
 

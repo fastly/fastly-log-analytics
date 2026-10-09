@@ -6,7 +6,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `local_compact_{service_id}`
 - **Category:** Local Storage Compaction & Query Accelerator
-- **Purpose:** Compaction of small, fragmented local Parquet files into size-capped consolidated Parquet partitions (hourly, daily, weekly tiers) to maintain high-throughput vectorized DuckDB scan speeds.
+- **Purpose:** Compaction of small, fragmented local Parquet files into size-capped consolidated Parquet partitions (hourly, daily, weekly tiers) to maintain high-speed vectorized DuckDB scan speeds.
 - **Why It Runs:** Continuous streaming ingest produces dozens of small files per hour. Unchecked, this causes file descriptor exhaustion, excessive seek latency, and DuckDB scan slowdowns. Local compaction bin-packs small files into optimal chunks (<= 256MB) strictly on local disk without generating expensive cloud FOS API charges.
 
 ---
@@ -28,7 +28,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Scans local `cache/{bucket}/` and `data/parquet/`, merges small files via DuckDB, writes compacted files, atomic rename. | Local file lock per service partition. Explicitly ALLOWED under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Scans `ingest_ledger` for hours committed in the last 15 minutes and executes `recompute_touched_hours()` to maintain fresh serving-pod Top-N rollups. Skipped on worker nodes. | Pod-local lock; read-only access to DuckLake via ephemeral connection. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Scans `ingest_ledger` for hours committed in the last 15 minutes and executes `recompute_touched_hours()` to maintain fresh serving-pod Top-N rollups. Skipped on worker nodes. | Pod-local lock; read-only access to DuckLake via ephemeral connection. |
 
 ---
 

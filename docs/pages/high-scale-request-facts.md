@@ -38,7 +38,7 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Engine Availability** | Emulates facts view via DuckDB partitioned table scan. | Direct execution against ClickHouse MergeTree tables (`request_facts`, `high_scale_batch_publications`). |
 | **Scalability** | Up to tens of millions of rows. | Hundreds of millions to billions of rows at sustained 2M-5M RPS. |

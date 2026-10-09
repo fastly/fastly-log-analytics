@@ -38,7 +38,7 @@ The **Control Room** is the real-time operations console for Fastly Log Analytic
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads local DuckDB `logs` view and local Parquet buffers. | Queries Postgres DuckLake / ClickHouse read-only engine. |
 | **Telemetry Stream** | In-process SSE stream from recent ingest buffer. | Redis pub/sub or Celery streaming bridge. |

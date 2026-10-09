@@ -38,7 +38,7 @@ The **Origin Health** page focuses on backend origin infrastructure, shielding e
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `origin_summary` / `origin_dims` rollups. | Reads Postgres DuckLake / ClickHouse origin tables. |
 | **Rollup Optimization** | Leverages `origin_latency_ts` rollup parquet files for instant 30d views. | Leverages server-side pre-aggregates. |

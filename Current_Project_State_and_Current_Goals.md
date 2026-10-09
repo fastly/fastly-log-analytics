@@ -196,7 +196,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Cron 1 (`log_discovery_{servi
 - **Zero FOS Egress Certified:** Local compaction operates strictly on local disk (`cache/{bucket}/data/`) via in-memory DuckDB connections (`get_memory_connection()`), generating zero outbound S3/FOS API calls or billing impact.
 - **ENOSPC Disk Pre-check:** Added pre-merge disk checks in `_compact_single_partition` and `_rollup_bins` that verify available space >= 2x target bin size before initiating merge operations, safely skipping and warning on low disk space.
 - **Admin Control Parity & Scheduler Cadence:** Added `@router.post("/admin/compact/{service_id}")` and `@router.get("/admin/compaction-status")` / `@router.get("/admin/compaction-status/{service_id}")` to `backend/routers/admin/compaction.py`. The scheduler honors `LOCAL_COMPACT_INTERVAL_MIN` (default 2 min, jitter 10s, misfire grace 60s) in both standard `_sync_jobs` and `_register_dev_local_safe_jobs` under `FLA_DEV_NO_CRONS=1`.
-- **High-Throughput Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
+- **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
 Next target: proceed to Cron 4 (`partial_hour_merge_{service_id}`).

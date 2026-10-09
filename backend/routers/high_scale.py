@@ -1,7 +1,7 @@
 """Explicit high-scale request-fact query surface.
 
-This namespace is intentionally separate from the standard and
-high-throughput analytics routes. Analysts may use the read-only POST query
+This namespace is intentionally separate from the standard
+analytics routes. Analysts may use the read-only POST query
 through ``_ANALYST_ALLOWED_WRITE_PREFIXES`` in ``remote_access.py``.
 """
 

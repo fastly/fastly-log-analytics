@@ -187,7 +187,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "cache_file_count": cache_file_count,
                 "log_row_count": log_row_count,
                 "is_active": sid == active_service_id,
-                "analyst_path_a_supported": not svcconfig.is_high_throughput_mode(src_dict),
+                "analyst_path_a_supported": not svcconfig.is_high_scale_mode(src_dict),
                 "cron_stats": cron_stats,
                 "status": cached_status,
                 "cron_sync": prov.get(

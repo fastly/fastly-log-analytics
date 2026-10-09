@@ -420,7 +420,7 @@ def get_top_bots(
     ngwaf_bots: list[dict] = []
 
     # QueryRunner owns the durable-mode coverage gate. Keeping this path
-    # enabled lets ready high-throughput services avoid a full-range UA scan.
+    # enabled lets ready high-scale services avoid a full-range UA scan.
     use_rollups = not filters
 
     # ── Arcjet UA matching ──────────────────────────────────────────

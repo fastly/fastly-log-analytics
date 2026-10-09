@@ -8,7 +8,7 @@
 # (config.deploymentMode: standard) and need NOTHING but a cluster with a
 # ReadWriteOnce StorageClass — `helm install` with no --set flags works.
 #
-# The scaled topology (config.deploymentMode: high_throughput) needs two datastores that
+# The scaled topology (config.deploymentMode: high_scale) needs two datastores that
 # this chart does NOT ship: it declares no subchart dependencies, so Postgres
 # and valkey/redis are bring-your-own. See README.md for the value set, and
 # note that selecting celery mode without them fails at `helm template` time
@@ -141,23 +141,18 @@ config:
   #            app's own default (backend/config.py: DEPLOYMENT_MODE) and the only
   #            mode that installs with no further values, so it is the chart
   #            default too.
-  # "high_throughput" — the horizontally-scaled ingest fleet (ADR-15/ADR-16). Renders
-  #            the worker + beat Deployments and the KEDA ScaledObject, and
-  #            REQUIRES all three of config.ducklakeCatalog,
-  #            secrets.metadataDsn and secrets.celeryBrokerUrl (or an
-  #            existingSecret carrying the latter two). Both DSNs must be
-  #            Postgres: a DuckDB-file catalog is single-process and per-pod
-  #            SQLite metadata cannot serialize the cron lease across pods.
-  #            backend/config.py::validate_deployment_mode() enforces the same
-  #            three conditions at boot; templates/validate.yaml enforces them
-  #            at template time so a misconfiguration is a `helm install`
-  #            error, not a CrashLoopBackOff.
+  # "high_scale" — the horizontally-scaled topology (ClickHouse + high-scale worker).
+  #            REQUIRES config.ducklakeCatalog and secrets.metadataDsn.
+  #            Both DSNs must be Postgres per ADR-22.
+  #            backend/config.py::validate_deployment_mode() enforces this at boot;
+  #            templates/validate.yaml enforces them at template time so a
+  #            misconfiguration is a `helm install` error, not a CrashLoopBackOff.
   #
   # Note this scales INGEST only. The serving tier stays single-pod in both
   # modes — see replicaCount above and docs/adr/18-serving-tier-single-pod.md.
   deploymentMode: standard
   # "external" hands the discovery/ingest job family to RedBeat in the broker,
-  # so it only makes sense with deploymentMode: high_throughput (enforced at
+  # so it only makes sense with deploymentMode: high_scale (enforced at
   # template time).
   schedulerMode: inprocess
   # "valkey" fans SSE events out across pods via the Celery broker, so it
@@ -205,7 +200,7 @@ config:
   duckdbThreads: "2"
   # DuckLake catalog DSN. Empty = the pod-local `.ducklake` file catalog,
   # which is correct for deploymentMode: standard and rejected for
-  # deploymentMode: high_throughput
+  # deploymentMode: high_scale
   # (which requires postgres:// or postgresql://).
   ducklakeCatalog: ""
   ducklakeDataPath: ""
@@ -213,7 +208,7 @@ config:
 
 # Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
 # does not take a redis:// URL). Only read when autoscaling.enabled and
-# deploymentMode: high_throughput. Keep in sync with secrets.celeryBrokerUrl.
+# deploymentMode: high_scale. Keep in sync with secrets.celeryBrokerUrl.
 broker:
   host: valkey-master
   port: 6379
@@ -226,12 +221,12 @@ broker:
 # anyone with helm access.
 # Both are empty by default because the default (sync) install needs neither,
 # and an unused broker URL pointing at a valkey that may not exist is worse
-# than no default at all. In celery mode both are required — either here or,
+# than no default at all. In high-scale mode both are required — either here or,
 # preferred, via existingSecret.
 secrets:
   # Name of a pre-created Secret. When set, no Secret is templated and
   # celeryBrokerUrl/metadataDsn below are ignored. It must carry
-  # CELERY_BROKER_URL (and METADATA_DSN in celery mode) — the chart cannot
+  # CELERY_BROKER_URL (and METADATA_DSN in high-scale mode) — the chart cannot
   # read a Secret it did not create, so a missing key surfaces as the pod
   # failing to start with "couldn't find key ... in Secret".
   existingSecret: ""
@@ -241,7 +236,7 @@ secrets:
   metadataDsn: ""
 
 # Worker and beat Deployments are rendered only in deploymentMode:
-# high_throughput.
+# high_scale.
 workers:
   # Same RWO-PVC caveat as replicaCount above.
   replicaCount: 1
@@ -312,7 +307,7 @@ observability:
       brokerUrl: "redis://valkey-master:6379/0"
 
 # Portable high-scale application plane. Disabled by default so standard and
-# high_throughput render exactly their existing workload set. Enabling this
+# high_scale render exactly their existing workload set. Enabling this
 # local subchart adds the executable high-scale ingest worker and its policies.
 # Archive, query, replay, and control-plane stanzas remain disabled until their
 # standalone entrypoints exist. ClickHouse and Keeper remain external

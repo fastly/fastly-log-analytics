@@ -27,7 +27,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Full S3 LIST on FOS raw prefix, cross-checks PostgreSQL `ingested_files` (per ADR-22), ingests missing `.gz` files into local buffer. | Exclusive per-service ingest lock. Active-request deferral (`should_defer_cron("full_sync", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers / Web Pod | Full S3 LIST via `discover_prefix`, bulk inserts unrecorded keys into PostgreSQL `ingest_ledger`, dispatches worker conversion tasks. | Distributed PostgreSQL row locks. Celery queue-depth adaptive throttling. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Workers / Web Pod | Full S3 LIST via `discover_prefix`, bulk inserts unrecorded keys into PostgreSQL `ingest_ledger`, dispatches worker conversion tasks. | Distributed PostgreSQL row locks. Celery queue-depth adaptive throttling. |
 
 ---
 

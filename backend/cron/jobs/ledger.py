@@ -1,6 +1,6 @@
 """Celery/ledger-mode crash recovery and dead-letter maintenance cron job.
 
-Acts as the automated crash-net for High-Scale (DEPLOYMENT_MODE=high_throughput)
+Acts as the automated crash-net for High-Scale (DEPLOYMENT_MODE=high_scale)
 distributed ingestion. Reclaims stuck worker claims in PostgreSQL ingest_ledger,
 re-dispatches stranded tasks with queue-depth guards, records permanently failing
 objects as dead_letter/quarantined, and diffs FOS to catch up on unrecorded keys.
@@ -20,7 +20,7 @@ logger = logging.getLogger("backend.scheduler")
 def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
     """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
     rows, and diff a lookback FOS LIST against the ledger. Registered by the
-    scheduler only when high-throughput mode."""
+    scheduler only when high-scale mode."""
     from backend.cron.scheduler import dev_mode_no_crons
 
     if dev_mode_no_crons():
@@ -35,7 +35,7 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
     if not cfg:
         return
     src = get_source_for_service(service_id)
-    if src is None or not svcconfig.is_high_throughput_mode(src):
+    if src is None or not svcconfig.is_high_scale_mode(src):
         return
     if src.get("access_level") == "read_only":
         return

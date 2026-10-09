@@ -1,7 +1,7 @@
-"""Boot-time gate on incoherent ``DEPLOYMENT_MODE=high_throughput`` configuration.
+"""Boot-time gate on incoherent ``DEPLOYMENT_MODE=high_scale`` configuration and rejection of legacy ``high_throughput``.
 
 ``config.validate_deployment_mode()`` is the only thing standing between a
-half-configured high-throughput deployment and a fleet that degrades invisibly. It
+half-configured high-scale deployment and a fleet that degrades invisibly. It
 runs from BOTH entry points — the backend lifespan (``main.py``) and
 ``worker_process_init`` in ``celery_app.py`` — so every process refuses to
 start rather than one of them silently operating on pod-local state.
@@ -31,12 +31,9 @@ _PG = "postgresql://fla:pw@pg:5432/ducklake"
 
 
 @pytest.fixture
-def celery_env(monkeypatch):
-    """A fully coherent celery-mode configuration. Each test knocks out the
-    one piece it is asserting on, so a passing test proves that piece is
-    load-bearing rather than that some unrelated field was missing."""
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
-    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "redis://valkey:6379/0")
+def high_scale_env(monkeypatch):
+    """A fully coherent high_scale configuration."""
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
     monkeypatch.setenv("METADATA_DSN", _PG)
     return monkeypatch
@@ -52,14 +49,15 @@ def test_sync_mode_requires_postgres_dsns_but_no_broker(monkeypatch):
     assert svcconfig.validate_deployment_mode() is None
 
 
-def test_coherent_celery_config_passes(celery_env):
+def test_coherent_high_scale_config_passes(high_scale_env):
     assert svcconfig.validate_deployment_mode() is None
 
 
-def test_celery_requires_broker(celery_env):
-    celery_env.setattr(svcconfig, "CELERY_BROKER_URL", "")
-
-    with pytest.raises(RuntimeError, match="requires CELERY_BROKER_URL"):
+def test_high_throughput_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    with pytest.raises(
+        RuntimeError, match="DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'"
+    ):
         svcconfig.validate_deployment_mode()
 
 
@@ -68,8 +66,8 @@ def test_celery_requires_broker(celery_env):
     ["", "/app/data/services/svc.ducklake", "svc.ducklake"],
     ids=["unset", "absolute-file", "relative-file"],
 )
-def test_celery_rejects_non_postgres_ducklake_catalog(celery_env, catalog):
-    celery_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
+def test_high_scale_rejects_non_postgres_ducklake_catalog(high_scale_env, catalog):
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
 
     with pytest.raises(RuntimeError, match="requires DUCKLAKE_CATALOG to be a Postgres DSN"):
         svcconfig.validate_deployment_mode()
@@ -80,35 +78,32 @@ def test_celery_rejects_non_postgres_ducklake_catalog(celery_env, catalog):
     [None, "", "/app/data/services/svc.metadata.db", "sqlite:///app/data/svc.metadata.db"],
     ids=["unset", "empty", "sqlite-path", "sqlite-url"],
 )
-def test_celery_rejects_non_postgres_metadata_dsn(celery_env, dsn):
-    """The gate ADR-15 claimed existed. Per-pod SQLite metadata in celery
-    mode is the failure this prevents: it boots clean and then every worker
-    re-discovers the same objects because no lease is shared."""
+def test_high_scale_rejects_non_postgres_metadata_dsn(high_scale_env, dsn):
     if dsn is None:
-        celery_env.delenv("METADATA_DSN", raising=False)
+        high_scale_env.delenv("METADATA_DSN", raising=False)
     else:
-        celery_env.setenv("METADATA_DSN", dsn)
+        high_scale_env.setenv("METADATA_DSN", dsn)
 
     with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
         svcconfig.validate_deployment_mode()
 
 
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql"])
-def test_both_postgres_url_schemes_accepted(celery_env, scheme):
+def test_both_postgres_url_schemes_accepted(high_scale_env, scheme):
     """libpq accepts both spellings; the gate must not reject the short one
     and send an operator hunting a phantom misconfiguration."""
     dsn = f"{scheme}://fla:pw@pg:5432/db"
-    celery_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
-    celery_env.setenv("METADATA_DSN", dsn)
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
+    high_scale_env.setenv("METADATA_DSN", dsn)
 
     assert svcconfig.validate_deployment_mode() is None
 
 
-def test_metadata_dsn_error_names_the_shared_state_at_risk(celery_env):
+def test_metadata_dsn_error_names_the_shared_state_at_risk(high_scale_env):
     """The message must explain WHY, matching the DuckLake error's style —
     an operator seeing it should not need to read the source to know what
     breaks."""
-    celery_env.delenv("METADATA_DSN", raising=False)
+    high_scale_env.delenv("METADATA_DSN", raising=False)
 
     with pytest.raises(RuntimeError) as exc:
         svcconfig.validate_deployment_mode()
@@ -126,7 +121,7 @@ def test_unknown_deployment_mode_is_rejected(monkeypatch):
         svcconfig.validate_deployment_mode()
 
 
-@pytest.mark.parametrize("mode", ["standard", "high_throughput"])
+@pytest.mark.parametrize("mode", ["standard", "high_scale"])
 def test_config_to_source_emits_deployment_mode(monkeypatch, tmp_path, mode):
     monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
     monkeypatch.setattr(svcconfig, "duckdb_path", lambda _service_id: str(tmp_path / "service.duckdb"))

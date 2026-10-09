@@ -57,9 +57,9 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 
 The DuckDB `logs` view stitches the DuckLake table and the local Parquet buffer
 so queries always see all data without callers caring which layer holds which
-row. In the explicit `DEPLOYMENT_MODE=high_throughput` Celery/Postgres topology, serving
-connections are ephemeral in-memory DuckDB instances and the view reads only
-the durable DuckLake table; native service files and local buffers are not
+row. In the explicit `DEPLOYMENT_MODE=high_scale` topology, serving
+connections use ClickHouse or ephemeral in-memory DuckDB instances reading
+durable state; native service files and local buffers are not
 opened by the serving path. Sync/file mode retains the local-buffer behavior.
 
 ### Package layout (post v2.0 carve-ups)
@@ -86,7 +86,7 @@ Other new modules introduced by the cleanup:
 - [`backend/core/request_context.py`](backend/core/request_context.py) — Phase 2 single FastAPI dependency that bundles `service_id`, `source`, `con`, `telemetry`, `analyst_session`, `cached_temps`. Replaces the v1 `AnalyticsDeps` bundle (deleted at the v2.0 cut — Phase 8.1/8.2) and folds `require_service_access` into context construction (there is no path that builds a context without enforcing tenancy). 23 analytics endpoints across 8 routers (dashboard / query / sessions / security / network / origin / performance / insights) now take `ctx: RequestContext = Depends(build_request_context)` directly.
 - [`backend/core/request_telemetry.py`](backend/core/request_telemetry.py) — Phase 1 thin wrapper around the OTel tracer that owns section spans, query attribution, call log, cache state, and the `app.thread_wait_ms` custom metric instrumented at `_Pool.acquire`. Lives on `RequestContext`.
 - [`backend/core/metadata/pg_connection.py`](backend/core/metadata/pg_connection.py) — PostgreSQL 16 connection pooling (`psycopg_pool.ConnectionPool`), thread-local connection reuse, autocommit statement execution, and instrumented profiling via `sqlite_profiler.record_statement` (see [ADR-22](docs/adr/22-postgres-only-metadata.md)).
-- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py). `DEPLOYMENT_MODE=standard` preserves synchronous ingest and file-backed serving; `DEPLOYMENT_MODE=high_throughput` requires Postgres DuckLake and serves from ephemeral read-only connections. Both require `METADATA_DSN` and `DUCKLAKE_CATALOG`.
+- **Env / config handling** — there is no central settings class. App-level env vars are read via `os.getenv` at their use sites (e.g. `OTEL_EXPORTER` in [request_telemetry.py](backend/core/request_telemetry.py), `STRUCTLOG_FORMAT` in [structlog_config.py](backend/utils/structlog_config.py), pool tuning in [duckdb_pool.py](backend/core/duckdb_pool.py)); per-service credentials/settings live in `configs/{id}.json` loaded by [backend/config.py](backend/config.py). `DEPLOYMENT_MODE=standard` preserves synchronous ingest and file-backed serving; `DEPLOYMENT_MODE=high_scale` requires ClickHouse, Postgres, and durable serving. Both require `METADATA_DSN` and `DUCKLAKE_CATALOG`.
 - [`backend/core/iceberg/_core.py`](backend/core/iceberg/_core.py) `execute_with_stale_view_retry(con, src, fn)` — self-heal wrapper for code paths that open raw DuckDB connections instead of going through `QueryRunner`. On stale-buffer "No files found" errors, busts `_view_cache` via `clear_source_caches(keep_snapshot_cache=True)` + `update_iceberg_view(force=True)` then retries `fn` once. Used by `rdns_cache` discovery, `rollups` DESCRIBE sites, and `/api/query`. Pre-fix prod incidents: ~8h of 100%-failing rdns runs + analyst-visible query errors on the same buffer-deletion race.
 
 ### Personas (where the two onboarding paths live)
@@ -101,7 +101,7 @@ The README explains the two collaboration modes for end users. Implementation po
 
 ## Ingest Pipeline
 
-Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous ingest, while `high_throughput` uses the Celery ledger data plane. Both commit to the same DuckLake table and the same unified `logs` view; see [ADR-14](docs/adr/14-ducklake-replacement.md)/[ADR-15](docs/adr/15-multi-writer-topology.md)/[ADR-16](docs/adr/16-ingest-ledger.md) for the full design.
+Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous DuckDB + DuckLake ingest, while `high_scale` uses ClickHouse ingest and micro-batching. Both provide analytical querying over logs; see [docs/runbooks/high-scale-capacity-and-recovery.md](docs/runbooks/high-scale-capacity-and-recovery.md) for the high-scale design.
 
 **Default (`sync`) mode** — APScheduler runs these per-service (plus per-service `alerts` evaluation + `insights_prewarmer`, and process-global maintenance jobs — see the [Scheduler](#scheduler-backendcron) note). Job names were renamed from `sync_{id}`/`commit_{id}` to the pair below during the v3.0.0-beta1 rework — grep history for the old names if you're reading pre-v3 code or logs:
 
@@ -120,7 +120,7 @@ Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous i
 | `rum_commit_{id}` | post-sync immediate + 1m fallback | Drains `client_vitals` and `client_errors` buffers into DuckLake, recomputes aggregates, persists RUM extents, and emits `sync_status` SSE. |
 | `metadata_sync_{id}` | varies | Sync admin state to FOS, flush usage log |
 
-**`DEPLOYMENT_MODE=high_throughput` mode** — discovery and conversion fan out across Celery workers instead of running in one pod's scheduler loop, backed by the `ingest_ledger` state machine (`discovered → claimed → committed`/`quarantined`/`dead_letter`). `log_discovery_{id}`/`commit_{id}` still exist as job names but run inline on a RedBeat-scheduled worker rather than the backend's APScheduler, plus a new `ledger_sweep_{id}` job (crash-net recovery: reclaims stuck claims, re-dispatches lost messages with a queue-depth guard, catches up via an FOS-diff). Requires a Postgres `DUCKLAKE_CATALOG` and `METADATA_DSN` (enforced at boot by `config.validate_deployment_mode()`) — a file-based catalog cannot serve concurrent worker writers. RUM beacon ingest is ported to this mode too (`rum_discovery_{id}` + `ledger_rum_sweep_{id}` in [backend/cron/jobs/rum_ledger.py](backend/cron/jobs/rum_ledger.py), both in `_REDBEAT_JOB_PREFIXES`); the v2 `rum_sync_{id}`/`rum_commit_{id}` pair remains the sync-mode path. **Ingest scales horizontally; the SERVING tier does not — it is single-pod, see [ADR-18](docs/adr/18-serving-tier-single-pod.md).**
+**`DEPLOYMENT_MODE=high_scale` mode** — ingest is handled by dedicated `high-scale-worker` micro-batching directly to ClickHouse and FOS archive Parquet for K8s clusters, backed by partitioned cursors and multi-source ArchiveManifests. ClickHouse serves as the high-throughput analytical engine. Requires ClickHouse cluster and PostgreSQL metadata. **Ingest scales horizontally across worker replicas; the backend serving tier is single-pod.**
 
 Teardown removes jobs on the next `_sync_jobs()` reload. The `config not found, skipping` warning during teardown is normal — a job fired after the config was deleted; harmless.
 
@@ -282,8 +282,8 @@ Backstop for endpoints that return a plain `dict` instead of going through `Base
 ### Isolated High-Scale Request Facts ([backend/routers/high_scale.py](backend/routers/high_scale.py))
 `POST /api/high-scale/services/{service_id}/request-facts` is an explicit
 high-scale-only read surface backed by `backend/high_scale/query_service.py`.
-It is not selected by `DEPLOYMENT_MODE` and does not alter standard or
-high-throughput routing. A service must be explicitly bound through the
+It is not selected by `DEPLOYMENT_MODE` and does not alter standard
+routing. A service must be explicitly bound through the
 injectable `HighScaleServiceRegistry`; unregistered services are refused.
 The route uses `RequestContext` tenancy and analyst time clamping, masks
 `client_ip` under the existing invite PII policy, and returns signed keyset
@@ -1217,7 +1217,7 @@ Before beginning implementation, testing, or refactoring on any page, background
 1. **Read & Synthesize First:** Thoroughly read the specific page or cron specification (`docs/pages/{page}.md`, `docs/cron/jobs/{cron}.md`), supporting architecture documents (`docs/ARCHITECTURE.md`, `AGENTS.md`), deployment runbooks, and test suites.
 2. **Interactive Inquiry Mandate:** Ask the operator as many clarifying questions as necessary about requirements, ambiguous behaviors, traffic profiles, edge cases, role permissions, or architecture-specific expectations. **Never make unvalidated assumptions or guess intent** when details can be confirmed.
 3. **Document First, Then Execute:** Incorporate all answers, clarifications, and design decisions directly back into the authoritative documentation (`docs/pages/`, `docs/cron/`, etc.) before executing code changes or test suites.
-4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_throughput`) and all user roles (Admin vs Analyst Path B vs Analyst Path A), verifying 100% query and API call telemetry attribution.
+4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_scale`) and all user roles (Admin vs Analyst Path B vs Analyst Path A), verifying 100% query and API call telemetry attribution.
 
 ### Canonical Multi-Tier Deployment Mandate (Never Deploy or Test by Hand)
 

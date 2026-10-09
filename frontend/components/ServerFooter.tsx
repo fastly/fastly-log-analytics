@@ -41,7 +41,7 @@ export async function ServerFooter() {
 
   const isHighScale =
     ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase()) ||
-    (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase() === 'high_throughput'
+    ['high_scale', 'high-scale'].includes((process.env.DEPLOYMENT_MODE || '').trim().toLowerCase())
   const architecture = isHighScale ? 'high-scale' : 'standard'
   const commitHash = process.env.COMMIT_HASH || 'unknown'
 

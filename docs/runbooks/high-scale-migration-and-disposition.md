@@ -23,7 +23,7 @@ claimed by the replacement.
 |---|---|---|
 | FOS credentials/listing | reuse/adapt | preserve credential and pagination safety; add leases and source versions |
 | `backend/core/ingest.py` commit path | replace | reuse only pure normalization after identity review |
-| DuckLake admission and writers | isolate | remain authoritative for standard/high-throughput only |
+| DuckLake admission and writers | isolate | remain authoritative for standard only |
 | `backend/cron/jobs/rum_ledger.py` | isolate | never runs for a high-scale service |
 | RUM/CMCD temporary-table repositories | replace | ClickHouse facts and projections |
 | DuckDB files/local buffers | preserve for current modes | not a high-scale serving dependency |
@@ -50,7 +50,7 @@ authorized by this document.
 
 The Helm chart now carries an opt-in application-only `highScale` subchart.
 It is disabled by default and does not register `high_scale` as a runtime
-mode: standard and `high_throughput` continue to render and start unchanged.
+mode: standard continues to render and start unchanged.
 The slice deliberately leaves image entrypoints and commands configurable,
 because runtime startup and the high-scale data-plane implementation remain
 out of scope for this phase. External ClickHouse/Keeper Services and

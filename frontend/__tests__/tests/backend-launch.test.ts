@@ -54,7 +54,7 @@ beforeEach(() => {
   for (const [key, value] of Object.entries(rejected)) vi.stubEnv(key, value)
   for (const key of ['FLA_DEV_NO_CRONS', 'FASTLY_MOCK_MODE']) vi.stubEnv(key, '0')
   vi.stubEnv('SCHEDULER_MODE', 'external')
-  vi.stubEnv('DEPLOYMENT_MODE', 'high_throughput')
+  vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
   vi.stubEnv('SSE_BACKPLANE', 'valkey')
   vi.stubEnv('OTEL_EXPORTER', 'otlp')
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))

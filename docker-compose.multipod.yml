@@ -67,7 +67,7 @@ services:
     # beyond the compose network.
     - LOCAL_ADMIN_CIDRS=172.28.0.0/16
     - CELERY_BROKER_URL=redis://valkey:6379/0
-    - DEPLOYMENT_MODE=high_throughput
+    - DEPLOYMENT_MODE=high_scale
     # Celery/multipod mode also REQUIRES shared metadata: per-service SQLite
     # is a pod-local file, so the cron lease / ingest ledger / ingested-file
     # manifest would each be private to one process. This stack only ever
@@ -232,7 +232,7 @@ services:
     - CELERY_BROKER_URL=redis://valkey:6379/0
     # Cron/ingest bodies execute here and gate on DEPLOYMENT_MODE; SSE progress
     # events publish through the valkey backplane.
-    - DEPLOYMENT_MODE=high_throughput
+    - DEPLOYMENT_MODE=high_scale
     - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
     # Shared metadata — same rationale as the backend service above.
     - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake

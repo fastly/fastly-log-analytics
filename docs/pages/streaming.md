@@ -38,7 +38,7 @@ The **Live Log Streaming** page delivers a high-speed, interactive terminal-styl
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Stream Transport** | FastAPI SSE streaming endpoint (`/api/stream/{service_id}`). | FastAPI SSE backed by Redis Pub/Sub stream bridge. |
 | **Buffer Source** | Reads newest rows from local memory ring buffer. | Reads newest events from Valkey / Redis stream. |

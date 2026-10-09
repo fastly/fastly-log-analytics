@@ -6,7 +6,7 @@
 # Page Specification: Admin ClickHouse Replay & Cluster Operations (`/admin/clickhouse`)
 
 ## 1. Overview & Objectives
-The ClickHouse Replay & Cluster Operations page provides administrative visibility and control over the High-Scale ClickHouse analytical engine and its bounded replay machinery. ClickHouse serves as the primary high-throughput event and minute-rollup data plane in `DEPLOYMENT_MODE=high_throughput` topologies, ingesting millions of RPS into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `origin_minute_summary`, `network_minute_dimensions`, etc.).
+The ClickHouse Replay & Cluster Operations page provides administrative visibility and control over the High-Scale ClickHouse analytical engine and its bounded replay machinery. ClickHouse serves as the primary high-throughput event and minute-rollup data plane in `DEPLOYMENT_MODE=high_scale` topologies, ingesting millions of RPS into partitioned MergeTree tables (`request_facts`, `high_scale_batch_publications`, `origin_minute_summary`, `network_minute_dimensions`, etc.).
 
 ### Key Tenets:
 - **Cluster & Schema Health Monitoring:** Surface authenticated connection health, schema version alignment (`CLICKHOUSE_SCHEMA_VERSION`), and disk capacity metrics directly from ClickHouse system tables (`system.disks`).
@@ -40,7 +40,7 @@ The ClickHouse Replay & Cluster Operations page provides administrative visibili
 | Architecture / Mode | Engine State | Behavior |
 |---|---|---|
 | **Standard** (`DEPLOYMENT_MODE=standard`) | Disabled | Page displays informational banner: ClickHouse is not active in Standard architecture (DuckDB/DuckLake serves all queries). `/api/admin/clickhouse/status` returns `enabled: false, health: "disabled"`. |
-| **High-Scale** (`DEPLOYMENT_MODE=high_throughput`) | Active | Full cluster monitoring, schema validation, publication lag tracking, and bounded replay operations via `ClickHouseClient` and `PgManifest`. |
+| **High-Scale** (`DEPLOYMENT_MODE=high_scale`) | Active | Full cluster monitoring, schema validation, publication lag tracking, and bounded replay operations via `ClickHouseClient` and `PgManifest`. |
 
 ---
 

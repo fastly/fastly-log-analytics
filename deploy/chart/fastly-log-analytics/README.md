@@ -16,13 +16,13 @@ The public Ingress uses a credential-stripping proxy when this option is on.
 
 The chart renders one of two shapes, selected by `config.deploymentMode`.
 
-| | `standard` (default) | `high_throughput` |
+| | `standard` (default) | `high_scale` |
 |---|---|---|
-| Ingest | in-process APScheduler on the backend pod | Celery worker fleet + RedBeat |
-| Pods | backend, frontend | backend, frontend, worker, beat |
+| Ingest | in-process APScheduler on the backend pod | High-scale worker micro-batching |
+| Pods | backend, frontend | backend, frontend, high-scale-worker |
 | Postgres | not used | **required** (DuckLake catalog + metadata) |
-| valkey/redis | not used | **required** (broker, RedBeat, SSE backplane) |
-| Scales ingest | no | yes (`workers.replicaCount`, or KEDA via `autoscaling.enabled`) |
+| valkey/redis | not used | optional (broker, SSE backplane) |
+| Scales ingest | no | yes (`highScale.workloads.ingest.replicas`) |
 
 Neither mode scales the **serving** tier. The backend Deployment is pinned to
 one replica in the template and has no HPA in either mode, because the
@@ -39,21 +39,14 @@ applies to the stateless frontend only.
 helm install fla ./deploy/chart/fastly-log-analytics
 ```
 
-`high_throughput` mode needs **Postgres and valkey/redis, which this chart does not
-ship.** `Chart.yaml` declares no subchart dependencies on purpose: vendoring
-them would make `helm lint`/`helm template` (and therefore `make
-deploy-validate`) depend on `helm dependency update` having network access.
-Bring your own — a `bitnami/postgresql` and `bitnami/valkey` release in the
-same namespace is enough for a test cluster — then:
+`high_scale` mode needs **Postgres and ClickHouse**.
+Bring your own — then:
 
 ```sh
 helm install fla ./deploy/chart/fastly-log-analytics \
-  --set config.deploymentMode=high_throughput \
-  --set config.schedulerMode=external \
-  --set config.sseBackplane=valkey \
+  --set config.deploymentMode=high_scale \
   --set config.ducklakeCatalog=postgresql://fla:PASSWORD@postgres:5432/ducklake \
-  --set secrets.existingSecret=fla-connections \
-  --set broker.host=valkey-master
+  --set secrets.existingSecret=fla-connections
 ```
 
 where `fla-connections` is a Secret you created first:
@@ -73,7 +66,7 @@ The two DSNs may point at the same Postgres database; every DuckLake table is
 ([ADR-15](../../../docs/adr/15-multi-writer-topology.md)). Run
 `scripts/setup_pg_schema.py` against the metadata database before first boot.
 
-High-throughput mode uses durable serving. In this mode backend
+High-scale mode uses durable serving. In this mode backend
 requests use ephemeral read-only DuckDB connections over the shared Postgres
 DuckLake catalog and do not open a native per-service DuckDB file.
 
@@ -95,7 +88,7 @@ helm install fla ./deploy/chart/fastly-log-analytics \
 
 The subchart is deliberately disabled by default, and enabling it does not
 change `config.deploymentMode`, existing startup commands, or the standard /
-`high_throughput` workload set. The enabled ingest workload runs
+`high_scale` workload set. The enabled ingest workload runs
 `python -m backend.high_scale.worker` continuously. Supply the application
 image and override workload arguments through `highScale.image` /
 `highScale.workloads` when needed. For a service registry shared with the
@@ -118,13 +111,13 @@ egress rules. No operator-specific values or CRDs are included.
 ## Misconfiguration is a template-time error
 
 `backend/config.py::validate_deployment_mode()` refuses to boot a backend or
-worker whose `DEPLOYMENT_MODE=high_throughput` lacks a Postgres `DUCKLAKE_CATALOG` or
+worker whose `DEPLOYMENT_MODE=high_scale` lacks a Postgres `DUCKLAKE_CATALOG` or
 `METADATA_DSN`. `templates/validate.yaml` reproduces those conditions at
 render time, so `helm install`/`helm template` fails with a message naming the
 value to set instead of deploying backend, worker and beat pods that all
 CrashLoop. It also rejects the combinations that fail *silently* at runtime:
 an unrecognised `deploymentMode`, or `schedulerMode=external` outside
-high-throughput mode (RedBeat-routed jobs with no
+high-scale mode (RedBeat-routed jobs with no
 worker fleet to consume them), and `sseBackplane=valkey` with no broker URL.
 
 The one case it cannot check is an `existingSecret` missing a key — the chart

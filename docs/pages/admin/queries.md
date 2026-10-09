@@ -38,7 +38,7 @@ The **Live Query Monitor** provides real-time observability into all running and
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Live Profiler** | Reads in-memory query tracker in `duckdb_pool` and `sqlite_pool`. | Reads `query_registry` tracking DuckDB, ClickHouse, Postgres, and SQLite. |
 | **Slow Query Log** | SQLite `slow_queries` table. | Postgres or SQLite `slow_queries` table. |

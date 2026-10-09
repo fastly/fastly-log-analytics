@@ -24,7 +24,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads 24 hourly bundles in `rollups/{service_id}/hour_bundles/`, writes `day_bundle_YYYY-MM-DD.parquet`, unlinks hourly bundles. | Exclusive per-service rollup lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). Yields via `should_defer_cron("rollup_compact")` if user queries are active. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Consolidates local day rollups on web serving pods across 11 subsystems. | Pod-local file lock; never runs on Celery workers. Yields via `should_defer_cron("rollup_compact")` if user queries are active. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Consolidates local day rollups on web serving pods across 11 subsystems. | Pod-local file lock; never runs on Celery workers. Yields via `should_defer_cron("rollup_compact")` if user queries are active. |
 
 ---
 

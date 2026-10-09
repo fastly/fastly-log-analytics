@@ -13,7 +13,7 @@ SERVICE_ID = "svc_test_rum_disc"
 FAKE_CFG = {
     "service_id": SERVICE_ID,
     "name": "Test Service",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "rum": {"enabled": True},
 }
 
@@ -21,7 +21,7 @@ FAKE_SRC = {
     "service_id": SERVICE_ID,
     "name": "Test Service",
     "access_level": "read_write",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
 }
 
 
@@ -31,7 +31,7 @@ def clean_env(monkeypatch):
 
 
 def test_rum_discovery_success(monkeypatch):
-    """Under high-throughput mode:
+    """Under high-scale mode:
     - Reconciles Faro bundle
     - Scans 5-minute sliding window via discover_rum_prefix
     - Records status 'success' with discovered file counts
@@ -42,7 +42,7 @@ def test_rum_discovery_success(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 555)
     monkeypatch.setattr(
@@ -89,7 +89,7 @@ def test_rum_discovery_faro_failure_records_warning(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 556)
     monkeypatch.setattr(
@@ -124,7 +124,7 @@ def test_rum_discovery_skips_in_standard_mode(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
@@ -132,7 +132,7 @@ def test_rum_discovery_skips_in_standard_mode(monkeypatch):
 
 
 def test_rum_discovery_missing_broker_error(monkeypatch):
-    """When CELERY_BROKER_URL is missing in high-throughput mode:
+    """When CELERY_BROKER_URL is missing in high-scale mode:
     - Status is recorded as 'error'
     - Progress is ended cleanly
     """
@@ -141,7 +141,7 @@ def test_rum_discovery_missing_broker_error(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 557)
     monkeypatch.setattr(

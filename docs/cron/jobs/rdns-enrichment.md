@@ -23,7 +23,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Discovers distinct IPs across active services using `execute_with_stale_view_retry()`, resolves PTR records asynchronously via `aiodns`, and writes to `data/cache/rdns_cache.db`. | Local SQLite thread-local pool write lock (`_write_lock`). Gated by `FLA_DEV_NO_CRONS=1` (network outbound suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Queries distinct IPs from DuckLake views; populates local/shared rDNS cache. | Process-global singleton; never scheduled to Celery workers. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries distinct IPs from DuckLake views; populates local/shared rDNS cache. | Process-global singleton; never scheduled to Celery workers. |
 
 ---
 

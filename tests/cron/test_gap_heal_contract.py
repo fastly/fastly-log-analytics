@@ -10,7 +10,7 @@ Verifies all requirements and checklist items from docs/cron/jobs/gap-heal.md (Â
 6. Active request politeness deferral (should_defer_cron), bypassed when force=True.
 7. Under FLA_DEV_NO_CRONS=1, verify job does not register or execute.
 8. Telemetry & usage_log process context attribution ("gap_heal" / "cron.full_sync").
-9. Scheduler registration, dynamic rescheduling on interval_minutes changes, and RedBeat routing in high-throughput mode.
+9. Scheduler registration, dynamic rescheduling on interval_minutes changes, and RedBeat routing in high-scale mode.
 """
 
 from __future__ import annotations

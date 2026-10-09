@@ -6,7 +6,7 @@ from backend.core import rollup_readiness as rr
 def test_initialize_service_defers_durable_rollup_catchup():
     rr.reset_rollup_coverage_ready()
     cfg = {"service_id": "svc-durable"}
-    fake_src = {"service_id": "svc-durable", "deployment_mode": "high_throughput"}
+    fake_src = {"service_id": "svc-durable", "deployment_mode": "high_scale"}
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),

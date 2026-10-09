@@ -36,7 +36,7 @@ The **Admin System Trends** page displays historical time-series graphs of opera
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Snapshot Source** | Populated by `metric_snapshot` cron into SQLite `metadata.db`. | Populated by `metric_snapshot` into Postgres or SQLite `metadata.db`. |
 | **Metrics Sampled** | Host CPU/RAM (`psutil`), DuckDB pool, SQLite pool, thread wait ms. | Host CPU/RAM, Celery worker depths, pool stats. |

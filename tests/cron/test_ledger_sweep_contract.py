@@ -13,7 +13,7 @@ Verifies all requirements and contract checklist items from docs/cron/jobs/ledge
    - Returns 403 if service is read-only.
    - Returns 403 if caller lacks admin permission.
 3. Execution Lifecycle & Step-by-Step Logic (_run_ledger_sweep):
-   - High-throughput mode: executes sweep_ledger_once, records status 'success', emits progress, finalizes duration.
+   - High-scale mode: executes sweep_ledger_once, records status 'success', emits progress, finalizes duration.
    - run_id reuse: accepts existing run_id without duplicate start_cron_run.
    - Guaranteed cleanup: end_progress and finalize_cron_duration execute in finally block even on error.
    - Health accounting: records status 'warning' when broker probe fails or dead-letter/quarantined rows exist.
@@ -47,7 +47,7 @@ SERVICE_ID = "svc_test_ledger_sweep"
 FAKE_CFG = {
     "service_id": SERVICE_ID,
     "name": SERVICE_ID,
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "access_level": "read_write",
     "provisioning": {
         "access_level": "read_write",
@@ -59,7 +59,7 @@ FAKE_SRC = {
     "service_id": SERVICE_ID,
     "name": SERVICE_ID,
     "access_level": "read_write",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "bucket": "test-sweep-bucket",
     "provisioning": {
         "access_level": "read_write",
@@ -146,7 +146,7 @@ def test_manual_trigger_endpoint_standard_mode_rejected():
             headers={"x-fastly-service-id": SERVICE_ID},
         )
         assert resp.status_code == 400
-        assert "high-throughput" in resp.json()["detail"].lower()
+        assert "high-scale" in resp.json()["detail"].lower()
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)
@@ -272,7 +272,7 @@ def test_ledger_quarantine_endpoint_non_admin_rejected():
 
 
 def test_run_ledger_sweep_success(monkeypatch):
-    """Under high-throughput mode:
+    """Under high-scale mode:
     - Runs sweep_ledger_once
     - Records status 'success' with reclaim/redispatch/discovery counts
     - Starts and ends progress cleanly, finalizes duration
@@ -282,7 +282,7 @@ def test_run_ledger_sweep_success(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 888)
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -337,7 +337,7 @@ def test_run_ledger_sweep_run_id_reuse(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *a: start_cron_calls.append(a))
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **k: log_calls.append((a, k)))
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
@@ -369,7 +369,7 @@ def test_run_ledger_sweep_warning_on_dead_letter_or_broker_down(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 889)
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -409,7 +409,7 @@ def test_run_ledger_sweep_error_handling_and_guaranteed_cleanup(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 890)
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -447,7 +447,7 @@ def test_run_ledger_sweep_skips_in_standard_mode(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     ledger_mod._run_ledger_sweep.__wrapped__(SERVICE_ID)
@@ -461,7 +461,7 @@ def test_run_ledger_sweep_skips_when_read_only(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     ledger_mod._run_ledger_sweep.__wrapped__(SERVICE_ID)
@@ -475,7 +475,7 @@ def test_run_ledger_sweep_skips_when_dev_no_crons(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     ledger_mod._run_ledger_sweep.__wrapped__(SERVICE_ID)
@@ -498,13 +498,13 @@ def test_run_ledger_sweep_skips_when_config_missing(monkeypatch):
 
 
 def test_scheduler_registers_and_reschedules_ledger_sweep():
-    """Scheduler registers ledger_sweep in high-throughput mode and reschedules on interval changes."""
+    """Scheduler registers ledger_sweep in high-scale mode and reschedules on interval changes."""
     sid = "svc-scheduler-sweep"
     cfg = {
         "service_id": sid,
         "name": sid,
         "log_period": 60,
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
         "access_level": "read_write",
         "provisioning": {
             "access_level": "read_write",
@@ -517,7 +517,7 @@ def test_scheduler_registers_and_reschedules_ledger_sweep():
         "service_id": sid,
         "bucket": "test-b",
         "access_level": "read_write",
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
     }
 
     s = Scheduler()
@@ -528,7 +528,7 @@ def test_scheduler_registers_and_reschedules_ledger_sweep():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -554,7 +554,7 @@ def test_scheduler_registers_and_reschedules_ledger_sweep():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -569,7 +569,7 @@ def test_scheduler_skips_ledger_sweep_when_disabled():
         "service_id": sid,
         "name": sid,
         "log_period": 60,
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
         "access_level": "read_write",
         "provisioning": {
             "access_level": "read_write",
@@ -582,7 +582,7 @@ def test_scheduler_skips_ledger_sweep_when_disabled():
         "service_id": sid,
         "bucket": "test-b",
         "access_level": "read_write",
-        "deployment_mode": "high_throughput",
+        "deployment_mode": "high_scale",
     }
 
     s = Scheduler()
@@ -592,7 +592,7 @@ def test_scheduler_skips_ledger_sweep_when_disabled():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):

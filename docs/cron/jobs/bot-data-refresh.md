@@ -22,7 +22,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Fetches public HTTP/JSON feeds, normalizes format, writes to `data/cache/bot_sources/{source_id}.json`. | Local in-process locks (`_matcher_lock`, `_source_cache_lock`). Gated by `FLA_DEV_NO_CRONS=1` (outbound HTTP suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Fetches feeds and populates local bot cache on web serving pods. | Process-global singleton; never scheduled to Celery workers. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Fetches feeds and populates local bot cache on web serving pods. | Process-global singleton; never scheduled to Celery workers. |
 
 ---
 

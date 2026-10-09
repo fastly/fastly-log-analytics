@@ -13,7 +13,7 @@ SERVICE_ID = "svc_test_rum_sweep"
 FAKE_CFG = {
     "service_id": SERVICE_ID,
     "name": "Test Service",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "rum": {"enabled": True},
 }
 
@@ -21,7 +21,7 @@ FAKE_SRC = {
     "service_id": SERVICE_ID,
     "name": "Test Service",
     "access_level": "read_write",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
 }
 
 
@@ -31,7 +31,7 @@ def clean_env(monkeypatch):
 
 
 def test_rum_ledger_sweep_success(monkeypatch):
-    """Under high-throughput mode:
+    """Under high-scale mode:
     - Runs sweep_rum_ledger_once
     - Records status 'success' with reclaim/redispatch/discovery counts
     - Starts and ends progress cleanly
@@ -40,7 +40,7 @@ def test_rum_ledger_sweep_success(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 777)
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -92,7 +92,7 @@ def test_rum_ledger_sweep_warning_on_dead_letter_or_broker_down(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 778)
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -132,7 +132,7 @@ def test_rum_ledger_sweep_skips_in_standard_mode(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     rum_ledger_mod._run_rum_ledger_sweep.__wrapped__(SERVICE_ID)
@@ -148,7 +148,7 @@ def test_rum_ledger_sweep_skips_when_read_only(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     rum_ledger_mod._run_rum_ledger_sweep.__wrapped__(SERVICE_ID)

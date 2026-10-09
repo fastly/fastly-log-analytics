@@ -36,11 +36,11 @@ ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (403, "Read-only services cannot run gap heal."),
     (403, "Read-only services cannot run cloud maintenance."),
     (403, "Read-only services cannot run ledger sweep."),
-    (400, "Ledger sweep is only supported in high-throughput (Celery) mode."),
+    (400, "Ledger sweep is only supported under high-scale mode."),
     (403, "Read-only services cannot run RUM sync."),
     (400, "RUM sync is only supported in standard deployment mode."),
     (403, "Read-only services cannot run RUM discovery."),
-    (400, "RUM discovery is only supported in high-throughput (Celery) mode."),
+    (400, "RUM discovery is only supported under high-scale mode."),
 }
 
 # All four envelope helpers return the canonical `{"error": code, ...}`

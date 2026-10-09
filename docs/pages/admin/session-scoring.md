@@ -36,7 +36,7 @@ The **Admin Session Scoring** page manages machine learning scoring matrix weigh
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Scorer Config** | Stored in per-service config JSON and SQLite metadata. | Stored in shared Postgres or per-service config. |
 | **Retraining Job** | Runs inline or in background thread over DuckDB data. | Dispatches Celery retraining task over DuckLake / ClickHouse data. |

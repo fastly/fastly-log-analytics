@@ -1008,9 +1008,9 @@ def analyst_path_a_supported(source: dict | None = None) -> bool:
     """Return whether independent FOS-only analyst invites are usable."""
     from backend import config as svcconfig
 
-    # Celery workers commit through the shared DuckLake catalog. That catalog
-    # is not present in the FOS-only payload consumed by an independent copy.
-    return not svcconfig.is_high_throughput_mode(source)
+    # In high-scale mode, analytical data resides in ClickHouse and is not
+    # present in the FOS-only payload consumed by an independent copy.
+    return not svcconfig.is_high_scale_mode(source)
 
 
 def generate_analyst_invite(service_id: str) -> dict:
@@ -1023,8 +1023,8 @@ def generate_analyst_invite(service_id: str) -> dict:
         raise RuntimeError("Invite generation requires a read_write service configuration")
     if not analyst_path_a_supported(cfg):
         raise RuntimeError(
-            "Independent analyst invites are unavailable when DEPLOYMENT_MODE=high_throughput: "
-            "the scalable DuckLake catalog is not included in the FOS-only invite. "
+            "Independent analyst invites are unavailable when DEPLOYMENT_MODE=high_scale: "
+            "analytical data resides in ClickHouse and is not included in the FOS-only invite. "
             "Use live shared-instance analyst access (Path B) instead."
         )
     api_token = cfg.get("fastly_api_key", "").strip()

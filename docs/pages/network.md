@@ -38,7 +38,7 @@ The **Network Path** page provides deep visibility into client network condition
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `network_rtt` / `network_speed` rollups. | Reads Postgres DuckLake / ClickHouse network tables. |
 | **ASN Enrichment** | Local SQLite `asn_names` table populated by `asn_enrichment`. | Shared Postgres / ClickHouse ASN dictionaries. |

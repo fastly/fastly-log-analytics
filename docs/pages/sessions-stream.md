@@ -38,7 +38,7 @@ The **Real-Time Session Stream** page visualizes live client session state trans
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Stream Transport** | In-process SSE stream from session scorer engine. | Redis Pub/Sub stream bridge connected to Celery workers. |
 | **State Tracking** | In-memory session sliding window. | Valkey / Redis session state store. |

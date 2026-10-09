@@ -514,14 +514,14 @@ def test_cleanup_local_data_removes_cache_directory_for_bucket(tmp_path, monkeyp
 
 
 def test_analyst_path_a_supported_only_for_non_celery(monkeypatch):
-    """The shared Path A topology predicate only blocks scalable Celery mode."""
+    """The shared Path A topology predicate only blocks high-scale mode."""
     from backend import config as svcconfig
 
     monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
     assert orchestrator.analyst_path_a_supported() is True
-    assert orchestrator.analyst_path_a_supported({"deployment_mode": "high_throughput"}) is False
+    assert orchestrator.analyst_path_a_supported({"deployment_mode": "high_scale"}) is False
 
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
     assert orchestrator.analyst_path_a_supported() is False
     assert orchestrator.analyst_path_a_supported({"deployment_mode": "standard"}) is True
 
@@ -547,13 +547,13 @@ def test_generate_analyst_invite_rejects_read_only_service():
 def test_generate_analyst_invite_rejects_celery_topology():
     """Path A must not issue FOS-only credentials for the shared DuckLake catalog."""
     with (
-        patch("backend.config.DEPLOYMENT_MODE", "high_throughput"),
+        patch("backend.config.DEPLOYMENT_MODE", "high_scale"),
         patch(
             "backend.config.load_config",
             return_value={"access_level": "read_write", "fastly_api_key": "k"},
         ),
     ):
-        with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE=high_throughput"):
+        with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE=high_scale"):
             orchestrator.generate_analyst_invite("svc")
 
 

@@ -272,10 +272,10 @@ def test_partial_commit_error_preserves_counts_and_refreshes_durable_rows(
     _common.refresh_view_and_warm_pool.assert_called_once()
 
 
-def test_high_throughput_commit_uses_ledger_merge_not_standard_buffer(
+def test_high_scale_commit_uses_ledger_merge_not_standard_buffer(
     monkeypatch, stub_load_config, stub_source, stub_cron_envelope
 ):
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     merge_calls = []
     monkeypatch.setattr("backend.core.ingest.merge_lake_files", lambda sid: merge_calls.append(("merge", sid)))
     monkeypatch.setattr(

@@ -17,7 +17,7 @@ image:
   pullPolicy: IfNotPresent
 
 config:
-  deploymentMode: high_throughput
+  deploymentMode: high_scale
   schedulerMode: external
   sseBackplane: valkey
   ducklakeCatalog: "postgresql://fla:PLACEHOLDER@postgres:5432/ducklake"

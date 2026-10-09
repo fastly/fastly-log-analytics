@@ -30,7 +30,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Reads FOS `raw/request/**/*.gz`, transforms to Parquet in local buffer `cache/{bucket}/`, updates session DuckDB `logs` view. | Acquires per-service ingest lock. Gated by `FLA_DEV_NO_CRONS=1` (skips execution). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | RedBeat + Celery Workers | Scans five recent minute prefixes, inserts discovered keys into PostgreSQL `ingest_ledger` with `discovered` state and their originating task/run ID, and dispatches Celery conversion tasks (`convert_batch_files`). Older missed objects are caught by the separate four-hour `ledger_sweep` FOS diff. Workers must resolve outcomes against each ledger row's origin; redispatch does not overwrite it. | Distributed PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Never opens local DuckDB. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | RedBeat + Celery Workers | Scans five recent minute prefixes, inserts discovered keys into PostgreSQL `ingest_ledger` with `discovered` state and their originating task/run ID, and dispatches Celery conversion tasks (`convert_batch_files`). Older missed objects are caught by the separate four-hour `ledger_sweep` FOS diff. Workers must resolve outcomes against each ledger row's origin; redispatch does not overwrite it. | Distributed PostgreSQL row locks (`FOR UPDATE SKIP LOCKED`). Never opens local DuckDB. |
 
 ---
 

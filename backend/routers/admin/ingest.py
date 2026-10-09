@@ -117,10 +117,10 @@ def ledger_sweep_service(
 
     from backend import config as svcconfig
 
-    if not svcconfig.is_high_throughput_mode(source):
+    if not svcconfig.is_high_scale_mode(source):
         raise HTTPException(
             status_code=400,
-            detail="Ledger sweep is only supported in high-throughput (Celery) mode.",
+            detail="Ledger sweep is only supported under high-scale mode.",
         )
 
     from backend.cron.jobs.ledger import _run_ledger_sweep
@@ -181,10 +181,10 @@ def rum_discovery_service(
 
     from backend import config as svcconfig
 
-    if not svcconfig.is_high_throughput_mode(source):
+    if not svcconfig.is_high_scale_mode(source):
         raise HTTPException(
             status_code=400,
-            detail="RUM discovery is only supported in high-throughput (Celery) mode.",
+            detail="RUM discovery is only supported under high-scale mode.",
         )
 
     from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron

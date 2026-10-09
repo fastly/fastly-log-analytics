@@ -77,7 +77,7 @@ FAKE_CFG_HIGH_SCALE = {
     "endpoint": "https://test.fos.fastly.com",
     "access_key_id": "test_key",
     "secret_access_key": "test_secret",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "access_level": "read_write",
     "rum": {
         "enabled": True,
@@ -95,7 +95,7 @@ FAKE_SRC_HIGH_SCALE = {
     "endpoint": "https://test.fos.fastly.com",
     "access_key_id": "test_key",
     "secret_access_key": "test_secret",
-    "deployment_mode": "high_throughput",
+    "deployment_mode": "high_scale",
     "access_level": "read_write",
     "rum": {
         "enabled": True,
@@ -128,7 +128,7 @@ def test_mode_routing_standard_registers_rum_sync_and_commit(monkeypatch):
 
     monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_STANDARD])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
 
     with (
@@ -145,7 +145,7 @@ def test_mode_routing_standard_registers_rum_sync_and_commit(monkeypatch):
 
 
 def test_mode_routing_high_scale_registers_discovery_and_sweep(monkeypatch):
-    """Under High-Scale mode (DEPLOYMENT_MODE=high_throughput):
+    """Under High-Scale mode (DEPLOYMENT_MODE=high_scale):
     - Registers rum_discovery_{service_id} and ledger_rum_sweep_{service_id}
     - Does NOT register rum_sync_{service_id} or rum_commit_{service_id}
     """
@@ -155,7 +155,7 @@ def test_mode_routing_high_scale_registers_discovery_and_sweep(monkeypatch):
 
     monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_HIGH_SCALE])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
 
     with (
@@ -179,7 +179,7 @@ def test_mode_routing_no_co_registration_guarantee(monkeypatch):
 
     monkeypatch.setattr("backend.config.list_configs", lambda: [FAKE_CFG_HIGH_SCALE])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
 
     with (
@@ -193,13 +193,13 @@ def test_mode_routing_no_co_registration_guarantee(monkeypatch):
         assert not (has_discovery and has_sync), "Both discovery and sync must never co-register!"
 
 
-def test_high_throughput_job_early_exits_in_standard_mode(monkeypatch):
-    """_run_rum_discovery_cron exits early if the service is not in high_throughput mode."""
+def test_high_scale_job_early_exits_in_standard_mode(monkeypatch):
+    """_run_rum_discovery_cron exits early if the service is not in high_scale mode."""
     start_calls = []
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_STANDARD)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
@@ -217,7 +217,7 @@ def test_role_gate_admin_executes_normally(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 701)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
@@ -240,7 +240,7 @@ def test_role_gate_analyst_path_a_discovery_skipped(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: ro_src)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: start_calls.append(task))
 
     rum_ledger_mod._run_rum_discovery_cron.__wrapped__(SERVICE_ID)
@@ -342,7 +342,7 @@ def test_cadence_dynamic_rescheduling_standard(monkeypatch):
 
     monkeypatch.setattr("backend.config.list_configs", lambda: [updated_cfg])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_STANDARD)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: False)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
     monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
 
     with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False):
@@ -365,7 +365,7 @@ def test_cadence_dynamic_rescheduling_high_scale(monkeypatch):
 
     monkeypatch.setattr("backend.config.list_configs", lambda: [updated_cfg])
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.cron.scheduler.dev_local_crons_enabled", lambda: True)
 
     with patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False):
@@ -405,7 +405,7 @@ def test_faro_reconcile_warning_in_high_scale(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 702)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: log_calls.append((a, kw)))
@@ -464,7 +464,7 @@ def test_minute_prefix_incremental_discovery_slices(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 704)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
@@ -651,7 +651,7 @@ def test_guaranteed_cleanup_rum_discovery(monkeypatch):
 
     monkeypatch.setattr("backend.config.load_config", lambda sid: FAKE_CFG_HIGH_SCALE)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: FAKE_SRC_HIGH_SCALE)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://localhost:6379/0")
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 709)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
@@ -857,7 +857,7 @@ def test_manual_trigger_rum_discovery_standard_mode_rejected_400():
             headers={"x-fastly-service-id": SERVICE_ID},
         )
         assert resp.status_code == 400
-        assert "high-throughput" in resp.json()["detail"].lower()
+        assert "high-scale" in resp.json()["detail"].lower()
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)

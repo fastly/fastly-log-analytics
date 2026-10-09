@@ -202,14 +202,14 @@ def test_skips_when_source_missing(monkeypatch, stub_load_config):
     start_cron.assert_not_called()
 
 
-def test_high_throughput_discovery_persists_its_originating_run_id(monkeypatch, stub_load_config):
+def test_high_scale_discovery_persists_its_originating_run_id(monkeypatch, stub_load_config):
     from backend.cron.jobs import sync as sync_mod
 
     source = _fake_src()
-    source["deployment_mode"] = "high_throughput"
+    source["deployment_mode"] = "high_scale"
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://broker")
     discovery = MagicMock(return_value=1)
     monkeypatch.setattr("backend.core.ingest.discover_prefix", discovery)
@@ -223,12 +223,12 @@ def test_high_throughput_discovery_persists_its_originating_run_id(monkeypatch, 
     assert log_cron.call_args.kwargs["run_id"] == 521
 
 
-def test_high_throughput_discovery_rejects_missing_broker_without_listing(monkeypatch, stub_load_config):
+def test_high_scale_discovery_rejects_missing_broker_without_listing(monkeypatch, stub_load_config):
     from backend.cron.jobs import sync as sync_mod
 
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
     discover = MagicMock()
     monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
@@ -243,12 +243,12 @@ def test_high_throughput_discovery_rejects_missing_broker_without_listing(monkey
     assert "CELERY_BROKER_URL" in log_run.call_args.kwargs["error_message"]
 
 
-def test_high_throughput_discovery_records_list_failure_on_its_run(monkeypatch, stub_load_config):
+def test_high_scale_discovery_records_list_failure_on_its_run(monkeypatch, stub_load_config):
     from backend.cron.jobs import sync as sync_mod
 
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
     discover = MagicMock(side_effect=OSError("FOS unavailable"))
     monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
@@ -1031,7 +1031,7 @@ def test_scheduled_discovery_persists_service_creation_time_as_range_start(monke
     save = MagicMock()
     monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
     monkeypatch.setattr("backend.config.save_config", save)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
@@ -1062,7 +1062,7 @@ def test_manual_discovery_clears_pinned_range_before_listing(monkeypatch):
     save = MagicMock()
     monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
     monkeypatch.setattr("backend.config.save_config", save)
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
@@ -1354,7 +1354,7 @@ def test_high_scale_full_sweep_attributes_discovery_to_its_own_run(monkeypatch, 
     from backend.cron.jobs import sync as sync_mod
 
     source = _fake_src()
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 104)
@@ -1382,7 +1382,7 @@ def test_high_scale_full_sweep_records_discovery_failure_on_originating_run(monk
     from backend.cron.jobs import sync as sync_mod
 
     source = _fake_src()
-    monkeypatch.setattr("backend.config.is_high_throughput_mode", lambda src: True)
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 105)

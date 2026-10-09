@@ -20,7 +20,7 @@ Every scheduled background job in this system must adhere to these non-negotiabl
    - Jobs that modify operational metadata must use the shared PostgreSQL connection pool and its query instrumentation.
 4. **Strict Concurrency & Pod Safety:**
    - Long-running cloud write jobs (`optimize`, `expire`, `commit`) must prevent overlapping executions for the same service using the job's lease or lock; a task-scoped lease does not serialize every cron type.
-   - In distributed deployments (`DEPLOYMENT_MODE=high_throughput`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
+   - In distributed deployments (`DEPLOYMENT_MODE=high_scale`), jobs that touch pod-local state, caches, or DuckDB memory pools (`local_compact`, `partial_hour_merge`, `rollup_heal`, `rollup_compact`, `insights_prewarmer`, `alerts_evaluation`, `metric_snapshot`, `duckdb_recycle`) **strictly run on the web serving pod's APScheduler**. They are NEVER dispatched to Celery workers, preventing multi-process lock contention on local files.
    - Cron 8 (`expire`) also stays on the serving pod's APScheduler in High-Scale mode; it is not routed through RedBeat or Celery.
 5. **Local-Only Safety Gate (`FLA_DEV_NO_CRONS=1`):**
    - Development environments and AI test sessions must be capable of running safely without racing production FOS buckets or generating external write costs.
@@ -55,7 +55,7 @@ flowchart TD
         APStd -->|Audit / State| PostgresStd
     end
 
-    subgraph HighScaleMode["High-Scale Mode (DEPLOYMENT_MODE=high_throughput)"]
+    subgraph HighScaleMode["High-Scale Mode (DEPLOYMENT_MODE=high_scale)"]
         RedBeat["RedBeat Periodic Scheduler<br/>(Redis / Valkey)"]
         CeleryFleet["Celery Worker Fleet<br/>(Horizontal Scale)"]
         WebAPScheduler["Web Pod APScheduler<br/>(Pod-Local Jobs Only)"]
@@ -71,7 +71,7 @@ flowchart TD
     end
 
     Mode -->|standard| StandardMode
-    Mode -->|high_throughput| HighScaleMode
+    Mode -->|high_scale| HighScaleMode
 ```
 
 ---

@@ -57,7 +57,7 @@ spec:
             # public ingress path.
             - name: API_PROXY_URL
               value: "http://{{ include "fastly-log-analytics.fullname" . }}-backend:8000"
-            {{- if eq .Values.config.deploymentMode "high_throughput" }}
+            {{- if eq .Values.config.deploymentMode "high_scale" }}
             - name: HIGH_SCALE_ENABLED
               value: "1"
             {{- end }}

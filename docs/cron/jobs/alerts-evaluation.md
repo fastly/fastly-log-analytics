@@ -24,7 +24,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries session DuckDB `logs` view over lookback window (e.g. last 5-15 min). | Read-only DuckDB connection. Active request politeness gate (`should_defer_cron`) yields to interactive dashboard queries. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse facts/aggregates. | Ephemeral read-only connection; never runs on Celery workers. Yields if active interactive dashboard queries are executing. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse facts/aggregates. | Ephemeral read-only connection; never runs on Celery workers. Yields if active interactive dashboard queries are executing. |
 
 ---
 

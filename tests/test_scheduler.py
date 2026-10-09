@@ -3151,7 +3151,7 @@ def test_run_ledger_sweep_emits_progress_and_finalizes_duration():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.core.duckdb.start_cron_run", return_value=55),
         patch("backend.cron_progress.start_progress", side_effect=lambda rid, **kw: prog_started.append((rid, kw))),
         patch("backend.cron_progress.end_progress", side_effect=lambda rid: prog_ended.append(rid)),
@@ -3190,7 +3190,7 @@ def test_run_ledger_sweep_status_warning_on_dead_letter_or_broker_issue():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.core.duckdb.start_cron_run", return_value=56),
         patch("backend.cron_progress.start_progress"),
         patch("backend.cron_progress.end_progress"),
@@ -3237,7 +3237,7 @@ def test_sync_jobs_reschedules_ledger_sweep_when_interval_changed():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-resched")),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -3267,7 +3267,7 @@ def test_sync_jobs_skips_ledger_sweep_when_disabled():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-sweep-disabled")),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.is_high_throughput_mode", return_value=True),
+        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):

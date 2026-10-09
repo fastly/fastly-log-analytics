@@ -38,7 +38,7 @@ The **Client Sessions** page analyzes behavioral session clusters across client 
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session view + `sessions` rollups. | Reads Postgres DuckLake / ClickHouse session aggregates. |
 | **Scoring Engine** | Python ML scoring pipeline running over DuckDB aggregates. | Worker-evaluated scoring models / ClickHouse feature queries. |

@@ -475,10 +475,10 @@ def get_active_service_id(fallback_to_first: bool = True) -> str | None:
 
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the db.py 'source' dict format."""
-    if is_high_throughput_mode() and cfg.get("raw_layout_version") != 3:
+    if is_high_scale_mode() and cfg.get("raw_layout_version") != 3:
         raise RuntimeError(
             f"service {cfg.get('service_id', '<unknown>')} uses the v2 raw-log layout; "
-            "tear it down and reprovision it for v3 before enabling high-throughput deployment"
+            "tear it down and reprovision it for v3 before enabling high-scale deployment"
         )
     actual_db_path = duckdb_path(cfg.get("service_id", "default"))
 
@@ -794,7 +794,7 @@ HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
 def _default_sse_backplane() -> str:
     if explicit := os.getenv("SSE_BACKPLANE"):
         return explicit.strip()
-    return "valkey" if (DEPLOYMENT_MODE == "high_throughput" or bool(CELERY_BROKER_URL)) else "local"
+    return "valkey" if (DEPLOYMENT_MODE in {"high_scale", "high-scale"} or bool(CELERY_BROKER_URL)) else "local"
 
 
 SSE_BACKPLANE = _default_sse_backplane()
@@ -832,49 +832,38 @@ def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) ->
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
 
 
+def is_high_scale_mode(source: dict | None = None) -> bool:
+    """Return whether the deployment uses the high-scale ClickHouse topology."""
+    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
+    return mode in {"high_scale", "high-scale"} or os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def is_durable_serving_mode(source: dict | None = None) -> bool:
     """Return whether serving must use durable shared state only.
 
-    The durable serving mode is intentionally restricted to the Celery
-    topology with a Postgres DuckLake catalog. Sync/file mode keeps its
-    existing native per-service DuckDB file and local-buffer behavior.
+    The durable serving mode is used in high-scale topology with a Postgres
+    DuckLake catalog. Sync/file mode keeps its existing native per-service
+    DuckDB file and local-buffer behavior.
     """
-    return is_high_throughput_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
-
-
-def is_high_throughput_mode(source: dict | None = None) -> bool:
-    """Return whether the deployment uses the high-throughput topology."""
-    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
-    return mode == "high_throughput"
+    return is_high_scale_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
 
 
 def validate_deployment_mode() -> None:
-    """Fail fast on incoherent high-throughput configuration.
+    """Fail fast on incoherent deployment configuration.
 
-    Called from the backend lifespan AND celery worker init so both
-    processes refuse to run rather than degrade invisibly:
-
-    - Celery mode without a broker: discovery would dispatch into nothing.
-    - Celery mode on a DuckDB-FILE DuckLake catalog: worker processes write
-      while the backend reads, which a file catalog cannot support (single
-      process holds the file lock; concurrent merges tear the catalog and
-      leave it referencing parquet that never landed — observed live as
-      404 NoSuchKey on reads). A transactional multi-writer catalog
-      (Postgres DSN) is REQUIRED.
-    - Celery mode on per-pod SQLite metadata: the cron lease, the ingest
-      ledger, and ingested-file bookkeeping would each be private to one
-      process, so nothing serializes the fleet. A shared Postgres metadata
-      database (``METADATA_DSN``) is REQUIRED. See ADR-15.
-
-    ``METADATA_DSN`` is read from the environment here rather than captured
-    as a module constant so this gate and
-    ``metadata.pg_connection.is_postgres()`` (which also reads it live)
-    can never disagree about which backend is active.
+    Allowed modes are 'standard' and 'high_scale' (or 'high-scale').
+    DEPLOYMENT_MODE=high_throughput has been completely removed.
+    Both modes require DUCKLAKE_CATALOG and METADATA_DSN to be Postgres DSNs per ADR-22.
     """
-    if DEPLOYMENT_MODE not in {"standard", "high_throughput"}:
-        raise RuntimeError("DEPLOYMENT_MODE must be either 'standard' or 'high_throughput'")
-    if DEPLOYMENT_MODE == "high_throughput" and not CELERY_BROKER_URL:
-        raise RuntimeError("DEPLOYMENT_MODE=high_throughput requires CELERY_BROKER_URL to be set")
+    if DEPLOYMENT_MODE == "high_throughput":
+        raise RuntimeError("DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'")
+    if DEPLOYMENT_MODE not in {"standard", "high_scale", "high-scale"}:
+        raise RuntimeError(f"DEPLOYMENT_MODE must be either 'standard' or 'high_scale'; got {DEPLOYMENT_MODE!r}")
     if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
             f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires DUCKLAKE_CATALOG to be a Postgres DSN — "

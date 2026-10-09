@@ -39,7 +39,7 @@ The **Raw Logs Explorer** provides high-throughput, paginated, searchable access
 
 ## 4. Architecture Execution Matrix
 
-| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`) |
+| Component / Subsystem | Standard Mode (`DEPLOYMENT_MODE=standard`) | High-Scale Mode (`DEPLOYMENT_MODE=high_scale`) |
 |---|---|---|
 | **Data Plane** | Reads DuckDB session `logs` view with pushdown predicates. | Reads Postgres DuckLake or ClickHouse raw logs table. |
 | **Filter Optimization** | Uses partition pruning (`timestamp >= ...`) to minimize parquet reads. | Uses ClickHouse primary keys / Postgres index scans. |

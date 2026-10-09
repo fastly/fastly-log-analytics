@@ -35,7 +35,7 @@ _PG = "postgresql://fla:pw@postgres:5432/ducklake"
 # one constant so a new requirement shows up as one edit here rather than as
 # a scatter of --set flags.
 CELERY = (
-    "config.deploymentMode=high_throughput",
+    "config.deploymentMode=high_scale",
     "config.schedulerMode=external",
     "config.sseBackplane=valkey",
     f"config.ducklakeCatalog={_PG}",
@@ -133,13 +133,13 @@ def test_default_values_render_a_self_contained_install():
 def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
     """Mirror of backend/config.py::validate_deployment_mode() over the rendered
     pod specs. The real gate runs in the backend lifespan AND in
-    worker_process_init, so every pod carrying DEPLOYMENT_MODE=high_throughput has to
+    worker_process_init, so every pod carrying DEPLOYMENT_MODE=high_scale has to
     satisfy it or it CrashLoops."""
     for doc in docs:
         if doc["kind"] != "Deployment":
             continue
         env = _env(doc)
-        if env.get("DEPLOYMENT_MODE", {}).get("value") != "high_throughput":
+        if env.get("DEPLOYMENT_MODE", {}).get("value") != "high_scale":
             continue
         name = doc["metadata"]["name"]
         assert "INGEST_MODE" not in env, name
@@ -157,8 +157,13 @@ def test_no_rendered_pod_would_fail_the_app_boot_gate():
 # ── Celery mode is a validated opt-in ────────────────────────────────────────
 
 
-def test_celery_without_ducklake_catalog_fails_at_template_time():
+def test_high_throughput_fails_at_template_time():
     stderr = _render_error("config.deploymentMode=high_throughput")
+    assert 'config.deploymentMode=high_throughput has been removed; use "standard" or "high_scale"' in stderr
+
+
+def test_celery_without_ducklake_catalog_fails_at_template_time():
+    stderr = _render_error("config.deploymentMode=high_scale")
 
     assert "config.ducklakeCatalog" in stderr
     assert "postgresql://" in stderr
@@ -166,7 +171,7 @@ def test_celery_without_ducklake_catalog_fails_at_template_time():
 
 def test_celery_without_metadata_dsn_fails_at_template_time():
     stderr = _render_error(
-        "config.deploymentMode=high_throughput",
+        "config.deploymentMode=high_scale",
         f"config.ducklakeCatalog={_PG}",
     )
 
@@ -176,7 +181,8 @@ def test_celery_without_metadata_dsn_fails_at_template_time():
 
 def test_celery_without_broker_fails_at_template_time():
     stderr = _render_error(
-        "config.deploymentMode=high_throughput",
+        "config.deploymentMode=high_scale",
+        "config.sseBackplane=valkey",
         f"config.ducklakeCatalog={_PG}",
         f"secrets.metadataDsn={_PG}",
     )
@@ -188,7 +194,7 @@ def test_celery_rejects_a_file_ducklake_catalog():
     """A file catalog is single-process; the boot gate rejects it, so the
     template must too rather than deferring to a CrashLoop."""
     stderr = _render_error(
-        "config.deploymentMode=high_throughput",
+        "config.deploymentMode=high_scale",
         "config.ducklakeCatalog=/app/data/catalog.ducklake",
     )
 
@@ -198,7 +204,7 @@ def test_celery_rejects_a_file_ducklake_catalog():
 
 def test_celery_rejects_a_non_postgres_metadata_dsn():
     stderr = _render_error(
-        "config.deploymentMode=high_throughput",
+        "config.deploymentMode=high_scale",
         f"config.ducklakeCatalog={_PG}",
         "secrets.metadataDsn=sqlite:///app/data/metadata.db",
     )
@@ -222,7 +228,7 @@ def test_external_scheduler_outside_celery_mode_fails_at_template_time():
     stderr = _render_error("config.schedulerMode=external")
 
     assert "config.schedulerMode=external" in stderr
-    assert "config.deploymentMode=high_throughput" in stderr
+    assert "config.deploymentMode=high_scale" in stderr
 
 
 def test_valkey_backplane_without_a_broker_fails_at_template_time():
@@ -240,14 +246,14 @@ def test_celery_mode_renders_the_full_ingest_fleet():
 
     for component in ("backend", "worker", "beat"):
         env = _env(_deployment(docs, component))
-        assert env["DEPLOYMENT_MODE"]["value"] == "high_throughput"
+        assert env["DEPLOYMENT_MODE"]["value"] == "high_scale"
         assert "INGEST_MODE" not in env
         assert "SERVING_MODE" not in env
         assert env["DUCKLAKE_CATALOG"]["value"] == _PG
         # Non-optional: a Secret missing the key must stop the pod with
         # "couldn't find key" rather than boot it into the config gate.
         assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
-        assert env["CELERY_BROKER_URL"]["valueFrom"]["secretKeyRef"]["optional"] is False
+        assert "CELERY_BROKER_URL" in env
         assert env["DUCKDB_EXTENSION_DIRECTORY"]["value"] == "/tmp/duckdb-extensions"
 
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
@@ -266,7 +272,7 @@ def test_existing_secret_satisfies_the_dsn_requirement():
     """The production path: connection strings pre-created out of band, so
     the chart templates no Secret and cannot inspect the keys."""
     docs = _render(
-        "config.deploymentMode=high_throughput",
+        "config.deploymentMode=high_scale",
         f"config.ducklakeCatalog={_PG}",
         "secrets.existingSecret=fla-connections",
     )

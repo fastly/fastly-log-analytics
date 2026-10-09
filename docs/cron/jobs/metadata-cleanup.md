@@ -29,7 +29,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to PostgreSQL `METADATA_DSN` and issues bounded chunked `DELETE FROM` statements (`ctid IN (SELECT ctid ... LIMIT 5000)`). | PostgreSQL connection pool and transaction; politeness gate yields if active dashboard queries are running. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler | Connects to PostgreSQL `METADATA_DSN` and executes SQL deletes in bounded 5,000-row chunks. | PostgreSQL transaction; politeness gate yields if active dashboard queries are running. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler | Connects to PostgreSQL `METADATA_DSN` and executes SQL deletes in bounded 5,000-row chunks. | PostgreSQL transaction; politeness gate yields if active dashboard queries are running. |
 
 ---
 

@@ -261,7 +261,7 @@ def test_contract_dual_role_registration_admin_and_analyst():
 
 
 def test_contract_pod_safety_never_routes_to_redbeat():
-    """Requirement 4: In distributed High-Scale mode (DEPLOYMENT_MODE=high_throughput / mode=external),
+    """Requirement 4: In distributed High-Scale mode (DEPLOYMENT_MODE=high_scale / mode=external),
     insights_prewarmer must NEVER be routed to RedBeat or Celery workers. It runs strictly on the web
     serving pod's APScheduler to prewarm pod-local in-memory cache.
     """

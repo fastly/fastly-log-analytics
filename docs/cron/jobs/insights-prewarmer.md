@@ -26,7 +26,7 @@
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
 | **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries session DuckDB `logs` view and precomputed rollups; populates module memory cache `_insights_cache`. | Read-only connection from DuckDB pool with `skip_view_update=True`. Active request politeness gate (`should_defer_cron`) defers when user queries are active. Permitted under `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_throughput`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse dimension rollups; populates local web cache. | Pod-local memory cache; never dispatched to Celery workers. Yields if active dashboard queries are executing. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse dimension rollups; populates local web cache. | Pod-local memory cache; never dispatched to Celery workers. Yields if active dashboard queries are executing. |
 
 ---
 
@@ -99,7 +99,7 @@ Verified with 30 passing automated tests across the dedicated contract suite (`t
 - [x] **Requirement 1 — Cadence and Trigger:** Interval timer running every 240 seconds (`seconds=240`, `jitter=15`) strictly within the 300s cache TTL (`INSIGHTS_CACHE_TTL = 300`). Verified via `test_contract_cadence_and_cache_ttl_safety`.
 - [x] **Requirement 2 — Dynamic Registration Gating & Rescheduling:** Job disabled when `cron_insights_prewarmer.enabled=False`; rescheduled with custom interval on `cron_insights_prewarmer.interval_seconds` update. Verified via `test_contract_dynamic_registration_gating_and_rescheduling`.
 - [x] **Requirement 3 — Dual-Role Registration:** Registered for both Admin (`read_write`) and Analyst Path A (`read_only`). Verified via `test_contract_dual_role_registration_admin_and_analyst_a`.
-- [x] **Requirement 4 — Pod Safety:** In distributed High-Scale mode (`DEPLOYMENT_MODE=high_throughput` / `mode=external`), runs strictly on the web serving pod's APScheduler, never routed to RedBeat or Celery workers. Verified via `test_contract_pod_safety_never_routes_to_redbeat`.
+- [x] **Requirement 4 — Pod Safety:** In distributed High-Scale mode (`DEPLOYMENT_MODE=high_scale` / `mode=external`), runs strictly on the web serving pod's APScheduler, never routed to RedBeat or Celery workers. Verified via `test_contract_pod_safety_never_routes_to_redbeat`.
 - [x] **Requirement 5 — Local Safety under `FLA_DEV_NO_CRONS=1`:** Registered and executed as a local-safe read-only cache prewarmer during dev mode via `_register_dev_local_safe_jobs`. Verified via `test_contract_local_safety_under_fla_dev_no_crons`.
 - [x] **Requirement 6 — Politeness Deferral:** Cleanly defers execution via `should_defer_cron("insights_prewarmer", service_id)` when active user queries are running on the dashboard. Verified via `test_contract_politeness_deferral_when_active_queries`.
 - [x] **Requirement 7 — Adaptive Parameter Resolution:** Adaptively derives `(window_hours, baseline_hours)` based on service log history extents via `pick_insights_default`. Verified via `test_contract_adaptive_parameter_resolution`.

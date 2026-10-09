@@ -104,10 +104,9 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Verify on dev (ports 13002/18002) before GCE deploy
 - `local-docs/` and `pending-docs/` never reach `main`; `docs/` is PUBLIC
 - Repo is PUBLIC — never commit GCE/bucket/service-ID strings; use `infra-leak-sweep` skill
-- **Experimental Kubernetes chart:** `deploy/chart/fastly-log-analytics/` (Helm). Not the supported path —
-  exists to exercise the multi-pod Celery/valkey ingest split. Two topologies via
-  `config.deploymentMode`: `standard` (default, no external datastores) or
-  `high_throughput` (worker + beat pods, requires bring-your-own Postgres + valkey/redis).
+- **Experimental Kubernetes chart:** `deploy/chart/fastly-log-analytics/` (Helm).
+  Two topologies via `config.deploymentMode`: `standard` (default, no external datastores) or
+  `high_scale` (dedicated worker pods, requires ClickHouse + Postgres).
   See the chart's own [README](deploy/chart/fastly-log-analytics/README.md).
   - **The serving tier does not scale in either topology.** The backend Deployment is pinned to
     `replicas: 1` with no HPA — the per-service `.duckdb` file takes a process-exclusive lock, so a

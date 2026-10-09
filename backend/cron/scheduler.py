@@ -988,7 +988,7 @@ class Scheduler:
             # Reclaims stale ingest_ledger claims, re-dispatches stuck rows, and
             # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
             # the previous `now.minute % 15 == 0` gate inside the discovery tick
-            if svcconfig.is_high_throughput_mode(src):
+            if svcconfig.is_high_scale_mode(src):
                 from backend.cron.jobs.ledger import _run_ledger_sweep
 
                 sweep_cfg = prov.get("cron_ledger_sweep", {})
@@ -1037,7 +1037,7 @@ class Scheduler:
                 if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
                 else bool(cfg.get("rum_enabled", False))
             )
-            if rum_enabled and svcconfig.is_high_throughput_mode(src):
+            if rum_enabled and svcconfig.is_high_scale_mode(src):
                 from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
