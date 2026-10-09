@@ -370,6 +370,7 @@ def test_contract_8_corrupt_rows_and_quarantine_outcome_counters(full_sync_test_
     monkeypatch.setattr("backend.core.duckdb.update_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
     monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
 
     def fake_ingest(*args, **kwargs):
         yield {

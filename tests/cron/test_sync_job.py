@@ -1107,6 +1107,7 @@ def test_full_sweep_success_logs_new_files_count(
     monkeypatch,
     stub_load_config,
     stub_progress,
+    stub_post_ingest,
 ):
     """A clean ``done`` event with new_files > 0 → log_cron_run
     success with "Backfilled N late-arriving file(s)" summary."""
@@ -1230,7 +1231,7 @@ def test_full_sweep_defers_when_active_requests_present(monkeypatch, stub_load_c
     start_cron.assert_not_called()
 
 
-def test_full_sweep_error_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress):
+def test_full_sweep_error_status_on_corrupt_rows(monkeypatch, stub_load_config, stub_progress, stub_post_ingest):
     """When corrupt rows are quarantined during a full sweep, the cron run status
     must transition to 'error' and the summary must flag the quarantine."""
     from backend.cron.jobs import sync as sync_mod
