@@ -988,9 +988,8 @@ class Scheduler:
             # Reclaims stale ingest_ledger claims, re-dispatches stuck rows, and
             # diffs a lookback FOS LIST. Its own schedule entry (every 15 min):
             # the previous `now.minute % 15 == 0` gate inside the discovery tick
-            # fired zero-or-multiple times depending on interval alignment.
             if svcconfig.is_high_throughput_mode(src):
-                from backend.cron.jobs.sync import _run_ledger_sweep
+                from backend.cron.jobs.ledger import _run_ledger_sweep
 
                 sweep_cfg = prov.get("cron_ledger_sweep", {})
                 if sweep_cfg.get("enabled", True):

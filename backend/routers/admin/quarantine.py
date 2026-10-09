@@ -59,6 +59,38 @@ def list_quarantine(
     }
 
 
+@router.get("/admin/ledger/quarantine", response_model=QuarantineListResponse)
+def list_ledger_quarantine(
+    service_id: str = Query(..., description="Service ID to inspect quarantine for"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    error_category: str | None = Query(default=None, min_length=1, max_length=64),
+    _admin: None = Depends(require_admin),
+) -> dict:
+    from backend.core.duckdb import get_source_for_service
+
+    src = get_source_for_service(service_id)
+    if not src:
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("service_not_found", f"Service {service_id} not found."),
+        )
+    _require_read_write_source(src)
+    items = list_quarantine_evidence(
+        service_id,
+        limit=limit,
+        offset=offset,
+        error_category=error_category,
+    )
+    for item in items:
+        item["quarantined_at"] = str(item["quarantined_at"])
+    summary = get_quarantine_evidence_summary(service_id)
+    return {
+        "items": [QuarantineEvidenceItem(**item) for item in items],
+        "total": summary["category_counts"].get(error_category, 0) if error_category else summary["total_items"],
+    }
+
+
 @router.get("/admin/quarantine/summary", response_model=QuarantineSummary)
 def quarantine_summary(
     source: dict = Depends(get_source),

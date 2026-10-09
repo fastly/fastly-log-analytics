@@ -108,7 +108,7 @@ Below is the master catalog of all 24 active scheduled background tasks plus one
 | `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
 | `insights_prewarmer_{id}` | Every 240 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
 | `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
-| `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) |
+| `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
 | `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
 | `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (request parity unified); [High-Scale mode](jobs/rum-discovery.md) |
 | `rum_commit_{id}` | Post-sync immediate & 1m periodic | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) |

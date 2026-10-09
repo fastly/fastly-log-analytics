@@ -102,6 +102,42 @@ def gap_heal_service(
     return SyncStartResponse(**res)
 
 
+@router.post(
+    "/admin/ledger/sweep/{service_id}",
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def ledger_sweep_service(
+    service_id: str,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run ledger sweep.")
+
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_throughput_mode(source):
+        raise HTTPException(
+            status_code=400,
+            detail="Ledger sweep is only supported in high-throughput (Celery) mode.",
+        )
+
+    from backend.cron.jobs.ledger import _run_ledger_sweep
+    from backend.repositories.dashboard import invalidate_service
+    from backend.utils.router_utils import start_or_resume_cron
+
+    invalidate_service(source["name"])
+    res = start_or_resume_cron(
+        source,
+        "ledger_sweep",
+        _run_ledger_sweep,
+        success_msg="Ledger sweep started.",
+        in_progress_msg="Ledger sweep already running.",
+    )
+    return SyncStartResponse(**res)
+
+
 @router.post("/admin/ingest-logs")
 def ingest_endpoint(
     start_time: str | None = Query(default=None),
