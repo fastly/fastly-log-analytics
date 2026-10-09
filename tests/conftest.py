@@ -306,7 +306,17 @@ def _pg_worker_schema(worker_id):
 
     admin_conn = psycopg.connect(maint_dsn, autocommit=True)
     admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
-    admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+    for attempt in range(10):
+        try:
+            admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+            break
+        except (psycopg.errors.UniqueViolation, psycopg.errors.ObjectInUse):
+            if attempt == 9:
+                raise
+            import time
+
+            time.sleep(0.1)
+            admin_conn.execute(f'DROP DATABASE IF EXISTS "{worker_db}" WITH (FORCE)')
 
     worker_parsed = parsed._replace(path=f"/{worker_db}")
     worker_dsn = urlunparse(worker_parsed)

@@ -1278,13 +1278,31 @@ def health_check(
 
             svc_state["last_ingest"] = last_ingest
 
+            has_service_id = False
+            try:
+                con.execute("SELECT service_id FROM cron_runs LIMIT 0")
+                has_service_id = True
+            except Exception:
+                pass
+
+            has_id = False
+            try:
+                con.execute("SELECT id FROM cron_runs LIMIT 0")
+                has_id = True
+            except Exception:
+                pass
+
+            order_suffix = ", id DESC" if has_id else ""
+            where_service = "service_id = ? AND " if has_service_id else ""
+            service_args = (sid,) if has_service_id else ()
+
             # task IN (…): the ingest cron was renamed sync → log_discovery in
             # v3.0.0-beta1; match both so pre-upgrade history still satisfies the probe.
             cron_row = con.execute(
-                "SELECT status, started_at, error_message FROM cron_runs "
-                "WHERE service_id = ? AND task IN ('sync', 'log_discovery') AND status != 'running' "
-                "ORDER BY started_at DESC, id DESC LIMIT 1",
-                (sid,),
+                f"SELECT status, started_at, error_message FROM cron_runs "
+                f"WHERE {where_service}task IN ('sync', 'log_discovery') AND status != 'running' "
+                f"ORDER BY started_at DESC{order_suffix} LIMIT 1",
+                service_args,
             ).fetchone()
             if cron_row:
                 svc_state["last_sync_status"] = cron_row["status"]
@@ -1305,10 +1323,10 @@ def health_check(
             if svc_state["status"] == "ok":
                 try:
                     stuck = con.execute(
-                        "SELECT started_at FROM cron_runs "
-                        "WHERE service_id = ? AND task IN ('sync', 'log_discovery') AND status = 'running' "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
-                        (sid,),
+                        f"SELECT started_at FROM cron_runs "
+                        f"WHERE {where_service}task IN ('sync', 'log_discovery') AND status = 'running' "
+                        f"ORDER BY started_at DESC{order_suffix} LIMIT 1",
+                        service_args,
                     ).fetchone()
                     if stuck and stuck["started_at"]:
                         stuck_cutoff = iso_z(datetime.now(UTC) - timedelta(minutes=_STUCK_SYNC_RUNNING_MINS))
@@ -1348,8 +1366,8 @@ def health_check(
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
                         "  SELECT task, status, error_message, "
-                        "         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn "
-                        f"  FROM cron_runs WHERE service_id = ? AND task IN ({placeholders}) AND status != 'running'"
+                        f"         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC{order_suffix}) AS rn "
+                        f"  FROM cron_runs WHERE {where_service}task IN ({placeholders}) AND status != 'running'"
                         "  AND started_at >= ?"
                         # Boot-reap rows are lifecycle artifacts (the process
                         # stopped mid-run), not failing crons — a task that is
@@ -1358,7 +1376,7 @@ def health_check(
                         # window on every restart.
                         "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
                         ") WHERE rn = 1 AND status = 'error' LIMIT 1",
-                        (sid, *critical_tasks, crit_cutoff),
+                        (*service_args, *critical_tasks, crit_cutoff),
                     ).fetchone()
                     if crit_row:
                         svc_state["status"] = "degraded"

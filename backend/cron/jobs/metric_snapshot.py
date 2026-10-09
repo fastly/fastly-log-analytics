@@ -95,26 +95,63 @@ def _sample_cron_duration() -> int:
     count = 0
     try:
         from backend import config as svcconfig
+        from backend.core.metadata.base import get_con
 
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id")
             if not service_id:
                 continue
             try:
-                from backend.core.metadata import cron_log
+                con = get_con(service_id)
+                has_service_id = False
+                try:
+                    con.execute("SELECT service_id FROM cron_runs LIMIT 0")
+                    has_service_id = True
+                except Exception:
+                    pass
 
-                latest = cron_log.latest_cron_per_task(service_id)
-                for task, info in latest.items():
-                    if info.get("status") in ("success", "warning", "error"):
-                        secs = info.get("duration_s")
-                        if secs is not None:
-                            if _safe_record(
-                                "cron_duration_ms",
-                                float(secs) * 1000.0,
-                                service_id=service_id,
-                                task=task,
-                            ):
-                                count += 1
+                if has_service_id:
+                    rows = con.execute(
+                        """
+                        SELECT task, duration_s
+                        FROM cron_runs
+                        WHERE service_id = ?
+                          AND status IN ('success', 'warning', 'error')
+                          AND duration_s IS NOT NULL
+                          AND id IN (
+                              SELECT max(id) FROM cron_runs
+                              WHERE service_id = ? AND status IN ('success', 'warning', 'error')
+                              GROUP BY service_id, task
+                          )
+                        """,
+                        (service_id, service_id),
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        """
+                        SELECT task, duration_s
+                        FROM cron_runs
+                        WHERE status IN ('success', 'warning', 'error')
+                          AND duration_s IS NOT NULL
+                          AND id IN (
+                              SELECT max(id) FROM cron_runs
+                              WHERE status IN ('success', 'warning', 'error')
+                              GROUP BY task
+                          )
+                        """
+                    ).fetchall()
+
+                for r in rows:
+                    task = r["task"]
+                    secs = r["duration_s"]
+                    if task and secs is not None:
+                        if _safe_record(
+                            "cron_duration_ms",
+                            float(secs) * 1000.0,
+                            service_id=service_id,
+                            task=task,
+                        ):
+                            count += 1
             except Exception as e:
                 logger.debug("[metric_snapshot] cron_duration for %s failed: %s", service_id, e)
     except Exception as e:

@@ -835,16 +835,16 @@ def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...
     lifecycle artifacts, not failing crons). Default callers are unaffected.
     """
     con = get_con(service_id)
-    exclusion_sql = ""
-    params: list[Any] = [service_id]
-    if exclude_error_messages:
-        placeholders = ",".join(["?"] * len(exclude_error_messages))
-        exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
-        params.extend(exclude_error_messages)
-
     from backend.core.metadata import pg_connection
 
     if pg_connection.is_postgres():
+        exclusion_sql = ""
+        params: list[Any] = [service_id]
+        if exclude_error_messages:
+            placeholders = ",".join(["?"] * len(exclude_error_messages))
+            exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
+            params.extend(exclude_error_messages)
+
         sql = f"""
         WITH RECURSIVE tasks AS (
             (
@@ -870,6 +870,13 @@ def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...
             cte_params.extend(exclude_error_messages)
         rows = con.execute(sql, tuple(cte_params)).fetchall()
     else:
+        exclusion_sql = ""
+        sqlite_params: list[Any] = []
+        if exclude_error_messages:
+            placeholders = ",".join(["?"] * len(exclude_error_messages))
+            exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
+            sqlite_params.extend(exclude_error_messages)
+
         rows = con.execute(
             f"""
             SELECT task, started_at, status, duration_s, summary, error_message
@@ -879,11 +886,11 @@ def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...
                            PARTITION BY task ORDER BY started_at DESC, id DESC
                        ) AS rn
                 FROM cron_runs
-                WHERE service_id = ? AND status != 'running'{exclusion_sql}
+                WHERE status != 'running'{exclusion_sql}
             ) AS ranked
             WHERE rn = 1
             """,
-            tuple(params),
+            tuple(sqlite_params),
         ).fetchall()
     return {
         r["task"]: {
@@ -1014,11 +1021,11 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("log_disco
                 SELECT task, started_at, duration_s, status, error_message, summary,
                        ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn
                 FROM cron_runs
-                WHERE service_id = ? AND task IN ({placeholders})
+                WHERE task IN ({placeholders})
             ) AS ranked
             WHERE rn = 1
             """,
-            (service_id, *tasks),
+            tuple(tasks),
         ).fetchall()
     return {
         row["task"]: {

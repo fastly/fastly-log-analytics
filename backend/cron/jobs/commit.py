@@ -79,10 +79,14 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             # convert workers landed since the previous commit tick, and
             # how many durable raw .gz files we deleted (delete_after).
             meta_con = get_con(service_id)
+            from backend.core.metadata import pg_connection
+
+            where_service = "service_id = ? AND " if pg_connection.is_postgres() else ""
+            service_args = (service_id,) if pg_connection.is_postgres() else ()
             prev = meta_con.execute(
-                "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
-                "AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
-                (service_id,),
+                f"SELECT started_at FROM cron_runs WHERE {where_service}task = 'commit' "
+                f"AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
+                service_args,
             ).fetchone()
             since_epoch = 0.0
             if prev and prev["started_at"]:

@@ -77,11 +77,6 @@ _SLOW_QUERIES_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_slow_queries_service_duration ON slow_queries (service_id, duration_ms DESC, started_at_utc DESC)",
 )
 
-_CRON_RUNS_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS idx_cron_runs_service_task_started ON cron_runs (service_id, task, started_at DESC, id DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_cron_runs_service_started ON cron_runs (service_id, started_at DESC, id DESC)",
-)
-
 
 # committed_buffers is created by SQLite migration 004, not _SCHEMA, so the
 # Postgres path never had it — while pg_connection._IGNORE_TABLES already
@@ -274,7 +269,6 @@ def pg_schema_statements() -> list[str]:
     statements.append(_COMMITTED_BUFFERS_DDL)
     statements.append(_METRIC_SNAPSHOTS_DDL)
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
-    statements.extend(_CRON_RUNS_INDEX_DDL)
     statements.extend(_INGEST_LEDGER_ALTERS)
     statements.extend(_QUARANTINED_FILES_ALTERS)
     statements.extend(_CRON_RUNS_ALTERS)
