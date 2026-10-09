@@ -199,7 +199,7 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 1. **Decision: this design supersedes the ADR-21 per-source manifest.** `ArchiveManifest` (`backend/high_scale/archive_models.py`) currently holds a single `ArchiveSourceObject`. It becomes a batch manifest: one artifact plus a list of source entries, each with key, version, checksum, row range, and deletion deadline. Replay and deletion stay per source. ADR-21 carries an amendment note pointing here. Implementation work: change `ArchiveManifest`, `register_archive_manifest`, and the deletion ledger to iterate source entries.
 2. **Runtime mode is not enabled.** The rest of ADR-21 still stands: the `high_scale` mode stays gated on operator selection, a continuous-ingest vertical slice, an archive-only recovery test, a differential canary, and rollback evidence. This design does not enable it.
 3. **Partitioning and sharding** for `request_facts` at 2M RPS (§3.2).
-4. **Fastly flush period** versus the freshness budget: see §8. With FOS delivery, edge-to-dashboard freshness is at least `period` (10 s on the test services, 60 s code default) plus pipeline latency, so < 5s edge-to-dashboard needs a sub-5 s `period` (no documented minimum; unverified) or a streaming endpoint.
+4. **Fastly flush period** versus the freshness budget: see §8. With FOS delivery, edge-to-dashboard freshness is at least `period` (10 s on the test services, 60 s code default) plus pipeline latency, so < 5s edge-to-dashboard needs a sub-5 s `period` (operator-confirmed that sub-10 s periods work on FOS; the lower floor is untested) or a streaming endpoint.
 
 ---
 
@@ -225,8 +225,8 @@ The repo has no per-stage timings, so everything below is a call count read from
 
 ## 8. Findings From Fastly Log Delivery (official docs; unverified items flagged)
 
-1. **Flush period:** the S3/object-storage logging `period` defaults to 3600 s and "how frequently log files are finalized so they can be available for reading". This repo's code default is 60 s (`log_period`, `backend/config.py`) and is configurable per service; the test services use 10 s. No documented minimum was found (unverified); sub-5 s may be accepted by the API but is not what file objects are designed for, so test empirically. `file_max_bytes` (minimum 1 MiB) forces earlier rotation at high volume, so object count scales with traffic.
-   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`. At the 10 s test setting the floor is about 10 s plus pipeline latency, and at the 60 s default about 60 s. The < 5 s target is therefore only meaningful as FOS-landing-to-visible. A true < 5 s edge-to-dashboard target needs a sub-5 s `period` (unverified) or a streaming endpoint.
+1. **Flush period:** the S3/object-storage logging `period` defaults to 3600 s and "how frequently log files are finalized so they can be available for reading". This repo's code default is 60 s (`log_period`, `backend/config.py`) and is configurable per service; the test services use 10 s. No documented minimum was found. Operator-confirmed: periods below 10 s work on FOS; the floor is untested, and tiny periods multiply object count, so test empirically. `file_max_bytes` (minimum 1 MiB) forces earlier rotation at high volume, so object count scales with traffic.
+   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`. At the 10 s test setting the floor is about 10 s plus pipeline latency, and at the 60 s default about 60 s. The < 5 s target is therefore only meaningful as FOS-landing-to-visible. A true < 5 s edge-to-dashboard target needs a sub-5 s `period` (sub-10 s confirmed working; lower floor untested) or a streaming endpoint.
 2. **Streaming alternatives** (batched by `request_max_entries` / `request_max_bytes`): HTTPS (`period` default 5 s) meets the budget but needs a public TLS receiver sized for 2M RPS that handles its own backpressure and loss; Kafka is the best fit for a durable, replayable buffer but needs a Kafka cluster and drops FOS-as-archive (the archive would be written from the consumer). Per-endpoint delivery guarantees are unverified. No "real-time log streaming to ClickHouse" endpoint was found in the docs. This is a product decision to make before building, not something the worker design settles.
 3. **Delivery guarantees:** Fastly documents no at-least-once or no-loss guarantee for S3/FOS. Assume both duplicates and loss are possible. The ledger checksum dedup in this design is the correct defense; loss detection needs a count reconciliation against edge-side stats.
 4. **Object count at 2M RPS:** whether files are per POP, per cache server, or per process is not documented (unverified), so objects per second is unknown. Measure it; it drives claim contention and LIST cost (§7).
@@ -247,3 +247,59 @@ The repo has no per-stage timings, so everything below is a call count read from
 5. **Retention & cost:** ClickHouse TTL follows `data_retention_days`; the FOS archive follows the manifest retention deadline. Estimate archive storage and FOS request/egress cost at target volume (objects per second x GET/PUT/LIST per object) before rollout; larger pages cut request cost.
 6. **Observability** (per the observability-first rule): per-stage latency histograms (list, get, decode, archive, manifest, insert, publish, ack), page rows/bytes, dead-letter ratio, oldest-unpublished-batch age, claim-lease expiries, source-to-visible lag (the headline SLO), ClickHouse parts per partition, and insert rejections. Alert on lag above the budget, any `pending` batch older than the lease, and dead-letter ratio above threshold.
 7. **Rollout & rollback:** ship behind a per-service flag. Run the batched path in shadow against a canary service and compare row counts and aggregates with the existing path (differential canary, as ADR-21 requires). Rollback is flipping the flag; the archive keeps every source replayable, so no data is lost on rollback.
+
+---
+
+## 10. Measured Baseline (Elevation dev, read-only, 2026-10-09)
+
+Taken with read-only `kubectl top` and ClickHouse `SELECT`s against the test services (10 s log period). Traffic was low, so these show *shape*, not capacity.
+
+| Measure | Value | Reading |
+|---|---|---|
+| Objects ingested (last hour) | 209 | about 3.5 objects/min |
+| Rows ingested (last hour) | 1,424 | about **6.8 rows per object** |
+| ClickHouse INSERTs (last hour) | 3,546 (avg 9 ms, p95 23 ms) | about **17 inserts per object**; confirms the per-object fan-out |
+| `request_facts` parts, recent days | 4–5 parts per day-partition for 20k–134k rows | many tiny parts; the case for large blocks |
+| `high-scale-worker` CPU | 6 pods at about 50–60 m each | idle; CPU-bound hypothesis cannot be tested at this load |
+
+**What this settles:** objects are tiny (single-digit rows) at a 10 s period, so a per-object design cannot reach 2M events/s, and batching across objects (this design) is necessary. The single-digit rows per object also means object count, not row count, drives list, claim, and manifest cost; at 2M RPS and 10 s period, objects per second is the number to size from.
+
+**Still unmeasured (needs a controlled load run; do not run against shared services without approval):** per-core decode rate (`py-spy` on a worker), throughput versus replica count, objects per second per edge POP at high RPS, and PostgreSQL transaction cost under load. The capacity model in §7 stays assumption-based until these exist; Phase 0 below produces them.
+
+---
+
+## 11. Implementation Plan (Handoff)
+
+Order matters: each phase has an exit test. Do not start a phase before the previous exit is met. Use the owning agents in `.claude/agents` where noted.
+
+### Phase 0: Decisions and measurement (no production code)
+1. **Delivery path decision (owner: you/lead):** keep FOS file delivery with a short `period`, or add a streaming endpoint (HTTPS/Kafka). Default recommendation: FOS with a short period first, since it keeps the archive-as-authority model; revisit if Phase 0 measurements show object count is unmanageable.
+2. **Load run on a dedicated test service:** use the generator (`--target fos --rate-rps ... --upload-workers ...`, `scripts/generate_synthetic_traffic.py`) to measure: objects/s and rows/object at target-like RPS and 10 s / 5 s periods; `py-spy` split of decode / archive / PG / ClickHouse in a worker; throughput versus replica count (confirms claim contention); PG transaction cost (`pg_stat_statements`). Agent: `perf-expert`.
+3. **Fill in the §7 capacity model** with the measured numbers and record the worker/ClickHouse sizing.
+Exit: capacity model with measured inputs, delivery decision recorded in §6.
+
+### Phase 1: Contracts (small, test-first)
+1. Batch manifest: change `ArchiveManifest` to hold a list of source entries (§6.1); update `register_archive_manifest`, the deletion ledger, and serialization. Agent: `data-etl-expert`.
+2. New control-plane methods `claim_sources_batch` and `acknowledge_sources_batch` with partitioned (range/hash) leases so replicas add throughput (§7 item 2). Tests: fencing, idempotency, expired-claim recovery.
+3. `batch_id` derived from `manifest_id`; 128-bit deterministic `event_id` with length-prefixed inputs.
+4. ClickHouse DDL changes: day-only partition, new sort key, rollup tables, TTL (§3.2). Needs a schema-version bump (`CLICKHOUSE_SCHEMA_VERSION`) and migration plan for existing tables.
+Exit: contract tests green (`tests/high_scale/`), `make import-contracts` and `make typecheck` clean.
+
+### Phase 2: Batched pipeline
+1. Page-level decode with single canonicalization and Arrow-native batches; worker processes, not threads, for CPU (§7 item 1).
+2. Archive-first flow: one artifact, verify once, manifest prepared -> committed (§2 stages 3, 6).
+3. Collapsed publish handshake: one pending write, one INSERT per table per block (100k–1M rows, multi-page), one count check, one visible write (§7 item 3).
+4. Per-manifest deletion with one verify and parallel deletes (§7 item 4); adaptive polling loop and back-scan of trailing minute prefixes (§9.1, §8.5).
+5. Observability from §9.6 and backpressure from §4.6.
+Exit: `tests/high_scale/` suite from §5.1 passes; a single-service run on Elevation shows source-to-visible p95 inside budget at the measured load.
+
+### Phase 3: Scale and rollout
+1. Sweep worker count and ClickHouse nodes against the capacity model; record results in `high-scale-capacity-and-recovery.md`.
+2. Differential canary against the existing path (row counts and aggregates match), behind a per-service flag; rollback is the flag (§9.7).
+3. Archive-only recovery test and the remaining ADR-21 gate evidence.
+Exit: ADR-21 gate evidence complete; runtime mode may then be proposed for enablement (separate decision).
+
+### Hand-off notes
+- **Source of truth for DDL** is `backend/high_scale/sql/*.sql`; snippets in §3 are abridged.
+- Repo rules: `uv run pytest`, `make ci` before merge, security-regression floor 206, keep public docs free of infra identifiers (`infra-leak-sweep`), and no PRs or pushes to `main` without the owner's instruction.
+- Items marked unverified in §8 and the ClickHouse dedup window defaults (§9.0) must be confirmed against the deployed version (ClickHouse 26.9.1 on Elevation dev) before relying on them.
