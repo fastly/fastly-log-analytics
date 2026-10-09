@@ -34,6 +34,11 @@ artifact_uploading -> artifact_verified -> manifest_prepared
   -> manifest_committed -> deletion_eligible -> source_deleted
 ```
 
+> **Amendment (2026-10-09):** a manifest may cover many source objects. It holds
+> one artifact and a list of source entries (key, version, checksum, row range,
+> deletion deadline); replay and deletion remain per source. See
+> [high-scale-request-logs-design.md](../runbooks/high-scale-request-logs-design.md).
+
 A manifest records service and domain, exact source identity and version,
 artifact identity, row and byte counts, per-domain counts, schema and
 transform versions, canonical event digest, retention and deletion deadlines,
