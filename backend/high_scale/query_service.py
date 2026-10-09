@@ -191,7 +191,7 @@ def _query_facts(
         "WHERE service_id={service_id:String} "
         "AND event_timestamp >= {start:DateTime64(3)} "
         "AND event_timestamp < {end:DateTime64(3)} "
-        "AND publication_state = 'visible'"
+        "AND publication_state = 'visible' "
         "AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
         "WHERE service_id={service_id:String} AND domain={domain:String} "

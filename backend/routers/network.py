@@ -83,14 +83,6 @@ def network_health(
     req: NetworkHealthRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
-    if high_scale_service is not None:
-        from backend.high_scale.network import network_health as hs_network_health
-
-        return hs_network_health(high_scale_service, req, req.start_time, req.end_time)
-
     # ── Relative-range keyed path ───────────────────────────────────────────
     # When the caller sends a recognized ``range_token``, the SERVER resolves
     # the scan window from (token, quantized anchor) — we do NOT trust the
@@ -117,6 +109,14 @@ def network_health(
         invite_fp = invite_clamp_fingerprint(ctx.analyst_session)
     else:
         start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_health as hs_network_health
+
+        return hs_network_health(high_scale_service, req, start_time, end_time)
     sections = _expand_sections(req.sections)
     # mask_ips partitions the get_health response cache (masked vs unmasked).
     # network-health emits no IP today so this is belt-and-braces; it keeps the
@@ -185,15 +185,15 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+
     from backend.high_scale.registry import get_high_scale_service_registry
 
     high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
     if high_scale_service is not None:
         from backend.high_scale.network import network_quality as hs_network_quality
 
-        return hs_network_quality(high_scale_service, req, req.start_time, req.end_time)
-
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+        return hs_network_quality(high_scale_service, req, start_time, end_time)
     res = repo.get_quality(
         con_factory=lambda: ctx.con,
         src=ctx.source,

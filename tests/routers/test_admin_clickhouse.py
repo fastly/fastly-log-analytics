@@ -24,7 +24,7 @@ def boundary(monkeypatch):
     monkeypatch.setattr(api.config, "load_config", lambda sid: cfg if sid == SERVICE else None)
     store, ch, objects, audit = MagicMock(), MagicMock(), MagicMock(), MagicMock()
     store.admin_status.return_value = {
-        "schema_version": 1,
+        "schema_version": api.CLICKHOUSE_SCHEMA_VERSION,
         "publication_counts": {"pending": 1, "claimed": 0, "failed": 0, "published": 2},
         "oldest_pending_age_seconds": 12.5,
         "last_published_at": "2026-09-07T00:00:00+00:00",

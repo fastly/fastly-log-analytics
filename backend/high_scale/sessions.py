@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
 
 
+def _parse_ts(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    return datetime.fromisoformat(val.replace("Z", "+00:00"))
+
+
 def sessions_endpoint(
     service: HighScaleService, req: SessionsRequest, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    end_dt = _parse_ts(end_time) or now
+    start_dt = _parse_ts(start_time) or (end_dt - timedelta(days=7))
     query = """
     WITH base AS (
         SELECT
@@ -89,8 +98,8 @@ def sessions_endpoint(
         query,
         {
             "service_id": service.service_id,
-            "start_time": datetime.fromisoformat(start_time) if start_time else None,
-            "end_time": datetime.fromisoformat(end_time) if end_time else None,
+            "start_time": start_dt,
+            "end_time": end_dt,
             "limit": req.limit,
             "offset": (req.page - 1) * req.limit,
             "min_reqs_flag": req.min_reqs_flag if req.min_reqs_flag is not None else 1000,
@@ -153,6 +162,9 @@ def sessions_detail(
     ip: str,
     ja4: str | None,
 ) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    end_dt = _parse_ts(end_time) or now
+    start_dt = _parse_ts(start_time) or (end_dt - timedelta(days=7))
     query = """
     SELECT
         client_ip as ip,
@@ -179,8 +191,8 @@ def sessions_detail(
 
     params = {
         "service_id": service.service_id,
-        "start_time": datetime.fromisoformat(start_time) if start_time else None,
-        "end_time": datetime.fromisoformat(end_time) if end_time else None,
+        "start_time": start_dt,
+        "end_time": end_dt,
         "ip": ip,
     }
 

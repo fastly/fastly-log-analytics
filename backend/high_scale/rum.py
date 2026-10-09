@@ -256,6 +256,9 @@ def rum_analytics(service: HighScaleService, start_time: str | None, end_time: s
 def rum_live_events(
     service: HighScaleService, start_time: str | None, end_time: str | None, limit: int
 ) -> list[dict[str, Any]]:
+    now = datetime.now(UTC)
+    end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else now
+    start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else (end_dt - timedelta(days=1))
     query = """
     SELECT
         event_timestamp as timestamp,
@@ -301,8 +304,8 @@ def rum_live_events(
             query,
             {
                 "service_id": service.service_id,
-                "start_time": datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else None,
-                "end_time": datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else None,
+                "start_time": start_dt,
+                "end_time": end_dt,
                 "limit": limit,
             },
         )

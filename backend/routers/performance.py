@@ -62,14 +62,6 @@ def performance_aggregates(
     req: PerformanceRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
-    if high_scale_service is not None:
-        from backend.high_scale.performance import performance_aggregates as hs_performance
-
-        return hs_performance(high_scale_service, req, req.start_time, req.end_time)
-
     # Keyed path: resolve window server-side from (range_token, anchor), ignore
     # FE-supplied bounds, clamp AFTER resolve. Mirrors routers/origin.py.
     if is_valid_range_token(req.range_token):
@@ -78,6 +70,14 @@ def performance_aggregates(
         start_time, end_time = ctx.clamp(resolved_start, resolved_end)
     else:
         start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if high_scale_service is not None:
+        from backend.high_scale.performance import performance_aggregates as hs_performance
+
+        return hs_performance(high_scale_service, req, start_time, end_time)
     sections = _expand_sections(req.sections)
     res = repo.get_performance_aggregates(
         con=ctx.con,

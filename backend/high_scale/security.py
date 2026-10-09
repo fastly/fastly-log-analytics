@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -20,8 +18,9 @@ def _range_value(value: str | None) -> datetime | None:
 def security_aggregates(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityAggregatesResponse:
-    start = _range_value(start_time)
-    end = _range_value(end_time)
+    now = datetime.now(UTC)
+    end = _range_value(end_time) or now
+    start = _range_value(start_time) or (end - timedelta(days=1))
 
     def _query(query: str):
         try:
@@ -147,8 +146,9 @@ def security_aggregates(
 def top_bots(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> SecurityTopBotsResponse:
-    start = _range_value(start_time)
-    end = _range_value(end_time)
+    now = datetime.now(UTC)
+    end = _range_value(end_time) or now
+    start = _range_value(start_time) or (end - timedelta(days=1))
 
     query = """
         SELECT
@@ -198,4 +198,4 @@ def get_proxies_data(
 def get_security_threat_intel(
     service: HighScaleService, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
-    return {"has_data": False, "fingerprints": []}
+    return {"data": []}

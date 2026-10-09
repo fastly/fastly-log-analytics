@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -15,6 +13,9 @@ def cmcd_aggregates(
     sections: set[Any] | None,
     mask_ips: bool,
 ) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else now
+    start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00")) if start_time else (end_dt - timedelta(days=1))
 
     # Check if there is data
     query = """
@@ -30,17 +31,15 @@ def cmcd_aggregates(
             query,
             {
                 "service_id": service.service_id,
-                "start_time": datetime.fromisoformat(start_time) if start_time else None,
-                "end_time": datetime.fromisoformat(end_time) if end_time else None,
+                "start_time": start_dt,
+                "end_time": end_dt,
             },
         )
-        has_data = (
-            res[0].get("sum(event_count)", 0)
-            if res
-            else 0 != None and res[0].get("sum(event_count)", 0)
-            if res
-            else 0 > 0
-        )
+        count = 0
+        if res and len(res) > 0:
+            val = next(iter(res[0].values()), 0)
+            count = int(val) if val is not None else 0
+        has_data = count > 0
     except Exception:
         has_data = False
 

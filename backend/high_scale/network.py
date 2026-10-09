@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from backend.high_scale.registry import HighScaleService
@@ -68,8 +66,9 @@ _RTT_FILTER = f"{_BASE_WHERE} AND {_RTT} > 0"
 def network_health(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkHealthResponse:
-    start = _range_value(start_time)
-    end = _range_value(end_time)
+    now = datetime.now(UTC)
+    end = _range_value(end_time) or now
+    start = _range_value(start_time) or (end - timedelta(days=1))
     bucket_seconds = int(getattr(req, "bucket_seconds", 300) or 300)
     top_n = int(getattr(req, "top_n", 30) or 30)
 
@@ -477,8 +476,9 @@ def network_health(
 def network_quality(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> NetworkQualityResponse:
-    start = _range_value(start_time)
-    end = _range_value(end_time)
+    now = datetime.now(UTC)
+    end = _range_value(end_time) or now
+    start = _range_value(start_time) or (end - timedelta(days=1))
     region_country = getattr(req, "region_country", "US") or "US"
     params = {"service_id": service.service_id, "start": start, "end": end, "region_country": region_country}
 
