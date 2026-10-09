@@ -543,7 +543,15 @@ class PgConnectionWrapper:
 
         from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
-        cur = self._conn.cursor()
+        try:
+            cur = self._conn.cursor()
+        except psycopg.OperationalError:
+            pool = self._pool or get_pg_pool()
+            if pool is not None:
+                self._conn = pool.getconn()
+                cur = self._conn.cursor()
+            else:
+                raise
         rewritten_sql = _rewrite_sql(sql)
         rewritten_sql, id_col = _maybe_add_returning(rewritten_sql)
 
@@ -569,7 +577,15 @@ class PgConnectionWrapper:
 
         from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
 
-        cur = self._conn.cursor()
+        try:
+            cur = self._conn.cursor()
+        except psycopg.OperationalError:
+            pool = self._pool or get_pg_pool()
+            if pool is not None:
+                self._conn = pool.getconn()
+                cur = self._conn.cursor()
+            else:
+                raise
         rewritten_sql = _rewrite_sql(sql)
         qid = _live_register("Postgres", rewritten_sql, self)
         t0 = time.perf_counter()
