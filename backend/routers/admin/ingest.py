@@ -138,6 +138,70 @@ def ledger_sweep_service(
     return SyncStartResponse(**res)
 
 
+@router.post(
+    "/admin/rum/sync/{service_id}",
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def rum_sync_service(
+    service_id: str,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM sync.")
+
+    from backend.cron.jobs.rum_sync import _run_rum_sync
+    from backend.repositories.dashboard import invalidate_service
+    from backend.utils.router_utils import start_or_resume_cron
+
+    invalidate_service(source["name"])
+    res = start_or_resume_cron(
+        source,
+        "rum_sync",
+        _run_rum_sync,
+        success_msg="RUM sync started.",
+        in_progress_msg="RUM sync already running.",
+    )
+    return SyncStartResponse(**res)
+
+
+@router.post(
+    "/admin/rum/discovery/{service_id}",
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def rum_discovery_service(
+    service_id: str,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM discovery.")
+
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_throughput_mode(source):
+        raise HTTPException(
+            status_code=400,
+            detail="RUM discovery is only supported in high-throughput (Celery) mode.",
+        )
+
+    from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron
+    from backend.repositories.dashboard import invalidate_service
+    from backend.utils.router_utils import start_or_resume_cron
+
+    invalidate_service(source["name"])
+    res = start_or_resume_cron(
+        source,
+        "rum_discovery",
+        _run_rum_discovery_cron,
+        success_msg="RUM discovery started.",
+        in_progress_msg="RUM discovery already running.",
+    )
+    return SyncStartResponse(**res)
+
+
 @router.post("/admin/ingest-logs")
 def ingest_endpoint(
     start_time: str | None = Query(default=None),

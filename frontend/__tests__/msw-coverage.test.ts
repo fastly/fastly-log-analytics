@@ -117,6 +117,10 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/sync/:service_id',
   'POST /api/admin/full-sweep/:service_id',
   'POST /api/admin/gap-heal/:service_id',
+  'POST /api/admin/ledger/sweep/:service_id',
+  'GET /api/admin/ledger/quarantine',
+  'POST /api/admin/rum/sync/:service_id',
+  'POST /api/admin/rum/discovery/:service_id',
 
   // Session-scoring sub-endpoints — the page hits the two composite
   // endpoints (scoring/analytics, scoring/config) which ARE in

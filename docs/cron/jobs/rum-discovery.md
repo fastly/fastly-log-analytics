@@ -1,8 +1,8 @@
 # Background Job Specification: `rum_discovery_{service_id}`
 
 > [!NOTE]
-> **Status: VERIFIED & OPERATIONAL (High-Scale Architecture / Ingest Pipeline Audit)**
-> Automated test suites verified: `tests/cron/test_rum_discovery.py` (4 tests passing: high-scale discovery success, faro bundle warning status, standard mode guard, broker config validation).
+> **Status: VERIFIED & OPERATIONAL (High-Scale Architecture / Ingest Pipeline Audit & Contract Verification)**
+> Automated test suites verified: `tests/cron/test_rum_discovery.py` (8 tests passing), `tests/core/test_rum_ingest.py` (20 tests passing), and dedicated contract test suite `tests/cron/test_rum_discovery_contract.py` (31 tests passing).
 
 ---
 
@@ -104,3 +104,4 @@
 - [x] 3. Verified Faro bundle reconcile failure records `status='warning'` without halting beacon discovery.
 - [x] 4. Verified standard-mode guard skips cleanly when invoked outside high-throughput deployments.
 - [x] 5. Verified clean progress lifecycle (`start_progress`, `end_progress`) and `finalize_cron_run_if_running`.
+- [x] 6. Dedicated contract test suite verified in `tests/cron/test_rum_discovery_contract.py` covering all contract requirements across Standard and High-Scale modes.

@@ -1043,7 +1043,14 @@ class Scheduler:
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"
                 seen_ids.add(rum_disc_job_id)
-                if rum_disc_job_id not in self._job_ids:
+                if rum_disc_job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(rum_disc_job_id)
+                        if job:
+                            job.reschedule("interval", seconds=rum_disc_interval_secs)
+                    except Exception:
+                        pass
+                else:
                     self._add_job(
                         _run_rum_discovery_cron,
                         "interval",

@@ -287,6 +287,7 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
 def ingest_rum_logs(
     service_id: str,
     max_seconds: int | None = None,
+    run_id: int | None = None,
 ) -> Generator[tuple]:
     """Ingest RUM beacon logs from FOS raw_rum/ prefix into local Parquet buffers & DuckDB Iceberg views."""
     import tempfile
@@ -310,7 +311,8 @@ def ingest_rum_logs(
     )
 
     start_time = time.time()
-    run_id = start_cron_run(service_id, "rum_sync")
+    if run_id is None:
+        run_id = start_cron_run(service_id, "rum_sync")
     outcome_counters = _new_object_outcome(processed=0)
     yield ("started", run_id)
 

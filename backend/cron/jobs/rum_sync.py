@@ -262,7 +262,7 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
     run_id = None
     had_warning = False
     try:
-        for event in ingest_rum_logs(service_id, max_seconds=pass_max_seconds):
+        for event in ingest_rum_logs(service_id, max_seconds=pass_max_seconds, run_id=kwargs.get("run_id")):
             if event[0] == "started":
                 run_id = event[1]
                 start_progress(run_id, service_id=service_id, task="rum_sync")

@@ -1,10 +1,12 @@
 # Background Job Specification: `rum_sync_{service_id}`
 
 > [!NOTE]
-> **Status:** Standard-mode RUM ingestion runs as `rum_sync_{service_id}`.
+> **Status: VERIFIED & OPERATIONAL (Contract Test Suite & Ingest Pipeline Audit)**
+> Standard-mode RUM ingestion runs as `rum_sync_{service_id}`.
 > High-Scale RUM ingestion is handled by
 > [`rum_discovery_{service_id}`](rum-discovery.md). Focused regression coverage
-> lives in `tests/cron/test_rum_sync.py` and `tests/core/test_rum_ingest.py`.
+> lives in `tests/cron/test_rum_sync.py`, `tests/core/test_rum_ingest.py`, and
+> dedicated contract test suite `tests/cron/test_rum_discovery_contract.py` (31 tests passing).
 
 ---
 
@@ -125,6 +127,7 @@
 - [x] 11. Shared parser (`_parse_rum_beacon_file`) and quarantine flow per object (`_quarantine_rum_corrupt_lines`, exact bytes).
 - [x] 12. Bookkeeping records durable rows written per table (0 for no-data files).
 - [x] 13. `convert_rum_object` uses `_ducklake_detach` in `finally` (Trap #35).
+- [x] 14. Dedicated contract test suite verified in `tests/cron/test_rum_discovery_contract.py` (covering Dual Architecture & Mode Routing, Role Gates, Cadence & Registration, Politeness Gate Removal, Faro Bundle Integrity, Minute-Prefix Discovery, Chunk Budgeting Trap #41, Post-Sync Immediate Commit, Accounting & Outcome Counters, Guaranteed Cleanup, and Manual Trigger Endpoints).
 
 ---
 
