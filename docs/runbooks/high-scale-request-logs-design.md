@@ -3,7 +3,7 @@
 - **Date:** 2026-10-09
 - **Author:** Engineering Team
 - **Status:** Proposed (not yet implemented; supersedes the ADR-21 per-source manifest, see §6.1)
-- **Target Scale:** 2,000,000 RPS on Fastly Edge
+- **Target Scale:** 2,000,000 RPS total on Fastly Edge, typically one dominant service plus a few small ones (1–5 services provisioned). Design for one hot service first; per-service fairness is secondary.
 - **Target Latency:** edge-to-dashboard freshness of about 10–15 s (decision: keep the 10 s `period`); the pipeline budget is < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Log delivery is FOS only (decision: no streaming endpoints). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services; sub-10 s confirmed working) and is upstream of this budget, so edge-to-dashboard freshness is `period` plus pipeline latency. Sub-5 s end-to-end is not a goal; it would require a sub-5 s `period` and sharply more objects (see §8).
 - **Primary Environment:** Elevation Kubernetes (namespace from `ELEVATION_NAMESPACE`)
 - **Relevant Standards & ADRs:**
@@ -199,7 +199,8 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 1. **Decision: this design supersedes the ADR-21 per-source manifest.** `ArchiveManifest` (`backend/high_scale/archive_models.py`) currently holds a single `ArchiveSourceObject`. It becomes a batch manifest: one artifact plus a list of source entries, each with key, version, checksum, row range, and deletion deadline. Replay and deletion stay per source. ADR-21 carries an amendment note pointing here. Implementation work: change `ArchiveManifest`, `register_archive_manifest`, and the deletion ledger to iterate source entries.
 2. **Runtime mode is not enabled.** The rest of ADR-21 still stands: the `high_scale` mode stays gated on operator selection, a continuous-ingest vertical slice, an archive-only recovery test, a differential canary, and rollback evidence. This design does not enable it.
 3. **Partitioning and sharding** for `request_facts` at 2M RPS (§3.2).
-4. **Fastly flush period** versus the freshness budget: see §8. Decision: FOS is the only log delivery path. Edge-to-dashboard freshness is `period` plus pipeline latency, so < 5s requires a sub-5 s `period` (sub-10 s confirmed working; the lower floor is untested) and a pipeline that absorbs the resulting object rate.
+4. **Single hot service means per-service parallelism.** ADR-21 gives each service one source cursor and one owner epoch, so a dominant service would be a single serial stream. Work must be partitioned *within* a service: independent cursors per key range (for example per minute-prefix shard, or per hash of the object uid), all under the one owner epoch, with manifests and publications keyed per partition. This is a required change to the cursor model, and it also supersedes the ADR-21 single-cursor statement. Multi-service fairness (§9.4) is secondary because there are only 1–5 services.
+5. **Fastly flush period** versus the freshness budget: see §8. Decision: FOS is the only log delivery path. Edge-to-dashboard freshness is `period` plus pipeline latency, so < 5s requires a sub-5 s `period` (sub-10 s confirmed working; the lower floor is untested) and a pipeline that absorbs the resulting object rate.
 
 ---
 
