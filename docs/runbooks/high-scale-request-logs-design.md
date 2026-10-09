@@ -4,7 +4,7 @@
 - **Author:** Engineering Team
 - **Status:** Proposed (not yet implemented; supersedes the ADR-21 per-source manifest, see §6.1)
 - **Target Scale:** 2,000,000 RPS on Fastly Edge
-- **Target Latency:** < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Log delivery is FOS only (decision: no streaming endpoints). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services; sub-10 s confirmed working) and is upstream of this budget, so edge-to-dashboard freshness is `period` plus pipeline latency. Reaching < 5s end-to-end means lowering `period`, which raises object count (see §8).
+- **Target Latency:** edge-to-dashboard freshness of about 10–15 s (decision: keep the 10 s `period`); the pipeline budget is < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Log delivery is FOS only (decision: no streaming endpoints). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services; sub-10 s confirmed working) and is upstream of this budget, so edge-to-dashboard freshness is `period` plus pipeline latency. Sub-5 s end-to-end is not a goal; it would require a sub-5 s `period` and sharply more objects (see §8).
 - **Primary Environment:** Elevation Kubernetes (namespace from `ELEVATION_NAMESPACE`)
 - **Relevant Standards & ADRs:**
   - [ADR-14: DuckLake Replacement](../adr/14-ducklake-replacement.md)
@@ -273,7 +273,7 @@ Taken with read-only `kubectl top` and ClickHouse `SELECT`s against the test ser
 Order matters: each phase has an exit test. Do not start a phase before the previous exit is met. Use the owning agents in `.claude/agents` where noted.
 
 ### Phase 0: Decisions and measurement (no production code)
-1. **Delivery path (decided):** FOS file delivery only; no streaming endpoints. Open sub-question: choose the `period` (10 s today; test 5 s and lower) by measuring objects/s versus freshness gain.
+1. **Delivery path (decided):** FOS file delivery only; no streaming endpoints. The `period` stays at 10 s (decided: 10–15 s edge-to-dashboard freshness is the requirement); Phase 0 only confirms the object rate it produces at target RPS.
 2. **Load run on a dedicated test service:** use the generator (`--target fos --rate-rps ... --upload-workers ...`, `scripts/generate_synthetic_traffic.py`) to measure: objects/s and rows/object at target-like RPS and 10 s / 5 s periods; `py-spy` split of decode / archive / PG / ClickHouse in a worker; throughput versus replica count (confirms claim contention); PG transaction cost (`pg_stat_statements`). Agent: `perf-expert`.
 3. **Fill in the §7 capacity model** with the measured numbers and record the worker/ClickHouse sizing.
 Exit: capacity model with measured inputs and a chosen `period` recorded in §6.
