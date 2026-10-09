@@ -1,24 +1,22 @@
 # ADR-21 - High-Scale Ownership and Recovery Gate
 
-**Status:** Phase 0 gate accepted; runtime implementation not enabled
-**Date:** 2026-09-11
+**Status:** Phase 0 gate accepted; high_scale enabled as standard/high_scale 2-mode topology (legacy high_throughput removed)
+**Date:** 2026-09-11 (Updated 2026-10-09)
 
 ## Decision
 
-The repository will add a separate, explicitly fenced `high_scale` data plane.
-This ADR defines its contracts but does not add `high_scale` to the supported
-runtime modes. `standard` and `high_throughput` remain the only active modes
-until the migration and recovery evidence described below exists.
+The repository provides a separate, explicitly fenced `high_scale` data plane alongside `standard`.
+The legacy intermediate `high_throughput` mode has been completely removed in favor of `standard` and `high_scale`.
 
-| Operation | standard | high_throughput | high_scale |
-|---|---|---|---|
-| Source discovery | synchronous ingest | high-throughput ledger | high-scale ledger |
-| Durable event store | DuckLake | DuckLake | verified FOS archive |
-| Serving store | DuckDB/DuckLake | DuckDB/DuckLake | ClickHouse |
-| Source deletion | existing ingest path | existing ingest path | archive deletion controller |
-| RUM ingest | existing mode path | RUM ledger | high-scale RUM pipeline |
-| CMCD | request-row analytics | request-row analytics | request-event projection |
-| DuckLake writers | allowed | allowed | prohibited |
+| Operation | standard | high_scale |
+|---|---|---|
+| Source discovery | synchronous ingest | high-scale ledger |
+| Durable event store | DuckLake | verified FOS archive |
+| Serving store | DuckDB/DuckLake | ClickHouse |
+| Source deletion | existing ingest path | archive deletion controller |
+| RUM ingest | existing mode path | high-scale RUM pipeline |
+| CMCD | request-row analytics | request-event projection |
+| DuckLake writers | allowed | prohibited |
 
 The high-scale plane owns one owner epoch per service and, per the 2026-10-09 amendment below, one source cursor per key-range partition of that service.
 Cutover requires a drained old owner, a durable cursor handoff, and an

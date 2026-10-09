@@ -15,7 +15,7 @@ This is a genuine regression for any service running celery mode / DuckLake with
 
 ## Decision
 
-Path A is explicitly rejected when `DEPLOYMENT_MODE=high_throughput`. The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
+Path A is explicitly rejected when `DEPLOYMENT_MODE=high_scale` (and legacy `high_throughput`). The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
 
 Path A remains available for the synchronous topology for backward compatibility with existing FOS/metadata-pointer deployments. A future FOS-resident DuckLake catalog export may restore Path A for scalable deployments, but it requires the validation spike described above before changing this gate.
 
