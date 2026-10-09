@@ -90,3 +90,42 @@ def test_slow_deletion_sweep_does_not_block_ingest_pages() -> None:
     loop.run_once()
     loop.wait_for_deletion_sweep(timeout=2)
     assert sweeper.calls == 2
+
+
+def test_worker_loop_with_interval_sleeps_and_stops() -> None:
+    coordinator = _Coordinator([])
+    sleeps: list[float] = []
+    loop = HighScaleWorkerLoop(
+        coordinator=coordinator,  # type: ignore[arg-type]
+        service_ids=("svc",),
+        domains=("request",),
+        interval_seconds=2.0,
+        sleeper=sleeps.append,
+    )
+
+    loop.run(max_iterations=2)
+
+    assert coordinator.calls == [("svc", "request"), ("svc", "request")]
+    assert len(sleeps) == 1
+    assert 1.0 <= sleeps[0] <= 2.0
+
+
+def test_multi_service_worker_loop_with_interval_sleeps_and_stops() -> None:
+    from backend.high_scale.worker import _MultiServiceWorkerLoop
+
+    coord_a = _Coordinator([])
+    coord_b = _Coordinator([])
+    sleeps: list[float] = []
+    loop = _MultiServiceWorkerLoop(
+        coordinators=(("svc-a", coord_a), ("svc-b", coord_b)),  # type: ignore[arg-type]
+        domains=("request",),
+        interval_seconds=2.0,
+    )
+    loop._sleeper = sleeps.append
+
+    loop.run(max_iterations=2)
+
+    assert coord_a.calls == [("svc-a", "request"), ("svc-a", "request")]
+    assert coord_b.calls == [("svc-b", "request"), ("svc-b", "request")]
+    assert len(sleeps) == 1
+    assert 1.0 <= sleeps[0] <= 2.0

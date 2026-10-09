@@ -142,6 +142,14 @@ class HighScaleWorkerLoop:
         except Exception:
             logger.debug("periodic clickhouse system tables maintenance failed")
 
+    def _has_full_page(self, results: tuple[WorkerPageResult, ...]) -> bool:
+        page_size = getattr(self._coordinator, "_page_size", None)
+        return (
+            page_size is not None
+            and page_size > 0
+            and any(r.page is not None and r.page.discovered >= page_size for r in results)
+        )
+
     def run(self, *, max_iterations: int | None = None) -> None:
         if max_iterations is not None and max_iterations < 0:
             raise ValueError("max_iterations must be non-negative")
@@ -153,13 +161,7 @@ class HighScaleWorkerLoop:
                 self.wait_for_deletion_sweep()
                 return
             if self._interval_seconds > 0:
-                page_size = getattr(self._coordinator, "_page_size", None)
-                has_full_page = (
-                    page_size is not None
-                    and page_size > 0
-                    and any(r.page is not None and r.page.discovered >= page_size for r in results)
-                )
-                if not has_full_page:
+                if not self._has_full_page(results):
                     sleep_dur = random.uniform(0.5, 1.0) * self._interval_seconds
                     self._sleeper(sleep_dur)
 
@@ -321,6 +323,18 @@ class _MultiServiceWorkerLoop(HighScaleWorkerLoop):
 
     def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
         return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
+
+    def _has_full_page(self, results: tuple[WorkerPageResult, ...]) -> bool:
+        if not self._coordinators:
+            return False
+        coord_map = {sid: c for sid, c in self._coordinators}
+        for r in results:
+            if r.page is not None:
+                c = coord_map.get(r.service_id)
+                page_size = getattr(c, "_page_size", None) if c else None
+                if page_size is not None and page_size > 0 and r.page.discovered >= page_size:
+                    return True
+        return False
 
     def _run_system_cleanups(self) -> None:
         now = time.time()
