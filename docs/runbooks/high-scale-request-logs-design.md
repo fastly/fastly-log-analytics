@@ -4,7 +4,7 @@
 - **Author:** Engineering Team
 - **Status:** Proposed (not yet implemented; supersedes the ADR-21 per-source manifest, see §6.1)
 - **Target Scale:** 2,000,000 RPS on Fastly Edge
-- **Target Latency:** < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Fastly's log flush `period` (60 s default here) is upstream of this budget, so true edge-to-dashboard < 5s needs a streaming endpoint (see §8).
+- **Target Latency:** < 5s p95 from FOS object landing to dashboard visibility (< 2s stretch). Fastly's log flush `period` is per service (`log_period`; 60 s code default, 10 s on the test services) and is upstream of this budget, so edge-to-dashboard freshness is at least `period` plus this pipeline's latency. Below ~10 s end-to-end needs a streaming endpoint (see §8).
 - **Primary Environment:** Elevation Kubernetes (namespace from `ELEVATION_NAMESPACE`)
 - **Relevant Standards & ADRs:**
   - [ADR-14: DuckLake Replacement](../adr/14-ducklake-replacement.md)
@@ -199,7 +199,7 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 1. **Decision: this design supersedes the ADR-21 per-source manifest.** `ArchiveManifest` (`backend/high_scale/archive_models.py`) currently holds a single `ArchiveSourceObject`. It becomes a batch manifest: one artifact plus a list of source entries, each with key, version, checksum, row range, and deletion deadline. Replay and deletion stay per source. ADR-21 carries an amendment note pointing here. Implementation work: change `ArchiveManifest`, `register_archive_manifest`, and the deletion ledger to iterate source entries.
 2. **Runtime mode is not enabled.** The rest of ADR-21 still stands: the `high_scale` mode stays gated on operator selection, a continuous-ingest vertical slice, an archive-only recovery test, a differential canary, and rollback evidence. This design does not enable it.
 3. **Partitioning and sharding** for `request_facts` at 2M RPS (§3.2).
-4. **Fastly flush period** versus the freshness budget: see §8. The < 5s target cannot be met with the current 60 s `period`; it requires either a lower `period` (unverified) or a streaming endpoint.
+4. **Fastly flush period** versus the freshness budget: see §8. With FOS delivery, edge-to-dashboard freshness is at least `period` (10 s on the test services, 60 s code default) plus pipeline latency, so < 5s edge-to-dashboard needs a sub-5 s `period` (no documented minimum; unverified) or a streaming endpoint.
 
 ---
 
@@ -225,8 +225,8 @@ The repo has no per-stage timings, so everything below is a call count read from
 
 ## 8. Findings From Fastly Log Delivery (official docs; unverified items flagged)
 
-1. **Flush period:** the S3/object-storage logging `period` defaults to 3600 s and "how frequently log files are finalized so they can be available for reading". This repo defaults to 60 s (`log_period`, `backend/provision/fastly_api.py`). No documented minimum was found (unverified); sub-5 s may be accepted by the API but is not what file objects are designed for, so test empirically. `file_max_bytes` (minimum 1 MiB) forces earlier rotation at high volume, so object count scales with traffic.
-   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`, and 5 s is not achievable at the 60 s default. The < 5 s target is only meaningful as FOS-landing-to-visible. A true < 5 s edge-to-dashboard target needs a streaming endpoint.
+1. **Flush period:** the S3/object-storage logging `period` defaults to 3600 s and "how frequently log files are finalized so they can be available for reading". This repo's code default is 60 s (`log_period`, `backend/config.py`) and is configurable per service; the test services use 10 s. No documented minimum was found (unverified); sub-5 s may be accepted by the API but is not what file objects are designed for, so test empirically. `file_max_bytes` (minimum 1 MiB) forces earlier rotation at high volume, so object count scales with traffic.
+   - **Consequence:** with FOS delivery, end-to-end freshness is bounded below by `period`. At the 10 s test setting the floor is about 10 s plus pipeline latency, and at the 60 s default about 60 s. The < 5 s target is therefore only meaningful as FOS-landing-to-visible. A true < 5 s edge-to-dashboard target needs a sub-5 s `period` (unverified) or a streaming endpoint.
 2. **Streaming alternatives** (batched by `request_max_entries` / `request_max_bytes`): HTTPS (`period` default 5 s) meets the budget but needs a public TLS receiver sized for 2M RPS that handles its own backpressure and loss; Kafka is the best fit for a durable, replayable buffer but needs a Kafka cluster and drops FOS-as-archive (the archive would be written from the consumer). Per-endpoint delivery guarantees are unverified. No "real-time log streaming to ClickHouse" endpoint was found in the docs. This is a product decision to make before building, not something the worker design settles.
 3. **Delivery guarantees:** Fastly documents no at-least-once or no-loss guarantee for S3/FOS. Assume both duplicates and loss are possible. The ledger checksum dedup in this design is the correct defense; loss detection needs a count reconciliation against edge-side stats.
 4. **Object count at 2M RPS:** whether files are per POP, per cache server, or per process is not documented (unverified), so objects per second is unknown. Measure it; it drives claim contention and LIST cost (§7).
