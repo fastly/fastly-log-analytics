@@ -6,6 +6,7 @@ import pytest
 
 from scripts.dev.measure_e2e_freshness import (
     admin_token_from_environment,
+    compute_lag_statistics,
     configured_polling,
     cron_completion_time,
     load_environment_config,
@@ -150,3 +151,58 @@ def test_seconds_between_preserves_negative_delays_and_handles_missing_times():
 )
 def test_rum_beacon_count_supports_standard_and_high_scale_responses(response, expected):
     assert rum_beacon_count(response) == expected
+
+
+def test_compute_lag_statistics_empty_samples():
+    stats = compute_lag_statistics([])
+    assert stats["sample_count"] == 0
+    assert stats["header_lag"] == {"min": None, "max": None, "avg": None, "p95": None}
+    assert stats["dashboard_lag"] == {"min": None, "max": None, "avg": None, "p95": None}
+
+
+def test_compute_lag_statistics_filters_pre_traffic_and_computes_stats():
+    t0 = datetime(2026, 10, 9, 12, 0, 0, tzinfo=UTC)
+    t1 = datetime(2026, 10, 9, 12, 0, 10, tzinfo=UTC)
+    t2 = datetime(2026, 10, 9, 12, 0, 15, tzinfo=UTC)
+    t3 = datetime(2026, 10, 9, 12, 0, 20, tzinfo=UTC)
+
+    samples = [
+        # Idle sample before new traffic arrives
+        {
+            "elapsed_s": 2.0,
+            "header_latest_ts": t0,
+            "header_lag_s": 65.0,
+            "dashboard_lag_s": 70.0,
+        },
+        # Active samples after edge ingests new traffic
+        {
+            "elapsed_s": 4.0,
+            "header_latest_ts": t1,
+            "header_lag_s": 10.0,
+            "dashboard_lag_s": 12.0,
+        },
+        {
+            "elapsed_s": 6.0,
+            "header_latest_ts": t2,
+            "header_lag_s": 15.0,
+            "dashboard_lag_s": 16.0,
+        },
+        {
+            "elapsed_s": 8.0,
+            "header_latest_ts": t3,
+            "header_lag_s": 20.0,
+            "dashboard_lag_s": 22.0,
+        },
+    ]
+
+    stats = compute_lag_statistics(samples, baseline_latest_ts=t0)
+    assert stats["sample_count"] == 3
+    assert stats["total_samples"] == 4
+    assert stats["header_lag"]["min"] == 10.0
+    assert stats["header_lag"]["max"] == 20.0
+    assert stats["header_lag"]["avg"] == 15.0
+    assert stats["header_lag"]["p95"] == 20.0
+    assert stats["dashboard_lag"]["min"] == 12.0
+    assert stats["dashboard_lag"]["max"] == 22.0
+    assert stats["dashboard_lag"]["avg"] == 16.7
+    assert stats["dashboard_lag"]["p95"] == 22.0
