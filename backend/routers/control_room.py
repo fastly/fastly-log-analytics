@@ -414,7 +414,7 @@ async def control_room_correlate(
     def _query():
         con = _db.get_connection(source=source, read_only=True)
         try:
-            view_name = _safe_table(f"logs_{service_id.replace('-', '_')}")
+            view_name = _safe_table(service_id.replace("-", "_"))
             result = con.execute(
                 f"""
                 SELECT {col} AS value, COUNT(*) AS count
