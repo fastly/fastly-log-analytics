@@ -11,15 +11,20 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend.core.metadata.state import list_audit, record_audit
+from backend.core.share_db.validation import mask_ip
 from backend.deps import ServiceId, require_admin, require_service_access
+from backend.high_scale.aggregate_query import query_clickhouse_aggregate
+from backend.high_scale.aggregates import AggregateRequest
+from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, query_errors
 
 logger = logging.getLogger(__name__)
@@ -242,6 +247,7 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
 @query_errors()
 async def realtime_seed(
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ):
     """Return the last 60 metrics ticks for instant chart hydration."""
     from backend.core.realtime.poller import poller
@@ -266,6 +272,7 @@ async def realtime_seed(
 async def realtime_stream(
     request: Request,
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
     """Real-time metrics stream powered by rt.fastly.com polling.
 
@@ -346,13 +353,16 @@ class CorrelateRequest(BaseModel):
 async def control_room_correlate(
     body: CorrelateRequest,
     service_id: ServiceId,
+    request: Request,
     _access: str | None = Depends(require_service_access),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ):
     """Top-N breakdown by a log field within a recent time window."""
     from fastapi import HTTPException
 
     from backend.core import duckdb as _db
     from backend.core import field_registry
+    from backend.repositories._base import _safe_table
 
     field_def = field_registry.try_get(body.dimension)
     if field_def is None:
@@ -361,6 +371,39 @@ async def control_room_correlate(
             detail={"error": "unknown_dimension", "dimension": body.dimension},
         )
 
+    col = field_def.code
+    window_minutes = body.window_minutes
+    limit = body.limit
+
+    high_scale_service = registry.resolve(service_id)
+    if high_scale_service is not None:
+        start = datetime.now(UTC) - timedelta(minutes=window_minutes)
+        aggregate_dimension = "client_ip" if col == "ip" else col
+        response = query_clickhouse_aggregate(
+            high_scale_service.client,
+            AggregateRequest(
+                service_id=service_id,
+                domain="request",
+                start=start,
+                end=datetime.now(UTC),
+                dimension=aggregate_dimension,
+            ),
+            watermark=high_scale_service.watermark_for("request"),
+        )
+        top_values = list(response.top_values)[:limit]
+        if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+            top_values = [(mask_ip(value), count) for value, count in top_values]
+        return {
+            "dimension": body.dimension,
+            "top": [{"value": value, "count": count} for value, count in top_values],
+            "freshness": {
+                "latest_log_at": (
+                    response.watermark.coverage_end.isoformat() if response.watermark.coverage_end else None
+                ),
+                "lag_seconds": int(response.freshness_lag_seconds),
+            },
+        }
+
     source = _db.get_source_for_service(service_id)
     if source is None:
         raise HTTPException(
@@ -368,23 +411,20 @@ async def control_room_correlate(
             detail={"error": "no_data_source", "service_id": service_id},
         )
 
-    col = field_def.code
-    window_minutes = body.window_minutes
-    limit = body.limit
-
     def _query():
         con = _db.get_connection(source=source, read_only=True)
         try:
-            view_name = f"logs_{service_id.replace('-', '_')}"
+            view_name = _safe_table(f"logs_{service_id.replace('-', '_')}")
             result = con.execute(
                 f"""
                 SELECT {col} AS value, COUNT(*) AS count
                 FROM {view_name}
-                WHERE timestamp >= NOW() - INTERVAL '{window_minutes} minutes'
+                WHERE timestamp >= ?
                 GROUP BY 1
                 ORDER BY 2 DESC
-                LIMIT {limit}
+                LIMIT ?
                 """,
+                [datetime.now(UTC) - timedelta(minutes=window_minutes), limit],
             ).fetchall()
             freshness_row = con.execute(f"SELECT MAX(timestamp) AS latest FROM {view_name}").fetchone()
             return result, freshness_row
@@ -398,9 +438,13 @@ async def control_room_correlate(
     if latest_log_at:
         lag_seconds = max(0, int((datetime.now(UTC) - latest_log_at).total_seconds()))
 
+    top = [{"value": str(r[0]), "count": r[1]} for r in rows]
+    if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+        top = [{"value": mask_ip(item["value"]), "count": item["count"]} for item in top]
+
     return {
         "dimension": body.dimension,
-        "top": [{"value": str(r[0]), "count": r[1]} for r in rows],
+        "top": top,
         "freshness": {
             "latest_log_at": latest_log_at.isoformat() if latest_log_at else None,
             "lag_seconds": lag_seconds,

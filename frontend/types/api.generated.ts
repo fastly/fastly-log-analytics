@@ -20378,8 +20378,14 @@ export interface operations {
     };
     realtime_seed_api_services__service_id__realtime_seed_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 service_id: string;
             };
@@ -20481,8 +20487,14 @@ export interface operations {
     };
     realtime_stream_api_services__service_id__realtime_stream_get: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
             path: {
                 service_id: string;
             };

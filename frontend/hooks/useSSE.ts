@@ -52,7 +52,11 @@ export function useSSE() {
     }
   }, [])
 
-  const start = useCallback(async (urlPath: string, body?: Record<string, unknown>) => {
+  const start = useCallback(async (
+    urlPath: string,
+    body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
+  ) => {
     // Stop any existing stream before starting a new one
     stop();
 
@@ -93,6 +97,9 @@ export function useSSE() {
       const adminToken = useAdminTokenStore.getState().token
       if (adminToken) {
         headers['X-Admin-Token'] = adminToken
+      }
+      if (extraHeaders) {
+        Object.assign(headers, extraHeaders)
       }
 
       // Raw fetch (not typed `client`): SSE needs ReadableStream access via

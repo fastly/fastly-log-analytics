@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
+import { getPageLoadId } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
@@ -95,7 +96,10 @@ function useRealtimeStream(): RealtimeStreamState {
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
-        const res = await fetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal, headers: authHeaders() })
+        const headers = { ...authHeaders() }
+        const pageLoadId = getPageLoadId()
+        if (pageLoadId) headers['X-Page-Load-ID'] = pageLoadId
+        const res = await fetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal, headers })
         if (res.ok) {
           const json = await res.json()
           seedTicks = (json.ticks ?? []).filter(isTick)
@@ -105,7 +109,12 @@ function useRealtimeStream(): RealtimeStreamState {
       }
       if (!ac.signal.aborted) {
         setSeed({ ticks: seedTicks, timestamps: new Set(seedTicks.map((t) => t.timestamp)) })
-        start(`/api/services/${activeServiceId}/realtime-stream`)
+        const pageLoadId = getPageLoadId()
+        start(
+          `/api/services/${activeServiceId}/realtime-stream`,
+          undefined,
+          pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
+        )
       }
     })()
     return () => {
@@ -124,7 +133,7 @@ function useRealtimeStream(): RealtimeStreamState {
   }, [lines, seed])
 
   const latestTick = allTicks.length > 0 ? allTicks[allTicks.length - 1] : null
-  const lastTickTime = latestTick ? new Date() : null
+  const lastTickTime = latestTick ? new Date(latestTick.timestamp) : null
 
   return {
     connected: status === 'streaming',

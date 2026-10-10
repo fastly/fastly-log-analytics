@@ -436,6 +436,75 @@ def test_correlate_success(admin_client, monkeypatch):
     assert "freshness" in data
 
 
+@pytest.mark.asyncio
+async def test_correlate_masks_client_ips_for_analyst(monkeypatch):
+    """Control Room correlator must not expose raw client IPs to Path B."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    import backend.routers.control_room as cr_mod
+
+    mock_con = MagicMock()
+    mock_con.execute().fetchall.return_value = [("203.0.113.45", 7)]
+    mock_con.execute().fetchone.return_value = (datetime.now(UTC),)
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": "svc"})
+    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda source, read_only: mock_con)
+
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=SimpleNamespace(pii_policy={"mask_ips": True})))
+    response = await cr_mod.control_room_correlate(
+        cr_mod.CorrelateRequest(dimension="ip"),
+        MOCK_SERVICE_ID,
+        request,
+        None,
+        SimpleNamespace(resolve=lambda service_id: None),
+    )
+
+    assert response["top"] == [{"value": "203.0.113.xxx", "count": 7}]
+
+
+@pytest.mark.asyncio
+async def test_correlate_uses_high_scale_aggregate_path():
+    """High-Scale Control Room correlation reads the distributed aggregate."""
+    from datetime import UTC, datetime
+
+    import backend.routers.control_room as cr_mod
+    from backend.high_scale.archive_models import ServingWatermark
+
+    watermark = ServingWatermark(
+        service_id=MOCK_SERVICE_ID,
+        domain="request",
+        owner_epoch=1,
+        coverage_start=datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+        coverage_end=datetime(2026, 8, 19, 12, 5, tzinfo=UTC),
+        last_accepted_cursor=None,
+        last_archived_event_id=None,
+        last_visible_event_id=None,
+        exact=True,
+    )
+
+    class Client:
+        def execute(self, sql, params=None):
+            if "AS total_count" in sql:
+                return [{"total_count": 12}]
+            return [{"value": "500", "aggregate_count": 12}]
+
+    service = SimpleNamespace(
+        client=Client(),
+        watermark_for=lambda domain: watermark,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=None))
+    response = await cr_mod.control_room_correlate(
+        cr_mod.CorrelateRequest(dimension="status"),
+        MOCK_SERVICE_ID,
+        request,
+        None,
+        SimpleNamespace(resolve=lambda service_id: service),
+    )
+
+    assert response["top"] == [{"value": "500", "count": 12}]
+    assert response["freshness"]["latest_log_at"] == "2026-08-19T12:05:00+00:00"
+
+
 def test_correlate_unknown_service_source_404(admin_client, monkeypatch):
     """If service source doesn't exist, return 404."""
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)

@@ -7,6 +7,18 @@ import { useSessionRoleStore } from "@/stores/sessionRoleStore";
 import { showReadOnlyToast, showBusyToast, showToast } from "@/lib/toast";
 import { isUserActive } from "@/lib/userActivity";
 
+let pageLoadId: string | null = null
+
+export function getPageLoadId(): string | null {
+  if (typeof window === "undefined") return null
+  if (!pageLoadId) {
+    pageLoadId = typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+  return pageLoadId
+}
+
 export function extractApiError(error: unknown): string {
   if (!error) return 'Unknown error'
   if (typeof error === 'string') return error
@@ -102,6 +114,10 @@ export function adminFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers ?? {})
+  const currentPageLoadId = getPageLoadId()
+  if (currentPageLoadId && !headers.has("X-Page-Load-ID")) {
+    headers.set("X-Page-Load-ID", currentPageLoadId)
+  }
   try {
     const token = useAdminTokenStore.getState().token
     if (token && !headers.has("X-Admin-Token")) {
@@ -234,6 +250,10 @@ function redirectToShareLoginIfSessionDead(): void {
 // Middleware to inject activeServiceId and handle errors
 client.use({
   async onRequest({ request }) {
+    const currentPageLoadId = getPageLoadId()
+    if (currentPageLoadId) {
+      request.headers.set("X-Page-Load-ID", currentPageLoadId)
+    }
     // The ``_debug_queries`` / ``_debug_calls`` envelope is ~40 KB on
     // /api/insights cold loads and ~5-15 KB on every other admin call.
     // Opt in via this header only when the admin Debug Panel toggle is

@@ -71,6 +71,24 @@ describe('useSSE', () => {
     expect(result.current.isDone).toBe(true)
   })
 
+  it('merges caller-provided headers into the SSE request', async () => {
+    vi.mocked(fetch).mockResolvedValue(makeStreamResponse(['data: {"type":"done"}\n\n']))
+
+    const { useSSE } = await import('@/hooks/useSSE')
+    const { result } = renderHook(() => useSSE())
+
+    await act(async () => {
+      await result.current.start('/api/realtime-stream', undefined, { 'X-Page-Load-ID': 'page-123' })
+    })
+
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/realtime-stream'),
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'X-Page-Load-ID': 'page-123' }),
+      }),
+    )
+  })
+
   it('captures an error event and stores the message', async () => {
     const messages = [
       'data: {"type":"status","message":"starting"}\n\n',
