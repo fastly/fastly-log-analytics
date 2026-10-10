@@ -21,6 +21,7 @@ from backend.models.admin import (
     PartialHourMergeResponse,
     PartialHourStatusResponse,
     RollupCompactResponse,
+    RollupHealResponse,
     RollupStatusResponse,
 )
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
@@ -388,6 +389,38 @@ def rollup_compact_now(
     return RollupCompactResponse(**res)
 
 
+@router.post(
+    "/admin/rollup-heal",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollup-heal/{service_id}",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/heal",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+@router.post(
+    "/admin/rollups/heal/{service_id}",
+    response_model=RollupHealResponse,
+    response_model_exclude_unset=True,
+)
+def rollup_heal_now(
+    service_id: str | None = None,
+    source: dict = Depends(get_source),
+) -> RollupHealResponse:
+    """Manually trigger hourly rollup healing for missing closed-hour bundles over 48h."""
+    sid = service_id or source.get("service_id") or source.get("name") or ""
+    from backend.cron.jobs.compaction import _run_rollup_hour_heal
+
+    res = _run_rollup_hour_heal(sid, manual=True)
+    return RollupHealResponse(**res)
+
+
 @router.get(
     "/admin/rollups/status",
     response_model=RollupStatusResponse,
@@ -403,7 +436,7 @@ def rollup_status(
     source: dict = Depends(get_source),
 ) -> RollupStatusResponse:
     """Inspect the status of day and hour rollup bundles."""
-    sid = service_id or source.get("name") or source.get("service_id")
+    sid = service_id or source.get("service_id") or source.get("name") or ""
     from backend.core.rollups._common import _day_bundled_root, _hour_bundled_root
 
     day_root = _day_bundled_root(source)

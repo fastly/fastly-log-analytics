@@ -9,6 +9,27 @@ this module is the pure data builder both call paths use.
 
 from __future__ import annotations
 
+TASK_MAP = {
+    "sync_metadata": "metadata_sync",
+    "log_discovery": "log_discovery",
+    "rum_sync": "rum_sync",
+    "full_sync": "full_sync",
+    "gap_heal": "gap_heal",
+    "commit": "commit",
+    "rum_commit": "rum_commit",
+    "optimize": "optimize",
+    "local_compact": "local_compact",
+    "expire": "expire_snapshots",
+    "alerts_evaluation": "alerts",
+    "ngwaf_sync": "ngwaf_sync",
+    "metadata_cleanup": "metadata_cleanup",
+    "insights_prewarmer": "insights_prewarmer",
+    "rollup_heal": "rollup_hour_heal",
+    "rollup_compact": "rollup_compact_daily",
+    "ledger_sweep": "ledger_sweep",
+}
+_TASK_MAP = TASK_MAP
+
 
 def build_cron_schedule_payload(source: dict) -> dict:
     """Return ``{"schedules": [...]}`` for the given ``source``.
@@ -37,25 +58,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
             }
     except Exception:
         pass
-    _TASK_MAP = {
-        "sync_metadata": "metadata_sync",
-        "log_discovery": "log_discovery",
-        "rum_sync": "rum_sync",
-        "full_sync": "full_sync",
-        "gap_heal": "gap_heal",
-        "commit": "commit",
-        "rum_commit": "rum_commit",
-        "optimize": "optimize",
-        "local_compact": "local_compact",
-        "expire": "expire_snapshots",
-        "alerts_evaluation": "alerts",
-        "ngwaf_sync": "ngwaf_sync",
-        "metadata_cleanup": "metadata_cleanup",
-        "insights_prewarmer": "insights_prewarmer",
-        "rollup_heal": "rollup_hour_heal",
-        "rollup_compact": "rollup_compact_daily",
-        "ledger_sweep": "ledger_sweep",
-    }
     schedules = []
 
     # Pod-local APScheduler jobs — the ONLY source of cron jobs.

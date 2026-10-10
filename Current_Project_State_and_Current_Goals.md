@@ -210,11 +210,21 @@ The detailed inventory and per-job specifications live under
 - **Admin Control Parity & Status Inspection:** Exposed manual trigger `POST /api/admin/partial-hour-merge/{service_id}` and status inspection `GET /api/admin/partial-hour-status/{service_id}` returning active-hour watermark, file existence, and total rows.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_partial_hour_contract.py` (10/10 tests) and `tests/cron/test_partial_hour_cron.py` (7/7 tests) passed 100% green. Full test suite and typechecks passed via `make fast-ci` (1,090 passing Python tests, 68 passing Vitest suites).
 
+**Cron 5: `rollup_heal_{service_id}` — Hourly Missing-Bundle Self-Heal (2026-10-10) — Audited, Verified, and Certified.**
+- **Scheduler Cadence & Startup Jitter:** Registered at `minute=5` past each hour (`misfire_grace_time=900s`, `coalesce=True`, `max_instances=1`) with initial startup run scheduled at `NOW() + 30s` in both standard `_sync_jobs` and `_register_dev_local_safe_jobs` under `FLA_DEV_NO_CRONS=1`.
+- **48-Hour Lookback Window:** Enforced 48-hour lookback window (`lookback_days = 2`) in `backend/cron/jobs/compaction.py`, safely catching cross-midnight and edge-delayed closed-hour gaps across both day boundaries.
+- **Politeness Gating & Admin Bypass:** Automated scheduled runs evaluate `should_defer_cron("rollup_hour_heal", service_id)` and defer with status `"deferred"` if active user queries are running; bypassed when manually triggered.
+- **Durable Serving Mode Catch-up Throttle:** Throttles startup backlog catch-up to `max_missing_hours = 1` in durable serving / High-Scale mode, marking the service bundle-ready after the first closed hour is healed.
+- **Zero-Row Empty Hour Sentinels:** Stamped empty-hour sentinel bundles (`_sentinel: 1`) for closed hours with zero rows, preventing unneeded and costly table re-scan thrashing on idle services.
+- **Zero FOS Egress & ENOSPC Safety:** Operates entirely against local disk bundles (`rollups/hour_bundled/`) and in-memory DuckDB connections (`get_memory_connection()`), creating zero outbound FOS calls. Includes ENOSPC pre-check (< 50MB free disk) logging warning to `cron_runs`.
+- **Admin Control Parity & Inspection:** Added `POST /api/admin/rollup-heal/{service_id}`, `POST /api/admin/rollup-heal`, and alias `POST /api/admin/rollups/heal/{service_id}` returning `RollupHealResponse` (`missing`, `bundled`, `rebuilt_fields`, `stamped_empty`, `coverage_verified`, `duration_s`, `summary`, `run_id`), with execution history recorded in `cron_runs` and queryable via `GET /api/cron-runs?task=rollup_hour_heal`.
+- **Automated Validation:** Contract test suite `tests/cron/test_rollup_heal_contract.py` (9/9 tests) and unit test suite `tests/cron/test_compaction_jobs.py` (18/18 tests) pass 100% green.
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 5: `rollup_heal_{service_id}` documented in `docs/cron/jobs/rollup-heal.md`:
-1. Read `docs/cron/jobs/rollup-heal.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
-2. Audit compaction/healing mechanics, atomic file operations, reader error handling, and scheduler cadence.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 12: `sync_status_refresh_{service_id}` documented in `docs/cron/jobs/sync-status-refresh.md`:
+1. Read `docs/cron/jobs/sync-status-refresh.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
+2. Audit sync status refresh mechanics, caching, and scheduler cadence.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -227,7 +237,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 6, 7, 8, 9,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 5 (`rollup_heal_{service_id}`).
+Next target: proceed to Cron 12 (`sync_status_refresh_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).

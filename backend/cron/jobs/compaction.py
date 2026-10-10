@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 
 from backend.cron.decorators import cron_task
@@ -182,11 +184,16 @@ def _run_local_compact(service_id: str) -> None:
 
 
 @cron_task("rollup_hour_heal", job_name="rollup_hour_heal")
-def _run_rollup_hour_heal(service_id: str) -> None:
+def _run_rollup_hour_heal(
+    service_id: str,
+    manual: bool = False,
+    run_id: int | None = None,
+) -> dict:
     """Hourly job: rebuild hour bundles for closed hours the per-sync
     recompute missed.
 
-    ``recompute_touched_hours`` excludes the active hour, so a closed hour
+    The per-sync recompute (``recompute_touched_hours``) only runs when
+    sync touches an hour. A closed hour with delivery-lagged rows arriving
     only gets its rollup when a LATER sync batch ingests rows stamped
     inside it. Bursty services (burst ends mid-hour, all rows delivered
     before the boundary) never retrigger — diagnosed 2026-07-06 as top-N
@@ -208,18 +215,47 @@ def _run_rollup_hour_heal(service_id: str) -> None:
 
     # The heal's view scan + per-field COPY are CPU-bound; defer when API
     # requests are in flight (same politeness gate as local_compact).
-    if should_defer_cron("rollup_hour_heal", service_id):
-        return
+    if not manual and should_defer_cron("rollup_hour_heal", service_id):
+        logger.info("⏸️  [rollup-heal] %s: deferring due to active user queries", service_id)
+        return {
+            "status": "deferred",
+            "service_id": service_id,
+            "summary": "Deferred due to active queries",
+        }
 
     src = get_source_for_service(service_id)
     if src is None:
-        return
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
 
+    # ENOSPC safety check (< 50MB free disk space)
+    from backend.core.rollups._common import _hour_bundled_root
+
+    hour_root = _hour_bundled_root(src)
+    check_dir = hour_root if os.path.isdir(hour_root) else "."
     try:
-        run_id = start_cron_run(src, "rollup_hour_heal")
-    except RuntimeError as e:
-        logger.info("⏭️  [rollup-heal] %s: skipping — %s", service_id, str(e))
-        return
+        free_bytes = shutil.disk_usage(check_dir).free
+        if free_bytes < 50 * 1024 * 1024:
+            msg = f"Disk space critically low (< 50MB free: {free_bytes / (1024 * 1024):.1f}MB)"
+            logger.warning("⚠️  [rollup-heal] %s: %s", service_id, msg)
+            log_cron_run(
+                src,
+                "rollup_hour_heal",
+                0.0,
+                "warning",
+                summary="Skipped due to low disk space",
+                error_message=msg,
+                run_id=run_id,
+            )
+            return {"status": "warning", "service_id": service_id, "summary": msg}
+    except Exception as e:
+        logger.warning("[rollup-heal] %s: failed to check disk space: %s", service_id, e)
+
+    if run_id is None:
+        try:
+            run_id = start_cron_run(src, "rollup_hour_heal")
+        except RuntimeError as e:
+            logger.info("⏭️  [rollup-heal] %s: skipping — %s", service_id, str(e))
+            return {"status": "skipped", "service_id": service_id, "summary": str(e)}
 
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
@@ -272,6 +308,18 @@ def _run_rollup_hour_heal(service_id: str) -> None:
         )
         if heal.get("missing", 0) or heal.get("stamped_empty", 0):
             logger.info("🏁  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
+        return {
+            "status": "success",
+            "service_id": service_id,
+            "missing": heal.get("missing", 0),
+            "rebuilt_fields": heal.get("rebuilt_fields", 0),
+            "bundled": heal.get("bundled", 0),
+            "stamped_empty": heal.get("stamped_empty", 0),
+            "coverage_verified": heal.get("coverage_verified", False),
+            "duration_s": duration,
+            "summary": summary,
+            "run_id": run_id,
+        }
     except Exception as e:
         duration = time.time() - start_time
         log_cron_run(
@@ -288,6 +336,14 @@ def _run_rollup_hour_heal(service_id: str) -> None:
             run_id, service_id, job_name="rollup_hour_heal", event={"type": "error", "message": str(e)}
         )
         logger.exception("[scheduler] %s: rollup_hour_heal failed: %s", service_id, e)
+        return {
+            "status": "error",
+            "service_id": service_id,
+            "error_message": str(e),
+            "summary": "hour-bundle self-heal failed",
+            "duration_s": duration,
+            "run_id": run_id,
+        }
     finally:
         end_progress(run_id)
 

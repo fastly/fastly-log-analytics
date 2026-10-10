@@ -603,6 +603,22 @@ class RollupCompactResponse(_AdminMaintRead):
     errors: list[str] | None = None
 
 
+class RollupHealResponse(_AdminMaintRead):
+    """Result from POST /admin/rollup-heal/{service_id}."""
+
+    status: str | None = None
+    service_id: str | None = None
+    missing: int | None = None
+    rebuilt_fields: int | None = None
+    bundled: int | None = None
+    stamped_empty: int | None = None
+    coverage_verified: bool | None = None
+    duration_s: float | None = None
+    summary: str | None = None
+    run_id: int | None = None
+    error_message: str | None = None
+
+
 class RollupStatusResponse(_AdminMaintRead):
     """Rollup status from GET /admin/rollups/status."""
 
