@@ -624,7 +624,7 @@ def test_convert_object_excludes_null_timestamp_rows_from_lake(tmp_path, monkeyp
     with patch("backend.core.duckdb.get_source_for_service", return_value=src):
         with patch("backend.core.ingest._get_fos_client", return_value=MagicMock()):
             with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
-                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect()):
+                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect(*a, **kw)):
                     with patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=_fake_attach):
                         with patch("backend.core.duckdb._configure_fos"):
                             with patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"):
@@ -633,12 +633,19 @@ def test_convert_object_excludes_null_timestamp_rows_from_lake(tmp_path, monkeyp
                                 status = convert_object(service_id, object_key, "test-worker")
 
     assert status == "committed"
-    check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    rows = check_con.execute("SELECT count(*) FROM lake.logs").fetchone()[0]
-    null_rows = check_con.execute("SELECT count(*) FROM lake.logs WHERE timestamp IS NULL").fetchone()[0]
-    assert rows == 1, "only the valid row should have been written to the lake table"
-    assert null_rows == 0, "a corrupt row must never land in the queryable lake table"
+    check_con = duckdb.connect(":memory:")
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        rows = check_con.execute("SELECT count(*) FROM lake.logs").fetchone()[0]
+        null_rows = check_con.execute("SELECT count(*) FROM lake.logs WHERE timestamp IS NULL").fetchone()[0]
+        assert rows == 1, "only the valid row should have been written to the lake table"
+        assert null_rows == 0, "a corrupt row must never land in the queryable lake table"
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
     # ingested_files parity: every existing reader (Usage Log /
     # log-line-accounting reconciliation, admin ingested-files list) must
@@ -678,14 +685,20 @@ def test_merge_lake_files_flushes_inlined_rows_to_parquet(tmp_path):
             pass  # already attached on this connection
         return True
 
-    seed = duckdb.connect()
-    _real_ducklake_attach(seed, src)
-    seed.execute("CREATE TABLE lake.logs (ts TIMESTAMP, v INT)")
-    for i in range(5):
-        seed.execute(f"INSERT INTO lake.logs VALUES (now(), {i})")
-    # Premise: every commit so far is inlined — zero materialized files.
-    assert seed.execute("SELECT file_count FROM ducklake_table_info('lake')").fetchone()[0] == 0
-    seed.close()
+    seed = duckdb.connect(":memory:")
+    try:
+        _real_ducklake_attach(seed, src)
+        seed.execute("CREATE TABLE lake.logs (ts TIMESTAMP, v INT)")
+        for i in range(5):
+            seed.execute(f"INSERT INTO lake.logs VALUES (now(), {i})")
+        # Premise: every commit so far is inlined — zero materialized files.
+        assert seed.execute("SELECT file_count FROM ducklake_table_info('lake')").fetchone()[0] == 0
+    finally:
+        try:
+            seed.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        seed.close()
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
@@ -696,12 +709,19 @@ def test_merge_lake_files_flushes_inlined_rows_to_parquet(tmp_path):
 
         merge_lake_files(service_id)
 
-    check = duckdb.connect()
-    _real_ducklake_attach(check, src, read_only=True)
-    file_count, file_bytes = check.execute(
-        "SELECT file_count, file_size_bytes FROM ducklake_table_info('lake')"
-    ).fetchone()
-    assert file_count > 0, "inlined rows must be flushed to real parquet files, or the data isn't durable"
-    assert file_bytes > 0
-    # Lossless: the flush promotes rows, it must not drop them.
-    assert check.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 5
+    check = duckdb.connect(":memory:")
+    try:
+        _real_ducklake_attach(check, src, read_only=True)
+        file_count, file_bytes = check.execute(
+            "SELECT file_count, file_size_bytes FROM ducklake_table_info('lake')"
+        ).fetchone()
+        assert file_count > 0, "inlined rows must be flushed to real parquet files, or the data isn't durable"
+        assert file_bytes > 0
+        # Lossless: the flush promotes rows, it must not drop them.
+        assert check.execute("SELECT count(*) FROM lake.logs").fetchone()[0] == 5
+    finally:
+        try:
+            check.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check.close()

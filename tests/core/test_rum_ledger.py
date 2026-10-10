@@ -239,7 +239,7 @@ def _run_convert_rum(service_id, object_key, local_file, lake_file):
     with patch("backend.core.duckdb.get_source_for_service", return_value=src):
         with patch("backend.core.ingest._get_fos_client", return_value=MagicMock()):
             with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
-                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect()):
+                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect(*a, **kw)):
                     with patch(
                         "backend.core.iceberg._ducklake._ducklake_attach",
                         side_effect=_fake_attach_factory(lake_file),
@@ -275,15 +275,22 @@ def test_convert_rum_object_splits_into_both_tables_and_commits(tmp_path):
 
     assert status == "committed"
 
-    check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    vitals_count = check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0]
-    errors_count = check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0]
-    assert vitals_count == 1
-    assert errors_count == 1
+    check_con = duckdb.connect(":memory:")
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        vitals_count = check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0]
+        errors_count = check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0]
+        assert vitals_count == 1
+        assert errors_count == 1
 
-    src_file = check_con.execute("SELECT _source_file FROM lake.client_vitals").fetchone()[0]
-    assert src_file == f"s3://test-bucket/{object_key}"
+        src_file = check_con.execute("SELECT _source_file FROM lake.client_vitals").fetchone()[0]
+        assert src_file == f"s3://test-bucket/{object_key}"
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
     row = con.execute(
         "SELECT status, committed_at FROM ingest_ledger WHERE service_id=? AND object_key=?",
@@ -316,10 +323,17 @@ def test_convert_rum_object_idempotent_under_redelivery(tmp_path):
         status = _run_convert_rum(service_id, object_key, raw_file, lake_file)
         assert status == "committed"
 
-    check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
-    assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
+    check_con = duckdb.connect(":memory:")
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
+        assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
 
 def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_rows(tmp_path):
@@ -348,7 +362,7 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
     with patch("backend.core.duckdb.get_source_for_service", return_value=src):
         with patch("backend.core.ingest._get_fos_client", return_value=fos_mock):
             with patch("backend.core.ingest._download_chunk_to_local", side_effect=_fake_download):
-                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect()):
+                with patch("duckdb.connect", side_effect=lambda *a, **kw: _real_duckdb_connect(*a, **kw)):
                     with patch(
                         "backend.core.iceberg._ducklake._ducklake_attach",
                         side_effect=_fake_attach_factory(lake_file),
@@ -370,7 +384,7 @@ def test_convert_rum_object_quarantines_malformed_line_and_still_commits_valid_r
 
     assert status == "committed"
 
-    check_con = duckdb.connect()
+    check_con = duckdb.connect(":memory:")
     try:
         check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
         assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
@@ -442,10 +456,16 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
     # before the errors table blew up) — a real DuckLake table now exists
     # with the one vitals row, even though the ledger never reached
     # 'committed'. A retry after fixing the input must not duplicate it.
-    check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
-    check_con.close()
+    check_con = duckdb.connect(":memory:")
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
     # Retry (the bad input is now "fixed") converges: vitals row isn't
     # duplicated, and errors now lands too.
@@ -458,10 +478,17 @@ def test_convert_rum_object_partial_write_failure_does_not_mark_committed(tmp_pa
     status2 = _run_convert_rum(service_id, object_key, raw_file, lake_file)
     assert status2 == "committed"
 
-    check_con = duckdb.connect()
-    check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
-    assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
-    assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
+    check_con = duckdb.connect(":memory:")
+    try:
+        check_con.execute(f"ATTACH '{lake_file}' AS lake (READ_ONLY)")
+        assert check_con.execute("SELECT count(*) FROM lake.client_vitals").fetchone()[0] == 1
+        assert check_con.execute("SELECT count(*) FROM lake.client_errors").fetchone()[0] == 1
+    finally:
+        try:
+            check_con.execute("DETACH lake")
+        except duckdb.Error:
+            pass
+        check_con.close()
 
 
 # ── sweep ────────────────────────────────────────────────────────────────

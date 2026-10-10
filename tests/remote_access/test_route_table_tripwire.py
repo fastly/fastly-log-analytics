@@ -190,6 +190,8 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Control Room's live metrics push channel (S-1 audit decision):
     # aggregate rps/error-rate/cache-ratio, no PII, no infra details.
     ("GET", "/api/services/{service_id}/realtime-stream"),
+    # Control Room's bounded recent 4xx/5xx request-event feed (analyst-safe masked client IPs).
+    ("GET", "/api/services/{service_id}/control-room/error-stream"),
     # Security proxies export: read-only CSV export of security proxies.
     ("GET", "/api/security/proxies/export"),
     # Network pop-health & security threat-intel (read-only analytical endpoints)
