@@ -181,12 +181,19 @@ The detailed inventory and per-job specifications live under
   - **Scale Sweeps & Capacity:** Worker sweep (1–200 workers) and ClickHouse topology sweep (1x1 to 4x2) modeled in `docs/runbooks/high-scale-capacity-and-recovery.md` demonstrating headroom at 2M RPS and 256M events/sec replay qualification arithmetic with 25% live reservation.
   - **ADR-21 Gate Evidence:** All 12 ADR-21 gate requirements formally documented and satisfied. Full test suite passing with 322 passed, 11 skipped, 0 failures (`uv run pytest tests/high_scale/`).
 
+**Cron 10: `gap_heal_{service_id}` — Bounded Ingest-Gap Discovery & Loss-Triggered Sweep (2026-10-10) — Audited, Implemented, and Verified.**
+- **Politeness Gating & Dynamic Control:** Evaluates `should_defer_cron("gap_heal", service_id)` on scheduled runs, yielding cleanly if user queries are active; bypassed when triggered via API or with `force=True`.
+- **Sustained Loss Detection & Sweep Trigger:** Analyzes Fastly Stats API edge writes vs. ingested events over a 24-hour lookback window. Triggers targeted `_run_full_sweep` when sustained loss is observed (≥2 consecutive completed hourly buckets with ≥5% deficit).
+- **Adaptive Severity Bands & Dynamic Sweep Budgeting:** Classifies sustained deficits into `mild` (5-10%), `elevated` (10-25%), `severe` (25-50%), and `critical` (≥50%). Automatically scales sweep budget: `critical` widens sweep limits to 100,000 files and 1800s with 0h throttle bypass; `severe` allocates 50,000 files and 1500s with 15-minute cooldown; `elevated`/`mild` use default 20,000 files and 1200s with 1h/2h throttles.
+- **Structured Audit & Warning Status Tracking:** Records runs in `cron_runs` with outcome summary, tagging `warning` status for both triggered full sweeps and throttled sustained loss conditions. Binds `process_context="cron.gap_heal"` to record Fastly API accounting queries in `usage_log`.
+- **Admin Control & Trigger Endpoint:** Implemented `POST /api/admin/gap-heal/{service_id}` in `backend/routers/admin/ingest.py` supporting run_id reuse and force bypass. Dynamic scheduler rescheduling on `interval_minutes` config change and safety kill-switch under `FLA_DEV_NO_CRONS=1`.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_gap_heal_contract.py` passed 9/9 tests covering Section 9 of `docs/cron/jobs/gap-heal.md`. Unit tests `tests/test_scheduler.py -k "gap_heal"` (14 passed) and `tests/test_dev_mode_no_crons.py -k "gap_heal"` (1 passed) green.
+
 ## Next-session prompt
 
-
-Continue the Cron audit on `release/v3.0.0-beta3`. Cron 1 (`log_discovery_{service_id}`), Cron 8 (`expire_{service_id}`), and Cron 9 (`full_sync_{service_id}`) are complete; do not repeat their implementation or deployment. Proceed to Cron 10: `gap_heal_{service_id}` documented in `docs/cron/jobs/gap-heal.md`:
-1. Read `docs/cron/jobs/gap-heal.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
-2. Confirm which checklist items and contract requirements remain genuinely unverified (including Fastly Stats API vs DuckDB/DuckLake row counts accounting, SustainedLossAlert detection on >= 2 consecutive hours with >= 5% loss, adaptive severity bands and sweep budget expansion, manual API trigger `POST /api/admin/gap-heal/{service_id}`, FOS and Fastly API attribution in `usage_log`, and `cron_runs` tracking).
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 6, 7, 8, 9, 10, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 11: `metadata_cleanup_{service_id}` documented in `docs/cron/jobs/metadata-cleanup.md`:
+1. Read `docs/cron/jobs/metadata-cleanup.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
+2. Audit operational metadata maintenance, table trimming, and retention enforcement across PostgreSQL metadata tables.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -453,6 +460,8 @@ Each line: commit — one-line why. All on `release/v3.0.0-beta3`.
 - `6382fc8d` — RUM freshness parity: persist `{rum: total_rows/latest_log_at/last_sync_at}` at `rum_commit` time and read it from the status doc in `refresh_config_status`, removing a nested unbounded live DuckLake/FOS RUM `MAX(timestamp)` scan from the request-ingest cron's critical path (a transient RUM-lake stall had permanently wedged GCE `log_discovery` ~12–15min). GCE `log_discovery` now `success`; mirrors the request-path freshness-persist (Trap #39).
 - `d018df12` — classify `ChunkLoadError` / "Failed to load chunk" as the same bounded-transient port-forward blip as `ERR_CONNECTION_REFUSED` (its direct cause): a dropped Elevation :3002 `kubectl port-forward` refuses the chunk fetch and Next.js re-surfaces that exact network failure as a ChunkLoadError. The verifier tolerated the cause but hard-failed the effect — the SOLE cause of the `6382fc8d` run's `❌` despite all 4 envs passing every page/RUM/30d/commit check (Elevation FE pod `Running` restarts=0, data all green). Positive per-section checks + the 8-blip budget remain the arbiter.
 - `ea0cbeaf` — GCE request-header "11d ago" flap (the non-empty-stale-view case `d15a2886` missed): a `skip_view_update` status connection on a service with no local `cache/data` mirror (GCE standard) can hold a stale-but-NON-empty baked iceberg view whose `max(timestamp)` lags the committed lake by days. `d15a2886` only self-healed the EMPTY-view branch (`view_rows == 0`); here `view_rows > 0` so it trusted the stale view max. `get_sync_status` now reconciles the view's extents against `_authoritative_direct_stats` (committed lake + buffer, catalog-stat min/max, no footer scan) in the non-empty branch too — never reports a latest older, or earliest newer, than the committed lake holds. Timestamp-only (row count stays the view's), failure-safe (helper returns None → no-op). Pinned by `test_get_sync_status_nonempty_stale_view_reconciles_against_authoritative_lake`.
+- `5c072530` — Traffic-over-Time chart visual spacing parity: unified bar layout and bucket alignment between Standard and High-Scale modes.
+- `73f7b98c` — CI/CD tripwire & test isolation: classify control-room error-stream in tripwire scanner and isolate duckdb lake connections.
 
 Harness-only (gitignored `deploy_test_all.sh`): per-env parallel `validate_env`
 threads; benign-allowlist additions for designed self-healing log lines
@@ -545,7 +554,7 @@ Measured, non-blocking; candidates for the scale-exploration phase (10k RPS std
   No files found that match the pattern ".../buffer/client_vitals/batch_<id>.parquet"`.
   Looks like a read racing a buffer file being rotated/deleted out from under
   it; single occurrence, not yet reproduced or root-caused. Not fixed.
-- **Phase 3 preview — Traffic-over-Time bar spacing** — High-Scale renders bars closer together than Standard for equivalent data; fix the shared contract/rendering path (bucket density / omitted zero buckets / alignment / Plotly config), not the data source.
+- **Phase 3 preview — Traffic-over-Time bar spacing — FIXED (`5c072530`).** Unified bar visual spacing and layout properties between Standard and High-Scale modes in Traffic over Time chart.
 
 ## Phase 3: Pages
 
