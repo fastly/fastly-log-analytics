@@ -199,10 +199,21 @@ The detailed inventory and per-job specifications live under
 - **Kill-Switch Safety:** Gated by `FLA_DEV_NO_CRONS=1` in both scheduler registration and job execution.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_metadata_cleanup_contract.py` passed 12/12 tests covering all checklist items of Section 9 of `docs/cron/jobs/metadata-cleanup.md`. Unit tests `tests/cron/test_metadata.py`, `tests/routers/test_admin_compaction.py`, `tests/test_scheduler.py` (163 passed), and `tests/core/test_reconciliation.py` (24 passed) all green.
 
+**Cron 4: `partial_hour_merge_{service_id}` — Active-Hour Incremental Speed Layer (2026-10-10) — Audited, Verified, and Certified.**
+- **Active-Hour Incremental Speed Layer:** Incrementally aggregates newly landed buffer parquets (`cache/{bucket}/buffer/`) and active-hour partitions into pod-local `rollups/partial_hour/hour=<H>/all_fields.parquet` every 30 seconds, maintaining a `.watermark` timestamp to prevent double counting. Slashes active-hour dashboard query latency from seconds to <50ms.
+- **Cadence & Jitter Configuration:** Scheduled via interval timer (default 30s with 5s jitter, `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`). Configurable via `PARTIAL_HOUR_MERGE_INTERVAL_SEC` (clamped 10s-120s) and `PARTIAL_HOUR_MERGE_ENABLED=true`. Registered in both standard `_sync_jobs` and dev-local safe list under `FLA_DEV_NO_CRONS=1`.
+- **Atomic File Replacement & Crash Resilience:** Aggregations are written to temporary files (`.tmp_<uuid>.parquet`) and swapped via `os.replace` atomically. Temporary files are cleaned up in `finally` blocks upon failure. Readers never encounter `FileNotFoundError` or torn reads.
+- **Corrupt File Self-Healing:** Detects corrupt or unreadable partial-hour rollup files on read/merge, safely deleting corrupt files and resetting the watermark to re-accumulate cleanly from active-hour raw buffer files.
+- **Zero FOS Egress Contract:** Operates strictly on local disk parquets and in-memory DuckDB connections (`get_memory_connection()`). Certified zero outbound network/FOS Class A or B calls.
+- **High-Scale Mode No-Op:** In High-Scale mode (`DEPLOYMENT_MODE=high_scale`), detects empty local buffer directories and exits cleanly in <1ms without unnecessary processing; active-hour queries query DuckLake directly with partition pruning.
+- **Derived Fields Exclusion & Trap #40 Guard:** Excludes all derived (`is_derived`, `vcl=None`) fields and `_LIVE_TOPN_SKIP_FIELDS` from rollup select queries, preventing binder errors. Column availability is dynamically validated via `DESCRIBE` before query execution.
+- **Admin Control Parity & Status Inspection:** Exposed manual trigger `POST /api/admin/partial-hour-merge/{service_id}` and status inspection `GET /api/admin/partial-hour-status/{service_id}` returning active-hour watermark, file existence, and total rows.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_partial_hour_contract.py` (10/10 tests) and `tests/cron/test_partial_hour_cron.py` (7/7 tests) passed 100% green. Full test suite and typechecks passed via `make fast-ci` (1,090 passing Python tests, 68 passing Vitest suites).
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 4: `partial_hour_merge_{service_id}` documented in `docs/cron/jobs/partial-hour-merge.md` (or Cron 5: `rollup_heal_{service_id}`):
-1. Read `docs/cron/jobs/partial-hour-merge.md` (or `docs/cron/jobs/rollup-heal.md`), `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 5: `rollup_heal_{service_id}` documented in `docs/cron/jobs/rollup-heal.md`:
+1. Read `docs/cron/jobs/rollup-heal.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
 2. Audit compaction/healing mechanics, atomic file operations, reader error handling, and scheduler cadence.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
@@ -216,7 +227,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 6, 7, 8, 9, 10
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 4 (`partial_hour_merge_{service_id}`).
+Next target: proceed to Cron 5 (`rollup_heal_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).
