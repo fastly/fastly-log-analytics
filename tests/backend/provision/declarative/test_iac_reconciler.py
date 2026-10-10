@@ -94,7 +94,7 @@ class TestIaCReconciler:
         assert current["compute_scorer"]["id"] == "compute_123"
 
     @patch("httpx.get")
-    @patch("time.sleep")
+    @patch("backend.provision.declarative.iac_reconciler.time.sleep")
     def test_verify_readiness_probe_retries_and_succeeds(self, mock_sleep, mock_get):
         """Verify readiness probe retries on failure and succeeds on success code."""
         compute_def = DeclarativeComputeService(
@@ -235,7 +235,7 @@ class TestIaCReconciler:
         status_cb = MagicMock()
 
         # Capture sleep duration to verify drain
-        with patch("time.sleep") as mock_sleep:
+        with patch("backend.provision.declarative.iac_reconciler.time.sleep") as mock_sleep:
             reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=status_cb)
             mock_sleep.assert_called_once_with(5.0)
 

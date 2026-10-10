@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.core.clickhouse_manifest import PgManifest
+from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION
 from tests.core.test_clickhouse_publication import fixture_manifest
 
 
@@ -86,7 +87,7 @@ def test_replay_preview_only_reads_and_checks_service_references(manifest, gener
         rows.append(
             {"dataset_id": "dataset", "status": "building", "target_identity": "target", "current_revision": True}
         )
-    rows.extend([{"expires_at": dataset.expires_at, "schema_version": 1}, {"n": 3}])
+    rows.extend([{"expires_at": dataset.expires_at, "schema_version": CLICKHOUSE_SCHEMA_VERSION}, {"n": 3}])
     if generation:
         rows.append({"n": 2})
     con.execute.return_value.fetchone.side_effect = rows
@@ -120,7 +121,7 @@ def test_replay_preview_rejects_unreplayable_references(manifest, case):
         rows = [
             {
                 "expires_at": datetime.now(UTC) - timedelta(seconds=1) if case == "expired" else dataset.expires_at,
-                "schema_version": 99 if case == "schema" else 1,
+                "schema_version": 99 if case == "schema" else CLICKHOUSE_SCHEMA_VERSION,
             },
             {"n": 101},
         ]

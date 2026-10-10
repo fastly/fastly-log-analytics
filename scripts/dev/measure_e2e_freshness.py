@@ -55,23 +55,7 @@ ENVIRONMENTS = {
     "remote-hs": "Remote High-Scale",
 }
 
-DEFAULT_ENV_CONFIGS: dict[str, dict[str, str]] = {
-    "local-std": {
-        "service_id": "ZU15BvY2LX7WcEp43T9VwU",
-        "backend_url": "https://127.0.0.1:9443",
-        "cdn_domain": "http://fla-local-standard-test.global.ssl.fastly.net",
-    },
-    "remote-std": {
-        "service_id": "cVnu9mYB3Cvmob3lsqjQU3",
-        "backend_url": "https://34.123.30.195:9443",
-        "cdn_domain": "http://fastly-se-demo.global.ssl.fastly.net",
-    },
-    "remote-hs": {
-        "service_id": "ZEZ4mcAjoSFDTg7tpkDKV2",
-        "backend_url": "https://10.253.3.86:8443",
-        "cdn_domain": "http://fla-k8s-scaling-test-elevation.global.ssl.fastly.net",
-    },
-}
+DEFAULT_ENV_CONFIGS: dict[str, dict[str, str]] = {}
 
 
 def _load_persisted_deploy_env() -> None:

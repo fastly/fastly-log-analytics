@@ -435,7 +435,7 @@ def test_adaptive_ingest_stops_after_empty_followup_and_aggregates_outcomes(monk
     done = events[-1]
 
     assert len(calls) == 3
-    assert sleeps == [3, 3]
+    assert sleeps == [0.5, 0.5]
     assert done["new_files"] == 3
     assert done["rows_inserted"] == 30
     assert done["outcome_counters"]["valid_records"] == 30

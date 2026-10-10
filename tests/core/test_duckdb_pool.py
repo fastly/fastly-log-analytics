@@ -321,7 +321,7 @@ def test_pool_enabled_default_and_override(monkeypatch):
 
 
 def test_pool_max_size_parses_and_falls_back(monkeypatch):
-    """_pool_max_size returns max(1, int(env)) and falls back to 8 on garbage."""
+    """_pool_max_size returns max(1, int(env)) and falls back to 12 on garbage."""
     from backend.core.duckdb_pool import _pool_max_size
 
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "16")
@@ -329,7 +329,7 @@ def test_pool_max_size_parses_and_falls_back(monkeypatch):
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "0")
     assert _pool_max_size() == 1  # clamped to >= 1
     monkeypatch.setenv("DUCKDB_POOL_MAX_SIZE", "not-an-int")
-    assert _pool_max_size() == 8  # fallback default
+    assert _pool_max_size() == 12  # fallback default
 
 
 def test_pool_conn_memory_limit_passthrough(monkeypatch):
