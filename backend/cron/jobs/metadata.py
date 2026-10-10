@@ -10,7 +10,7 @@ Covers everything that isn't ingest/commit/compaction proper:
   * ``_run_rdns_enrichment`` — every-5-min rDNS lookup batcher.
   * ``_run_share_audit_purge`` — daily remote-share audit log purge.
   * ``_run_service_alerts_evaluation`` — per-service alert evaluation.
-  * ``_run_metadata_cleanup`` — daily SQLite retention trim + VACUUM.
+  * ``_run_metadata_cleanup`` — daily PostgreSQL operational metadata retention trim.
 """
 
 from __future__ import annotations

@@ -189,11 +189,21 @@ The detailed inventory and per-job specifications live under
 - **Admin Control & Trigger Endpoint:** Implemented `POST /api/admin/gap-heal/{service_id}` in `backend/routers/admin/ingest.py` supporting run_id reuse and force bypass. Dynamic scheduler rescheduling on `interval_minutes` config change and safety kill-switch under `FLA_DEV_NO_CRONS=1`.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_gap_heal_contract.py` passed 9/9 tests covering Section 9 of `docs/cron/jobs/gap-heal.md`. Unit tests `tests/test_scheduler.py -k "gap_heal"` (14 passed) and `tests/test_dev_mode_no_crons.py -k "gap_heal"` (1 passed) green.
 
+**Cron 11: `metadata_cleanup_{service_id}` — Operational Metadata Maintenance & Table Trimming (2026-10-10) — Audited, Verified, and Certified.**
+- **Politeness Gating & Dynamic Control:** Evaluates `should_defer_cron("metadata_cleanup", service_id)` on scheduled runs, yielding cleanly if user queries are active; bypassed when triggered via API or with `force=True`. Job dynamically reschedules on `cron_metadata_cleanup` config changes (`cron_hour`, `cron_minute`) and is cleanly unregistered when `cron_metadata_cleanup.enabled = False`.
+- **Zero FOS Egress Contract:** Verified that operational metadata pruning executes strictly against PostgreSQL metadata tables via `pg_pool`, with zero calls made to Fastly Object Storage or DuckDB analytical views.
+- **Dedup Suppression & Safe RUM Window:** Prunes expired `ingested_files` records only when `delete_after=True` (preserving non-deleting discovery history indefinitely to prevent re-ingestion loops). RUM files enforce a retention window of `max(ingested_files_days, log_retention_days + 1)` days, guaranteeing raw logs are deleted from FOS before discovery records are retired.
+- **Chunked Usage Log Pruning:** Purges expired `usage_log` raw entries in bounded 5,000-row batches (`_USAGE_PURGE_CHUNK_SIZE = 5000`) to prevent transaction locks, while strictly preserving aggregate rollup records in `usage_log_hourly_summary`.
+- **Operational Table Retention Trim:** Enforces retention policies across `cron_runs` (7 days), `slow_queries` (30 days using unix timestamp comparisons), and global `metric_snapshots` (30 days) on a single daily maintenance pass.
+- **Admin Control Parity & SSE Progress Streaming:** Provides parity across both single-service (`POST /api/admin/metadata-cleanup/{service_id}`) and global (`POST /api/admin/metadata-cleanup`) admin endpoints, yielding realtime Server-Sent Events (`status`, `running`, `complete`, `error`) and logging final run statistics to `cron_runs`.
+- **Kill-Switch Safety:** Gated by `FLA_DEV_NO_CRONS=1` in both scheduler registration and job execution.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_metadata_cleanup_contract.py` passed 12/12 tests covering all checklist items of Section 9 of `docs/cron/jobs/metadata-cleanup.md`. Unit tests `tests/cron/test_metadata.py`, `tests/routers/test_admin_compaction.py`, `tests/test_scheduler.py` (163 passed), and `tests/core/test_reconciliation.py` (24 passed) all green.
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 6, 7, 8, 9, 10, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 11: `metadata_cleanup_{service_id}` documented in `docs/cron/jobs/metadata-cleanup.md`:
-1. Read `docs/cron/jobs/metadata-cleanup.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
-2. Audit operational metadata maintenance, table trimming, and retention enforcement across PostgreSQL metadata tables.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 4: `partial_hour_merge_{service_id}` documented in `docs/cron/jobs/partial-hour-merge.md` (or Cron 5: `rollup_heal_{service_id}`):
+1. Read `docs/cron/jobs/partial-hour-merge.md` (or `docs/cron/jobs/rollup-heal.md`), `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
+2. Audit compaction/healing mechanics, atomic file operations, reader error handling, and scheduler cadence.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
