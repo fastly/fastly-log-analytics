@@ -222,9 +222,9 @@ The detailed inventory and per-job specifications live under
 
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 12: `sync_status_refresh_{service_id}` documented in `docs/cron/jobs/sync-status-refresh.md`:
-1. Read `docs/cron/jobs/sync-status-refresh.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/`).
-2. Audit sync status refresh mechanics, caching, and scheduler cadence.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 12: `alerts_evaluation_{service_id}` documented in `docs/cron/jobs/alerts-evaluation.md`:
+1. Read `docs/cron/jobs/alerts-evaluation.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_alerts_evaluation_contract.py`).
+2. Audit alert evaluation mechanics, politeness gate (`should_defer_cron("alerts", service_id)`), zero-alert short-circuit, webhook retry/timeout resilience, and two-phase timestamp/state export.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -237,7 +237,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 12 (`sync_status_refresh_{service_id}`).
+Next target: proceed to Cron 12 (`alerts_evaluation_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).
