@@ -195,6 +195,12 @@ def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -
         for k in list(_snapshot_files_cache.keys()):
             if k == source_key or k.startswith(f"{source_key}::"):
                 _snapshot_files_cache.pop(k, None)
+        try:
+            from backend.core._duckdb_status import clear_ducklake_stats_cache
+
+            clear_ducklake_stats_cache(source_key)
+        except Exception:
+            pass
 
 
 def _get_cache_file(source: dict, name: str) -> str:

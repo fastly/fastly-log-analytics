@@ -1506,6 +1506,7 @@ from backend.core._duckdb_status import (  # noqa: E402, F401
     _clear_schema_cache,
     _schema_cache,
     backfill_fastly_edge_writes,
+    clear_ducklake_stats_cache,
     delete_ingested_files,
     enrich_asn_labels,
     format_asn_label,
@@ -1542,6 +1543,14 @@ class _SchemaCacheAdapter:
 
 
 _CacheRegistry.register("duckdb._schema_cache", _SchemaCacheAdapter())
+
+
+class _DucklakeStatsCacheAdapter:
+    def clear(self) -> None:
+        clear_ducklake_stats_cache()
+
+
+_CacheRegistry.register("duckdb._ducklake_stats_cache", _DucklakeStatsCacheAdapter())
 
 
 def rum_source_for(source: dict) -> dict:

@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -100,29 +101,39 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 
+# In-memory cache for DuckLake committed table stats:
+# (source_name, lake_table) -> (snapshot_id, count, min_timestamp, max_timestamp)
+_ducklake_stats_cache: dict[tuple[str, str], tuple[int, int, Any, Any]] = {}
+_ducklake_stats_cache_lock = threading.Lock()
+
+
+def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
+    """Clear DuckLake table stats cache for a source or globally."""
+    with _ducklake_stats_cache_lock:
+        if source_key is None:
+            _ducklake_stats_cache.clear()
+        else:
+            for k in list(_ducklake_stats_cache.keys()):
+                if k[0] == source_key:
+                    _ducklake_stats_cache.pop(k, None)
+
+
 def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
     """Count/min/max read STRAIGHT from the committed DuckLake table plus the
     live buffer parquet, bypassing a possibly-poisoned per-connection baked
     iceberg view.
 
-    The empty-view fallback in ``get_sync_status`` otherwise preserves an
-    ancient persisted ``local_rows``/``latest_log_at``: on a service with no
-    local ``cache/data`` mirror (e.g. GCE standard), the split-stats fast path
-    is skipped and the status read hits the iceberg view directly. A
-    ``skip_view_update`` status connection that happens to hold a "WHERE false"
-    empty view then returns 0 rows with no error, and the fallback sticks at
-    the last-known value forever — the GCE header flap that read a 10-day-stale
-    Sept-22 timestamp while the lake was committing fresh rows every few
-    minutes (AGENTS.md trap #33/#35). The committed lake table is the latest
-    snapshot by construction, so reading it directly self-heals the header.
+    Committed DuckLake stats are cached in memory keyed by snapshot ID, avoiding
+    repeated WAN S3 scans on every sync tick while preserving full consistency.
 
     Returns ``(count, min_ts, max_ts)`` or ``None`` when nothing is readable.
     """
     counts: list[int] = []
     mins: list[Any] = []
     maxs: list[Any] = []
+    src_name = src.get("name", "default")
     try:
-        from backend.core.iceberg._ducklake import ducklake_table_name
+        from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
 
         lake_table = ducklake_table_name(src)
         exists = con.execute(
@@ -130,13 +141,31 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
             [lake_table],
         ).fetchone()
         if exists:
-            row = con.execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"').fetchone()
-            if row:
-                counts.append(row[0] or 0)
-                if row[1] is not None:
-                    mins.append(row[1])
-                if row[2] is not None:
-                    maxs.append(row[2])
+            snap_id = ducklake_current_snapshot_id(con)
+            cached = None
+            if snap_id is not None:
+                with _ducklake_stats_cache_lock:
+                    cached = _ducklake_stats_cache.get((src_name, lake_table))
+
+            if cached is not None and cached[0] == snap_id:
+                lake_count, lake_min, lake_max = cached[1], cached[2], cached[3]
+            else:
+                row = con.execute(
+                    f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
+                ).fetchone()
+                lake_count = (row[0] or 0) if row else 0
+                lake_min = row[1] if row else None
+                lake_max = row[2] if row else None
+                if snap_id is not None:
+                    with _ducklake_stats_cache_lock:
+                        _ducklake_stats_cache[(src_name, lake_table)] = (snap_id, lake_count, lake_min, lake_max)
+
+            if lake_count > 0:
+                counts.append(lake_count)
+                if lake_min is not None:
+                    mins.append(lake_min)
+                if lake_max is not None:
+                    maxs.append(lake_max)
     except Exception as e:
         logger.debug("[sync-status] direct lake stats unavailable: %s", e)
     try:
@@ -151,7 +180,9 @@ def _authoritative_direct_stats(con, src) -> tuple[int, Any, Any] | None:
                 f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
             ).fetchone()
             if row:
-                counts.append(row[0] or 0)
+                b_cnt = row[0] or 0
+                if b_cnt > 0:
+                    counts.append(b_cnt)
                 if row[1] is not None:
                     mins.append(row[1])
                 if row[2] is not None:
@@ -272,6 +303,7 @@ def get_sync_status(
         stats = None
         data_fp = _data_stats_fingerprint(src)
         cache_key = src["name"]
+        direct_stats = None
         if data_fp is not None:
             try:
                 with _db_main._data_stats_cache_lock:
@@ -367,7 +399,7 @@ def get_sync_status(
                 # source of truth, and the lake min/max are catalog-stat reads
                 # (no parquet-footer scan), so the split-stats fast path's
                 # perf win is preserved.
-                direct = _authoritative_direct_stats(con, src)
+                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
                 if direct is not None:
                     d_earliest, d_latest = direct[1], direct[2]
                     if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
@@ -383,7 +415,7 @@ def get_sync_status(
                 # a skip_view_update status connection holding an empty view
                 # persists a stale latest_log_at forever (the GCE header flap
                 # that read Sept-22 while the lake was fresh — trap #33/#35).
-                direct = _authoritative_direct_stats(con, src)
+                direct = direct_stats if direct_stats is not None else _authoritative_direct_stats(con, src)
                 if direct is not None:
                     local_rows = direct[0]
                     earliest_log_at = direct[1]
@@ -544,17 +576,22 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
     except Exception:
         pass
 
+    cached_status = src.get("status") or {}
     iceberg_bytes = None
     iceberg_files = None
-    try:
-        from backend.core import iceberg as _db_iceberg
+    if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
+        iceberg_bytes = cached_status.get("iceberg_bytes")
+        iceberg_files = cached_status.get("iceberg_files")
+    else:
+        try:
+            from backend.core import iceberg as _db_iceberg
 
-        info = _db_iceberg.get_table_info(source)
-        if not info.get("error"):
-            iceberg_bytes = int(info.get("size_bytes", 0) or 0)
-            iceberg_files = int(info.get("data_files", 0) or 0)
-    except Exception:
-        pass
+            info = _db_iceberg.get_table_info(source)
+            if not info.get("error"):
+                iceberg_bytes = int(info.get("size_bytes", 0) or 0)
+                iceberg_files = int(info.get("data_files", 0) or 0)
+        except Exception:
+            pass
 
     con = None
     try:
@@ -587,14 +624,17 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         # populated; the SELECT only fires when this cache miss. Cheap to
         # compute here (one COUNT … FILTER over the active hour) since we
         # already hold the read-only connection.
-        try:
-            from backend.repositories import usage as _usage_repo
+        if not include_top_values and "edge_ratio" in cached_status:
+            status["edge_ratio"] = cached_status.get("edge_ratio")
+        else:
+            try:
+                from backend.repositories import usage as _usage_repo
 
-            ratio, _ = _usage_repo.get_edge_ratio(con, source)
-            if ratio is not None:
-                status["edge_ratio"] = ratio
-        except Exception:
-            pass
+                ratio, _ = _usage_repo.get_edge_ratio(con, source)
+                if ratio is not None:
+                    status["edge_ratio"] = ratio
+            except Exception:
+                pass
 
         # Schema (SUMMARIZE over the iceberg view) costs ~800 ms because
         # update_iceberg_view runs post-ingest on every tick and clears the
@@ -699,6 +739,15 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     # non-None fingerprint) without touching DuckDB.
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
     data_fp = _data_stats_fingerprint(source)
+    if data_fp is None:
+        try:
+            from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+            snap_id = ducklake_current_snapshot_id(con)
+            if snap_id is not None:
+                data_fp = ("ducklake", snap_id)
+        except Exception:
+            pass
     if data_fp is not None and os.path.exists(cached_top_values_path):
         with _db_main._top_values_cache_lock:
             prior_fp = _db_main._top_values_cache.get(service_id)
@@ -838,6 +887,15 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         # fingerprint would let a commit that landed mid-sample lock the
         # cache to a stale value. _data_stats_fingerprint is ~0.5 ms.
         post_fp = _data_stats_fingerprint(source)
+        if post_fp is None:
+            try:
+                from backend.core.iceberg._ducklake import ducklake_current_snapshot_id
+
+                snap_id = ducklake_current_snapshot_id(con)
+                if snap_id is not None:
+                    post_fp = ("ducklake", snap_id)
+            except Exception:
+                pass
         if post_fp is not None:
             with _db_main._top_values_cache_lock:
                 _db_main._top_values_cache[service_id] = post_fp

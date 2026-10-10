@@ -59,16 +59,20 @@ def _ingest_with_adaptive_followups(
         "touched_hours": set(),
         "outcome_counters": _new_object_outcome(processed=0),
     }
+    max_files = ingest_kwargs.get("max_files")
+    pass_new_files = 0
 
     while True:
         if pass_number:
-            if not adaptive or pass_number >= 3 or time.monotonic() - started + 3 > 20:
+            sleep_time = 0.0 if (max_files and pass_new_files >= max_files) else 0.5
+            if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > 15:
                 break
             # Publish this pass's rows now; the caller's final refresh only
             # runs after the whole polling window.
             if after_pass is not None and pass_rows > 0:
                 after_pass()
-            time.sleep(3)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
             yield {"type": "status", "message": "Adaptive polling: checking for newly arrived log files."}
 
         pass_done: dict = {}
@@ -392,8 +396,10 @@ def _run_log_discovery_cron(
         max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
         pass_max_files = max_incremental_files if not is_manual else 5000
         pass_max_seconds = 20 if not is_manual else 240
+        published_pass_rows = 0
 
         def _publish_pass_rows() -> None:
+            nonlocal published_pass_rows
             from backend.cron.jobs._common import refresh_view_and_warm_pool
 
             def _progress(ev: dict) -> None:
@@ -418,6 +424,7 @@ def _run_log_discovery_cron(
                     _pub.publish(service_id, snapshot)
             except Exception:
                 logger.exception("[scheduler] %s: adaptive-pass status publish failed", service_id)
+            published_pass_rows = inserted_rows
 
         try:
             for event in _ingest_with_adaptive_followups(
@@ -554,7 +561,10 @@ def _run_log_discovery_cron(
                         # is bounded by commit_interval_mins instead of the sync
                         # cadence. CREATE OR REPLACE VIEW is metadata-only (no cloud
                         # reads), so this is cheap.
-                        if done_event.get("rows_inserted", 0) > 0:
+                        already_published = bool(
+                            published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
+                        )
+                        if done_event.get("rows_inserted", 0) > 0 and not already_published:
                             from backend.cron.jobs._common import refresh_view_and_warm_pool
                             from backend.utils.active_requests import yield_to_api
 
@@ -667,47 +677,49 @@ def _run_log_discovery_cron(
     # the heavy usage-log phase (reconcile_fastly_stats) — claim once per tick
     # and share the verdict so they don't drift relative to each other.
     do_heavy_refresh = _claim_heavy_refresh(service_id) or bool(force)
-    if (sync_enabled or force) and run_id is not None:
-        _msg_suffix = "+ filter suggestions" if do_heavy_refresh else "(header only)"
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="log_discovery",
-            event={
-                "type": "status",
-                "message": f"{elapsed()} Refreshing sync status {_msg_suffix}...",
-            },
-        )
-    _t0 = time.time()
-    try:
-        refresh_config_status(service_id, include_top_values=False)
-    except Exception:
-        pass
+    already_published = bool(published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0))
+    if not already_published or do_heavy_refresh:
+        if (sync_enabled or force) and run_id is not None:
+            _msg_suffix = "+ filter suggestions" if do_heavy_refresh else "(header only)"
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="log_discovery",
+                event={
+                    "type": "status",
+                    "message": f"{elapsed()} Refreshing sync status {_msg_suffix}...",
+                },
+            )
+        _t0 = time.time()
+        try:
+            refresh_config_status(service_id, include_top_values=False)
+        except Exception:
+            pass
 
-    # Publish AFTER the existing refresh persists queryable request extents.
-    # Filename metadata cannot stand in for MAX(timestamp); publishing before
-    # this refresh leaves connected browsers one ingest behind indefinitely.
-    # No additional scan is needed and header polls remain cached-only.
-    try:
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-        from backend.sync_status_snapshot import compute_sync_status_cached
+        # Publish AFTER the existing refresh persists queryable request extents.
+        # Filename metadata cannot stand in for MAX(timestamp); publishing before
+        # this refresh leaves connected browsers one ingest behind indefinitely.
+        # No additional scan is needed and header polls remain cached-only.
+        try:
+            from backend.sync_status_publisher import publisher as _sync_status_publisher
+            from backend.sync_status_snapshot import compute_sync_status_cached
 
-        _snapshot = compute_sync_status_cached(service_id)
-        if _snapshot is not None:
-            _sync_status_publisher.publish(service_id, _snapshot)
-    except Exception:
-        logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
+            _snapshot = compute_sync_status_cached(service_id)
+            if _snapshot is not None:
+                _sync_status_publisher.publish(service_id, _snapshot)
+        except Exception:
+            logger.exception("[scheduler] %s: sync-status SSE publish failed", service_id)
 
-    if run_id is not None:
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="log_discovery",
-            event={
-                "type": "status",
-                "message": f"{elapsed()} refresh_config_status: {int((time.time() - _t0) * 1000)}ms",
-            },
-        )
+        if run_id is not None:
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="log_discovery",
+                event={
+                    "type": "status",
+                    "message": f"{elapsed()} refresh_config_status: {int((time.time() - _t0) * 1000)}ms",
+                },
+            )
 
     # Top values + schema run after publish: the pass costs ~5 s on a busy
     # service and the extents it would publish are already persisted above.

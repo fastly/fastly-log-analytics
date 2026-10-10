@@ -20,7 +20,7 @@ Lifecycle:
   * Pool is created lazily on first checkout for a service.
   * Idle connections are stored in a LIFO queue (recently-used first, so the
     OS page cache stays hot on the file descriptors that are currently warm).
-  * Pool size is bounded by ``max_size`` (default 8 per service). When the
+  * Pool size is bounded by ``max_size`` (default 12 per service). When the
     pool is empty and ``in_use < max_size``, the next checkout creates a new
     connection. When ``in_use == max_size``, waiters block on a Condition.
   * If a request returns a connection that errored mid-query, the connection
@@ -77,11 +77,11 @@ def _pool_enabled() -> bool:
 
 
 def _pool_max_size() -> int:
-    raw = os.getenv("DUCKDB_POOL_MAX_SIZE", "8")
+    raw = os.getenv("DUCKDB_POOL_MAX_SIZE", "12")
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return 8
+        return 12
 
 
 def _pool_conn_memory_limit() -> str | None:
