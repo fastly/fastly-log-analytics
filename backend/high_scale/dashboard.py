@@ -212,6 +212,38 @@ def _aggregate(
     )
 
 
+def _normalize_chart_interval(chart_interval: str | None, default: str = "1 minute") -> str:
+    if not chart_interval:
+        return default
+    ci = chart_interval.strip().lower()
+    mapping = {
+        "1 second": "1 second",
+        "1 seconds": "1 second",
+        "1s": "1 second",
+        "second": "1 second",
+        "seconds": "1 second",
+        "1 minute": "1 minute",
+        "1 minutes": "1 minute",
+        "1m": "1 minute",
+        "minute": "1 minute",
+        "minutes": "1 minute",
+        "5 minute": "5 minutes",
+        "5 minutes": "5 minutes",
+        "5m": "5 minutes",
+        "1 hour": "1 hour",
+        "1 hours": "1 hour",
+        "1h": "1 hour",
+        "hour": "1 hour",
+        "hours": "1 hour",
+        "1 day": "1 day",
+        "1 days": "1 day",
+        "1d": "1 day",
+        "day": "1 day",
+        "days": "1 day",
+    }
+    return mapping.get(ci, default)
+
+
 def _time_series(
     service: HighScaleService, start_time: str | None, end_time: str | None, chart_interval: str
 ) -> list[TimeSeriesPoint]:
@@ -226,9 +258,9 @@ def _time_series(
         "WHERE service_id={service_id:String} AND domain='request_aggregate' "
         "AND publication_state='visible')",
     ]
-    interval_norm = chart_interval.removesuffix("s")
-    interval_map = {"1 second": 1, "1 minute": 60, "5 minute": 300, "1 hour": 3600, "1 day": 86400}
-    bucket_seconds = interval_map.get(interval_norm, 3600)
+    interval_norm = _normalize_chart_interval(chart_interval, default="1 minute")
+    interval_map = {"1 second": 1, "1 minute": 60, "5 minutes": 300, "1 hour": 3600, "1 day": 86400}
+    bucket_seconds = interval_map.get(interval_norm, 60)
     params: dict[str, Any] = {"service_id": service.service_id, "bucket_seconds": bucket_seconds}
     if start is not None:
         clauses.append("bucket_start >= {start:DateTime64(3)}")
@@ -374,16 +406,17 @@ def _filtered_aggregates(
 
     map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])]
 
+    norm_interval = _normalize_chart_interval(req.chart_interval)
     time_series = []
     if req.include_time_series is not False:
         interval_sql = "toStartOfMinute(event_timestamp)"
-        if req.chart_interval in ("1 second", "1 seconds"):
+        if norm_interval == "1 second":
             interval_sql = "toStartOfSecond(event_timestamp)"
-        elif req.chart_interval in ("5 minute", "5 minutes"):
+        elif norm_interval == "5 minutes":
             interval_sql = "toStartOfFiveMinutes(event_timestamp)"
-        elif req.chart_interval in ("1 hour", "1 hours"):
+        elif norm_interval == "1 hour":
             interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
-        elif req.chart_interval in ("1 day", "1 days"):
+        elif norm_interval == "1 day":
             interval_sql = "toStartOfDay(event_timestamp)"
 
         metric = req.chart_metric or "requests"
@@ -411,7 +444,7 @@ def _filtered_aggregates(
         time_series=time_series,
         map_data=map_data,
         where_clause="high-scale ClickHouse (filtered)",
-        interval=req.chart_interval,
+        interval=norm_interval,
         metric=req.chart_metric,
         total_rows=total_count,
         total_rows_total=total_count,
@@ -421,11 +454,8 @@ def _filtered_aggregates(
 
 
 def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None):
-    if (
-        req.filters
-        or req.chart_interval in ("1 second", "1 seconds")
-        or (req.chart_metric and req.chart_metric != "requests")
-    ):
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+    if req.filters or norm_interval == "1 second" or (req.chart_metric and req.chart_metric != "requests"):
         return _filtered_aggregates(service, req, start_time, end_time)
 
     requested_fields = req.fields or list(_FIELD_DIMENSIONS)
@@ -464,13 +494,13 @@ def aggregates(service: HighScaleService, req: AggregatesRequest, start_time: st
         if map_response is not None
         else []
     )
-    time_series = _time_series(service, start_time, end_time, req.chart_interval)
+    time_series = _time_series(service, start_time, end_time, norm_interval)
     return AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
         map_data=map_data,
         where_clause="high-scale ClickHouse",
-        interval=req.chart_interval,
+        interval=norm_interval,
         metric=req.chart_metric,
         total_rows=total.request_count,
         total_rows_total=total.request_count,

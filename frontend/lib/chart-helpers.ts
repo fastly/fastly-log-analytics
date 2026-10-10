@@ -84,9 +84,10 @@ const MAX_DENSE_BUCKETS = 5000
  */
 function parseUtcMs(t: string | number | null | undefined): number {
   if (t == null) return NaN
-  if (typeof t === 'number') return t
+  if (typeof t === 'number') return Math.round(t / 1000) * 1000
   const parsed = toUTCDate(t).getTime()
-  return Number.isNaN(parsed) ? Date.parse(t) : parsed
+  const raw = Number.isNaN(parsed) ? Date.parse(t) : parsed
+  return Number.isNaN(raw) ? NaN : Math.round(raw / 1000) * 1000
 }
 
 export function denseTimeGrid(
@@ -128,8 +129,15 @@ export function denseTimeGrid(
 
   // Bail if any present bucket is off the interval grid — filling would silently
   // drop its value. DuckDB guarantees alignment, so this only trips on a mixed
-  // or unexpected grain.
-  if (!timesMs.every((t) => (t - first) % stepMs === 0)) return null
+  // or unexpected grain. Tolerates sub-second rounding or boundary jitter.
+  if (
+    !timesMs.every((t) => {
+      const rem = Math.abs((t - first) % stepMs)
+      return rem === 0 || rem < 1000 || Math.abs(rem - stepMs) < 1000
+    })
+  ) {
+    return null
+  }
 
   const nBuckets = Math.round((last - first) / stepMs) + 1
   // Already contiguous (no gaps) or grid too large to be worth/safe filling.

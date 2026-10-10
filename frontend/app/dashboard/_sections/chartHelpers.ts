@@ -23,6 +23,35 @@ export interface BuildTrafficDataParams {
 }
 
 /**
+ * Resolves an interval string to seconds, supporting canonical intervals
+ * ("1 second", "1 minute", "5 minutes", "1 hour", "1 day"), shorthands
+ * ("1s", "1m", "5m", "1h", "1d"), and plural/case variants.
+ */
+export function getIntervalSeconds(intervalStr?: string | null): number | undefined {
+  if (!intervalStr) return undefined
+  const str = intervalStr.trim().toLowerCase()
+  if (INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS] !== undefined) {
+    return INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS]
+  }
+  if (str === '1s' || str === '1 seconds' || str === 'second' || str === 'seconds') return 1
+  if (str === '1m' || str === '1 minutes' || str === 'minute' || str === 'minutes') return 60
+  if (str === '5m' || str === '5 minute' || str === '5 minutes') return 300
+  if (str === '1h' || str === '1 hours' || str === 'hour' || str === 'hours') return 3600
+  if (str === '1d' || str === '1 days' || str === 'day' || str === 'days') return 86400
+
+  const match = str.match(/^(\d+)\s*(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/)
+  if (match) {
+    const num = parseInt(match[1], 10)
+    const unit = match[2]
+    if (unit.startsWith('s')) return num
+    if (unit.startsWith('m')) return num * 60
+    if (unit.startsWith('h')) return num * 3600
+    if (unit.startsWith('d')) return num * 86400
+  }
+  return undefined
+}
+
+/**
  * Build the Plotly traces for the traffic chart. Pure function — given the
  * same inputs returns the same output array. Memoize on the call-site.
  */
@@ -66,7 +95,7 @@ export function buildTrafficData({
   // (latency/throughput/hit_rate trend) are left untouched — a missing bucket
   // there is undefined, not zero. barSeries === time_series when !isBar.
   const actualInterval = aggregates?.interval || effectiveInterval
-  const intervalSeconds = INTERVAL_SECONDS[actualInterval as keyof typeof INTERVAL_SECONDS]
+  const intervalSeconds = getIntervalSeconds(actualInterval)
   const barSeries: BarSeriesPoint[] = isBar
     ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
     : time_series
@@ -160,7 +189,8 @@ export function buildTrafficData({
     } else {
       const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
       const actualInterval = aggregates?.interval || effectiveInterval
-      windowSize = Math.floor((trendMap[trend] ?? 0) / (INTERVAL_SECONDS[actualInterval as keyof typeof INTERVAL_SECONDS] ?? 60))
+      const sec = getIntervalSeconds(actualInterval) ?? 60
+      windowSize = Math.floor((trendMap[trend] ?? 0) / sec)
     }
     if (windowSize > 1) {
       const trendY = new Array(n).fill(null)
@@ -212,6 +242,8 @@ export function buildChartLayout({
   return {
     ...TIME_HOVER_LAYOUT,
     barmode: trafficData.length > 1 && trafficData[0]?.type === 'bar' ? 'stack' : undefined,
+    bargap: 0.1,
+    bargroupgap: 0.05,
     showlegend: trafficData.some(t => t.showlegend !== false),
     yaxis: {
       title: metricField?.unit || (actualMetric === 'requests' ? 'reqs' : ''),

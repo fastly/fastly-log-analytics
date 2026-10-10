@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildTrafficData, densifyBarSeries } from '@/app/dashboard/_sections/chartHelpers'
+import { buildTrafficData, densifyBarSeries, getIntervalSeconds, buildChartLayout } from '@/app/dashboard/_sections/chartHelpers'
 
 const baseParams = {
   compareAggregates: null,
@@ -131,5 +131,83 @@ describe('buildTrafficData gap-fill integration', () => {
     expect(traces[0].type).toBe('scatter')
     // Untouched: a missing latency bucket must not become a false 0 dip.
     expect(traces[0].y).toEqual([120, 140])
+  })
+
+  it('densifies correctly when given shorthand or plural interval formats (e.g. 5m, 1 hours)', () => {
+    const aggregates = {
+      metric: 'requests',
+      interval: '5 minutes',
+      time_series: [
+        { time: '2026-06-30T09:00:00Z', value: 10 },
+        { time: '2026-06-30T09:15:00Z', value: 20 },
+      ],
+    }
+    const traces = buildTrafficData({ ...baseParams, aggregates })
+    expect(traces[0].type).toBe('bar')
+    // 09:00, 09:05 (0), 09:10 (0), 09:15 -> 4 buckets
+    expect(traces[0].y).toEqual([10, 0, 0, 20])
+    expect(traces[0].width).toBe(270000) // 300 * 1000 * 0.9
+  })
+
+  it('densifies correctly with fractional sub-second timestamps', () => {
+    const aggregates = {
+      metric: 'requests',
+      interval: '1 minute',
+      time_series: [
+        { time: '2026-06-30 09:00:00.000', value: 3 },
+        { time: '2026-06-30 09:02:00.000', value: 7 },
+      ],
+    }
+    const traces = buildTrafficData({ ...baseParams, aggregates })
+    expect(traces[0].type).toBe('bar')
+    expect(traces[0].y).toEqual([3, 0, 7])
+    expect(traces[0].width).toBe(54000) // 60 * 1000 * 0.9
+  })
+})
+
+describe('getIntervalSeconds', () => {
+  it('resolves canonical interval strings', () => {
+    expect(getIntervalSeconds('1 second')).toBe(1)
+    expect(getIntervalSeconds('1 minute')).toBe(60)
+    expect(getIntervalSeconds('5 minutes')).toBe(300)
+    expect(getIntervalSeconds('1 hour')).toBe(3600)
+    expect(getIntervalSeconds('1 day')).toBe(86400)
+  })
+
+  it('resolves shorthand and plural variants', () => {
+    expect(getIntervalSeconds('1s')).toBe(1)
+    expect(getIntervalSeconds('1 seconds')).toBe(1)
+    expect(getIntervalSeconds('1m')).toBe(60)
+    expect(getIntervalSeconds('1 minutes')).toBe(60)
+    expect(getIntervalSeconds('5m')).toBe(300)
+    expect(getIntervalSeconds('1h')).toBe(3600)
+    expect(getIntervalSeconds('1 hours')).toBe(3600)
+    expect(getIntervalSeconds('1d')).toBe(86400)
+    expect(getIntervalSeconds('1 days')).toBe(86400)
+    expect(getIntervalSeconds('10m')).toBe(600)
+    expect(getIntervalSeconds('2 hours')).toBe(7200)
+  })
+
+  it('returns undefined for invalid or empty intervals', () => {
+    expect(getIntervalSeconds(undefined)).toBeUndefined()
+    expect(getIntervalSeconds(null)).toBeUndefined()
+    expect(getIntervalSeconds('')).toBeUndefined()
+    expect(getIntervalSeconds('unknown')).toBeUndefined()
+  })
+})
+
+describe('buildChartLayout', () => {
+  it('includes explicit bargap and bargroupgap for visual spacing parity', () => {
+    const layout = buildChartLayout({
+      trafficData: [{ type: 'bar' }],
+      aggregates: { metric: 'requests' },
+      metric: 'requests',
+      startTime: '2026-06-30T09:00:00Z',
+      endTime: '2026-06-30T10:00:00Z',
+      timezone: 'UTC',
+      catalog: { fields: [] },
+    })
+    expect(layout.bargap).toBe(0.1)
+    expect(layout.bargroupgap).toBe(0.05)
   })
 })
