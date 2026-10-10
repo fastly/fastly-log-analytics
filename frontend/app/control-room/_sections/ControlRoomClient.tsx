@@ -57,6 +57,68 @@ interface RealtimeStreamState {
   rtDown: boolean
 }
 
+interface ErrorEvent {
+  event_id: string
+  timestamp: string
+  status: number
+  url: string
+  pop: string
+  client_ip: string
+}
+
+function parseErrorEvent(line: SSELine): ErrorEvent | null {
+  if (line.event !== 'error_event' && line.type !== 'error_event') return null
+  const data = line.data
+  if (!data || typeof data !== 'object') return null
+  const value = data as Partial<ErrorEvent>
+  if (
+    typeof value.event_id !== 'string' ||
+    typeof value.timestamp !== 'string' ||
+    typeof value.status !== 'number'
+  ) {
+    return null
+  }
+  return {
+    event_id: value.event_id,
+    timestamp: value.timestamp,
+    status: value.status,
+    url: typeof value.url === 'string' ? value.url : '',
+    pop: typeof value.pop === 'string' ? value.pop : '',
+    client_ip: typeof value.client_ip === 'string' ? value.client_ip : '',
+  }
+}
+
+function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
+  const { lines, status, start, reset } = useSSE()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+
+  useEffect(() => {
+    if (!activeServiceId) return
+    const pageLoadId = getPageLoadId()
+    start(
+      `/api/services/${activeServiceId}/control-room/error-stream`,
+      undefined,
+      pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
+    )
+    return () => reset()
+  }, [activeServiceId, start, reset])
+
+  const events = useMemo(() => {
+    const seen = new Set<string>()
+    return lines
+      .map(parseErrorEvent)
+      .filter((event): event is ErrorEvent => event !== null)
+      .filter((event) => {
+        if (seen.has(event.event_id)) return false
+        seen.add(event.event_id)
+        return true
+      })
+      .slice(-20)
+  }, [lines])
+
+  return { connected: status === 'streaming', events }
+}
+
 function parseMetricsTick(line: SSELine): MetricsTick | null {
   if (line.event !== 'metrics_tick' && line.type !== 'metrics_tick') return null
   const metricsData = line.data as MetricsData | undefined
@@ -324,12 +386,18 @@ function OverviewTab({
   historicalHref,
   series,
   rollingAvg,
+  errorEvents,
+  errorsConnected,
+  timezone,
 }: {
   tick: MetricsTick | null
   rtDown: boolean
   historicalHref: string
   series: (extractor: (d: MetricsData) => number) => number[]
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
+  errorEvents: ErrorEvent[]
+  errorsConnected: boolean
+  timezone: string
 }) {
 
   const data = tick?.data
@@ -471,8 +539,123 @@ function OverviewTab({
         />
       </div>
 
+      <RecentErrorsCard events={errorEvents} connected={errorsConnected} timezone={timezone} />
+
       <HistoricalLink href={historicalHref} label="overview" />
     </div>
+  )
+}
+
+function RecentErrorsCard({
+  events,
+  connected,
+  timezone,
+}: {
+  events: ErrorEvent[]
+  connected: boolean
+  timezone: string
+}) {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  return (
+    <Card className="contain-intrinsic-size-[320px]">
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <CardTitle>Live errors</CardTitle>
+        <Badge variant={connected ? 'success' : 'destructive'}>
+          {connected ? 'Listening' : 'Disconnected'}
+        </Badge>
+      </CardHeader>
+      <CardContent>
+        {events.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            {connected ? 'No recent 4xx/5xx errors.' : 'Listening for errors...'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Recent HTTP errors</caption>
+              <thead className="bg-muted/50 text-left">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Time</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Path</th>
+                  <th className="px-3 py-2 font-medium">PoP</th>
+                  <th className="px-3 py-2 font-medium">Client IP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((event) => (
+                  <tr key={event.event_id} className="border-t">
+                    <td className="whitespace-nowrap px-3 py-2">
+                      {formatDate(event.timestamp, timezone, 'h:mm:ss a')}
+                    </td>
+                    <td className="px-3 py-2">
+                      <Link
+                        className="font-semibold underline decoration-dotted underline-offset-2"
+                        href={buildServiceHref(
+                          `/dashboard?filter_status=${encodeURIComponent(String(event.status))}`,
+                          activeServiceId,
+                        )}
+                        prefetch={false}
+                      >
+                        {event.status}
+                      </Link>
+                    </td>
+                    <td className="max-w-sm truncate px-3 py-2" title={event.url}>
+                      {event.url ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_url=${encodeURIComponent(event.url)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.url}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {event.pop ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_pop=${encodeURIComponent(event.pop)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.pop}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                    <td className="px-3 py-2 font-mono">
+                      {event.client_ip ? (
+                        <Link
+                          className="underline decoration-dotted underline-offset-2"
+                          href={buildServiceHref(
+                            `/dashboard?filter_client_ip=${encodeURIComponent(event.client_ip)}`,
+                            activeServiceId,
+                          )}
+                          prefetch={false}
+                        >
+                          {event.client_ip}
+                        </Link>
+                      ) : (
+                        '(unknown)'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -1287,6 +1470,9 @@ function TabContent({
   connected,
   series,
   rollingAvg,
+  errorEvents,
+  errorsConnected,
+  timezone,
 }: {
   tabId: string
   historicalHref: string | null
@@ -1295,11 +1481,22 @@ function TabContent({
   connected: boolean
   series: (extractor: (d: MetricsData) => number) => number[]
   rollingAvg: (extractor: (d: MetricsData) => number, windowSize: number) => number
+  errorEvents: ErrorEvent[]
+  errorsConnected: boolean
+  timezone: string
 }) {
   const commonProps = { tick, rtDown, series, rollingAvg }
   switch (tabId) {
     case 'overview':
-      return <OverviewTab {...commonProps} historicalHref={historicalHref ?? '/dashboard'} />
+      return (
+        <OverviewTab
+          {...commonProps}
+          historicalHref={historicalHref ?? '/dashboard'}
+          errorEvents={errorEvents}
+          errorsConnected={errorsConnected}
+          timezone={timezone}
+        />
+      )
     case 'performance':
       return <PerformanceTab {...commonProps} historicalHref={historicalHref ?? '/performance'} />
     case 'origin':
@@ -1391,6 +1588,7 @@ export default function ControlRoomClient() {
   const isAnalyst = useIsAnalyst()
   const timezone = useTimezone()
   const { connected, lastTickTime, latestTick, allTicks, rtDown } = useRealtimeStream()
+  const { connected: errorsConnected, events: errorEvents } = useErrorStream()
   const { series, rollingAvg } = useTickHistory(allTicks)
 
   const visibleTabs = useMemo(
@@ -1447,6 +1645,9 @@ export default function ControlRoomClient() {
                 connected={connected}
                 series={series}
                 rollingAvg={rollingAvg}
+                errorEvents={errorEvents}
+                errorsConnected={errorsConnected}
+                timezone={timezone}
               />
             </TabsContent>
           ))}

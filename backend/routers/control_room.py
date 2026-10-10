@@ -12,6 +12,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -288,6 +289,132 @@ async def realtime_stream(
     async def stream() -> AsyncIterator[str]:
         async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
             yield json.dumps(payload)
+
+    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+
+
+# ── Recent error stream ─────────────────────────────────────────────────────
+
+
+def _recent_standard_errors(source: dict, service_id: str) -> list[dict]:
+    from backend.core import duckdb as _db
+    from backend.repositories._base import _safe_table
+
+    con = _db.get_connection(source=source, read_only=True)
+    try:
+        view_name = _safe_table(service_id.replace("-", "_"))
+        rows = con.execute(
+            f"""
+            SELECT
+                md5(concat_ws('|', CAST(timestamp AS VARCHAR), CAST(status AS VARCHAR),
+                              COALESCE(url, ''), COALESCE(pop, ''), COALESCE(ip, ''),
+                              CAST(row_number() OVER (
+                                  ORDER BY timestamp DESC, status, url, pop, ip
+                              ) AS VARCHAR))) AS event_id,
+                timestamp,
+                TRY_CAST(status AS INTEGER) AS status,
+                COALESCE(url, '') AS url,
+                COALESCE(pop, '') AS pop,
+                COALESCE(ip, '') AS client_ip
+            FROM {view_name}
+            WHERE timestamp >= now() - INTERVAL 2 MINUTE
+              AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
+            ORDER BY timestamp DESC
+            LIMIT 20
+            """
+        ).fetchall()
+        return [
+            {
+                "event_id": str(row[0]),
+                "timestamp": row[1].isoformat(),
+                "status": int(row[2]),
+                "url": str(row[3]),
+                "pop": str(row[4]),
+                "client_ip": str(row[5]),
+            }
+            for row in rows
+        ]
+    finally:
+        con.close()
+
+
+def _recent_high_scale_errors(service: Any) -> list[dict]:
+    rows = service.client.execute(
+        """
+        SELECT
+            toString(event_id) AS event_id,
+            event_timestamp AS timestamp,
+            toInt32OrZero(custom_fields['status']) AS status,
+            url,
+            custom_fields['pop'] AS pop,
+            client_ip
+        FROM request_facts
+        WHERE service_id={service_id:String}
+          AND event_timestamp >= now() - INTERVAL 2 MINUTE
+          AND toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599
+          AND publication_state = 'visible'
+        ORDER BY event_timestamp DESC
+        LIMIT 20
+        """,
+        {"service_id": service.service_id},
+    )
+    return [
+        {
+            "event_id": str(row["event_id"]),
+            "timestamp": row["timestamp"].isoformat(),
+            "status": int(row["status"]),
+            "url": str(row.get("url") or ""),
+            "pop": str(row.get("pop") or ""),
+            "client_ip": str(row.get("client_ip") or ""),
+        }
+        for row in rows
+    ]
+
+
+def _mask_error_events(events: list[dict], request: Request) -> list[dict]:
+    if not mask_ips_for(getattr(request.state, "analyst_session", None)):
+        return events
+    return [{**event, "client_ip": mask_ip(event["client_ip"])} for event in events]
+
+
+@router.get("/services/{service_id}/control-room/error-stream")
+async def control_room_error_stream(
+    request: Request,
+    service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+) -> EventSourceResponse:
+    """Stream bounded recent 4xx/5xx request events.
+
+    This analyst-reachable SSE path is explicitly listed in
+    ``remote_access._ANALYST_SSE_ALLOWLIST``.
+    """
+    from backend.core import duckdb as _db
+
+    source = _db.get_source_for_service(service_id)
+    high_scale_service = registry.resolve(service_id)
+
+    async def stream() -> AsyncIterator[dict]:
+        seen: set[str] = set()
+        while not await request.is_disconnected():
+            try:
+                if high_scale_service is not None:
+                    events = await asyncio.to_thread(_recent_high_scale_errors, high_scale_service)
+                elif source is not None:
+                    events = await asyncio.to_thread(_recent_standard_errors, source, service_id)
+                else:
+                    events = []
+                for event in reversed(_mask_error_events(events, request)):
+                    event_id = event["event_id"]
+                    if event_id in seen:
+                        continue
+                    seen.add(event_id)
+                    if len(seen) > 200:
+                        seen = set(list(seen)[-100:])
+                    yield {"event": "error_event", "data": json.dumps(event)}
+            except Exception:
+                logger.warning("Control Room error stream query failed for %s", service_id, exc_info=True)
+            await asyncio.sleep(2)
 
     return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 

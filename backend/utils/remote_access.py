@@ -263,6 +263,9 @@ _ANALYST_SSE_ALLOWLIST: set[str] = {
     # being deliberately allowed; this entry makes that allowance
     # explicit instead of accidental.
     "/realtime-stream",
+    # Control Room's bounded recent 4xx/5xx request-event feed. Payloads are
+    # analyst-safe because client IPs are masked in the router.
+    "/control-room/error-stream",
 }
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.

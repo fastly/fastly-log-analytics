@@ -49,9 +49,10 @@ The **Control Room** is the real-time operations console for Fastly Log Analytic
 ## 5. Backend APIs & Telemetry Attribution
 
 ### Endpoints Hit:
-1. `GET /api/control-room/summary` (or composite bundle):
+1. `GET /api/services/{service_id}/realtime-seed` and
+   `GET /api/services/{service_id}/realtime-stream`:
    - Returns live RPS, 5xx rate, 4xx rate, p95 latency, and active error count.
-2. `GET /api/control-room/stream` (SSE or polling):
+2. `GET /api/services/{service_id}/control-room/error-stream` (SSE):
    - Emits recent error events (timestamp, status, path, pop, client_ip).
 
 ### Telemetry Attribution:

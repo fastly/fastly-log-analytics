@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -143,6 +144,89 @@ def test_unknown_tab_404(admin_client):
     )
     assert resp.status_code == 404
     assert resp.json()["detail"]["error"] == "unknown_tab"
+
+
+def test_error_stream_route_is_registered():
+    """The request-level error feed is part of the public OpenAPI surface."""
+    path = "/api/services/{service_id}/control-room/error-stream"
+    assert path in app.openapi()["paths"]
+
+
+def test_recent_standard_errors_maps_rows(monkeypatch):
+    import backend.routers.control_room as control_room
+
+    class _Result:
+        def fetchall(self):
+            return [
+                (
+                    "event-1",
+                    datetime(2026, 7, 7, tzinfo=UTC),
+                    "404",
+                    "/missing",
+                    "DEN",
+                    "192.0.2.10",
+                )
+            ]
+
+    class _Connection:
+        def execute(self, query, params=None):
+            assert "FROM logs_test_service" in query
+            return _Result()
+
+        def close(self):
+            pass
+
+    import backend.core.duckdb as duckdb
+
+    monkeypatch.setattr(duckdb, "get_connection", lambda **kwargs: _Connection())
+    source = {"service_id": MOCK_SERVICE_ID}
+    events = control_room._recent_standard_errors(source, "test-service")
+    assert events == [
+        {
+            "event_id": "event-1",
+            "timestamp": "2026-07-07T00:00:00+00:00",
+            "status": 404,
+            "url": "/missing",
+            "pop": "DEN",
+            "client_ip": "192.0.2.10",
+        }
+    ]
+
+
+def test_recent_high_scale_errors_maps_rows():
+    import backend.routers.control_room as control_room
+
+    class _Client:
+        def execute(self, query, params):
+            assert "request_facts" in query
+            assert params == {"service_id": MOCK_SERVICE_ID}
+            return [
+                {
+                    "event_id": "event-2",
+                    "timestamp": datetime(2026, 7, 7, tzinfo=UTC),
+                    "status": 503,
+                    "url": "/upstream",
+                    "pop": "IAD",
+                    "client_ip": "198.51.100.7",
+                }
+            ]
+
+    service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=_Client())
+    events = control_room._recent_high_scale_errors(service)
+    assert events[0]["status"] == 503
+    assert events[0]["client_ip"] == "198.51.100.7"
+
+
+def test_error_events_mask_only_client_ip(monkeypatch):
+    import backend.routers.control_room as control_room
+
+    monkeypatch.setattr(control_room, "mask_ips_for", lambda session: True)
+    monkeypatch.setattr(control_room, "mask_ip", lambda value: "masked")
+    request = SimpleNamespace(state=SimpleNamespace(analyst_session=object()))
+    event = {"event_id": "event-1", "client_ip": "192.0.2.10", "url": "/x"}
+    assert control_room._mask_error_events([event], request) == [
+        {"event_id": "event-1", "client_ip": "masked", "url": "/x"}
+    ]
 
 
 # ── Mutation tests (admin → 501) ─────────────────────────────────────────────
