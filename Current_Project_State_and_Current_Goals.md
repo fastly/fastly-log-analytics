@@ -220,11 +220,22 @@ The detailed inventory and per-job specifications live under
 - **Admin Control Parity & Inspection:** Added `POST /api/admin/rollup-heal/{service_id}`, `POST /api/admin/rollup-heal`, and alias `POST /api/admin/rollups/heal/{service_id}` returning `RollupHealResponse` (`missing`, `bundled`, `rebuilt_fields`, `stamped_empty`, `coverage_verified`, `duration_s`, `summary`, `run_id`), with execution history recorded in `cron_runs` and queryable via `GET /api/cron-runs?task=rollup_hour_heal`.
 - **Automated Validation:** Contract test suite `tests/cron/test_rollup_heal_contract.py` (9/9 tests) and unit test suite `tests/cron/test_compaction_jobs.py` (18/18 tests) pass 100% green.
 
+**Cron 12: `alerts_evaluation_{service_id}` — Alert Rule Evaluation & Multi-Channel Dispatch (2026-10-10) — Audited, Verified, and Certified.**
+- **Politeness Gating & Dynamic Control:** Evaluates `should_defer_cron("alerts", service_id)` on scheduled runs, yielding cleanly if user queries are active; bypassed when triggered via API or with `force=True`.
+- **Zero-Alert Short-Circuit:** Evaluates whether enabled alerts exist before opening any DuckDB connection or querying DuckLake; immediately returns without analytical engine overhead when 0 enabled alerts exist.
+- **Two-Phase State & Timestamp Export:** Updates alert evaluation timestamps and internal state in PostgreSQL before initiating any outbound webhook/notification HTTP requests, preventing stale state or double-firing loops if outbound network calls fail or hang.
+- **Multi-Channel Dispatch & Bounded Timeouts:** Supports generic Webhook, Slack, and PagerDuty notification channels with strict 5-second HTTP request timeouts (`urllib.request.urlopen(..., timeout=5)`), cleanly isolating per-channel network or service failures.
+- **Execution Status Contract & Warning Outcome:** Accurately logs `status="warning"` in PostgreSQL `cron_runs` whenever any alert is triggered (`n_trig > 0`) or if a webhook dispatch fails (`webhook_failures > 0`), maintaining precise incident visibility.
+- **SSE Live Progress Streaming:** Dispatches granular progress updates (`checking`, `evaluated`, `triggered`, `failed`, `complete`) to the `cron_progress` stream for realtime operational monitoring.
+- **Dynamic Cadence & Clean Unregistration:** Dynamically reschedules on `cron_alerts.interval_seconds` (or `log_period`) config changes, and cleanly unregisters the APScheduler job when `cron_alerts.enabled = False`.
+- **Dedicated Job Module & Safety Gates:** Re-exported from `backend/cron/jobs/alerts.py` in parity with `AGENTS.md` and `backend/cron/jobs/metadata.py`. Gated by `FLA_DEV_NO_CRONS=1` in both scheduler registration and job execution.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_alerts_evaluation_contract.py` passed 20/20 tests covering all checklist items from Section 9 of `docs/cron/jobs/alerts-evaluation.md`. Unit tests `tests/test_scheduler.py -k "alert"` (15 passed) and full CI suite passed 100% green.
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 12: `alerts_evaluation_{service_id}` documented in `docs/cron/jobs/alerts-evaluation.md`:
-1. Read `docs/cron/jobs/alerts-evaluation.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_alerts_evaluation_contract.py`).
-2. Audit alert evaluation mechanics, politeness gate (`should_defer_cron("alerts", service_id)`), zero-alert short-circuit, webhook retry/timeout resilience, and two-phase timestamp/state export.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 13: `insights_prewarmer_{service_id}` documented in `docs/cron/jobs/insights-prewarmer.md`:
+1. Read `docs/cron/jobs/insights-prewarmer.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_insights_prewarmer_contract.py`).
+2. Audit insights prewarming mechanics, politeness gate (`should_defer_cron("insights_prewarmer", service_id)`), query timeout bounds, adaptive cadence, and cache warming.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -237,7 +248,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 12 (`alerts_evaluation_{service_id}`).
+Next target: proceed to Cron 13 (`insights_prewarmer_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).
