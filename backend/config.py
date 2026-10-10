@@ -740,6 +740,42 @@ def is_usage_logging_enabled() -> bool:
     return load_usage_logging_config().get("enabled", False)
 
 
+# ── Global content security config ────────────────────────────────────────────
+
+_CONTENT_SECURITY_DEFAULTS: dict = {
+    # Operator's blocklist HTTP function: POST {key, value} blocks, DELETE
+    # with the same body reverts. Empty = blocking disabled.
+    "blocklist_url": "",
+    # Optional "Name: value" header sent with every call (e.g. Authorization).
+    # A credential: never returned by the settings API or logged.
+    "blocklist_auth_header": "",
+}
+
+
+def _content_security_config_path() -> Path:
+    # Resolved per call (not at import) so the test sandbox's SYSTEM_DATA_DIR patch applies.
+    return SYSTEM_DATA_DIR / "content_security.json"
+
+
+def load_content_security_config() -> dict:
+    """Return the global content security config, or defaults if missing/unreadable."""
+    path = _content_security_config_path()
+    if path.exists():
+        try:
+            with open(path) as f:
+                stored = json.load(f)
+            return {**_CONTENT_SECURITY_DEFAULTS, **stored}
+        except Exception:
+            pass
+    return dict(_CONTENT_SECURITY_DEFAULTS)
+
+
+def save_content_security_config(cfg: dict) -> None:
+    """Persist the global content security config atomically."""
+    _ensure_dirs()
+    _atomic_write_json(_content_security_config_path(), cfg)
+
+
 from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("config._name_cache", _name_cache)

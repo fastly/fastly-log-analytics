@@ -382,6 +382,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
                 audit_logs,
                 views,
                 alerts,
+                content_security_blocklist,
                 scoring_labels,
                 scoring_audit,
                 asn_names,

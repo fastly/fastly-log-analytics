@@ -7,6 +7,8 @@ import React from 'react'
 import SecurityTab from '@/app/streaming/_sections/tabs/SecurityTab'
 import { recencyOf } from '@/app/streaming/_sections/tabs/SubscriberIpsDialog'
 import { client } from '@/lib/api'
+import { showToastWithAction } from '@/lib/toast'
+import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { createTestQueryClient } from '../../helpers/query'
 import { spyOnConsoleError } from '../../helpers/page-smoke'
 
@@ -17,10 +19,14 @@ vi.mock('@/stores/filterStore', async () => (await import('../../helpers/page-sm
 vi.mock('next/navigation', async () => (await import('../../helpers/page-smoke')).navigationModuleMock('/streaming'))
 
 vi.mock('@/lib/api', () => ({
-  client: { GET: vi.fn(), POST: vi.fn(), use: vi.fn() },
+  client: { GET: vi.fn(), POST: vi.fn(), DELETE: vi.fn(), use: vi.fn() },
   extractApiError: vi.fn((e) => String(e)),
   getApiBase: vi.fn(() => 'http://test'),
 }))
+
+vi.mock('@/lib/toast', () => ({ showToast: vi.fn(), showToastWithAction: vi.fn() }))
+
+vi.mock('@/hooks/useIsAnalyst', () => ({ useIsAnalyst: vi.fn(() => false) }))
 
 vi.mock('@/components/charts/TimeSeriesChart', () => ({
   TimeSeriesChart: ({ data }: { data: { name: string; y: number[] }[] }) => (
@@ -64,6 +70,7 @@ const FULL_RESPONSE = {
 }
 
 const postMock = vi.mocked(client.POST)
+const getMock = vi.mocked(client.GET)
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 let errorSpy: ReturnType<typeof spyOnConsoleError>
 
@@ -80,6 +87,11 @@ beforeEach(() => {
   queryClient.clear()
   postMock.mockReset()
   postMock.mockResolvedValue({ data: FULL_RESPONSE } as never)
+  getMock.mockReset()
+  getMock.mockResolvedValue({ data: { configured: true, blocks: [] } } as never)
+  vi.mocked(client.DELETE).mockReset()
+  vi.mocked(showToastWithAction).mockReset()
+  vi.mocked(useIsAnalyst).mockReturnValue(false)
   errorSpy = spyOnConsoleError()
 })
 
@@ -195,11 +207,11 @@ test('lists subscriber IDs with IPs, countries, requests, bandwidth and last see
 
   const card = within(subscriberCard())
   const headers = card.getAllByRole('columnheader').map((h) => h.textContent)
-  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Countries', 'Requests', 'Bandwidth', 'Last seen'])
+  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Countries', 'Requests', 'Bandwidth', 'Last seen', 'Actions'])
 
   const [, first, second] = card.getAllByRole('row')
   expect(within(first).getAllByRole('cell').map((c) => c.textContent)).toEqual([
-    '1', 'acct-shared', '14', '5', '90', '2 MB', '2026-01-01 00:55:00',
+    '1', 'acct-shared', '14', '5', '90', '2 MB', '2026-01-01 00:55:00', '',
   ])
   // Server order is kept: fewer IPs ranks lower even with more requests.
   expect(within(second).getAllByRole('cell')[1]).toHaveTextContent('acct-home')
@@ -219,7 +231,7 @@ test('drops the Countries and Bandwidth columns when those fields are not logged
   await screen.findByText('acct-1')
 
   const headers = within(subscriberCard()).getAllByRole('columnheader').map((h) => h.textContent)
-  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Requests', 'Last seen'])
+  expect(headers).toEqual(['#', 'Subscriber ID', 'Distinct IPs', 'Requests', 'Last seen', 'Actions'])
 })
 
 test('notes masking when the analyst sees rank labels', async () => {
@@ -427,4 +439,246 @@ test('masked subscriber ids are not clickable', async () => {
 
   expect(await screen.findByText('acct-shared')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /Show IP addresses/ })).not.toBeInTheDocument()
+})
+
+// ── Blocklist (admin-only) ───────────────────────────────────────────────────
+
+const BLOCK = {
+  id: 'blk-1',
+  conditions: [{ category: 'country', value: 'US' }],
+  created_at: '2026-01-01T00:59:00Z',
+  created_by: 'admin',
+  unblocked_at: null,
+  unblocked_by: null,
+}
+
+/** Route POSTs: the block endpoint echoes a stored block; everything else is the tab's data. */
+function routePosts(extra: Record<string, unknown> = {}) {
+  postMock.mockImplementation(((path: string, init: { body: { conditions: unknown[] } }) => {
+    if (path === '/api/admin/content-security/blocks') {
+      return Promise.resolve({ data: { ...BLOCK, conditions: init.body.conditions } })
+    }
+    if (path in extra) return Promise.resolve({ data: extra[path] })
+    return Promise.resolve({ data: FULL_RESPONSE })
+  }) as never)
+}
+
+function blockCalls() {
+  return postMock.mock.calls
+    .filter((c) => c[0] === '/api/admin/content-security/blocks')
+    .map((c) => (c[1] as unknown as { body: unknown }).body)
+}
+
+test('Block from a leaderboard menu confirms the clicked value, then offers Undo', async () => {
+  routePosts()
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...BLOCK, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
+  await user.click(await screen.findByText('Block…'))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText('Block access')).toBeInTheDocument()
+  // One category in a leaderboard: no category picker, the clicked value preselected.
+  expect(within(dialog).queryByText('Category')).not.toBeInTheDocument()
+  expect(within(dialog).getByRole('combobox', { name: 'Country' })).toHaveTextContent('United States (US)')
+
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }] }]))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(showToastWithAction).toHaveBeenCalledWith(
+    'Blocked Country US',
+    expect.objectContaining({ actionLabel: 'Undo' }),
+  )
+
+  // The toast's Undo reverts via DELETE.
+  vi.mocked(showToastWithAction).mock.calls[0][1].onAction()
+  await waitFor(() =>
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
+      params: { path: { block_id: 'blk-1' } },
+    }),
+  )
+})
+
+test('Block dialog lets the user pick a different value from the list', async () => {
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for hosting' }))
+  await user.click(await screen.findByText('Block…'))
+  const dialog = await screen.findByRole('dialog')
+
+  await user.click(within(dialog).getByRole('combobox', { name: 'Proxy type' }))
+  await user.click(await screen.findByRole('option', { name: 'anonymous' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'proxy_type', value: 'anonymous' }] }]))
+})
+
+test('Block dialog accepts a custom value', async () => {
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for pirate.example' }))
+  await user.click(await screen.findByText('Block…'))
+  const dialog = await screen.findByRole('dialog')
+
+  await user.click(within(dialog).getByRole('combobox', { name: 'Host' }))
+  await user.click(await screen.findByRole('option', { name: 'Custom value…' }))
+  const blockButton = within(dialog).getByRole('button', { name: 'Block' })
+  expect(blockButton).toBeDisabled()
+  await user.type(within(dialog).getByRole('textbox', { name: 'Custom host' }), 'mirror.example')
+  await user.click(blockButton)
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'host', value: 'mirror.example' }] }]))
+})
+
+test('a failed block keeps the dialog open with the error', async () => {
+  postMock.mockImplementation(((path: string) =>
+    path === '/api/admin/content-security/blocks'
+      ? Promise.reject(new Error('Blocklist endpoint returned HTTP 500'))
+      : Promise.resolve({ data: FULL_RESPONSE })) as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for vpn' }))
+  await user.click(await screen.findByText('Block…'))
+  const dialog = await screen.findByRole('dialog')
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('HTTP 500')
+  expect(showToastWithAction).not.toHaveBeenCalled()
+})
+
+test('subscriber rows get an actions menu with Block', async () => {
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Actions for acct-home' }))
+  expect(await screen.findByText('Show IP addresses')).toBeInTheDocument()
+  await user.click(screen.getByText('Block…'))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-home')
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'subscriber_id', value: 'acct-home' }] }]))
+})
+
+test('the subscriber dialog Block button offers the subscriber ID or any of its IPs', async () => {
+  routePosts({ '/api/cmcd/content-security/subscriber': SUBSCRIBER_IPS })
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Show IP addresses for acct-shared' }))
+  const ipsDialog = await screen.findByRole('dialog')
+  await within(ipsDialog).findByText('Germany (DE)')
+  // Toolbar summary: distinct IPs (203.0.113.3 appears twice) and distinct non-null countries.
+  expect(within(ipsDialog).getByText('3 IP addresses · 3 countries')).toBeInTheDocument()
+  await user.click(within(ipsDialog).getByRole('button', { name: /Block/ }))
+
+  const dialogs = await screen.findAllByRole('dialog')
+  const dialog = dialogs.find((d) => within(d).queryByText('Block access')) as HTMLElement
+  expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-shared')
+
+  await user.click(within(dialog).getByRole('combobox', { name: 'Category' }))
+  await user.click(await screen.findByRole('option', { name: 'IP address' }))
+  const ipPicker = within(dialog).getByRole('combobox', { name: 'IP address' })
+  expect(ipPicker).toHaveTextContent('203.0.113.3')
+  await user.click(ipPicker)
+  // Duplicate IP rows (one per country) collapse to one choice.
+  expect(await screen.findAllByRole('option', { name: /^203\.0\.113\.\d$/ })).toHaveLength(3)
+  await user.click(screen.getByRole('option', { name: '203.0.113.2' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'ip', value: '203.0.113.2' }] }]))
+})
+
+test('Blocked card lists active blocks; values show a mark and offer Unblock', async () => {
+  getMock.mockResolvedValue({ data: { configured: true, blocks: [BLOCK] } } as never)
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...BLOCK, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  const card = await waitFor(() => cardByTitle('Blocked'))
+  expect(await card.findByText('United States (US)')).toBeInTheDocument()
+  expect(card.getByText('2026-01-01 00:59:00')).toBeInTheDocument()
+
+  const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
+  expect(within(usRow).getByTitle('Blocked')).toBeInTheDocument()
+  await user.click(within(usRow).getByRole('button', { name: 'Filter actions for US' }))
+  expect(await screen.findByText('Unblock')).toBeInTheDocument()
+  expect(screen.queryByText('Block…')).not.toBeInTheDocument()
+  await user.keyboard('{Escape}')
+
+  await user.click(card.getByRole('button', { name: 'Unblock Country US' }))
+  await waitFor(() =>
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
+      params: { path: { block_id: 'blk-1' } },
+    }),
+  )
+})
+
+test('without a blocklist endpoint the dialog explains and cannot confirm', async () => {
+  getMock.mockResolvedValue({ data: { configured: false, blocks: [] } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  expect(await screen.findByText(/Blocking is off/)).toBeInTheDocument()
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
+  await user.click(await screen.findByText('Block…'))
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/No blocklist endpoint is configured/)).toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: 'Block' })).toBeDisabled()
+})
+
+test('analysts get no block actions and never query the blocklist', async () => {
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
+  // The backend always masks subscriber ids for analysts.
+  postMock.mockResolvedValue({ data: { ...FULL_RESPONSE, subscribers_masked: true } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
+  expect(await screen.findByText('Copy value')).toBeInTheDocument()
+  expect(screen.queryByText('Block…')).not.toBeInTheDocument()
+  expect(screen.queryByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === 'Blocked')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument()
+  expect(getMock).not.toHaveBeenCalledWith('/api/admin/content-security/blocks', expect.anything())
+})
+
+test('a multi-condition (AND) block is listed with every condition but marks no single value', async () => {
+  const andBlock = {
+    ...BLOCK,
+    id: 'blk-and',
+    conditions: [
+      { category: 'country', value: 'US' },
+      { category: 'proxy_type', value: 'hosting' },
+    ],
+  }
+  getMock.mockResolvedValue({ data: { configured: true, blocks: [andBlock] } } as never)
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...andBlock, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  const card = await waitFor(() => cardByTitle('Blocked'))
+  expect(await card.findByText('United States (US)')).toBeInTheDocument()
+  expect(card.getByText('and')).toBeInTheDocument()
+  expect(card.getByText('Proxy type')).toBeInTheDocument()
+
+  // Neither value is blocked on its own, so the leaderboards still offer Block.
+  const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
+  expect(within(usRow).queryByTitle('Blocked')).not.toBeInTheDocument()
+
+  await user.click(card.getByRole('button', { name: 'Unblock Country US and Proxy type hosting' }))
+  await waitFor(() =>
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
+      params: { path: { block_id: 'blk-and' } },
+    }),
+  )
 })

@@ -21,6 +21,7 @@ import {
 
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BotSourcesPanel } from './BotSourcesPanel'
+import { ContentSecuritySettingsPanel } from './ContentSecuritySettingsPanel'
 
 function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: (days: number) => void }) {
   const [value, setValue] = useState(String(initial))
@@ -290,6 +291,8 @@ export function GlobalSettings() {
             </div>
           </div>
         </div>
+
+        <ContentSecuritySettingsPanel />
 
         <BotSourcesPanel />
         </div>

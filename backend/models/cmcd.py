@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 
 from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
 
@@ -125,3 +125,54 @@ class SubscriberIpsResponse(BaseResponse):
     ips: list[SubscriberIpRow] = []
     # More IPs exist than the list carries (capped, most recent first).
     truncated: bool = False
+
+
+# ── Content Security blocklist (admin-only) ──────────────────────────────────
+
+# Categories the blocklist HTTP function receives as ``category``.
+BlockCategory = Literal["country", "referer", "host", "proxy_type", "proxy_description", "subscriber_id", "ip"]
+
+
+class ContentSecuritySettings(BaseModel):
+    """Global blocklist config (Admin → Overall Settings → Content Security).
+
+    The auth header's value is a credential and is never returned — only its name.
+    """
+
+    blocklist_url: str = ""
+    # e.g. "Authorization"; null when no header is configured.
+    auth_header_name: str | None = None
+
+
+class ContentSecuritySettingsUpdate(BaseModel):
+    blocklist_url: Annotated[str, StringConstraints(max_length=2048)]
+    # Omitted/null keeps the saved header, "" removes it, "Name: value" replaces it.
+    # Length/format are checked by parse_auth_header, whose errors never echo the
+    # value — a model constraint would echo the credential back in the 422 body.
+    auth_header: str | None = None
+
+
+class ContentSecurityBlockCondition(BaseModel):
+    category: BlockCategory
+    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
+
+
+class ContentSecurityBlockRequest(BaseModel):
+    # All conditions must match (AND). One per category — two values for the
+    # same category could never both match.
+    conditions: Annotated[list[ContentSecurityBlockCondition], Field(min_length=1, max_length=7)]
+
+
+class ContentSecurityBlock(BaseModel):
+    id: str
+    conditions: list[ContentSecurityBlockCondition]
+    created_at: str
+    created_by: str
+    unblocked_at: str | None = None
+    unblocked_by: str | None = None
+
+
+class ContentSecurityBlocksResponse(BaseModel):
+    # False until an admin sets the blocklist URL — the tab then points them at Admin settings.
+    configured: bool
+    blocks: list[ContentSecurityBlock]

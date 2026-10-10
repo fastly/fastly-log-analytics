@@ -100,3 +100,67 @@ The **Live Log Streaming** page delivers a high-speed, interactive terminal-styl
 
 - **Playwright Test:** `frontend/e2e/pages/streaming.spec.ts` (Pending implementation).
 - **Synthetic Traffic Profile:** Continuous streaming traffic with varying HTTP status codes.
+
+---
+
+## 11. Content Security blocklist (admin-only)
+
+The **Content Security** tab (`?tab=security`) lets an admin act on what it shows: push a value to the operator's own blocklist HTTP function, then undo it.
+
+### Configuration
+- **Where:** Admin → Overall Settings → **Content Security**. One global URL (not per service), stored in `data/system/content_security.json`. Empty means blocking is off.
+- **Validation:** absolute `http://` or `https://` URL, ≤ 2048 chars, no `user:pass@`. The URL is returned only to admins and never logged (its path or query may carry a token).
+- **Authorization header (optional):** one `Name: value` header (e.g. `Authorization: Bearer <token>`) sent with every `POST` and `DELETE`. It's stored as `blocklist_auth_header` in the same file (written owner-only, `0600`). It is a credential, so:
+  - The settings API returns only `auth_header_name`, never the value, and it's never logged or written to the audit log. Validation errors never echo it.
+  - `PUT` `auth_header`: omitted keeps the saved header, `""` removes it, and a value replaces it. In the UI, the masked box starts empty; leaving it blank keeps the saved header, and **Remove** clears it.
+  - It must be a single line with a valid header name. `Host`, `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE` and `Trailer` are rejected (`422 invalid_header`).
+  - Changing the URL to a different scheme, host or port without re-entering or removing the header is rejected (`422 auth_header_reentry_required`), so a saved token never silently follows the URL to another server. Clearing the URL also drops the header.
+
+### HTTP function contract
+| Action | Request | Success |
+|---|---|---|
+| Block | `POST <url>` with JSON `{"conditions": [{"category": "<category>", "value": "<value>"}]}` | any 2xx |
+| Revert | `DELETE <url>` with the same JSON body | any 2xx |
+
+Example: `{"conditions": [{"category": "country", "value": "CN"}]}`.
+
+- **`conditions` is always an array**, even for one condition, so receivers handle a single shape. **All conditions must match (AND)**: `[{country: RS}, {proxy_type: hosting}]` blocks hosting-proxy traffic from Serbia, not all of Serbia. The UI sends one condition today; the API accepts up to one per category.
+- Conditions are sent sorted by `category`, and the same order is used on `DELETE`.
+- `category` is one of `country`, `referer`, `host`, `proxy_type`, `proxy_description`, `subscriber_id`, `ip`. Two conditions on the same category are rejected (`422 duplicate_category`), since they could never both match.
+
+`ip` values are validated and normalized (e.g. `2001:DB8::0001` → `2001:db8::1`). Redirects are **not** followed (a 3xx is a failure), and calls time out after 10 s.
+
+### Where Block appears
+- **Leaderboards** (Countries, Referers, Hosts, Proxy Types, Proxy Descriptions): **Block…** in each value's menu, below the filter and copy actions.
+- **Subscriber IDs by Distinct IPs:** a new per-row actions menu (**⋯**) with **Show IP addresses** and **Block…**.
+- **Subscriber dialog:** a **Block…** button. This is the only place to block an **IP address**.
+
+### Block dialog
+The dialog defaults to the value that was clicked. The user can pick another value from the same list or enter a **Custom value…**. From the Subscriber dialog the user can also switch **Category** between the subscriber ID and any of its IPs (an IP seen from several countries appears once). Confirm stays disabled while no blocklist URL is configured, and the dialog links to Admin settings.
+
+### After confirming
+- The backend calls the function. **Only a 2xx records the block**, so a rejected call leaves no row; the dialog stays open with the error.
+- A success toast (`Blocked Country US`) offers **Undo** for 10 s; Undo sends the `DELETE`.
+- Values with an active block show a red ban mark, and their menu offers **Unblock** instead of Block.
+- The **Blocked** card lists every active block for the service with an **Unblock** button. If the `DELETE` fails, the block stays active and an error toast is shown.
+
+### Storage & audit
+- Postgres `content_security_blocklist` (`id`, `service_id`, `conditions`, `created_at/by`, `unblocked_at/by`). `conditions` is canonical JSON (sorted by category, compact), so the same set in any order is the same block. Unblocking stamps `unblocked_at` rather than deleting, so history is kept. A partial unique index allows at most one *active* block per (service, condition set), and a duplicate returns `409 already_blocked` without calling the function. A subset is a different, broader block.
+- Only single-condition blocks put the red mark on a leaderboard value; a multi-condition block doesn't block that value on its own. The **Blocked** card lists each block's conditions joined by "and".
+- Every attempt is written to the service's audit log: `content_security_block`, `content_security_unblock`, and `*_failed` variants with the error.
+
+### Endpoints
+| Method | Path | Notes |
+|---|---|---|
+| `GET` / `PUT` | `/api/admin/content-security/settings` | Global URL |
+| `GET` | `/api/admin/content-security/blocks` | `{configured, blocks}`: active blocks for the active service |
+| `POST` | `/api/admin/content-security/blocks` | `{conditions: [{category, value}]}` → `201` block · `409 blocklist_not_configured` / `already_blocked` · `502 blocklist_call_failed` |
+| `DELETE` | `/api/admin/content-security/blocks/{block_id}` | Reverts; idempotent for an already-reverted block |
+
+### Roles
+| Role | Behavior |
+|---|---|
+| Admin (`read_write`) | Full block/unblock UI. |
+| Analyst Path B | No block UI and no blocklist query. `/api/admin/*` is blocked by `RemoteAccessMiddleware`, and every route also depends on `require_admin`. |
+| Read-only service (Path A) | Endpoints return `403`. |
+

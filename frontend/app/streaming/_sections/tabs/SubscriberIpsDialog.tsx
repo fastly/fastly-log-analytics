@@ -1,17 +1,19 @@
 'use client'
 
 import React from 'react'
-import { KeyRound, Loader2 } from 'lucide-react'
+import { Ban, KeyRound, Loader2 } from 'lucide-react'
 import { client } from '@/lib/api'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { formatDate } from '@/lib/date'
 import { formatBytes, resolveCountryName } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import type { components } from '@/types/api.generated'
 import type { StreamingTabProps } from './QualityTab'
+import type { BlockCategory, BlockCondition, BlockOption } from './blocklist'
 
 type SubscriberIpsData = components['schemas']['SubscriberIpsResponse']
 
@@ -59,6 +61,9 @@ type SubscriberIpsDialogProps = StreamingTabProps & {
   subscriberId: string | null
   contentId: string | null
   onClose: () => void
+  /** Admin-only: opens the Block dialog with this subscriber id and its IPs to choose from. */
+  onBlock?: (options: BlockOption[], initial: BlockCondition) => void
+  isBlocked?: (category: BlockCategory, value: string) => boolean
 }
 
 /** Every client IP one subscriber id was seen from in the window (admin-only drill-down). */
@@ -66,6 +71,8 @@ export function SubscriberIpsDialog({
   subscriberId,
   contentId,
   onClose,
+  onBlock,
+  isBlocked,
   activeServiceId,
   filterPayload,
   startTime,
@@ -95,6 +102,31 @@ export function SubscriberIpsDialog({
   const data = query.data?.subscriber_id === subscriberId ? query.data : undefined
   const rows = data?.ips ?? []
   const showBytes = rows.some((r) => r.bytes != null)
+
+  const distinctIps = new Set(rows.map((r) => r.ip)).size
+  const distinctCountries = new Set(rows.flatMap((r) => (r.country ? [r.country] : []))).size
+  const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
+  // Summarise the scale at a glance — usually what decides a block.
+  const summary = rows.length
+    ? [
+        plural(distinctIps, 'IP address', 'IP addresses'),
+        distinctCountries ? plural(distinctCountries, 'country', 'countries') : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : null
+
+  const openBlock = () => {
+    if (!subscriberId || !onBlock) return
+    const ips = [...new Set(rows.map((r) => r.ip))]
+    onBlock(
+      [
+        { category: 'subscriber_id', value: subscriberId },
+        ...ips.map((ip) => ({ category: 'ip' as const, value: ip })),
+      ],
+      { category: 'subscriber_id', value: subscriberId },
+    )
+  }
 
   let body: React.ReactNode
   if (query.error) {
@@ -132,7 +164,17 @@ export function SubscriberIpsDialog({
                   <TableCell>
                     <RecencyDot recency={recencyOf(row.last_seen, now)} />
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{row.ip}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      {row.ip}
+                      {isBlocked?.('ip', row.ip) && (
+                        <span className="text-destructive" title="Blocked">
+                          <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span className="sr-only">Blocked</span>
+                        </span>
+                      )}
+                    </span>
+                  </TableCell>
                   <TableCell>{row.country ? `${resolveCountryName(row.country)} (${row.country})` : '—'}</TableCell>
                   <TableCell className="max-w-[14rem] truncate" title={row.host ?? undefined}>
                     {row.host || '—'}
@@ -174,6 +216,17 @@ export function SubscriberIpsDialog({
             Each IP address, country and host combination this subscriber ID was seen from{contentId ? ` for ${contentId}` : ''}, most recent first.
           </DialogDescription>
         </DialogHeader>
+        {(onBlock || rows.length > 0) && (
+          <div className="flex min-h-8 items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground tabular-nums">{summary}</p>
+            {onBlock && (
+              <Button variant="destructive" onClick={openBlock} disabled={!data}>
+                <Ban className="h-3 w-3 mr-1" aria-hidden="true" />
+                Block…
+              </Button>
+            )}
+          </div>
+        )}
         {body}
       </DialogContent>
     </Dialog>

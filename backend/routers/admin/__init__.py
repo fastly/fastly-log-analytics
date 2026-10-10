@@ -42,6 +42,7 @@ from . import (  # noqa: F401
     celery_status,
     clickhouse,
     compaction,
+    content_security,
     debug_settings,
     downloads,
     duckdb,

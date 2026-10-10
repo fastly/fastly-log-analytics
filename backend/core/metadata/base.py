@@ -532,6 +532,23 @@ _SCHEMA = [
         quarantined_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantine_evidence_fifo ON quarantine_evidence(service_id, quarantined_at, id)",
+    # Streaming → Content Security blocks pushed to the operator's blocklist
+    # HTTP function. ``conditions`` is the canonical JSON list of
+    # {category, value} pairs (sorted by category, compact separators) — all
+    # must match (AND) — so the text itself is the dedupe key. A row is active
+    # until unblocked_at is set; history is kept (the audit log also records
+    # every call).
+    """CREATE TABLE IF NOT EXISTS content_security_blocklist (
+        id TEXT PRIMARY KEY,
+        service_id TEXT NOT NULL,
+        conditions TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        created_by TEXT NOT NULL,
+        unblocked_at TEXT,
+        unblocked_by TEXT
+    )""",
+    # At most one ACTIVE block per (service, condition set).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_blocklist_active ON content_security_blocklist(service_id, conditions) WHERE unblocked_at IS NULL",
 ]
 
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw

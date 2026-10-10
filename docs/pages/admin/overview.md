@@ -51,6 +51,7 @@ The **Admin Overview** page is the administrative mission control for Fastly Log
 2. `POST /api/admin/sync/{service_id}` (Trigger manual sync).
 3. `POST /api/admin/commit/{service_id}` (Trigger manual commit).
 4. `POST /api/admin/compact/{service_id}` (Trigger manual local compact).
+5. `GET` / `PUT /api/admin/content-security/settings` — the global Content Security blocklist URL (Overall Settings → Content Security). See [Streaming → Content Security blocklist](../streaming.md#11-content-security-blocklist-admin-only).
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
@@ -70,6 +71,7 @@ The **Admin Overview** page is the administrative mission control for Fastly Log
 
 - **Manual Trigger Progress:** Clicking "Sync Now" opens a progress indicator listening to Server-Sent Events from `cron_progress`.
 - **Service Configuration Modal:** Allows editing bucket name, prefix, log period, and custom log fields with Falco VCL validation.
+- **Overall Settings → Content Security:** a full-width box above Bot Intelligence Sources with one text box for the blocklist callback URL. Saving validates an absolute `http(s)` URL without embedded credentials; an empty value turns blocking off.
 - **Scheduler Error Banners:** If any cron job failed in its last run, an amber warning banner highlights the failure details.
 
 ---

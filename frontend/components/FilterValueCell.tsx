@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuShortcut,
 } from '@/components/ui/dropdown-menu'
 
@@ -26,6 +27,8 @@ interface FilterValueCellProps {
   display?: React.ReactNode
   className?: string
   containerClassName?: string
+  /** Page-specific actions appended below the standard items (e.g. Block). */
+  extraItems?: React.ReactNode
 }
 
 // Pathname → human-readable page name used in the menu label. Lookup is
@@ -65,6 +68,7 @@ export function FilterValueCell({
   display,
   className,
   containerClassName,
+  extraItems,
 }: FilterValueCellProps) {
   const pathname = usePathname()
   const addFilter = useFilterStore(state => state.addFilter)
@@ -163,6 +167,12 @@ export function FilterValueCell({
           <Copy className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Copy value</span>
         </DropdownMenuItem>
+        {extraItems && (
+          <>
+            <DropdownMenuSeparator />
+            {extraItems}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )
