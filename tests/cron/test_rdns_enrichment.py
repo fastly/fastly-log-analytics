@@ -138,3 +138,14 @@ def test_admin_rdns_stats_endpoint():
         data = resp.json()
         assert data["ok"] is True
         assert data["stats"] == fake_stats
+
+
+def test_rdns_enrichment_routes_to_maintenance_executor():
+    """rdns_enrichment job ID routes to the maintenance executor pool."""
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+    with patch.object(s._sched, "add_job") as mock_add_job:
+        s._add_job(lambda: None, "interval", minutes=5, id="rdns_enrichment")
+        mock_add_job.assert_called_once()
+        assert mock_add_job.call_args[1]["executor"] == "maintenance"

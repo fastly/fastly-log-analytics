@@ -1653,6 +1653,7 @@ class Scheduler:
                     "metric_snapshot",
                     "reconcile_fastly_",
                     "metadata_cleanup",
+                    "rdns_enrichment",
                     "rdns_refresh",
                     "bot_data_refresh",
                     "optimize_",

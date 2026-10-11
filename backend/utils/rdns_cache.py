@@ -1,30 +1,22 @@
 """Reverse DNS cache with FCrDNS validation.
 
-Stores IP→hostname mappings in a SQLite DB (WAL mode). A background enrichment
-job populates the cache; query-time reads are non-blocking — unknown IPs return
-'pending' immediately and are enqueued for the next enrichment run.
+Stores IP→hostname mappings in PostgreSQL 16 (METADATA_DSN, rdns table per ADR-22).
+A background enrichment job populates the cache; query-time reads are non-blocking —
+unknown IPs return 'pending' immediately and are enqueued for the next enrichment run.
 
-Concurrency (v2.0)
-------------------
-WAL mode allows concurrent readers, but SQLite serialises writers.
-``_write_lock`` (threading.Lock) gates every writer thread / async block.
-Read-only calls open an independent connection with check_same_thread=False
-and uri=True mode (file:...?mode=ro) so they never block writers.
+Concurrency (ADR-22)
+--------------------
+Read and write queries use PostgreSQL connection pooling via
+``backend.core.metadata.pg_connection`` (``get_pg_thread_connection`` /
+``get_pg_readonly_connection``). In-process write synchronization is guarded via
+``_write_lock`` (threading.Lock).
 
-Phase 1.4a refactored the enrichment loop to use :mod:`aiodns` for
-concurrent non-blocking PTR + A/AAAA lookups (semaphore-bounded at
-``_CONCURRENCY_LIMIT``) and :mod:`aiosqlite` for the bulk write inside a
-single transaction. The previous shape — sequential ``socket.gethostbyaddr``
-plus one ``UPDATE ... ; COMMIT`` per IP — was the dominant cost in the
-sync-worker hot path. The sync helper :func:`_do_lookup` is kept (still
-using ``socket.gethostbyaddr``) so existing tests that patch it keep
-working; the batch entrypoint :func:`_run_async_resolve` short-circuits to
-the sync helper when it detects a ``unittest.mock`` patch.
-
-Tenacity wraps the bulk write with a bounded exponential-backoff retry on
-:class:`sqlite3.OperationalError` / :class:`aiosqlite.OperationalError` so
-transient WAL "database is locked" busy errors during heavy concurrent
-ingest don't bubble out to the scheduler.
+Enrichment uses :mod:`aiodns` for concurrent non-blocking PTR + A/AAAA lookups
+(semaphore-bounded at ``_CONCURRENCY_LIMIT``) and threaded batch execution
+(:func:`_bulk_update_sync` via :func:`asyncio.to_thread`) for PostgreSQL row updates.
+The sync helper :func:`_do_lookup` is kept (using ``socket.gethostbyaddr``) so
+existing tests that patch it keep working; the batch entrypoint :func:`_run_async_resolve`
+short-circuits to the sync helper when it detects a ``unittest.mock`` patch.
 """
 
 from __future__ import annotations
@@ -48,6 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Backward compatibility shim for test suites and scripts inspecting historical paths
 _DB_PATH = Path("data/cache/rdns_cache.db")
 _write_lock = threading.Lock()
 _last_enrichment_at: str | None = None

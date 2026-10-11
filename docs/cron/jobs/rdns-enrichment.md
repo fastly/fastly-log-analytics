@@ -4,7 +4,7 @@
 - **Job Identifier:** `rdns_enrichment`
 - **Category:** IP Intelligence & Asynchronous Network Enrichment
 - **Status:** Verified (Automated Unit Tests & Lifecycle Audited)
-- **Purpose:** Discovers client IP addresses from recent traffic in DuckDB/DuckLake that lack reverse DNS hostname mappings and executes asynchronous PTR queries with Forward-Confirmed reverse DNS (FCrDNS) verification, caching the resolved hostnames in SQLite `rdns_cache.db`.
+- **Purpose:** Discovers client IP addresses from recent traffic in DuckDB/DuckLake that lack reverse DNS hostname mappings and executes asynchronous PTR queries with Forward-Confirmed reverse DNS (FCrDNS) verification, caching the resolved hostnames in PostgreSQL 16 `rdns` table (`METADATA_DSN` per ADR-22).
 - **Why It Runs:** Fastly access logs contain client IP addresses, but reverse DNS hostnames (e.g. `*.googlebot.com`, `*.crawl.yahoo.net`) provide vital human-readable context for security audits, bot detection, and traffic classification. Performing synchronous DNS lookups during request serving is prohibitively slow (> 100ms per IP). Running background asynchronous resolution enriches IP records ahead of time with zero serving-path latency penalty.
 
 ---
@@ -13,6 +13,7 @@
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Every 5 minutes (`minutes=5`).
 - **Scope:** Process-global singleton job registered on the Scheduler (`system_jobs`).
+- **Executor Pool:** Assigned to the `"maintenance"` threadpool executor (`backend/cron/scheduler.py`).
 - **Jitter & Misfire Policy:**
   - Jitter: 15 seconds.
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=300s`.
@@ -22,8 +23,8 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Discovers distinct IPs across active services using `execute_with_stale_view_retry()`, resolves PTR records asynchronously via `aiodns`, and writes to `data/cache/rdns_cache.db`. | Local SQLite thread-local pool write lock (`_write_lock`). Gated by `FLA_DEV_NO_CRONS=1` (network outbound suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries distinct IPs from DuckLake views; populates local/shared rDNS cache. | Process-global singleton; never scheduled to Celery workers. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Discovers distinct IPs across active services using `execute_with_stale_view_retry()`, resolves PTR records asynchronously via `aiodns`, and writes to PostgreSQL 16 `rdns` table. | In-process thread-local write lock (`_write_lock`) with PostgreSQL connection pooling (`pg_connection`). Gated by `FLA_DEV_NO_CRONS=1` (network outbound suppressed). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries distinct IPs from DuckLake views; populates shared PostgreSQL 16 `rdns` cache. | Process-global singleton; never scheduled to Celery workers. |
 
 ---
 
@@ -40,7 +41,7 @@
 1. **Dev Mode Gate:**
    - Evaluates `dev_mode_no_crons()`. If active (`FLA_DEV_NO_CRONS=1`), immediately skips outbound DNS queries and view scans, recording `status="skipped"` and `"skipped (dev_mode_no_crons)"` in `system_jobs`.
 2. **Dynamic Queue-Depth Sizing:**
-   - Probes the count of unresolved (`status='pending'`) IPs in `rdns_cache.db`:
+   - Probes the count of unresolved (`status='pending'`) IPs in PostgreSQL 16 `rdns` table:
      - Empty / minimal backlog (`pending == 0`): Defaults to baseline 200 IPs.
      - Small backlog (`0 < pending <= 200`): Drains up to `max(100, pending)` IPs.
      - Medium backlog (`200 < pending <= 2000`): Scales up to 500 IPs per tick.
@@ -59,7 +60,7 @@
        AND ip IS NOT NULL
      LIMIT 500;
      ```
-   - Filters out already-cached IPs and enqueues up to 500 new IPs into `rdns_cache.db` as `status='pending'`.
+   - Filters out already-cached IPs and enqueues up to 500 new IPs into PostgreSQL 16 `rdns` table as `status='pending'`.
 6. **Reaping & Retention Pruning:**
    - Runs daily (`_maybe_reap_stale_rows`):
      - Deletes `nxdomain` and `error` records older than 30 days.
