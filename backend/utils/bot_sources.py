@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import ipaddress
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from backend.utils.date_utils import iso_z_now
 
@@ -71,6 +75,10 @@ _matcher_cache: dict = {}  # keys: "fn", "mtime"
 # adding up.
 _source_cache: dict[str, tuple[int, list[dict]]] = {}
 _source_cache_lock = threading.Lock()
+
+# Pre-compiled IP network feeds for high-performance IP-based bot matching.
+_compiled_ip_feeds: dict = {}
+_compiled_ip_feeds_lock = threading.Lock()
 
 
 def _cache_path(source_id: str) -> Path:
@@ -190,6 +198,30 @@ def fetch_external_cidrs(source_config: dict) -> list[str]:
         return []
 
 
+def _atomic_write_cache(source_id: str, envelope: dict) -> None:
+    """Atomically write the source cache envelope to disk using a temp file."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _cache_path(source_id)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(_CACHE_DIR),
+    )
+    payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def fetch_and_cache_source(source_id: str) -> dict:
     """Fetch the source URL, write the cache file, return updated metadata."""
     src = next((s for s in BOT_SOURCES if s["id"] == source_id), None)
@@ -273,18 +305,23 @@ def fetch_and_cache_source(source_id: str) -> dict:
             }
         ]
 
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     entry_count = len(cidrs) if src.get("type") == "ip" else len(entries)
     envelope = {
         "last_updated": iso_z_now(),
         "entry_count": entry_count,
         "entries": entries,
     }
-    _cache_path(source_id).write_text(json.dumps(envelope, separators=(",", ":")))
+    _atomic_write_cache(source_id, envelope)
 
-    # Invalidate the in-process matcher so next call rebuilds
+    # Invalidate all in-process caches so next call rebuilds
     with _matcher_lock:
         _matcher_cache.clear()
+    with _source_cache_lock:
+        _source_cache.pop(source_id, None)
+    with _compiled_ip_feeds_lock:
+        _compiled_ip_feeds.clear()
+    with _version_cache_lock:
+        _version_cache.clear()
 
     logger.info("👾 \x1b[36m[bots]\x1b[0m Cached %d entries for %s", entry_count, source_id)
     return {
@@ -517,13 +554,6 @@ def get_bot_regex_pattern(limit: int = 500) -> str | None:
     return "(?i)" + "|".join(re.escape(lit) for lit in literals)
 
 
-import ipaddress
-from typing import Any
-
-_compiled_ip_feeds: dict = {}
-_compiled_ip_feeds_lock = threading.Lock()
-
-
 def _get_compiled_ip_feeds() -> dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]:
     """Compile enabled IP source CIDR ranges into Network objects once for high-performance match."""
     current_mtime = _cache_mtime()
@@ -663,3 +693,4 @@ from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa
 _CacheRegistry.register("utils.bot_sources._matcher_cache", _matcher_cache)
 _CacheRegistry.register("utils.bot_sources._source_cache", _source_cache)
 _CacheRegistry.register("utils.bot_sources._compiled_ip_feeds", _compiled_ip_feeds)
+_CacheRegistry.register("utils.bot_sources._version_cache", _version_cache)

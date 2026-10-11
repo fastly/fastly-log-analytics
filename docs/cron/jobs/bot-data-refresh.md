@@ -46,13 +46,17 @@
      - Cloud ranges (AWS/GCP JSON): parses IPv4 and IPv6 prefixes.
      - Plain-text lists (Tor exit nodes, IPsum): extracts IP blocks and scores.
 3. **Atomic Cache File Storage:**
-   - Writes normalized envelope to `data/cache/bot_sources/{source_id}.json` containing:
+   - Atomically writes normalized envelope to `data/cache/bot_sources/{source_id}.json` using a temporary file (`.{source_id}.json.*.tmp` via `tempfile.mkstemp` in `_CACHE_DIR`) followed by `os.replace` to prevent corrupted partial reads:
      - `last_updated`: ISO timestamp in UTC (`iso_z_now()`).
      - `entry_count`: count of prefixes or bot entries.
      - `entries`: parsed entry list.
 4. **In-Memory Cache Invalidation:**
-   - Acquires `_matcher_lock` and invalidates `_matcher_cache`.
-   - Invalidates `_source_cache` via file mtime checks, ensuring analytical query paths immediately pick up the latest definitions.
+   - Invalidates all four in-process bot caches under their respective concurrency locks:
+     - `_matcher_cache.clear()` under `_matcher_lock`.
+     - `_source_cache.pop(source_id, None)` under `_source_cache_lock`.
+     - `_compiled_ip_feeds.clear()` under `_compiled_ip_feeds_lock`.
+     - `_version_cache.clear()` under `_version_cache_lock`.
+   - All four caches are registered with `CacheRegistry` for cross-test teardown isolation.
 5. **Status & Telemetry Recording:**
    - Decorated with `@global_job("bot_data_refresh")`.
    - Records outcome into `system_jobs._status["bot_data_refresh"]`:
@@ -100,4 +104,6 @@
 - [x] 3. Unit tests verify `_run_bot_data_refresh` records `error` on total feed failures.
 - [x] 4. Unit tests verify `_run_bot_data_refresh` skips when `FLA_DEV_NO_CRONS=1` is active (`status="skipped"`).
 - [x] 5. Unit tests verify manual `POST /api/admin/bot-sources/refresh` and alias `/api/admin/bots/refresh` endpoints.
-- [x] 6. Regression suite verifies backward compatibility with existing scheduler tests.
+- [x] 6. Unit tests verify `POST /api/admin/bot-sources/{source_id}/refresh`, `POST /api/admin/rdns/enrich`, and `GET /api/admin/rdns/stats` in `tests/routers/test_admin_bot_sources.py`.
+- [x] 7. Unit tests verify atomic file writes, tempfile cleanup on error, and 4-cache invalidation (`_matcher_cache`, `_source_cache`, `_compiled_ip_feeds`, `_version_cache`).
+- [x] 8. Regression suite verifies backward compatibility with existing scheduler tests.

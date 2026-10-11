@@ -20,13 +20,24 @@ def _isolated_cache_dir(tmp_path, monkeypatch):
     """Point ``_CACHE_DIR`` at a tmp_path so cached source files don't
     leak across tests and we don't write into the real data/cache/."""
     monkeypatch.setattr(bot_sources, "_CACHE_DIR", tmp_path)
-    # Also clear the in-process matcher cache between tests.
+    # Clear all in-process caches between tests.
     with bot_sources._matcher_lock:
         bot_sources._matcher_cache.clear()
-    # Reset the content-hash version cache so it doesn't leak across tests.
-    bot_sources._version_cache["mtime"] = None
-    bot_sources._version_cache["version"] = None
+    with bot_sources._source_cache_lock:
+        bot_sources._source_cache.clear()
+    with bot_sources._compiled_ip_feeds_lock:
+        bot_sources._compiled_ip_feeds.clear()
+    with bot_sources._version_cache_lock:
+        bot_sources._version_cache.clear()
     yield
+    with bot_sources._matcher_lock:
+        bot_sources._matcher_cache.clear()
+    with bot_sources._source_cache_lock:
+        bot_sources._source_cache.clear()
+    with bot_sources._compiled_ip_feeds_lock:
+        bot_sources._compiled_ip_feeds.clear()
+    with bot_sources._version_cache_lock:
+        bot_sources._version_cache.clear()
 
 
 def _seed_cache(source_id: str, entries: list[dict]) -> Path:
@@ -433,6 +444,79 @@ def test_fetch_and_cache_source_invalidates_matcher_cache():
 
     # The cache was cleared as a side-effect of the fetch
     assert bot_sources._matcher_cache == {}
+
+
+def test_fetch_and_cache_source_invalidates_all_in_memory_caches():
+    """fetch_and_cache_source must clear _matcher_cache, pop _source_cache,
+    clear _compiled_ip_feeds, and clear _version_cache."""
+    # 1. Prime all four caches
+    _seed_cache("well-known-bots", [{"id": "cached_bot", "pattern": {"accepted": [r"OldBot"]}}])
+    bot_sources.build_matcher()
+    bot_sources.load_source("well-known-bots")
+    bot_sources.get_pattern_set_version()
+    with bot_sources._compiled_ip_feeds_lock:
+        bot_sources._compiled_ip_feeds["mtime"] = 12345.0
+        bot_sources._compiled_ip_feeds["feeds"] = {"test": []}
+
+    assert bot_sources._matcher_cache != {}
+    assert "well-known-bots" in bot_sources._source_cache
+    assert bot_sources._compiled_ip_feeds != {}
+    assert bot_sources._version_cache != {}
+
+    # 2. Fetch new data
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps([{"id": "new_bot"}]).encode()
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        bot_sources.fetch_and_cache_source("well-known-bots")
+
+    # 3. All in-memory caches must be invalidated
+    assert bot_sources._matcher_cache == {}
+    assert "well-known-bots" not in bot_sources._source_cache
+    assert bot_sources._compiled_ip_feeds == {}
+    assert bot_sources._version_cache == {}
+
+
+def test_atomic_write_cache_ensures_atomic_replace_and_cleanup_on_error():
+    """_atomic_write_cache must write atomically and remove temporary files on failure."""
+    envelope = {"last_updated": "2026-10-11T00:00:00Z", "entry_count": 1, "entries": [{"id": "bot1"}]}
+    target = bot_sources._cache_path("test-source")
+
+    # 1. Normal write succeeds and leaves no temp files
+    bot_sources._atomic_write_cache("test-source", envelope)
+    assert target.exists()
+    assert json.loads(target.read_text())["entries"][0]["id"] == "bot1"
+    temp_files = list(bot_sources._CACHE_DIR.glob(".test-source.json.*.tmp"))
+    assert temp_files == []
+
+    # 2. Write failure cleans up temp file and does not corrupt existing file
+    with patch("os.replace", side_effect=OSError("Atomic replace failed")):
+        with pytest.raises(OSError, match="Atomic replace failed"):
+            bot_sources._atomic_write_cache(
+                "test-source",
+                {"last_updated": "2026-10-11T01:00:00Z", "entry_count": 2, "entries": [{"id": "corrupt"}]},
+            )
+
+    # Existing file intact
+    assert json.loads(target.read_text())["entries"][0]["id"] == "bot1"
+    # Temp file cleaned up
+    temp_files = list(bot_sources._CACHE_DIR.glob(".test-source.json.*.tmp"))
+    assert temp_files == []
+
+
+def test_version_cache_registered_in_cache_registry():
+    """_version_cache is registered in CacheRegistry and drains on clear."""
+    from backend.utils.cache_registry import CacheRegistry
+
+    assert "utils.bot_sources._version_cache" in CacheRegistry.names()
+
+    bot_sources._version_cache["mtime"] = 99999.0
+    bot_sources._version_cache["version"] = "v_test"
+
+    cleared = CacheRegistry.clear("utils.bot_sources._version_cache")
+    assert cleared is True
+    assert bot_sources._version_cache == {}
 
 
 # ── refresh_all_sources ─────────────────────────────────────────────────────
