@@ -253,11 +253,21 @@ The detailed inventory and per-job specifications live under
 - **Manual Trigger Endpoints:** `POST /api/admin/rebuild-local-view` returns 202 Accepted, clears caches, and spawns background worker; Analyst Path B sessions are blocked with 403 `admin_only`. Handles 503 on `cron_busy`.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_sync_metadata_contract.py` passed 20/20 tests covering all Section 9 checklist items of `docs/cron/jobs/sync-metadata.md`. Unit tests `tests/test_scheduler.py -k metadata_sync` (15 passed), `tests/security/test_no_infra_leak_in_tracked_tree.py` (passed), and `make fast-ci` (1,090 passing Python tests, 68 passing Vitest suites) green.
 
+**Cron 15: `ledger_sweep_{service_id}` — High-Scale Request-Ledger Recovery & Crash-Net Sweeper (2026-10-11) — Audited, Verified, and Certified.**
+- **Live Progress & Duration Finalization:** Initialized live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="ledger_sweep")`, emitting progress events to `cron_progress`. In guaranteed `finally:` block, calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, started)`.
+- **Warning Outcome on Broker Issue or Dead-Letter Rows:** Accurately evaluates health of the distributed pipeline: sets run status to `"warning"` in `cron_runs` if Celery/Valkey broker probe fails (`broker_ok=False`) or if `dead_letter`/`quarantined` rows are present in `ingest_ledger`, while successful runs record `"success"`.
+- **Dynamic Cadence & Clean Gating:** Registered with default 15-minute interval (`minutes=15`, `coalesce=True`, `misfire_grace_time=300s`). Dynamically reschedules when `cron_ledger_sweep.interval_minutes` is updated; cleanly unregisters when `cron_ledger_sweep.enabled = False`. Gated by `FLA_DEV_NO_CRONS=1` in both scheduler registration and job execution.
+- **Stale Worker Claim Reclamation:** In `sweep_ledger_once(service_id)`, identifies rows in `ingest_ledger` where `status = 'claimed'` and `claimed_at < NOW() - LEDGER_RECLAIM_AFTER_S`, resetting them to `status='discovered'`, clearing worker claim fields, and updating `next_attempt_at`. Strictly excludes `raw/rum/%` keys (reserved for Cron 18 `ledger_rum_sweep`).
+- **Valkey Queue-Depth Guard:** Queries `celery_queue_depths()` for `q.ingest`; safely skips re-dispatch if `queue_depth >= pending_batches` to prevent queue amplification storms during worker backlog drain.
+- **Deployment Mode & Role Gate Isolation:** Cleanly exits without work in Standard mode (`is_high_scale_mode(src) == False`). Role-gated: skips execution for Analyst Path A standalone (`read_only`); blocks Analyst Path B remote share with HTTP 403.
+- **Admin Control Parity & Quarantine Inspection:** Manual trigger endpoint `POST /api/admin/ledger/sweep/{service_id}` returns HTTP 200 with `run_id` (or 400 for standard mode, 403 for read-only analysts). Quarantine inspection available via `GET /api/admin/ledger/quarantine`.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_ledger_sweep_contract.py` passed 21/21 tests covering all 10 checklist items of Section 9 in `docs/cron/jobs/ledger-sweep.md`. Sweeper core tests `tests/core/test_step4_sweeper.py` (17/17 passed), security tests `tests/security/test_no_infra_leak_in_tracked_tree.py` (passed), and `make fast-ci` (1,090 passing Python tests, 68 passing Vitest suites) green.
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 15: `ledger_sweep_{service_id}` documented in `docs/cron/jobs/ledger-sweep.md`:
-1. Read `docs/cron/jobs/ledger-sweep.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_ledger_sweep*.py` or similar).
-2. Audit High-Scale request-ledger recovery, FOS-vs-ledger discovery diff, lease recovery, and error handling.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 17: `rum_commit_{service_id}` documented in `docs/cron/jobs/rum-commit.md`:
+1. Read `docs/cron/jobs/rum-commit.md`, `AGENTS.md` (including Traps & Gotchas and ADR-22), relevant architecture docs, and existing tests (`tests/cron/test_rum_commit*.py` or similar).
+2. Audit Standard-mode RUM commit pipeline: buffer drain into DuckLake (`client_vitals`, `client_errors`), natural key deduplication, SSE sync status notifications, and error handling.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -270,7 +280,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 15 (`ledger_sweep_{service_id}`).
+Next target: proceed to Cron 17 (`rum_commit_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).
