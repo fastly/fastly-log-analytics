@@ -663,6 +663,32 @@ class Scheduler:
                 recycle_interval,
             )
 
+    def _register_metric_snapshot_job(self, seen_ids: set[str] | None = None) -> None:
+        """Register the minute-cadence operational-vital snapshot job.
+
+        Local-safe (samples local host/process/db vitals, zero FOS writes,
+        zero outbound calls), so it is registered from BOTH _sync_jobs and
+        _register_dev_local_safe_jobs.
+        """
+        from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
+
+        snapshot_id = "metric_snapshot"
+        if seen_ids is not None:
+            seen_ids.add(snapshot_id)
+        if snapshot_id not in self._job_ids:
+            self._add_job(
+                _run_metric_snapshot,
+                "interval",
+                seconds=60,
+                jitter=5,
+                id=snapshot_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
+            self._job_ids[snapshot_id] = snapshot_id
+            logger.info("📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).")
+
     def _register_dev_local_safe_jobs(self) -> None:
         """FLA_DEV_NO_CRONS allowlist: register ONLY the local-only jobs.
 
@@ -796,6 +822,10 @@ class Scheduler:
             # populates in-memory cache, never touches FOS or writes data.
             # Permitted under FLA_DEV_NO_CRONS=1.
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
+
+        # Operational-vital snapshots is local-safe (samples local host/process/db
+        # vitals, no FOS writes) → safe under the dev kill switch.
+        self._register_metric_snapshot_job()
 
         # DuckDB instance recycle is local-safe (closes/reopens local conns,
         # no FOS writes) → safe under the dev kill switch. Still OFF unless
@@ -1558,23 +1588,7 @@ class Scheduler:
             logger.info("🧹 \x1b[35m[share_audit_purge]\x1b[0m Registered share audit purge job (daily 03:45 UTC).")
 
         # ── Operational-vital snapshots (Trends tab + System Health sparklines) ──
-        from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
-
-        snapshot_id = "metric_snapshot"
-        seen_ids.add(snapshot_id)
-        if snapshot_id not in self._job_ids:
-            self._add_job(
-                _run_metric_snapshot,
-                "interval",
-                seconds=60,
-                jitter=5,
-                id=snapshot_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=60,
-            )
-            self._job_ids[snapshot_id] = snapshot_id
-            logger.info("📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).")
+        self._register_metric_snapshot_job(seen_ids)
 
         # DuckDB instance recycle (object-cache leak guard) — local-safe, so it
         # registers in both this path and the dev-local-safe path.

@@ -7,6 +7,7 @@ Pulls five operational vitals from the surfaces they already live on
 - ``pool_wait_p95_ms``    (per-service)
 - ``cron_duration_ms``    (per-service, per-task; latest terminal run)
 - ``ingest_lag_s``        (per-service)
+- ``duckdb_file_bytes``   (per-service)
 - ``active_query_count``  (global)
 - ``cpu_load_1m`` / ``mem_used_pct`` / ``disk_used_pct``  (global)
 
@@ -14,7 +15,7 @@ Failure of one metric is logged and skipped; the others still get
 recorded.
 
 Registered as a global APScheduler interval job (every 60 s) from
-:meth:`Scheduler._sync_jobs` — see ``metric_snapshot`` block there.
+:meth:`Scheduler._sync_jobs` and :meth:`Scheduler._register_dev_local_safe_jobs`.
 """
 
 from __future__ import annotations
@@ -423,12 +424,34 @@ def _sample_high_scale() -> int:
     return count
 
 
+def _sample_duckdb_size() -> int:
+    count = 0
+    try:
+        from backend import config as svcconfig
+
+        for cfg in svcconfig.list_configs():
+            service_id = cfg.get("service_id")
+            if not service_id:
+                continue
+            try:
+                db_path = svcconfig.duckdb_path(service_id)
+                if os.path.exists(db_path):
+                    size_bytes = os.path.getsize(db_path)
+                    if _safe_record("duckdb_file_bytes", float(size_bytes), service_id=service_id):
+                        count += 1
+            except Exception as e:
+                logger.debug("[metric_snapshot] duckdb_size for %s failed: %s", service_id, e)
+    except Exception as e:
+        logger.debug("[metric_snapshot] duckdb_size sample failed: %s", e)
+    return count
+
+
 def _sample_celery_workers() -> int:
     count = 0
     try:
         from backend.celery_app import app
 
-        i = app.control.inspect()
+        i = app.control.inspect(timeout=0.5)
         stats = i.stats() or {}
         if _safe_record("celery_active_workers", float(len(stats))):
             count += 1
@@ -451,12 +474,14 @@ def _run_metric_snapshot() -> str:
 
     Not decorated with @cron_task because it doesn't open a DuckDB
     connection or hit FOS and the standard watchdog / usage-log envelope
-    would be net overhead for a job that writes ~5 SQLite rows.
+    would be net overhead for a job that writes rows to PostgreSQL
+    metric_snapshots.
     """
     total = 0
     total += _sample_pool_wait()
     total += _sample_cron_duration()
     total += _sample_ingest_lag()
+    total += _sample_duckdb_size()
     total += _sample_active_queries()
     total += _sample_ducklake_admission()
     total += _sample_high_scale()
