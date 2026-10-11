@@ -125,7 +125,7 @@ def test_success_admin_only_logs_and_records(monkeypatch, stub_source, stub_cron
     args, kwargs = get_insights_mock.call_args
     assert args[0] is stub_cron_run["con"]
     assert args[1] is stub_source
-    assert kwargs["window_hours"] == 1.0
+    assert kwargs["window_hours"] == 24.0
     assert kwargs["baseline_hours"] == 168.0
     assert kwargs["force_refresh"] is True
     assert kwargs.get("clamp_cache_key") is None
@@ -190,8 +190,9 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
 
 
 def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
-    """A service with ≥7 d of history warms the (1, 168) pair the adaptive
-    frontend default will actually request. This ensures the /api/insights
+    """A service with ≥7 d of history warms the (24, 168) pair the adaptive
+    frontend default will actually request. Services with ≥30 d of history
+    additionally preload the month option (24, 720). This ensures the /api/insights
     cache key (which includes window+baseline) hits immediately for every
     default page load."""
     from datetime import UTC, datetime, timedelta
@@ -204,11 +205,41 @@ def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     stub_cron_run["get_status"].assert_called_once_with(stub_source["name"])
-    kwargs = get_insights_mock.call_args.kwargs
-    assert kwargs["window_hours"] == 1.0
-    assert kwargs["baseline_hours"] == 168.0
-    # The warmed shape is surfaced in the cron_runs summary for prod audit.
-    assert "1h/168h" in stub_cron_run["log"].call_args.kwargs["summary"]
+    # 2 calls: primary (24, 168) + month option preload (24, 720)
+    assert get_insights_mock.call_count == 2
+    primary_call = get_insights_mock.call_args_list[0]
+    assert primary_call.kwargs["window_hours"] == 24.0
+    assert primary_call.kwargs["baseline_hours"] == 168.0
+
+    month_call = get_insights_mock.call_args_list[1]
+    assert month_call.kwargs["window_hours"] == 24.0
+    assert month_call.kwargs["baseline_hours"] == 720.0
+
+    # The warmed shape and month preload are surfaced in the cron_runs summary for prod audit.
+    summary = stub_cron_run["log"].call_args.kwargs["summary"]
+    assert "24h/168h" in summary
+    assert "+ month option (24h/720h)" in summary
+
+
+def test_adaptive_shape_without_month_preload(monkeypatch, stub_source, stub_cron_run):
+    """A service with 10 days history warms (24, 168) but skips month preload (<30d)."""
+    from datetime import UTC, datetime, timedelta
+
+    earliest = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
+    get_insights_mock = MagicMock(return_value={})
+    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+
+    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
+
+    assert get_insights_mock.call_count == 1
+    call = get_insights_mock.call_args
+    assert call.kwargs["window_hours"] == 24.0
+    assert call.kwargs["baseline_hours"] == 168.0
+
+    summary = stub_cron_run["log"].call_args.kwargs["summary"]
+    assert "24h/168h" in summary
+    assert "month option" not in summary
 
 
 def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_cron_run):
@@ -217,7 +248,7 @@ def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_
     by the invite's stable clamp fragment."""
     from datetime import UTC, datetime, timedelta
 
-    earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
+    earliest = (datetime.now(UTC) - timedelta(days=10)).isoformat()
     stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
     stub_cron_run["mgr"].is_sharing_active.return_value = True
     stub_cron_run["invites"].return_value = [
@@ -238,7 +269,7 @@ def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_
 
     assert get_insights_mock.call_count == 2  # admin + 1 analyst shape
     analyst_call = next(c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None)
-    assert analyst_call.kwargs["window_hours"] == 1.0
+    assert analyst_call.kwargs["window_hours"] == 24.0
     assert analyst_call.kwargs["baseline_hours"] == 168.0
     assert analyst_call.kwargs["clamp_cache_key"] == "||24"
     assert analyst_call.kwargs["mask_ips"] is True
@@ -296,7 +327,7 @@ def test_success_logs_info_line(monkeypatch, stub_source, stub_cron_run, caplog)
 
     # The INFO line carries the warmed shape (static default here — the
     # fixture pins a no-extents snapshot).
-    assert any("prewarmed 1h/168h in" in r.message for r in caplog.records)
+    assert any("prewarmed 24h/168h in" in r.message for r in caplog.records)
 
 
 def test_display_label_falls_back_to_service_id(monkeypatch, stub_source, stub_cron_run, caplog):

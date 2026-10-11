@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
@@ -27,7 +27,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ReportLayout } from '@/components/ReportLayout'
-import { WINDOW_OPTIONS, BASELINE_OPTIONS } from '@/lib/insights-defaults'
+import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
 import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
 import {
   groupInsightsBySection,
@@ -373,6 +373,40 @@ export default function InsightsClient() {
     useInsightsDefaults(activeServiceId)
   const [statusFilter, setStatusFilter] = useState('all')
   const { relative, full, abbr } = useDateFormat()
+
+  const queryClient = useQueryClient()
+  const { data: extentsData } = useQuery({
+    queryKey: ['log-extents', activeServiceId],
+    queryFn: async () => {
+      const { data } = await client.GET('/api/log-extents')
+      return data
+    },
+    enabled: !!activeServiceId,
+    staleTime: 60_000,
+  })
+
+  // Pre-load / prefetch secondary month option (24h vs 720h) when enough data exists (>=30d history).
+  React.useEffect(() => {
+    if (!activeServiceId) return
+    const history = historyHoursFromExtents(extentsData?.earliest_log_at)
+    if (history !== null && history >= 720) {
+      queryClient.prefetchQuery({
+        queryKey: ['insights', activeServiceId, '24', '720'],
+        queryFn: async ({ signal }) => {
+          const { data } = await client.POST('/api/insights', {
+            signal,
+            body: {
+              window_size_hrs: 24,
+              baseline_hours: 720,
+              filters: {},
+            },
+          })
+          return data
+        },
+        staleTime: 60_000,
+      })
+    }
+  }, [activeServiceId, extentsData?.earliest_log_at, queryClient])
 
   // Debounce window/baseline so chained dropdown changes (e.g. switching
   // both window AND baseline in succession) only fire one /api/insights

@@ -6929,7 +6929,7 @@ export interface components {
             url: string;
             /**
              * Window Size Hrs
-             * @default 1
+             * @default 24
              */
             window_size_hrs: number;
             /**
@@ -9070,7 +9070,7 @@ export interface components {
             };
             /**
              * Window Size Hrs
-             * @default 1
+             * @default 24
              */
             window_size_hrs: number;
             /**

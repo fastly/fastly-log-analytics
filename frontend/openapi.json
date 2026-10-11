@@ -49018,7 +49018,7 @@
             "maximum": 168.0,
             "exclusiveMinimum": 0.0,
             "title": "Window Size Hrs",
-            "default": 1.0
+            "default": 24.0
           },
           "baseline_hours": {
             "type": "number",
@@ -54558,7 +54558,7 @@
             "maximum": 168.0,
             "exclusiveMinimum": 0.0,
             "title": "Window Size Hrs",
-            "default": 1.0
+            "default": 24.0
           },
           "baseline_hours": {
             "type": "number",

@@ -47,7 +47,7 @@ describe('useInsightsDefaults', () => {
     const { result } = renderHook(() => useInsightsDefaults(null), {
       wrapper: makeQueryWrapper(qc),
     })
-    expect(result.current.windowHours).toBe('1')
+    expect(result.current.windowHours).toBe('24')
     expect(result.current.baselineHours).toBe('168')
   })
 
@@ -74,8 +74,8 @@ describe('useInsightsDefaults', () => {
     expect(result.current.baselineHours).toBe('720')
 
     rerender({ sid: 'svc-b' })
-    // svc-b has ~10d history → adaptive 1/168, and svc-a's override is gone.
-    expect(result.current.windowHours).toBe('1')
+    // svc-b has ~10d history → adaptive 24/168, and svc-a's override is gone.
+    expect(result.current.windowHours).toBe('24')
     expect(result.current.baselineHours).toBe('168')
   })
 })

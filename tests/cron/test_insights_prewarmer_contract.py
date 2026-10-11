@@ -344,21 +344,28 @@ def test_contract_politeness_deferral_when_active_queries(base_context):
 def test_contract_adaptive_parameter_resolution(base_context):
     """Requirement 7: Derives (window_hours, baseline_hours) adaptively via pick_insights_default
     from service log history extents:
-    - >= 7 days history -> (1.0, 168.0) (prior 7-day period)
+    - >= 7 days history -> (24.0, 168.0) (prior 7-day period)
+    - >= 30 days history -> (24.0, 168.0) plus secondary month option preload (24.0, 720.0)
     - ~2 hours history -> (1.0, 1.0)
-    - empty / None history -> fallback (1.0, 168.0)
+    - empty / None history -> fallback (24.0, 168.0)
     """
     mock_get_insights = MagicMock(return_value={})
 
-    # Case A: >= 7 days history (e.g. 45 days) -> defaults to prior 7-day period (1h/168h)
+    # Case A: >= 30 days history (e.g. 45 days) -> defaults to prior 7-day period (24h/168h)
+    # and preloads the secondary month option (24h/720h).
     earliest_30d = (datetime.now(UTC) - timedelta(days=45)).isoformat()
     base_context["get_status"].return_value = {"earliest_log_at": earliest_30d}
 
     with patch("backend.repositories.insights.get_insights", mock_get_insights):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-prewarm-contract")
-        kwargs_a = mock_get_insights.call_args.kwargs
-        assert (kwargs_a["window_hours"], kwargs_a["baseline_hours"]) == (1.0, 168.0)
-        assert "1h/168h" in base_context["log_run"].call_args.kwargs["summary"]
+        assert mock_get_insights.call_count == 2
+        kwargs_primary = mock_get_insights.call_args_list[0].kwargs
+        assert (kwargs_primary["window_hours"], kwargs_primary["baseline_hours"]) == (24.0, 168.0)
+        kwargs_month = mock_get_insights.call_args_list[1].kwargs
+        assert (kwargs_month["window_hours"], kwargs_month["baseline_hours"]) == (24.0, 720.0)
+        summary = base_context["log_run"].call_args.kwargs["summary"]
+        assert "24h/168h" in summary
+        assert "+ month option (24h/720h)" in summary
 
     mock_get_insights.reset_mock()
     base_context["log_run"].reset_mock()
@@ -376,14 +383,14 @@ def test_contract_adaptive_parameter_resolution(base_context):
     mock_get_insights.reset_mock()
     base_context["log_run"].reset_mock()
 
-    # Case C: No status snapshot / extents unknown -> fallback to (1.0, 168.0)
+    # Case C: No status snapshot / extents unknown -> fallback to (24.0, 168.0)
     base_context["get_status"].return_value = {}
 
     with patch("backend.repositories.insights.get_insights", mock_get_insights):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-prewarm-contract")
         kwargs_c = mock_get_insights.call_args.kwargs
-        assert (kwargs_c["window_hours"], kwargs_c["baseline_hours"]) == (1.0, 168.0)
-        assert "1h/168h" in base_context["log_run"].call_args.kwargs["summary"]
+        assert (kwargs_c["window_hours"], kwargs_c["baseline_hours"]) == (24.0, 168.0)
+        assert "24h/168h" in base_context["log_run"].call_args.kwargs["summary"]
 
 
 # ── Requirement 8: Read-Only DuckDB Connection & Memory Safety ─────────────────
@@ -593,3 +600,103 @@ def test_contract_guaranteed_finalize_cron_duration_in_finally(base_context, stu
         src_arg, run_id_arg, started_arg = base_context["finalize_dur"].call_args[0]
         assert src_arg is stub_source
         assert run_id_arg == 101
+
+
+# ── Requirement 2b & 9b: Clean Unregistration & Cache Warming Verification ─────
+
+
+def test_contract_clean_unregistration_when_disabled():
+    """Requirement 2b: Dynamic unregistration when prewarming is disabled.
+    When a service that had insights_prewarmer registered has its config updated to
+    cron_insights_prewarmer.enabled = False, the subsequent _sync_jobs() cleanly
+    removes the job from the scheduler and from _job_ids.
+    """
+    s = Scheduler()
+    cfg_enabled = _fake_cfg("svc-ip-dynamic-toggle", ip_enabled=True)
+
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_enabled]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-dynamic-toggle")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-ip-dynamic-toggle" in s._job_ids
+    assert s._sched.get_job("insights_prewarmer_svc-ip-dynamic-toggle") is not None
+
+    # Update config to disabled
+    cfg_disabled = _fake_cfg("svc-ip-dynamic-toggle", ip_enabled=False)
+    with (
+        patch("backend.config.list_configs", return_value=[cfg_disabled]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-dynamic-toggle")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    assert "insights_prewarmer_svc-ip-dynamic-toggle" not in s._job_ids
+    assert s._sched.get_job("insights_prewarmer_svc-ip-dynamic-toggle") is None
+
+
+def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(base_context, stub_source):
+    """Requirement 9b: Cache warming and reuse verification.
+    When the prewarmer runs, it warms the in-memory _insights_cache for the adaptive
+    selection. Subsequent calls to get_insights (e.g. from the dashboard API) hit
+    the cache, returning is_cached=True without invoking any queries on the connection.
+    """
+    from backend.repositories.insights.repository import (
+        _insights_cache,
+        _insights_cache_lock,
+        get_insights,
+    )
+
+    source_name = stub_source["name"]
+    window_hours, baseline_hours = 24.0, 168.0
+    cache_key = f"{source_name}:{window_hours}:{baseline_hours}::0"
+
+    # Ensure clean cache state
+    with _insights_cache_lock:
+        _insights_cache.pop(cache_key, None)
+
+    prewarmed_payload = {
+        "status": "success",
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "results": [{"metric": "prewarmed_test", "value": 42}],
+    }
+
+    # Simulate prewarmer executing get_insights with force_refresh=True
+    def fake_get_insights(con, src, **kwargs):
+        if kwargs.get("force_refresh"):
+            with _insights_cache_lock:
+                _insights_cache[cache_key] = (datetime.now(UTC).isoformat(), prewarmed_payload)
+        return prewarmed_payload
+
+    with patch("backend.repositories.insights.get_insights", side_effect=fake_get_insights):
+        insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-prewarm-contract")
+
+    # Verify that the prewarmer populated _insights_cache
+    with _insights_cache_lock:
+        cached_entry = _insights_cache.get(cache_key)
+    assert cached_entry is not None, f"Expected cache key {cache_key} to be populated by prewarmer"
+
+    # Subsequent dashboard API request (force_refresh=False)
+    # It must return the cached result with is_cached=True and never touch the connection.
+    mock_con = MagicMock()
+    result = get_insights(
+        con=mock_con,
+        src=stub_source,
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        service_id="svc-prewarm-contract",
+        force_refresh=False,
+    )
+
+    assert result.get("is_cached") is True
+    assert result["results"] == [{"metric": "prewarmed_test", "value": 42}]
+    # Query connection cursor should never be opened on a cache hit
+    mock_con.cursor.assert_not_called()
+    mock_con.execute.assert_not_called()

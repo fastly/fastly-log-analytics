@@ -156,9 +156,8 @@ def _run_insights_prewarmer(service_id: str) -> None:
         # log_extents / /api/log-extents both project svcconfig status,
         # un-clamped for analysts) → same bucket → same cache key.
         cached_status = svcconfig.get_status(src["name"]) or {}
-        window_hours, baseline_hours = pick_insights_default(
-            history_hours_from_earliest(cached_status.get("earliest_log_at"))
-        )
+        history_hours = history_hours_from_earliest(cached_status.get("earliest_log_at"))
+        window_hours, baseline_hours = pick_insights_default(history_hours)
 
         # Read-only + skip_view_update: insights queries against the live
         # Iceberg view; a few seconds of view staleness across cron-tick
@@ -222,13 +221,30 @@ def _run_insights_prewarmer(service_id: str) -> None:
                 )
                 analyst_warmed += 1
 
+        # 3) Pre-load secondary option: last day vs last month (24h/720h) if there is enough data (>=30d history).
+        preloaded_month = False
+        if history_hours is not None and history_hours >= 720.0 and (window_hours, baseline_hours) != (24.0, 720.0):
+            if not should_defer_cron("insights_prewarmer", service_id):
+                yield_to_api(max_wait_secs=0.5)
+                get_insights(
+                    con,
+                    src,
+                    window_hours=24.0,
+                    baseline_hours=720.0,
+                    service_id=service_id,
+                    force_refresh=True,
+                    max_workers=2,
+                )
+                preloaded_month = True
+
         duration = time.time() - started
         # The warmed shape is in the summary so cron_runs alone can confirm
         # the prewarm matches what the page requests (the drift this cron
         # once had was invisible in an "admin + N analyst" summary).
+        month_suffix = " + month option (24h/720h)" if preloaded_month else ""
         summary = (
             f"Prewarmed default insights selection ({window_hours:g}h/{baseline_hours:g}h: "
-            f"admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'})"
+            f"admin + {analyst_warmed} analyst shape{'' if analyst_warmed == 1 else 's'}){month_suffix}"
         )
         log_cron_run(
             src,
@@ -245,10 +261,11 @@ def _run_insights_prewarmer(service_id: str) -> None:
             event={"type": "done", "message": summary},
         )
         logger.info(
-            "✅ [insights-prewarmer] %s: prewarmed %gh/%gh in %.2fs (admin + %d analyst)",
+            "✅ [insights-prewarmer] %s: prewarmed %gh/%gh%s in %.2fs (admin + %d analyst)",
             _display,
             window_hours,
             baseline_hours,
+            " + 24h/720h" if preloaded_month else "",
             duration,
             analyst_warmed,
         )

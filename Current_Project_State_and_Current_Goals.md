@@ -231,11 +231,20 @@ The detailed inventory and per-job specifications live under
 - **Dedicated Job Module & Safety Gates:** Re-exported from `backend/cron/jobs/alerts.py` in parity with `AGENTS.md` and `backend/cron/jobs/metadata.py`. Gated by `FLA_DEV_NO_CRONS=1` in both scheduler registration and job execution.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_alerts_evaluation_contract.py` passed 20/20 tests covering all checklist items from Section 9 of `docs/cron/jobs/alerts-evaluation.md`. Unit tests `tests/test_scheduler.py -k "alert"` (15 passed) and full CI suite passed 100% green.
 
+**Cron 13: `insights_prewarmer_{service_id}` — Adaptive Insight Prewarming (2026-10-10) — Audited, Verified, and Certified.**
+- **Politeness Gating & Dynamic Control:** Evaluates `should_defer_cron("insights_prewarmer", service_id)` on scheduled runs, yielding cleanly and deferring with status `"deferred"` if active user queries are running on the analytical engine; bypassed when triggered with `force=True`.
+- **Bounded Query Execution & Memory Tuning:** Wraps DuckDB/DuckLake prewarming queries with resilient query execution (`QueryRunner` / `get_memory_connection`) and strict per-query timeout bounding, preventing engine lockup or memory exhaustion.
+- **Granular Live Progress Streaming:** Streams live progress updates (`checking`, `prewarming`, `complete`, `error`) to the `cron_progress` SSE event stream for real-time operational monitoring.
+- **Dynamic Cadence & Clean Unregistration:** Dynamically adjusts to changes in `cron_insights_prewarmer.interval_seconds` (or fallback `log_period`) and cleanly unregisters the APScheduler job when `cron_insights_prewarmer.enabled = False`.
+- **Cache Warming & Subsequent Query Reuse:** Executes `get_insights(..., force_refresh=True)` to populate in-memory `_insights_cache` for both admin and analyst shapes (`key_clamp`, `mask_ips`), guaranteeing subsequent dashboard requests achieve instant cache hits (`is_cached=True`) with zero DuckDB queries.
+- **Safety Gate Under FLA_DEV_NO_CRONS=1:** Job is registered in `_register_dev_local_safe_jobs` for local execution testing while respecting global kill-switches.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_insights_prewarmer_contract.py` (14/14 tests) and unit test suite `tests/cron/test_insights_prewarmer.py` (19/19 tests) passed 100% green (33/33 tests). Default insights selection configured to last day vs last 7 days (24h/168h) with secondary month option (24h/720h) preloaded when history >= 30 days.
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 13: `insights_prewarmer_{service_id}` documented in `docs/cron/jobs/insights-prewarmer.md`:
-1. Read `docs/cron/jobs/insights-prewarmer.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_insights_prewarmer_contract.py`).
-2. Audit insights prewarming mechanics, politeness gate (`should_defer_cron("insights_prewarmer", service_id)`), query timeout bounds, adaptive cadence, and cache warming.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 14: `sync_metadata_{service_id}` documented in `docs/cron/jobs/sync-metadata.md`:
+1. Read `docs/cron/jobs/sync-metadata.md`, `AGENTS.md` (including Traps & Gotchas), relevant architecture docs, and existing tests (`tests/cron/test_metadata_sync*.py` or similar).
+2. Audit metadata sync mechanics, Analyst Path A state synchronization, snapshot sync, and error handling.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -248,7 +257,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 13 (`insights_prewarmer_{service_id}`).
+Next target: proceed to Cron 14 (`sync_metadata_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).

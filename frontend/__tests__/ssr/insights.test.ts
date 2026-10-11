@@ -120,20 +120,20 @@ describe('fetchInsightsServerSide (insights SSR)', () => {
     mockHeaders.mockReturnValue(headerGetter({ host: 'localhost:3001' }))
     try {
       const { fetchInsightsServerSide } = await import('@/lib/ssr/insights')
-      // ~10 days of history → default tokens window '1' / baseline '168'.
+      // ~10 days of history → default tokens window '24' / baseline '168'.
       const earliest = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
       const out = await fetchInsightsServerSide('svc-1', { earliest_log_at: earliest })
 
       expect(out).not.toBeNull()
       expect(out!.data).toEqual({ insights: [1, 2, 3] })
-      expect(out!.windowHours).toBe('1')
+      expect(out!.windowHours).toBe('24')
       expect(out!.baselineHours).toBe('168')
 
       // POST with the exact client body shape.
       expect(capturedMethod).toBe('POST')
       expect(captured['content-type']).toContain('application/json')
       expect(JSON.parse(capturedBody)).toEqual({
-        window_size_hrs: 1,
+        window_size_hrs: 24,
         baseline_hours: 168,
         filters: {},
       })

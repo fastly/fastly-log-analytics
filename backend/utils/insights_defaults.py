@@ -30,14 +30,14 @@ from datetime import UTC, datetime
 
 from backend.utils.date_utils import parse_iso_utc
 
-# The historical static default (also the InsightsRequest field defaults):
-# recent 1 h vs previous 7 d. Used when a service has no extents yet, so
-# no-data services behave exactly as before.
-STATIC_DEFAULT: tuple[float, float] = (1.0, 168.0)
+# The static default (also the InsightsRequest field defaults):
+# recent 24 h vs previous 7 d. Used when a service has no extents yet, so
+# no-data services behave predictably.
+STATIC_DEFAULT: tuple[float, float] = (24.0, 168.0)
 
 # (history_upper_bound_hours, window_hours, baseline_hours). Half-open bands
 # over available history — an exact boundary selects the higher bucket, and
-# the final +inf band is the ≥7 d shape (comparing recent 1 h against the prior
+# the final +inf band is the ≥7 d shape (comparing recent 24 h against the prior
 # 7-day period). Values are floats because the client sends ``parseFloat``
 # of the dropdown tokens, so these produce byte-identical cache-key fragments.
 _BANDS: tuple[tuple[float, float, float], ...] = (
@@ -46,7 +46,7 @@ _BANDS: tuple[tuple[float, float, float], ...] = (
     (24.0, 4.0, 1.0),
     (48.0, 4.0, 24.0),
     (168.0, 24.0, 24.0),
-    (math.inf, 1.0, 168.0),
+    (math.inf, 24.0, 168.0),
 )
 
 

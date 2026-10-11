@@ -158,7 +158,7 @@ class InsightsRequest(FilteredRequest):
     # temp-table scan — a value like 8_760_000 reached ~1000 years back and
     # scanned every retained row (DoS + time-scope bypass). 168h / 2160h
     # (7d / 90d) cover every legitimate insight selection.
-    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
+    window_size_hrs: float = Field(default=24.0, gt=0, le=168)
     baseline_hours: float = Field(default=168.0, gt=0, le=2160)
 
 
@@ -232,7 +232,7 @@ class InsightsAvailabilityResponse(BaseModel):
 
 class CacheCollapseDetailRequest(BaseModel):
     url: str
-    window_size_hrs: float = Field(default=1.0, gt=0, le=168)
+    window_size_hrs: float = Field(default=24.0, gt=0, le=168)
     baseline_hours: float = Field(default=168.0, gt=0, le=2160)
 
 

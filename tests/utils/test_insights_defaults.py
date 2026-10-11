@@ -44,10 +44,10 @@ _NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
         (47.9, (4.0, 24.0)),
         (48.0, (24.0, 24.0)),
         (167.9, (24.0, 24.0)),
-        (168.0, (1.0, 168.0)),
-        (719.9, (1.0, 168.0)),
-        (720.0, (1.0, 168.0)),  # ≥30 d defaults to prior 7-day period (1h vs 168h)
-        (1270.0, (1.0, 168.0)),
+        (168.0, (24.0, 168.0)),
+        (719.9, (24.0, 168.0)),
+        (720.0, (24.0, 168.0)),  # ≥30 d defaults to prior 7-day period (24h vs 168h)
+        (1270.0, (24.0, 168.0)),
     ],
 )
 def test_band_table(history_hours: float, expected: tuple[float, float]) -> None:
@@ -58,7 +58,7 @@ def test_none_and_nonfinite_fall_back_to_static_default() -> None:
     assert pick_insights_default(None) == STATIC_DEFAULT
     assert pick_insights_default(math.nan) == STATIC_DEFAULT
     assert pick_insights_default(math.inf) == STATIC_DEFAULT
-    assert STATIC_DEFAULT == (1.0, 168.0)
+    assert STATIC_DEFAULT == (24.0, 168.0)
 
 
 # ── history_hours_from_earliest ──────────────────────────────────────────────
