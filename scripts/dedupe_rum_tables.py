@@ -30,14 +30,12 @@ from backend import config as svcconfig
 from backend.core.iceberg import clear_source_caches
 from backend.core.iceberg._ducklake import ducklake_table_name
 from backend.core.iceberg.buffer import _ducklake_write_connection, _lake_columns
+from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dedupe_rum")
 
-NATURAL_KEYS = {
-    "client_vitals": ("timestamp", "metric_name", "pathname", "cid", "req_id"),
-    "client_errors": ("timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id"),
-}
+NATURAL_KEYS = RUM_NATURAL_KEYS
 
 
 @contextmanager

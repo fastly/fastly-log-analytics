@@ -602,7 +602,15 @@ def _commit_one_chunk(
                 logger.warning("%s Failed to sync schema for paths: %s", _core_mod._ICE, e)
                 parquet_cols = set()
 
+            from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
+
             delete_by_source = "_source_file" in table_cols and "_source_file" in parquet_cols
+            nat_keys = RUM_NATURAL_KEYS.get(table_name)
+            delete_by_natural = (
+                not delete_by_source
+                and nat_keys is not None
+                and all(k in table_cols and k in parquet_cols for k in nat_keys)
+            )
             con.execute("BEGIN TRANSACTION")
             try:
                 if delete_by_source:
@@ -610,9 +618,29 @@ def _commit_one_chunk(
                         f"DELETE FROM {lake_ident} WHERE _source_file IN "
                         f"(SELECT DISTINCT _source_file FROM read_parquet([{paths_sql}], union_by_name=true))"
                     )
-                con.execute(
-                    f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
-                )
+                    con.execute(
+                        f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
+                    )
+                elif delete_by_natural and nat_keys:
+                    join_cond = " AND ".join(f'lake_tbl."{k}" IS NOT DISTINCT FROM incoming."{k}"' for k in nat_keys)
+                    con.execute(
+                        f"DELETE FROM {lake_ident} AS lake_tbl WHERE EXISTS ("
+                        f"  SELECT 1 FROM read_parquet([{paths_sql}], union_by_name=true) AS incoming"
+                        f"  WHERE {join_cond}"
+                        f")"
+                    )
+                    nat_cols_expr = ", ".join(f'"{k}"' for k in nat_keys)
+                    con.execute(
+                        f"INSERT INTO {lake_ident} BY NAME "
+                        f"SELECT * EXCLUDE (_dup_rn) FROM ("
+                        f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY {nat_cols_expr} ORDER BY timestamp) AS _dup_rn"
+                        f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+                        f") WHERE _dup_rn = 1"
+                    )
+                else:
+                    con.execute(
+                        f"INSERT INTO {lake_ident} BY NAME SELECT * FROM read_parquet([{paths_sql}], union_by_name=true)"
+                    )
                 con.execute("COMMIT")
             except Exception as e:
                 con.execute("ROLLBACK")

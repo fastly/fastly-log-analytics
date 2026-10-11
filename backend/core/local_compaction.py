@@ -75,12 +75,27 @@ _WEEKLY_TIER_AGE_DAYS = int(os.environ.get("LOCAL_COMPACT_WEEKLY_TIER_DAYS", "30
 _DAILY_DIR = "daily"
 _WEEKLY_DIR = "weekly"
 
+from backend.core.iceberg.rum_schema import RUM_NATURAL_KEYS
+
 _HOUR_PART_RE = re.compile(r"^timestamp_hour=(\d{4}-\d{2}-\d{2})-(\d{2})$")
 # Daily file naming from _compact_daily_tier: daily_YYYY-MM-DD_<hex>.parquet
 _DAILY_FILE_RE = re.compile(r"^daily_(\d{4}-\d{2}-\d{2})_[0-9a-f]+\.parquet$")
 
 
-def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: bool) -> str:
+def _detect_natural_keys(col_names: set[str]) -> tuple[str, ...] | None:
+    """Detect if the given parquet columns match known RUM composite natural keys."""
+    for natural_keys in RUM_NATURAL_KEYS.values():
+        if set(natural_keys).issubset(col_names):
+            return natural_keys
+    return None
+
+
+def _build_merge_select_sql(
+    paths_sql: str,
+    cols_to_strip: list[str],
+    has_rid: bool = False,
+    natural_keys: tuple[str, ...] | list[str] | None = None,
+) -> str:
     """SELECT clause for the COPY that produces a merged parquet.
 
     When the schema has a ``rid`` column, dedupe by ``rid`` keeping the
@@ -96,27 +111,41 @@ def _build_merge_select_sql(paths_sql: str, cols_to_strip: list[str], has_rid: b
     is preserved without a uniqueness guarantee. In practice prod data
     has zero NULL rids (verified 2026-06-12), so this branch is defensive.
 
-    When the schema has no ``rid`` column (older sources, test fixtures),
-    fall through to a plain SELECT — no dedup, original behaviour.
+    When ``natural_keys`` is supplied (e.g. for RUM tables ``client_vitals``
+    and ``client_errors``), dedupe by the composite natural key using
+    ``ROW_NUMBER() OVER (PARTITION BY ... ORDER BY timestamp)``.
+
+    When the schema has no ``rid`` column and no ``natural_keys`` (older
+    sources, test fixtures), fall through to a plain SELECT — no dedup,
+    original behaviour.
     """
     exclude_clause = f" EXCLUDE ({', '.join(cols_to_strip)})" if cols_to_strip else ""
-    if not has_rid:
-        return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-    # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
-    # into the output parquet schema.
-    inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
-    return (
-        # Non-NULL rid: dedupe, keep earliest occurrence.
-        f"SELECT *{inner_exclude_clause} FROM ("
-        f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
-        f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
-        f"  WHERE rid IS NOT NULL"
-        f") WHERE _dup_rn = 1"
-        f" UNION ALL BY NAME "
-        # NULL rid: pass through.
-        f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
-        f" WHERE rid IS NULL"
-    )
+    if has_rid:
+        # Add _dup_rn to the EXCLUDE list so the helper column doesn't bleed
+        # into the output parquet schema.
+        inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+        return (
+            # Non-NULL rid: dedupe, keep earliest occurrence.
+            f"SELECT *{inner_exclude_clause} FROM ("
+            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY rid ORDER BY timestamp) AS _dup_rn"
+            f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f"  WHERE rid IS NOT NULL"
+            f") WHERE _dup_rn = 1"
+            f" UNION ALL BY NAME "
+            # NULL rid: pass through.
+            f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f" WHERE rid IS NULL"
+        )
+    if natural_keys:
+        inner_exclude_clause = f" EXCLUDE ({', '.join([*cols_to_strip, '_dup_rn'])})"
+        partition_expr = ", ".join(f'"{k}"' for k in natural_keys)
+        return (
+            f"SELECT *{inner_exclude_clause} FROM ("
+            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition_expr} ORDER BY timestamp) AS _dup_rn"
+            f"  FROM read_parquet([{paths_sql}], union_by_name=true)"
+            f") WHERE _dup_rn = 1"
+        )
+    return f"SELECT *{exclude_clause} FROM read_parquet([{paths_sql}], union_by_name=true)"
 
 
 def _bin_pack_files(file_paths: list[str], max_bin_size_bytes: int) -> list[list[str]]:
@@ -530,7 +559,11 @@ def _rollup_bins(
                     )
                     col_names = {d[0] for d in probe}
                     cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
-                    select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+                    has_rid = "rid" in col_names
+                    natural_keys = None if has_rid else _detect_natural_keys(col_names)
+                    select_sql = _build_merge_select_sql(
+                        paths_sql, cols_to_strip, has_rid=has_rid, natural_keys=natural_keys
+                    )
                     order_by = "ORDER BY timestamp"
                     if "ip" in col_names:
                         order_by += ", ip"
@@ -797,7 +830,9 @@ def _compact_single_partition(part_dir: str, parquets: list[str], dry_run: bool 
         probe = con.execute(f"SELECT * FROM read_parquet([{paths_sql}], union_by_name=true) LIMIT 0").description or []
         col_names = {d[0] for d in probe}
         cols_to_strip = sorted(c for c in ("timestamp_hour", "dt") if c in col_names)
-        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, "rid" in col_names)
+        has_rid = "rid" in col_names
+        natural_keys = None if has_rid else _detect_natural_keys(col_names)
+        select_sql = _build_merge_select_sql(paths_sql, cols_to_strip, has_rid=has_rid, natural_keys=natural_keys)
         order_by = "ORDER BY timestamp"
         if "ip" in col_names:
             order_by += ", ip"

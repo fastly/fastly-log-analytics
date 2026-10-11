@@ -263,11 +263,20 @@ The detailed inventory and per-job specifications live under
 - **Admin Control Parity & Quarantine Inspection:** Manual trigger endpoint `POST /api/admin/ledger/sweep/{service_id}` returns HTTP 200 with `run_id` (or 400 for standard mode, 403 for read-only analysts). Quarantine inspection available via `GET /api/admin/ledger/quarantine`.
 - **Empirical Validation:** Automated contract test suite `tests/cron/test_ledger_sweep_contract.py` passed 21/21 tests covering all 10 checklist items of Section 9 in `docs/cron/jobs/ledger-sweep.md`. Sweeper core tests `tests/core/test_step4_sweeper.py` (17/17 passed), security tests `tests/security/test_no_infra_leak_in_tracked_tree.py` (passed), and `make fast-ci` (1,090 passing Python tests, 68 passing Vitest suites) green.
 
+**Cron 17: `rum_commit_{service_id}` — Standard-Mode RUM Buffer Drain, Natural Key Deduplication & Extent Sync (2026-10-11) — Audited, Verified, and Certified.**
+- **Natural Key Deduplication in DuckLake Buffer Commit:** Canonical composite natural keys established in `backend/core/iceberg/rum_schema.py` (`client_vitals`: `(timestamp, metric_name, pathname, cid, req_id)`; `client_errors`: `(timestamp, error_message, error_file, error_line, pathname, cid, req_id)`) and unified with `scripts/dedupe_rum_tables.py`. Enforced two-way deduplication in `_commit_one_chunk`: deduplicates incoming batch via window function `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY timestamp) AS _dup_rn WHERE _dup_rn = 1`, and deletes pre-existing duplicate rows in DuckLake via `DELETE FROM {lake_ident} AS lake_tbl WHERE EXISTS (SELECT 1 FROM read_parquet(...) AS incoming WHERE ... IS NOT DISTINCT FROM ...)`, avoiding DuckDB 3-part identifier catalog errors.
+- **Natural Key Deduplication in Local Compaction:** Extended `backend/core/local_compaction.py` (`_detect_natural_keys`, `_build_merge_select_sql`, `_rollup_bins`, `_compact_single_partition`) to detect RUM schemas and apply composite key deduplication across Parquet merges, ensuring compacted RUM buffers stay duplicate-free before and after lake commit.
+- **Buffer Drain & Extent Reconciliation:** Commits `client_vitals` and `client_errors` independently, recording committed row counts, updating RUM table extents (`set_rum_extent`), draining buffered files, and broadcasting live SSE `sync_status` updates with updated extents and file counts.
+- **Partial Failure & Status Isolation:** Isolated commits per table: if one table commit fails, the error is logged, the other table proceeds, the failed table's buffer is retained, and the job status transitions to `"warning"` (or `"error"` if both fail), never deleting or dropping uncommitted buffered data.
+- **ENOSPC Disk Pre-check:** Enforces disk space availability check before attempting Parquet reads and commits; aborts cleanly with status `"error"` on low disk space without mutating lake tables or buffers.
+- **Politeness Gate Alignment:** Automated ticks run without active-query deferral (commit `5a7541fd`), maintaining real-time RUM data freshness parity with request logs.
+- **Empirical Validation:** Automated contract test suite `tests/cron/test_rum_commit_contract.py` passed 7/7 tests covering all Section 9 checklist items of `docs/cron/jobs/rum-commit.md`. Unit test suites `tests/cron/test_rum_commit.py` (7/7 passed), `tests/core/test_local_compaction_branches.py` (17/17 passed), and `tests/security/test_no_infra_leak_in_tracked_tree.py` (passed).
+
 ## Next-session prompt
 
-Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, and 16 are complete; do not repeat their implementation or deployment. Proceed to Cron 17: `rum_commit_{service_id}` documented in `docs/cron/jobs/rum-commit.md`:
-1. Read `docs/cron/jobs/rum-commit.md`, `AGENTS.md` (including Traps & Gotchas and ADR-22), relevant architecture docs, and existing tests (`tests/cron/test_rum_commit*.py` or similar).
-2. Audit Standard-mode RUM commit pipeline: buffer drain into DuckLake (`client_vitals`, `client_errors`), natural key deduplication, SSE sync status notifications, and error handling.
+Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, and 17 are complete; do not repeat their implementation or deployment. Proceed to Cron 18: `ledger_rum_sweep_{service_id}` documented in `docs/cron/jobs/ledger-rum-sweep.md`:
+1. Read `docs/cron/jobs/ledger-rum-sweep.md`, `AGENTS.md` (including Traps & Gotchas and ADR-22), relevant architecture docs, and existing tests (`tests/cron/test_ledger_rum_sweep*.py` or similar).
+2. Audit High-Scale RUM ledger sweeper: state machine crash recovery, dead-letter sweeps, Celery queue depth guards, stale worker claim reclamation, and quarantine tracking.
 3. If work is needed, apply systematic debugging and TDD, update directly related docs, and run focused tests and the required project checks.
 4. Follow the authorized push/deployment procedure: commit only explicit pathspecs (never stage `.github/instructions/` or state files), push to `origin/release/v3.0.0-beta3`, contiguously run `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, and report request log lag across all 3 active environments at completion. Do not create a PR or merge.
 
@@ -280,7 +289,7 @@ Continue the Cron audit on `release/v3.0.0-beta3`. Crons 1, 2, 3, 4, 5, 6, 7, 8,
 - **High-Scale Mode Rollup Recompute:** Verified that in High-Scale mode, `_run_local_compact` derives touched hours from `ingest_ledger` within the 15-minute lookback window and executes `recompute_touched_hours` to keep pod-local Top-N rollups fresh.
 - **Automated Verification Suite:** Certified with 100% passing tests in `tests/cron/test_local_compact_contract.py` covering all 6 checklist items from `docs/cron/jobs/local-compact.md`.
 
-Next target: proceed to Cron 17 (`rum_commit_{service_id}`).
+Next target: proceed to Cron 18 (`ledger_rum_sweep_{service_id}`).
 
 **Cron 2: `log_commit_{service_id}` / `merge_lake_files` — implemented and verified (see Status below).**
 - Upstream DuckLake bug #1495 (stale cached inlined tables across multiple attachments after a flush drops them) was resolved natively by enforcing `DATA_INLINING_ROW_LIMIT 0` on every DuckLake attach (`_ducklake_attach` in `backend/core/iceberg/_ducklake.py`).

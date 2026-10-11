@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **Status: VERIFIED & OPERATIONAL (Standard Mode / Ingest Pipeline Audit)**
-> Automated test suites verified: `tests/cron/test_rum_commit.py` (4 tests passing: full commit success, partial failure warning, politeness gate deferral, disk space abort).
+> Automated test suites verified: `tests/cron/test_rum_commit.py` and `tests/cron/test_rum_commit_contract.py` (contract tests passing: full commit success, partial failure warning, both tables failure error, politeness gate removal, disk space abort, DuckLake buffer natural key deduplication, and local compaction natural key deduplication).
 
 ---
 
@@ -100,9 +100,10 @@
 ---
 
 ## 9. AI Session Automated Verification Checklist
-- [x] 1. Automated unit tests verified in `tests/cron/test_rum_commit.py`.
+- [x] 1. Automated unit tests verified in `tests/cron/test_rum_commit.py` and `tests/cron/test_rum_commit_contract.py`.
 - [x] 2. Verified full commit success with both tables: status `"success"`, row counts and files recorded.
 - [x] 3. Verified partial commit failure: status `"warning"`, raw ledger kept safe.
-- [x] 4. Verified politeness gate: background run defers during active queries; manual/force bypasses.
+- [x] 4. Verified active-requests politeness gate removal (commit `5a7541fd`): automated ticks proceed without deferral to maintain RUM freshness parity with request logs.
 - [x] 5. Verified disk space pre-check: aborts cleanly with status `"error"` on low disk.
 - [x] 6. Verified progress tracking lifecycle: `start_progress` and `end_progress` clean teardown.
+- [x] 7. Verified natural key deduplication across RUM tables (`client_vitals`, `client_errors`) in both DuckLake buffer commit and local parquet compaction.

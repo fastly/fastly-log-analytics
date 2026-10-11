@@ -40,6 +40,57 @@ def test_build_merge_select_sql_with_rid_emits_dedup_window():
     assert "WHERE _dup_rn = 1" in sql
 
 
+def test_build_merge_select_sql_with_natural_keys_vitals():
+    """RUM client_vitals natural keys → dedup via ROW_NUMBER over composite key."""
+    keys = ("timestamp", "metric_name", "pathname", "cid", "req_id")
+    sql = lc._build_merge_select_sql("'a.parquet'", ["timestamp_hour"], has_rid=False, natural_keys=keys)
+    assert (
+        'ROW_NUMBER() OVER (PARTITION BY "timestamp", "metric_name", "pathname", "cid", "req_id" ORDER BY timestamp) AS _dup_rn'
+        in sql
+    )
+    assert "WHERE _dup_rn = 1" in sql
+    assert "_dup_rn" in sql
+    assert "UNION ALL" not in sql
+
+
+def test_build_merge_select_sql_with_natural_keys_errors():
+    """RUM client_errors natural keys → dedup via ROW_NUMBER over composite key."""
+    keys = ("timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id")
+    sql = lc._build_merge_select_sql("'a.parquet'", [], has_rid=False, natural_keys=keys)
+    assert 'PARTITION BY "timestamp", "error_message", "error_file", "error_line", "pathname", "cid", "req_id"' in sql
+    assert "WHERE _dup_rn = 1" in sql
+    assert "EXCLUDE (_dup_rn)" in sql
+
+
+def test_detect_natural_keys():
+    """_detect_natural_keys accurately identifies vitals and errors schemas."""
+    vitals_cols = {"timestamp", "metric_name", "pathname", "cid", "req_id", "metric_value", "browser"}
+    assert lc._detect_natural_keys(vitals_cols) == ("timestamp", "metric_name", "pathname", "cid", "req_id")
+
+    errors_cols = {
+        "timestamp",
+        "error_message",
+        "error_file",
+        "error_line",
+        "pathname",
+        "cid",
+        "req_id",
+        "browser",
+    }
+    assert lc._detect_natural_keys(errors_cols) == (
+        "timestamp",
+        "error_message",
+        "error_file",
+        "error_line",
+        "pathname",
+        "cid",
+        "req_id",
+    )
+
+    request_cols = {"timestamp", "rid", "service_id", "status"}
+    assert lc._detect_natural_keys(request_cols) is None
+
+
 # ── _bin_pack_files: pure-function packing ─────────────────────────────────
 
 
