@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.core import quarantine
 from backend.core.metadata.quarantine import (
+    count_quarantine_evidence,
     get_quarantine_evidence,
     get_quarantine_evidence_summary,
     list_quarantine_evidence,
@@ -39,6 +40,7 @@ def list_quarantine(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     error_category: str | None = Query(default=None, min_length=1, max_length=64),
+    source_type: str | None = Query(default=None, min_length=1, max_length=32),
     source: dict = Depends(get_source),
     _admin: None = Depends(require_admin),
 ) -> dict:
@@ -49,13 +51,18 @@ def list_quarantine(
         limit=limit,
         offset=offset,
         error_category=error_category,
+        source_type=source_type,
     )
     for item in items:
         item["quarantined_at"] = str(item["quarantined_at"])
-    summary = get_quarantine_evidence_summary(service_id)
+    total = count_quarantine_evidence(
+        service_id,
+        error_category=error_category,
+        source_type=source_type,
+    )
     return {
         "items": [QuarantineEvidenceItem(**item) for item in items],
-        "total": summary["category_counts"].get(error_category, 0) if error_category else summary["total_items"],
+        "total": total,
     }
 
 
@@ -65,6 +72,7 @@ def list_ledger_quarantine(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     error_category: str | None = Query(default=None, min_length=1, max_length=64),
+    source_type: str | None = Query(default=None, min_length=1, max_length=32),
     _admin: None = Depends(require_admin),
 ) -> dict:
     from backend.core.duckdb import get_source_for_service
@@ -81,13 +89,18 @@ def list_ledger_quarantine(
         limit=limit,
         offset=offset,
         error_category=error_category,
+        source_type=source_type,
     )
     for item in items:
         item["quarantined_at"] = str(item["quarantined_at"])
-    summary = get_quarantine_evidence_summary(service_id)
+    total = count_quarantine_evidence(
+        service_id,
+        error_category=error_category,
+        source_type=source_type,
+    )
     return {
         "items": [QuarantineEvidenceItem(**item) for item in items],
-        "total": summary["category_counts"].get(error_category, 0) if error_category else summary["total_items"],
+        "total": total,
     }
 
 

@@ -182,7 +182,7 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
 
 
 @cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
-def _run_rum_ledger_sweep(service_id: str) -> None:
+def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
     """Celery-mode crash net for the RUM ledger pipeline — RUM counterpart
     of ``backend.cron.jobs.sync._run_ledger_sweep``. Registered by the
     scheduler only when high-scale mode and RUM is enabled for this
@@ -196,6 +196,8 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import finalize_cron_run_if_running, get_source_for_service, log_cron_run, start_cron_run
     from backend.core.ingest import sweep_rum_ledger_once
+    from backend.cron.jobs._common import finalize_cron_duration
+    from backend.cron.jobs.metadata import _log_and_add_progress
     from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
     src = get_source_for_service(service_id)
@@ -217,15 +219,21 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
     if not rum_enabled:
         return
 
-    run_id = None
-    try:
-        run_id = start_cron_run(src, "ledger_rum_sweep")
-    except RuntimeError as e:
-        logger.info("[ledger_rum_sweep] %s: skipping — %s", service_id, str(e))
-        return
+    if run_id is None:
+        try:
+            run_id = start_cron_run(src, "ledger_rum_sweep")
+        except RuntimeError as e:
+            logger.info("[ledger_rum_sweep] %s: skipping — %s", service_id, str(e))
+            return
 
     cleanup_progress_and_reap()
     start_progress(run_id, service_id=service_id, task="ledger_rum_sweep")
+    _log_and_add_progress(
+        run_id,
+        service_id,
+        job_name="ledger_rum_sweep",
+        event={"type": "status", "message": f"Starting RUM ledger sweep for {service_id}..."},
+    )
 
     started = time.time()
     try:
@@ -256,6 +264,12 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
             summary=summary_msg,
             error_message="; ".join(warnings) if warnings else None,
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="ledger_rum_sweep",
+            event={"type": "done", "message": summary_msg},
+        )
     except Exception as e:
         log_cron_run(
             src,
@@ -266,8 +280,15 @@ def _run_rum_ledger_sweep(service_id: str) -> None:
             error_message=str(e),
             summary="RUM ledger sweep failed",
         )
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="ledger_rum_sweep",
+            event={"type": "error", "message": str(e)},
+        )
         logger.exception("[ledger_rum_sweep] %s: sweep failed", service_id)
     finally:
         end_progress(run_id)
         if run_id is not None:
             finalize_cron_run_if_running(src, "ledger_rum_sweep", run_id)
+        finalize_cron_duration(src, run_id, started)

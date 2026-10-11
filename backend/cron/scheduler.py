@@ -1068,21 +1068,35 @@ class Scheduler:
                         rum_disc_interval_secs,
                     )
 
-                rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
-                seen_ids.add(rum_sweep_job_id)
-                if rum_sweep_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_rum_ledger_sweep,
-                        "interval",
-                        minutes=15,
-                        args=[service_id],
-                        id=rum_sweep_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=300,
-                    )
-                    self._job_ids[rum_sweep_job_id] = rum_sweep_job_id
-                    logger.info("🧹 [scheduler] Registered ledger_rum_sweep job %s (every 15m).", rum_sweep_job_id)
+                rum_sweep_cfg = prov.get("cron_ledger_rum_sweep") or prov.get("cron_rum_ledger_sweep") or {}
+                if rum_sweep_cfg.get("enabled", True):
+                    rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
+                    rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
+                    seen_ids.add(rum_sweep_job_id)
+                    if rum_sweep_job_id in self._job_ids:
+                        try:
+                            job = self._sched.get_job(rum_sweep_job_id)
+                            if job:
+                                job.reschedule("interval", minutes=rum_sweep_interval_mins)
+                        except Exception:
+                            pass
+                    else:
+                        self._add_job(
+                            _run_rum_ledger_sweep,
+                            "interval",
+                            minutes=rum_sweep_interval_mins,
+                            args=[service_id],
+                            id=rum_sweep_job_id,
+                            max_instances=1,
+                            coalesce=True,
+                            misfire_grace_time=300,
+                        )
+                        self._job_ids[rum_sweep_job_id] = rum_sweep_job_id
+                        logger.info(
+                            "🧹 [scheduler] Registered ledger_rum_sweep job %s (every %dm).",
+                            rum_sweep_job_id,
+                            rum_sweep_interval_mins,
+                        )
             elif rum_enabled:
                 rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_sync_job_id = f"rum_sync_{service_id}"

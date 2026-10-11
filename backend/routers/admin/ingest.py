@@ -202,6 +202,62 @@ def rum_discovery_service(
     return SyncStartResponse(**res)
 
 
+@router.post(
+    "/admin/rum/ledger/sweep/{service_id}",
+    response_model=SyncStartResponse,
+    response_model_exclude_unset=True,
+)
+def rum_ledger_sweep_service(
+    service_id: str,
+    _admin: None = Depends(require_admin),
+    source: dict = Depends(get_source),
+) -> SyncStartResponse:
+    if source.get("access_level") == "read_only":
+        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM ledger sweep.")
+
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_scale_mode(source):
+        raise HTTPException(
+            status_code=400,
+            detail="RUM ledger sweep is only supported under high-scale mode.",
+        )
+
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        raise HTTPException(
+            status_code=400,
+            detail="Service configuration not found.",
+        )
+
+    raw_rum = cfg.get("rum")
+    rum_dict: dict[str, object] = raw_rum if isinstance(raw_rum, dict) else {}
+    rum_enabled = (
+        bool(rum_dict.get("enabled"))
+        if "enabled" in rum_dict and rum_dict.get("enabled") is not None
+        else bool(cfg.get("rum_enabled", False))
+    )
+    if not rum_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="RUM is not enabled for this service.",
+        )
+
+    from backend.cron.jobs.rum_ledger import _run_rum_ledger_sweep
+    from backend.repositories.dashboard import invalidate_service
+    from backend.utils.router_utils import start_or_resume_cron
+
+    invalidate_service(source["name"])
+    res = start_or_resume_cron(
+        source,
+        "ledger_rum_sweep",
+        _run_rum_ledger_sweep,
+        success_msg="RUM ledger sweep started.",
+        in_progress_msg="RUM ledger sweep already running.",
+    )
+    return SyncStartResponse(**res)
+
+
 @router.post("/admin/ingest-logs")
 def ingest_endpoint(
     start_time: str | None = Query(default=None),

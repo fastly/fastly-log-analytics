@@ -1,8 +1,11 @@
 # Background Job Specification: `ledger_rum_sweep_{service_id}`
 
 > [!NOTE]
-> **Status: VERIFIED & OPERATIONAL (High-Scale Architecture / Ingest Pipeline Audit)**
-> Automated test suites verified: `tests/cron/test_ledger_rum_sweep.py` (5 tests passing: high-scale recovery success, broker/dead-letter warning status, standard mode guard, read_only guard, dev-mode suppression).
+> **Status: AUDITED, VERIFIED, AND CERTIFIED (High-Scale Architecture / Ingest Pipeline Audit)**
+> Comprehensive automated contract and unit test suites verified:
+> - `tests/cron/test_ledger_rum_sweep_contract.py` (25 tests covering API triggers, RBAC, re-entrancy, standard-mode/read-only guards, quarantine filtering, execution lifecycle, duration finalization, scheduler registration/rescheduling/gates, and Redis/Celery queue safety).
+> - `tests/cron/test_ledger_rum_sweep.py` (5 tests covering high-scale recovery success, broker/dead-letter warning status, standard mode guard, read_only guard, and dev-mode suppression).
+> - `tests/core/test_rum_ledger.py` & `tests/core/test_rum_ledger_edges.py` (39 tests covering RUM state machine transitions, claim reclamation, batch dispatch, and quarantine tracking).
 
 ---
 
@@ -96,3 +99,8 @@
 - [x] 3. Verified Celery broker failure or dead-letter accumulation records `status='warning'` with error details.
 - [x] 4. Verified standard-mode and read-only guards skip cleanly.
 - [x] 5. Verified clean progress lifecycle (`start_progress`, `end_progress`) and `finalize_cron_run_if_running`.
+- [x] 6. Verified manual trigger endpoint `POST /api/admin/rum/ledger/sweep/{service_id}` with re-entrancy 409, standard-mode 400, RUM-disabled 400, and RBAC 403 enforcement.
+- [x] 7. Verified quarantine inspection with `source_type=rum` filtering and exact item counts across `/api/admin/ledger/quarantine` and `/api/admin/quarantine`.
+- [x] 8. Verified dynamic scheduler registration, interval override via `cron_ledger_rum_sweep.interval_minutes`, and `enabled: false` clean unregistration.
+- [x] 9. Verified Celery queue depth safety probe against `q.ingest` before batch redispatch.
+- [x] 10. Verified duration tracking and telemetry finalization via `finalize_cron_duration`.

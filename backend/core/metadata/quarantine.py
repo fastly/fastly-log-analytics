@@ -282,6 +282,7 @@ def list_quarantine_evidence(
     *,
     oldest_first: bool = False,
     error_category: str | None = None,
+    source_type: str | None = None,
 ) -> list[dict]:
     con = get_con(service_id)
     order = "ASC" if oldest_first else "DESC"
@@ -296,6 +297,9 @@ def list_quarantine_evidence(
     if error_category is not None:
         query += " AND error_category = ?"
         params.append(error_category)
+    if source_type is not None:
+        query += " AND source_type = ?"
+        params.append(source_type)
     query += f" ORDER BY quarantined_at {order}, id {order} LIMIT ? OFFSET ?"
     params.extend((limit, offset))
     rows = con.execute(query, params).fetchall()
@@ -314,6 +318,25 @@ def list_quarantine_evidence(
         "quarantined_at",
     )
     return [dict(zip(names, row, strict=True)) for row in rows]
+
+
+def count_quarantine_evidence(
+    service_id: str,
+    *,
+    error_category: str | None = None,
+    source_type: str | None = None,
+) -> int:
+    con = get_con(service_id)
+    query = "SELECT count(*) FROM quarantine_evidence WHERE service_id = ?"
+    params: list[object] = [service_id]
+    if error_category is not None:
+        query += " AND error_category = ?"
+        params.append(error_category)
+    if source_type is not None:
+        query += " AND source_type = ?"
+        params.append(source_type)
+    row = con.execute(query, params).fetchone()
+    return int(row[0]) if row else 0
 
 
 def get_quarantine_evidence_summary(service_id: str) -> dict:
