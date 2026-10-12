@@ -2,11 +2,13 @@
 
 ## 1. Overview & Objectives
 - **Job Identifier:** `insights_prewarmer_{service_id}`
-- **Status:** Resource-contention mitigation; production latency remeasurement pending rollout.
+- **Status:** Serial/default-only mitigation deployed; follow-up SQL optimization locally verified, pending approved rollout.
 - **Category:** Analytics Cache Prewarming & Anomaly Pre-Computation
 - **Purpose:** Precomputes baseline statistical distributions and anomaly detection metrics for the Insights page (`/insights`), prewarming the in-memory cache every 240 seconds.
 - **Why It Runs:** Calculating statistical anomaly baselines requires multi-dimensional aggregations and percentile calculations. The cache TTL is 300 seconds (`INSIGHTS_CACHE_TTL = 300`). The 240s cadence aims to keep the adaptive default warm, but contention, deferral and run duration can still cause cache misses.
 - **Resource Policy:** Warm only the adaptive default for admin and eligible analyst shapes, using `max_workers=1`. Do not automatically warm the additional 24h/720h month comparison; it remains available on demand. Standard-mode measurements found repeated 91–95s prewarmer runs alongside 3.0–4.8s dashboard requests, compared with 1.1–2.2s after prewarming finished. This mitigation reduces background query concurrency and removes the extra historical scan; it does not guarantee sub-second dashboard latency.
+- **Follow-up SQL optimization:** Cached computation telemetry identified crawler/referral matching at 17.6s, stale-browser detection at 15.8s, and shared window materialization at 11.1s. The two matching queries use literal substring searches against lowercased UA/referrer strings instead of repeated case-insensitive wildcard matching. Classification priority, null handling, distinct-IP counts, window boundaries and thresholds must remain unchanged. Initial one-million-row synthetic measurements showed crawler matching at 0.44–0.48s versus 1.59–2.73s and stale-browser matching at 0.66–0.82s versus 1.13–1.56s; these are isolated query measurements, not a production dashboard latency guarantee. Production impact requires a subsequent approved rollout and remeasurement during prewarming.
+- **Positive-result verification:** A further one-million-row, two-thread synthetic run produced identical non-empty result rows before and after the change. Median crawler query time fell from 581ms to 173ms (3.36×); stale-browser query time fell from 425ms to 214ms (1.99×). Repository regressions cover mixed-case brands, overlapping classification tokens, Unicode-containing strings, null UA/referrer/IP, distinct referral counting, crawler exclusions, Chrome parsing and window/threshold boundaries.
 
 ---
 

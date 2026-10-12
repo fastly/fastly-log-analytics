@@ -1428,33 +1428,34 @@ CRAWLER_DISPARITY = """
         WITH crawler_traffic AS (
             SELECT
                 CASE
-                    WHEN ua ILIKE '%Claude-SearchBot%' THEN 'Anthropic (Claude)'
-                    WHEN ua ILIKE '%Amzn-SearchBot%' THEN 'Amazon (Rufus/Alexa)'
-                    WHEN ua ILIKE '%GPTBot%' OR ua ILIKE '%ChatGPT-User%' THEN 'OpenAI'
-                    WHEN ua ILIKE '%SemrushBot%' THEN 'Semrush'
-                    WHEN ua ILIKE '%AhrefsBot%' THEN 'Ahrefs'
+                    WHEN contains(lower(ua), 'claude-searchbot') THEN 'Anthropic (Claude)'
+                    WHEN contains(lower(ua), 'amzn-searchbot') THEN 'Amazon (Rufus/Alexa)'
+                    WHEN contains(lower(ua), 'gptbot') OR contains(lower(ua), 'chatgpt-user') THEN 'OpenAI'
+                    WHEN contains(lower(ua), 'semrushbot') THEN 'Semrush'
+                    WHEN contains(lower(ua), 'ahrefsbot') THEN 'Ahrefs'
                     ELSE 'Other Crawler'
                 END AS bot_brand,
                 COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_crawls,
                 COUNT(*) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_crawls
             FROM {table_name}
-            WHERE ua ILIKE '%bot%' OR ua ILIKE '%crawler%' OR ua ILIKE '%spider%' OR ua ILIKE '%ahrefs%' OR ua ILIKE '%semrush%'
+            WHERE contains(lower(ua), 'bot') OR contains(lower(ua), 'crawler') OR contains(lower(ua), 'spider')
+               OR contains(lower(ua), 'ahrefs') OR contains(lower(ua), 'semrush')
             GROUP BY bot_brand
         ),
         referred_traffic AS (
             SELECT
                 CASE
-                    WHEN referer ILIKE '%claude.ai%' OR ua ILIKE '%Claude-User%' THEN 'Anthropic (Claude)'
-                    WHEN referer ILIKE '%amazon.com%' OR referer ILIKE '%amazon.co%' THEN 'Amazon (Rufus/Alexa)'
-                    WHEN referer ILIKE '%openai.com%' OR referer ILIKE '%chatgpt.com%' THEN 'OpenAI'
-                    WHEN referer ILIKE '%semrush.com%' THEN 'Semrush'
-                    WHEN referer ILIKE '%ahrefs.com%' THEN 'Ahrefs'
+                    WHEN contains(lower(referer), 'claude.ai') OR contains(lower(ua), 'claude-user') THEN 'Anthropic (Claude)'
+                    WHEN contains(lower(referer), 'amazon.com') OR contains(lower(referer), 'amazon.co') THEN 'Amazon (Rufus/Alexa)'
+                    WHEN contains(lower(referer), 'openai.com') OR contains(lower(referer), 'chatgpt.com') THEN 'OpenAI'
+                    WHEN contains(lower(referer), 'semrush.com') THEN 'Semrush'
+                    WHEN contains(lower(referer), 'ahrefs.com') THEN 'Ahrefs'
                     ELSE 'Other Crawler'
                 END AS bot_brand,
                 COUNT(DISTINCT ip) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ)) AS w_referrals,
                 COUNT(DISTINCT ip) FILTER (WHERE timestamp < CAST(? AS TIMESTAMPTZ)) AS b_referrals
             FROM {table_name}
-            WHERE ua NOT ILIKE '%bot%' AND ua NOT ILIKE '%crawler%' AND ua NOT ILIKE '%spider%'
+            WHERE NOT contains(lower(ua), 'bot') AND NOT contains(lower(ua), 'crawler') AND NOT contains(lower(ua), 'spider')
             GROUP BY bot_brand
         )
         SELECT
@@ -1479,7 +1480,8 @@ STALE_BROWSER_VERSION = r"""
                 (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
                 (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
             FROM {table_name}
-            WHERE ua ILIKE '%Chrome%' AND ua NOT ILIKE '%bot%' AND ua NOT ILIKE '%crawler%' AND ua NOT ILIKE '%spider%'
+            WHERE contains(lower(ua), 'chrome') AND NOT contains(lower(ua), 'bot')
+              AND NOT contains(lower(ua), 'crawler') AND NOT contains(lower(ua), 'spider')
         ),
         version_aggregates AS (
             SELECT

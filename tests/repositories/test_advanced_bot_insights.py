@@ -4,8 +4,83 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import duckdb
+import pytest
+
 from backend.repositories._base import _safe_table
+from backend.repositories._sql import insights as SQL
 from backend.repositories.insights import _insights_cache, get_insights
+
+
+@pytest.mark.parametrize(
+    ("ua", "referer", "referral_ua", "brand"),
+    [
+        ("Claude-SearchBot GPTBot", "https://CLAUDE.AI/chatgpt.com", "Browser", "Anthropic (Claude)"),
+        ("AMZN-SEARCHBOT", "https://AMAZON.CO.uk", "Browser", "Amazon (Rufus/Alexa)"),
+        ("gPtBoT ChatGPT-User", "https://CHATGPT.COM", "Browser", "OpenAI"),
+        ("SemrushBOT", "https://SEMRUSH.COM", "Browser", "Semrush"),
+        ("AHREFSBOT", "https://AHREFS.COM", "Browser", "Ahrefs"),
+        ("Claude-SearchBot", None, "CLAUDE-USER", "Anthropic (Claude)"),
+        ("\u0130 Claude-SearchBot", "https://claude.ai/\u00df", "Browser", "Anthropic (Claude)"),
+    ],
+)
+def test_crawler_matching_preserves_referrals(
+    in_memory_duckdb: duckdb.DuckDBPyConnection,
+    ua: str,
+    referer: str | None,
+    referral_ua: str,
+    brand: str,
+) -> None:
+    con = in_memory_duckdb
+    boundary = datetime(2026, 1, 2, tzinfo=UTC)
+    before = boundary - timedelta(seconds=1)
+    con.execute("CREATE TABLE ua_logs (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, referer VARCHAR)")
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL FROM range(1000)", [boundary, ua])
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', ?, NULL FROM range(20)", [before, ua])
+    con.executemany(
+        "INSERT INTO ua_logs VALUES (?, ?, ?, ?)",
+        [
+            (boundary, "192.0.2.2", referral_ua, referer),
+            (boundary, "192.0.2.2", referral_ua, referer),
+            (before, "192.0.2.3", referral_ua, referer),
+            (before, "192.0.2.4", referral_ua, referer),
+            (boundary, None, referral_ua, referer),
+            (boundary, "192.0.2.5", None, referer),
+            (boundary, "192.0.2.6", "Crawler", referer),
+            (boundary, "192.0.2.7", "Spider", referer),
+            (boundary, "192.0.2.8", "Browser BOT", referer),
+        ],
+    )
+    rows = con.execute(SQL.CRAWLER_DISPARITY.format(table_name="ua_logs"), [boundary] * 4).fetchall()
+    assert rows == [(brand, 1000, 1, 1000.0, 10.0)]
+
+
+def test_stale_browser_matching_preserves_exclusions_and_window(
+    in_memory_duckdb: duckdb.DuckDBPyConnection,
+) -> None:
+    con = in_memory_duckdb
+    boundary = datetime(2026, 1, 2, tzinfo=UTC)
+    before = boundary - timedelta(seconds=1)
+    con.execute("CREATE TABLE ua_logs (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR)")
+    con.execute(
+        "INSERT INTO ua_logs SELECT ?, CASE WHEN i % 15 = 0 THEN NULL ELSE '192.0.2.' || (i % 15) END, "
+        "'Mozilla \u0130 Chrome/100.0' FROM range(600) t(i)",
+        [boundary],
+    )
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.1', 'Chrome/100.0' FROM range(24)", [before])
+    for ua in [
+        "Chrome/100.0 BoT",
+        "Chrome/100.0 cRaWlEr",
+        "Chrome/100.0 SPIDER",
+        "chrome/100.0",
+        "Chrome/131.0",
+        "Chrome/invalid",
+        None,
+    ]:
+        con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.2', ? FROM range(600)", [boundary, ua])
+    con.execute("INSERT INTO ua_logs SELECT ?, '192.0.2.3', 'Chrome/110.0' FROM range(499)", [boundary])
+    query = SQL.STALE_BROWSER_VERSION.format(table_name="ua_logs", baseline_hours=24, window_hours=1)
+    assert con.execute(query, [boundary] * 2).fetchall() == [("Chrome 100", 600, 14, 600.0)]
 
 
 def test_advanced_bot_insights_trigger(in_memory_duckdb, test_service_source):
