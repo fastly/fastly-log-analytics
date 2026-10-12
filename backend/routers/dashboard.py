@@ -154,6 +154,9 @@ async def dashboard_bundle(
     from backend.repositories import security as security_repo
     from backend.repositories._base import SectionTimer
 
+    timer = SectionTimer()
+    section_timings = timer.entries
+
     # Resolve+clamp ONCE here so BOTH sub-queries (_run_aggregates and
     # _run_top_bots) close over the same clamped window — neither can scan
     # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
@@ -193,12 +196,14 @@ async def dashboard_bundle(
     # sub-query pattern below: await the checkout task to completion on
     # cancellation so the holder records the connection for the finally to
     # release.
+    t_prewarm = time.perf_counter()
     _prewarm = asyncio.create_task(asyncio.to_thread(lambda: ctx.con))
     try:
         await asyncio.shield(_prewarm)
     except asyncio.CancelledError:
         await _prewarm
         raise
+    timer.mark("bundle:primary_checkout", t_prewarm)
 
     sections = _expand_sections(req.sections)
     its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
@@ -207,9 +212,6 @@ async def dashboard_bundle(
     # ``topten`` is requested, and only run top_bots when ``bots`` is.
     want_aggregates = sections is None or bool(sections & {"core", "topten"})
     want_bots = sections is None or "bots" in sections
-
-    timer = SectionTimer()
-    section_timings = timer.entries
 
     def _run_aggregates(con) -> Any:
         return repo.get_aggregates(
@@ -319,6 +321,7 @@ async def dashboard_bundle(
         checkout_result.append(res)
         return res
 
+    t_second_checkout = time.perf_counter()
     try:
         await asyncio.shield(_shielded_checkout())
         if checkout_result:
@@ -337,6 +340,8 @@ async def dashboard_bundle(
                 pass
         second_cm = None
         second_con = None
+    finally:
+        timer.mark("bundle:second_checkout", t_second_checkout)
 
     if parallel:
         # Two-connection concurrent path. Wrap each repo call in
