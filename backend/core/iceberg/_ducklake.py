@@ -7,9 +7,11 @@ the attach contract:
 - **Local Storage Architecture**: Standard deployments store all committed
   DuckLake parquet files locally under ``/app/data/services/{service_id}/ducklake/``
   on fast local disk for instant analytical queries with 0 network latency.
-  FOS / S3 is strictly an ingress drop bucket for incoming raw ``.gz`` logs.
-  Remote S3 parquet scans are prohibited unless explicitly permitted via
-  ``ALLOW_REMOTE_S3_PARQUET_SCAN=1``.
+  FOS / S3 serves as the edge ingress destination for raw ``.gz`` logs as well
+  as the durable cloud backup/sync store for periodic commits (every
+  ``commit_interval_mins``), archive Parquet, and synchronized admin state.
+  Remote S3 parquet scans are prohibited during analytical queries unless
+  explicitly permitted via ``ALLOW_REMOTE_S3_PARQUET_SCAN=1``.
 - **Tenant isolation**: when ``DUCKLAKE_CATALOG`` points every service at
   one shared catalog (e.g. a Postgres DSN), a bare ``lake.logs`` would mix
   tenants. :func:`ducklake_table_name` derives a per-service table name

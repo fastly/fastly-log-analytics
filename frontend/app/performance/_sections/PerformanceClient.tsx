@@ -183,9 +183,10 @@ function PerformanceBody({
           icon={<Network className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Calculating latency percentiles..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={!coreData?.waterfall?.avg}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={
             <div className="space-y-4">
@@ -233,9 +234,10 @@ function PerformanceBody({
           }
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling endpoint latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_urls?.length ?? 0) === 0}
-          className="min-h-[300px]"
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestUrlsHelp />}
         >
@@ -262,9 +264,10 @@ function PerformanceBody({
           }
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling network latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.top_asns?.length ?? 0) === 0}
-          className="min-h-[300px]"
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestNetworksHelp />}
         >
@@ -284,9 +287,10 @@ function PerformanceBody({
           icon={<Clock className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling cache TTL distribution..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(distData?.ttl_dist?.length ?? 0) === 0}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<CacheTtlHelp />}
         >
@@ -294,16 +298,18 @@ function PerformanceBody({
             data={ttlDistData}
             layout={TTL_DIST_LAYOUT}
             height="100%"
-          />        </AnalyticsCard>
+          />
+        </AnalyticsCard>
 
         <AnalyticsCard
           title="Origin vs Edge Processing (ms)"
           icon={<Zap className="h-4 w-4" />}
           isLoading={performanceQuery.isLoading}
           isFetching={performanceQuery.isFetching}
+          loadingMessage="Profiling origin vs edge latency..."
           error={performanceQuery.error as AnalyticsCardError | null}
           isEmpty={(coreData?.scatter?.length ?? 0) === 0}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<OriginVsEdgeHelp />}
         >
@@ -311,7 +317,8 @@ function PerformanceBody({
             data={scatterData}
             layout={SCATTER_LAYOUT}
             height="100%"
-          />        </AnalyticsCard>
+          />
+        </AnalyticsCard>
       </div>
     </>
   )
