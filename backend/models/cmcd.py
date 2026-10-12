@@ -161,11 +161,14 @@ class ContentSecurityBlockRequest(BaseModel):
     # All conditions must match (AND). One per category — two values for the
     # same category could never both match.
     conditions: Annotated[list[ContentSecurityBlockCondition], Field(min_length=1, max_length=7)]
+    # 0 blocks matching traffic outright; > 0 throttles it to that many kbps.
+    kbps: Annotated[int, Field(ge=0, le=10_000_000)] = 0
 
 
 class ContentSecurityBlock(BaseModel):
     id: str
     conditions: list[ContentSecurityBlockCondition]
+    kbps: int = 0
     created_at: str
     created_by: str
     unblocked_at: str | None = None

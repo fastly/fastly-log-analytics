@@ -2,8 +2,8 @@
 
 Admin-only (``/api/admin/*`` is blocked for analysts in ``remote_access``, and
 every route also depends on ``require_admin``). Blocking calls the operator's
-HTTP function — ``POST`` ``{"conditions": [{category, value}, ...]}`` blocks
-requests matching ALL conditions, ``DELETE`` with the same body reverts — and
+HTTP function — ``POST`` ``{"kbps": N, "conditions": [{category, value}, ...]}``
+blocks (``kbps`` 0) or throttles (``kbps`` > 0) requests matching ALL conditions, ``DELETE`` with the same body reverts — and
 records the result in ``content_security_blocklist`` plus the service's audit
 log. A row is written only after the function returns 2xx,
 so the active list never claims a block the function rejected.
@@ -172,6 +172,14 @@ def _describe(conditions: list[dict]) -> str:
     return " AND ".join(f"{c['category']}={c['value']}" for c in conditions)
 
 
+def _already(conditions: list[dict], kbps: int) -> dict:
+    state = "blocked" if kbps == 0 else f"throttled to {kbps} kbps"
+    return make_error(
+        "already_blocked",
+        f"{_describe(conditions)} is already {state}. Remove that rule before adding a different one.",
+    )
+
+
 @router.post("/admin/content-security/blocks", response_model=ContentSecurityBlock, status_code=201)
 def create_content_security_block(
     body: ContentSecurityBlockRequest,
@@ -181,31 +189,34 @@ def create_content_security_block(
     _require_read_write_source(source)
     service_id = _service_id_from_source(source)
     conditions = _normalize_conditions(body.conditions)
-    already = make_error("already_blocked", f"{_describe(conditions)} is already blocked")
-    if blocks_db.find_active_block(service_id, conditions):
-        raise HTTPException(status_code=409, detail=already)
+    kbps = body.kbps
+    # One active rule per condition set: to switch between block and a throttle
+    # rate, remove the existing rule first.
+    existing = blocks_db.find_active_block(service_id, conditions)
+    if existing:
+        raise HTTPException(status_code=409, detail=_already(conditions, existing["kbps"]))
     url, auth_header = _blocklist_target_or_409()
 
     try:
-        status = call_blocklist(url, "POST", conditions, auth_header)
+        status = call_blocklist(url, "POST", conditions, kbps, auth_header)
     except BlocklistCallError as exc:
         record_audit(
             service_id,
             "content_security_block_failed",
-            {"conditions": conditions, "error": str(exc)},
+            {"conditions": conditions, "kbps": kbps, "error": str(exc)},
             actor=_ACTOR,
         )
         raise HTTPException(status_code=502, detail=make_error("blocklist_call_failed", str(exc))) from exc
 
     try:
-        block = blocks_db.insert_block(service_id, conditions, _ACTOR)
+        block = blocks_db.insert_block(service_id, conditions, kbps, _ACTOR)
     except psycopg.errors.UniqueViolation as exc:
         # A concurrent request recorded the same block between our check and insert.
-        raise HTTPException(status_code=409, detail=already) from exc
+        raise HTTPException(status_code=409, detail=_already(conditions, kbps)) from exc
     record_audit(
         service_id,
         "content_security_block",
-        {"block_id": block["id"], "conditions": conditions, "status": status},
+        {"block_id": block["id"], "conditions": conditions, "kbps": kbps, "status": status},
         actor=_ACTOR,
     )
     return block
@@ -228,12 +239,12 @@ def delete_content_security_block(
     conditions = block["conditions"]
 
     try:
-        status = call_blocklist(url, "DELETE", conditions, auth_header)
+        status = call_blocklist(url, "DELETE", conditions, block["kbps"], auth_header)
     except BlocklistCallError as exc:
         record_audit(
             service_id,
             "content_security_unblock_failed",
-            {"block_id": block_id, "conditions": conditions, "error": str(exc)},
+            {"block_id": block_id, "conditions": conditions, "kbps": block["kbps"], "error": str(exc)},
             actor=_ACTOR,
         )
         raise HTTPException(status_code=502, detail=make_error("blocklist_call_failed", str(exc))) from exc
@@ -242,7 +253,7 @@ def delete_content_security_block(
     record_audit(
         service_id,
         "content_security_unblock",
-        {"block_id": block_id, "conditions": conditions, "status": status},
+        {"block_id": block_id, "conditions": conditions, "kbps": block["kbps"], "status": status},
         actor=_ACTOR,
     )
     assert updated is not None

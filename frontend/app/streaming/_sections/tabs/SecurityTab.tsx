@@ -42,7 +42,9 @@ import { SubscriberIpsDialog } from './SubscriberIpsDialog'
 import {
   BLOCK_CATEGORY_LABELS,
   BlockDialog,
+  BlockMark,
   describeConditions,
+  removeLabel,
   useBlockActions,
   useBlocklist,
   type Block,
@@ -78,15 +80,6 @@ const blockId = (category: BlockCategory, value: string) => `${category}\u0000${
 
 /** Active single-condition block on exactly this (category, value), if any. */
 type BlockLookup = (category: BlockCategory, value: string) => Block | undefined
-
-function BlockedMark() {
-  return (
-    <span className="inline-flex shrink-0 text-destructive" title="Blocked">
-      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-      <span className="sr-only">Blocked</span>
-    </span>
-  )
-}
 
 const BANDWIDTH_LAYOUT = {
   yaxis: { title: { text: 'Bandwidth' }, tickformat: '.3s', ticksuffix: 'bps', rangemode: 'tozero' as const },
@@ -160,7 +153,7 @@ export function SubscriberTable({
               ) : (
                 row.subscriber_id
               )}
-              {block && <BlockedMark />}
+              {block && <BlockMark kbps={block.kbps} />}
               </span>
             </TableCell>
             <TableCell className="text-right tabular-nums font-medium">{row.distinct_ips.toLocaleString()}</TableCell>
@@ -200,13 +193,13 @@ export function SubscriberTable({
                     {block && onUnblock ? (
                       <DropdownMenuItem onClick={() => onUnblock(block)}>
                         <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Unblock</span>
+                        <span>{removeLabel(block.kbps)}</span>
                       </DropdownMenuItem>
                     ) : (
                       onBlock && (
                         <DropdownMenuItem onClick={() => onBlock(row.subscriber_id)}>
                           <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Block…</span>
+                          <span>Block or throttle…</span>
                         </DropdownMenuItem>
                       )
                     )}
@@ -263,14 +256,14 @@ function TopTable({
             extraItems = (
               <DropdownMenuItem onClick={() => onUnblock(block)}>
                 <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Unblock</span>
+                <span>{removeLabel(block.kbps)}</span>
               </DropdownMenuItem>
             )
           } else if (onBlock) {
             extraItems = (
               <DropdownMenuItem onClick={() => onBlock(row.value)}>
                 <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Block…</span>
+                <span>Block or throttle…</span>
               </DropdownMenuItem>
             )
           }
@@ -285,7 +278,7 @@ function TopTable({
                     extraItems={extraItems}
                   />
                 </span>
-                {block && <BlockedMark />}
+                {block && <BlockMark kbps={block.kbps} />}
               </span>
             </TableCell>
             {showUsers && (
@@ -318,7 +311,7 @@ function BlockConditionsList({ conditions }: { conditions: BlockCondition[] }) {
   )
 }
 
-/** Admin-only: every active block for this service, each with an Unblock button. */
+/** Admin-only: every active block or throttle for this service, each with an Unblock / Remove button. */
 function BlockedCard({
   blocks,
   configured,
@@ -348,19 +341,20 @@ function BlockedCard({
   if (configured === false) {
     body = (
       <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-        Blocking is off. Set a blocklist endpoint in Admin → Overall Settings → Content Security.
+        Blocking and throttling are off. Set a blocklist endpoint in Admin → Overall Settings → Content Security.
       </p>
     )
   } else if (!blocks.length) {
-    body = <p className="px-2 py-6 text-center text-sm text-muted-foreground">No values are blocked.</p>
+    body = <p className="px-2 py-6 text-center text-sm text-muted-foreground">No values are blocked or throttled.</p>
   } else {
     body = (
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Conditions</TableHead>
-            <TableHead className="text-right">Blocked</TableHead>
-            <TableHead className="w-28">
+            <TableHead>Action</TableHead>
+            <TableHead className="text-right">Added</TableHead>
+            <TableHead className="w-36">
               <span className="sr-only">Actions</span>
             </TableHead>
           </TableRow>
@@ -370,6 +364,12 @@ function BlockedCard({
             <TableRow key={b.id}>
               <TableCell className="max-w-[28rem]">
                 <BlockConditionsList conditions={b.conditions} />
+              </TableCell>
+              <TableCell className="whitespace-nowrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <BlockMark kbps={b.kbps} />
+                  {b.kbps === 0 ? 'Block' : `Throttle to ${b.kbps} kbps`}
+                </span>
               </TableCell>
               <TableCell className="text-right tabular-nums whitespace-nowrap">
                 {formatDate(b.created_at, timezone, 'yyyy-MM-dd HH:mm:ss')}
@@ -381,14 +381,14 @@ function BlockedCard({
                   className="h-7 text-xs"
                   disabled={pending != null}
                   onClick={() => void unblock(b)}
-                  aria-label={`Unblock ${describeConditions(b.conditions)}`}
+                  aria-label={`${removeLabel(b.kbps)} ${describeConditions(b.conditions)}`}
                 >
                   {pending === b.id ? (
                     <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                   ) : (
                     <Undo2 className="h-3 w-3 mr-1" />
                   )}
-                  {pending === b.id ? 'Unblocking…' : 'Unblock'}
+                  {pending === b.id ? 'Removing…' : removeLabel(b.kbps)}
                 </Button>
               </TableCell>
             </TableRow>
@@ -400,8 +400,8 @@ function BlockedCard({
 
   return (
     <AnalyticsCard
-      title="Blocked"
-      description="Values sent to your blocklist endpoint for this service."
+      title="Blocked & Throttled"
+      description="Rules sent to your blocklist endpoint for this service."
       icon={<ShieldBan className="h-4 w-4" />}
       isLoading={isLoading}
       className="min-h-[160px]"
@@ -750,7 +750,7 @@ export default function SecurityTab({
         anchor={anchor}
         timezone={timezone}
         onBlock={isAdmin ? (options, initial) => setBlockRequest({ options, initial }) : undefined}
-        isBlocked={(category, value) => findBlock(category, value) != null}
+        findBlock={findBlock}
       />
 
       {isAdmin && (

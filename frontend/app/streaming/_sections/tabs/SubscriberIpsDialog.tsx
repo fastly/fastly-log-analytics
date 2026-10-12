@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import type { components } from '@/types/api.generated'
 import type { StreamingTabProps } from './QualityTab'
-import type { BlockCategory, BlockCondition, BlockOption } from './blocklist'
+import { BlockMark, type Block, type BlockCategory, type BlockCondition, type BlockOption } from './blocklist'
 
 type SubscriberIpsData = components['schemas']['SubscriberIpsResponse']
 
@@ -63,7 +63,7 @@ type SubscriberIpsDialogProps = StreamingTabProps & {
   onClose: () => void
   /** Admin-only: opens the Block dialog with this subscriber id and its IPs to choose from. */
   onBlock?: (options: BlockOption[], initial: BlockCondition) => void
-  isBlocked?: (category: BlockCategory, value: string) => boolean
+  findBlock?: (category: BlockCategory, value: string) => Block | undefined
 }
 
 /** Every client IP one subscriber id was seen from in the window (admin-only drill-down). */
@@ -72,7 +72,7 @@ export function SubscriberIpsDialog({
   contentId,
   onClose,
   onBlock,
-  isBlocked,
+  findBlock,
   activeServiceId,
   filterPayload,
   startTime,
@@ -167,12 +167,10 @@ export function SubscriberIpsDialog({
                   <TableCell className="font-mono text-xs">
                     <span className="inline-flex items-center gap-1.5">
                       {row.ip}
-                      {isBlocked?.('ip', row.ip) && (
-                        <span className="text-destructive" title="Blocked">
-                          <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span className="sr-only">Blocked</span>
-                        </span>
-                      )}
+                      {(() => {
+                        const block = findBlock?.('ip', row.ip)
+                        return block ? <BlockMark kbps={block.kbps} /> : null
+                      })()}
                     </span>
                   </TableCell>
                   <TableCell>{row.country ? `${resolveCountryName(row.country)} (${row.country})` : '—'}</TableCell>
@@ -222,7 +220,7 @@ export function SubscriberIpsDialog({
             {onBlock && (
               <Button variant="destructive" onClick={openBlock} disabled={!data}>
                 <Ban className="h-3 w-3 mr-1" aria-hidden="true" />
-                Block…
+                Block or throttle…
               </Button>
             )}
           </div>

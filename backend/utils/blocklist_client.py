@@ -2,9 +2,10 @@
 
 Contract (configured in Admin → Overall Settings → Content Security):
 
-- ``POST <url>`` with JSON ``{"conditions": [{"category": ..., "value": ...}]}``
-  blocks requests matching ALL conditions (AND). Always an array, even for
-  one condition, so receivers handle a single shape.
+- ``POST <url>`` with JSON ``{"kbps": N, "conditions": [{"category": ..., "value": ...}]}``
+  acts on requests matching ALL conditions (AND): ``kbps`` 0 blocks them,
+  > 0 throttles them to that rate. ``conditions`` is always an array, even
+  for one condition, so receivers handle a single shape.
 - ``DELETE <url>`` with the same JSON body reverts the block.
 
 An optional operator-configured header (e.g. ``Authorization: Bearer …``)
@@ -81,7 +82,7 @@ def parse_auth_header(raw: str) -> tuple[str, str]:
     return name, value
 
 
-def call_blocklist(url: str, method: str, conditions: list[dict], auth_header: str | None = None) -> int:
+def call_blocklist(url: str, method: str, conditions: list[dict], kbps: int = 0, auth_header: str | None = None) -> int:
     """Send one block (``POST``) or unblock (``DELETE``) call; return the HTTP status.
 
     Raises :class:`BlocklistCallError` on transport failure or a non-2xx reply.
@@ -91,7 +92,7 @@ def call_blocklist(url: str, method: str, conditions: list[dict], auth_header: s
     try:
         with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False, transport=_TRANSPORT) as client:
             headers = dict([parse_auth_header(auth_header)]) if auth_header else None
-            resp = client.request(method, url, json={"conditions": conditions}, headers=headers)
+            resp = client.request(method, url, json={"kbps": kbps, "conditions": conditions}, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("blocklist %s to %s failed: %s", method, host, type(exc).__name__)
         raise BlocklistCallError(f"Could not reach the blocklist endpoint ({type(exc).__name__})") from exc

@@ -187,6 +187,10 @@ _INGEST_LEDGER_INDEX_NAMES = (
 # rerunnable pattern as ``_INGEST_LEDGER_ALTERS`` above.
 _QUARANTINED_FILES_ALTERS = ("ALTER TABLE quarantined_files ADD COLUMN IF NOT EXISTS reason_counts TEXT DEFAULT '{}'",)
 _CRON_RUNS_ALTERS = ("ALTER TABLE cron_runs ADD COLUMN IF NOT EXISTS outcome_counters TEXT NOT NULL DEFAULT '{}'",)
+# kbps (block vs throttle) landed after the table shipped on dev databases.
+_CS_BLOCKLIST_ALTERS = (
+    "ALTER TABLE content_security_blocklist ADD COLUMN IF NOT EXISTS kbps INTEGER NOT NULL DEFAULT 0",
+)
 
 # SQLSTATEs that mean "a concurrently-booting pod created this first".
 # 42P07 duplicate_table (covers indexes too), 42710 duplicate_object,
@@ -249,6 +253,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_INGEST_LEDGER_ALTERS)
     statements.extend(_QUARANTINED_FILES_ALTERS)
     statements.extend(_CRON_RUNS_ALTERS)
+    statements.extend(_CS_BLOCKLIST_ALTERS)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)
     statements.append(_SEED_INITIAL_TOS_DDL)

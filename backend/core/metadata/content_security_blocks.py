@@ -16,7 +16,7 @@ import uuid
 from backend.core.metadata.base import get_con
 from backend.utils.date_utils import iso_z_now
 
-_COLUMNS = "id, service_id, conditions, created_at, created_by, unblocked_at, unblocked_by"
+_COLUMNS = "id, service_id, conditions, kbps, created_at, created_by, unblocked_at, unblocked_by"
 
 
 def canonical_conditions(conditions: list[dict]) -> list[dict]:
@@ -33,6 +33,7 @@ def _row(r) -> dict:
         "id": r["id"],
         "service_id": r["service_id"],
         "conditions": json.loads(r["conditions"]),
+        "kbps": int(r["kbps"]),
         "created_at": str(r["created_at"]),
         "created_by": r["created_by"],
         "unblocked_at": str(r["unblocked_at"]) if r["unblocked_at"] is not None else None,
@@ -71,13 +72,13 @@ def find_active_block(service_id: str, conditions: list[dict]) -> dict | None:
     return _row(row) if row else None
 
 
-def insert_block(service_id: str, conditions: list[dict], actor: str) -> dict:
-    """Record a block the HTTP function has accepted; returns the stored row."""
+def insert_block(service_id: str, conditions: list[dict], kbps: int, actor: str) -> dict:
+    """Record a block (kbps 0) or throttle the HTTP function has accepted; returns the stored row."""
     block_id = str(uuid.uuid4())
     con = get_con(service_id)
     con.execute(
-        "INSERT INTO content_security_blocklist (id, service_id, conditions, created_by) VALUES (?, ?, ?, ?)",
-        (block_id, service_id, _encode(conditions), actor),
+        "INSERT INTO content_security_blocklist (id, service_id, conditions, kbps, created_by) VALUES (?, ?, ?, ?, ?)",
+        (block_id, service_id, _encode(conditions), kbps, actor),
     )
     con.commit()
     block = get_block(service_id, block_id)

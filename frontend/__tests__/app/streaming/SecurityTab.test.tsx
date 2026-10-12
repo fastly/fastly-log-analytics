@@ -446,6 +446,7 @@ test('masked subscriber ids are not clickable', async () => {
 const BLOCK = {
   id: 'blk-1',
   conditions: [{ category: 'country', value: 'US' }],
+  kbps: 0,
   created_at: '2026-01-01T00:59:00Z',
   created_by: 'admin',
   unblocked_at: null,
@@ -476,17 +477,17 @@ test('Block from a leaderboard menu confirms the clicked value, then offers Undo
   renderTab()
 
   await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  await user.click(await screen.findByText('Block…'))
+  await user.click(await screen.findByText('Block or throttle…'))
 
   const dialog = await screen.findByRole('dialog')
-  expect(within(dialog).getByText('Block access')).toBeInTheDocument()
+  expect(within(dialog).getByText('Block or throttle access')).toBeInTheDocument()
   // One category in a leaderboard: no category picker, the clicked value preselected.
   expect(within(dialog).queryByText('Category')).not.toBeInTheDocument()
   expect(within(dialog).getByRole('combobox', { name: 'Country' })).toHaveTextContent('United States (US)')
 
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }] }]))
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }], kbps: 0 }]))
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   expect(showToastWithAction).toHaveBeenCalledWith(
     'Blocked Country US',
@@ -508,14 +509,14 @@ test('Block dialog lets the user pick a different value from the list', async ()
   renderTab()
 
   await user.click(await screen.findByRole('button', { name: 'Filter actions for hosting' }))
-  await user.click(await screen.findByText('Block…'))
+  await user.click(await screen.findByText('Block or throttle…'))
   const dialog = await screen.findByRole('dialog')
 
   await user.click(within(dialog).getByRole('combobox', { name: 'Proxy type' }))
   await user.click(await screen.findByRole('option', { name: 'anonymous' }))
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'proxy_type', value: 'anonymous' }] }]))
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'proxy_type', value: 'anonymous' }], kbps: 0 }]))
 })
 
 test('Block dialog accepts a custom value', async () => {
@@ -524,7 +525,7 @@ test('Block dialog accepts a custom value', async () => {
   renderTab()
 
   await user.click(await screen.findByRole('button', { name: 'Filter actions for pirate.example' }))
-  await user.click(await screen.findByText('Block…'))
+  await user.click(await screen.findByText('Block or throttle…'))
   const dialog = await screen.findByRole('dialog')
 
   await user.click(within(dialog).getByRole('combobox', { name: 'Host' }))
@@ -534,7 +535,7 @@ test('Block dialog accepts a custom value', async () => {
   await user.type(within(dialog).getByRole('textbox', { name: 'Custom host' }), 'mirror.example')
   await user.click(blockButton)
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'host', value: 'mirror.example' }] }]))
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'host', value: 'mirror.example' }], kbps: 0 }]))
 })
 
 test('a failed block keeps the dialog open with the error', async () => {
@@ -546,7 +547,7 @@ test('a failed block keeps the dialog open with the error', async () => {
   renderTab()
 
   await user.click(await screen.findByRole('button', { name: 'Filter actions for vpn' }))
-  await user.click(await screen.findByText('Block…'))
+  await user.click(await screen.findByText('Block or throttle…'))
   const dialog = await screen.findByRole('dialog')
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
@@ -561,13 +562,13 @@ test('subscriber rows get an actions menu with Block', async () => {
 
   await user.click(await screen.findByRole('button', { name: 'Actions for acct-home' }))
   expect(await screen.findByText('Show IP addresses')).toBeInTheDocument()
-  await user.click(screen.getByText('Block…'))
+  await user.click(screen.getByText('Block or throttle…'))
 
   const dialog = await screen.findByRole('dialog')
   expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-home')
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'subscriber_id', value: 'acct-home' }] }]))
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'subscriber_id', value: 'acct-home' }], kbps: 0 }]))
 })
 
 test('the subscriber dialog Block button offers the subscriber ID or any of its IPs', async () => {
@@ -583,7 +584,7 @@ test('the subscriber dialog Block button offers the subscriber ID or any of its 
   await user.click(within(ipsDialog).getByRole('button', { name: /Block/ }))
 
   const dialogs = await screen.findAllByRole('dialog')
-  const dialog = dialogs.find((d) => within(d).queryByText('Block access')) as HTMLElement
+  const dialog = dialogs.find((d) => within(d).queryByText('Block or throttle access')) as HTMLElement
   expect(within(dialog).getByRole('combobox', { name: 'Subscriber ID' })).toHaveTextContent('acct-shared')
 
   await user.click(within(dialog).getByRole('combobox', { name: 'Category' }))
@@ -596,7 +597,7 @@ test('the subscriber dialog Block button offers the subscriber ID or any of its 
   await user.click(screen.getByRole('option', { name: '203.0.113.2' }))
   await user.click(within(dialog).getByRole('button', { name: 'Block' }))
 
-  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'ip', value: '203.0.113.2' }] }]))
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'ip', value: '203.0.113.2' }], kbps: 0 }]))
 })
 
 test('Blocked card lists active blocks; values show a mark and offer Unblock', async () => {
@@ -605,7 +606,7 @@ test('Blocked card lists active blocks; values show a mark and offer Unblock', a
   const user = userEvent.setup()
   renderTab()
 
-  const card = await waitFor(() => cardByTitle('Blocked'))
+  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
   expect(await card.findByText('United States (US)')).toBeInTheDocument()
   expect(card.getByText('2026-01-01 00:59:00')).toBeInTheDocument()
 
@@ -613,7 +614,7 @@ test('Blocked card lists active blocks; values show a mark and offer Unblock', a
   expect(within(usRow).getByTitle('Blocked')).toBeInTheDocument()
   await user.click(within(usRow).getByRole('button', { name: 'Filter actions for US' }))
   expect(await screen.findByText('Unblock')).toBeInTheDocument()
-  expect(screen.queryByText('Block…')).not.toBeInTheDocument()
+  expect(screen.queryByText('Block or throttle…')).not.toBeInTheDocument()
   await user.keyboard('{Escape}')
 
   await user.click(card.getByRole('button', { name: 'Unblock Country US' }))
@@ -629,9 +630,9 @@ test('without a blocklist endpoint the dialog explains and cannot confirm', asyn
   const user = userEvent.setup()
   renderTab()
 
-  expect(await screen.findByText(/Blocking is off/)).toBeInTheDocument()
+  expect(await screen.findByText(/Blocking and throttling are off/)).toBeInTheDocument()
   await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
-  await user.click(await screen.findByText('Block…'))
+  await user.click(await screen.findByText('Block or throttle…'))
   const dialog = await screen.findByRole('dialog')
   expect(within(dialog).getByText(/No blocklist endpoint is configured/)).toBeInTheDocument()
   expect(within(dialog).getByRole('button', { name: 'Block' })).toBeDisabled()
@@ -646,8 +647,8 @@ test('analysts get no block actions and never query the blocklist', async () => 
 
   await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
   expect(await screen.findByText('Copy value')).toBeInTheDocument()
-  expect(screen.queryByText('Block…')).not.toBeInTheDocument()
-  expect(screen.queryByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === 'Blocked')).not.toBeInTheDocument()
+  expect(screen.queryByText('Block or throttle…')).not.toBeInTheDocument()
+  expect(screen.queryByText((_, e) => e?.getAttribute('data-slot') === 'card-title' && e.textContent === 'Blocked & Throttled')).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument()
   expect(getMock).not.toHaveBeenCalledWith('/api/admin/content-security/blocks', expect.anything())
 })
@@ -666,7 +667,7 @@ test('a multi-condition (AND) block is listed with every condition but marks no 
   const user = userEvent.setup()
   renderTab()
 
-  const card = await waitFor(() => cardByTitle('Blocked'))
+  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
   expect(await card.findByText('United States (US)')).toBeInTheDocument()
   expect(card.getByText('and')).toBeInTheDocument()
   expect(card.getByText('Proxy type')).toBeInTheDocument()
@@ -679,6 +680,70 @@ test('a multi-condition (AND) block is listed with every condition but marks no 
   await waitFor(() =>
     expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
       params: { path: { block_id: 'blk-and' } },
+    }),
+  )
+})
+
+test('the dialog can throttle instead of block, and the list shows the rate', async () => {
+  routePosts()
+  postMock.mockImplementation(((path: string, init: { body: { conditions: unknown[]; kbps: number } }) =>
+    Promise.resolve({
+      data:
+        path === '/api/admin/content-security/blocks'
+          ? { ...BLOCK, conditions: init.body.conditions, kbps: init.body.kbps }
+          : FULL_RESPONSE,
+    })) as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for US' }))
+  await user.click(await screen.findByText('Block or throttle…'))
+  const dialog = await screen.findByRole('dialog')
+
+  const action = within(dialog).getByRole('combobox', { name: 'Action' })
+  expect(action).toHaveTextContent('Block (no traffic allowed)')
+  await user.click(action)
+  const labels = (await screen.findAllByRole('option')).map((o) => o.textContent)
+  expect(labels).toEqual([
+    'Block (no traffic allowed)',
+    'Throttle to: 128 kbps',
+    'Throttle to: 256 kbps',
+    'Throttle to: 512 kbps',
+  ])
+  await user.click(screen.getByRole('option', { name: 'Throttle to: 256 kbps' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Throttle' }))
+
+  await waitFor(() =>
+    expect(blockCalls()).toEqual([{ conditions: [{ category: 'country', value: 'US' }], kbps: 256 }]),
+  )
+  expect(showToastWithAction).toHaveBeenCalledWith(
+    'Throttled Country US to 256 kbps',
+    expect.objectContaining({ actionLabel: 'Undo' }),
+  )
+})
+
+test('a throttle is listed with its rate and offers Remove throttle', async () => {
+  const throttle = { ...BLOCK, id: 'thr-1', kbps: 512 }
+  getMock.mockResolvedValue({ data: { configured: true, blocks: [throttle] } } as never)
+  vi.mocked(client.DELETE).mockResolvedValue({ data: { ...throttle, unblocked_at: '2026-01-01T01:00:00Z' } } as never)
+  const user = userEvent.setup()
+  renderTab()
+
+  const card = await waitFor(() => cardByTitle('Blocked & Throttled'))
+  expect(await card.findByText('Throttle to 512 kbps')).toBeInTheDocument()
+
+  // The leaderboard value carries a throttle mark, not a block mark.
+  const [, usRow] = cardByTitle('Countries (Top 10)').getAllByRole('row')
+  expect(within(usRow).getByTitle('Throttled to 512 kbps')).toBeInTheDocument()
+  expect(within(usRow).queryByTitle('Blocked')).not.toBeInTheDocument()
+  await user.click(within(usRow).getByRole('button', { name: 'Filter actions for US' }))
+  expect(await screen.findByText('Remove throttle')).toBeInTheDocument()
+  await user.keyboard('{Escape}')
+
+  await user.click(card.getByRole('button', { name: 'Remove throttle Country US' }))
+  await waitFor(() =>
+    expect(client.DELETE).toHaveBeenCalledWith('/api/admin/content-security/blocks/{block_id}', {
+      params: { path: { block_id: 'thr-1' } },
     }),
   )
 })

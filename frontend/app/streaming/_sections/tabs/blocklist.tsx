@@ -3,7 +3,7 @@
 import React from 'react'
 import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
-import { Ban, Loader2 } from 'lucide-react'
+import { Ban, Gauge, Loader2 } from 'lucide-react'
 import { client, extractApiError } from '@/lib/api'
 import { buildServiceHref } from '@/lib/navigation'
 import { showToast, showToastWithAction } from '@/lib/toast'
@@ -40,6 +40,33 @@ export interface BlockOption {
 
 const CUSTOM = '__custom__'
 
+/** Throttle rates offered in the dialog, in kbps. 0 (Block) is always offered first. */
+export const THROTTLE_KBPS = [128, 256, 512] as const
+
+/** "Blocked" or "Throttled to 256 kbps". */
+export function describeAction(kbps: number) {
+  return kbps === 0 ? 'Blocked' : `Throttled to ${kbps} kbps`
+}
+
+/** Label for reverting a rule: "Unblock" or "Remove throttle". */
+export function removeLabel(kbps: number) {
+  return kbps === 0 ? 'Unblock' : 'Remove throttle'
+}
+
+/** Inline mark beside a value with an active rule: red ban for a block, amber gauge for a throttle. */
+export function BlockMark({ kbps }: { kbps: number }) {
+  const label = describeAction(kbps)
+  return (
+    <span
+      className={kbps === 0 ? 'inline-flex shrink-0 text-destructive' : 'inline-flex shrink-0 text-amber-600 dark:text-amber-500'}
+      title={label}
+    >
+      {kbps === 0 ? <Ban className="h-3.5 w-3.5" aria-hidden="true" /> : <Gauge className="h-3.5 w-3.5" aria-hidden="true" />}
+      <span className="sr-only">{label}</span>
+    </span>
+  )
+}
+
 /** Admin-only: the service's active blocks and whether a blocklist URL is configured. */
 export function useBlocklist(activeServiceId: string | null, enabled: boolean) {
   return useServiceQuery<BlocksData | undefined>(
@@ -73,17 +100,19 @@ export function useBlockActions(activeServiceId: string | null) {
       })
       await invalidate()
       if (error) throw error
-      showToast(`Unblocked ${describeConditions(block.conditions)}`, 'info')
+      const what = describeConditions(block.conditions)
+      showToast(block.kbps === 0 ? `Unblocked ${what}` : `Removed throttle on ${what}`, 'info')
     },
     [invalidate],
   )
 
   const block = React.useCallback(
-    async (conditions: BlockCondition[]) => {
-      const { data, error } = await client.POST('/api/admin/content-security/blocks', { body: { conditions } })
+    async (conditions: BlockCondition[], kbps: number) => {
+      const { data, error } = await client.POST('/api/admin/content-security/blocks', { body: { conditions, kbps } })
       if (error) throw error
       await invalidate()
-      showToastWithAction(`Blocked ${describeConditions(data.conditions)}`, {
+      const what = describeConditions(data.conditions)
+      showToastWithAction(data.kbps === 0 ? `Blocked ${what}` : `Throttled ${what} to ${data.kbps} kbps`, {
         actionLabel: 'Undo',
         kind: 'success',
         durationMs: 10_000,
@@ -114,12 +143,14 @@ export function BlockDialog({
   /** undefined while the blocks query is loading. */
   configured: boolean | undefined
   activeServiceId: string | null
-  onConfirm: (conditions: BlockCondition[]) => Promise<unknown>
+  /** kbps 0 blocks; > 0 throttles to that rate. */
+  onConfirm: (conditions: BlockCondition[], kbps: number) => Promise<unknown>
 }) {
   const categories = React.useMemo(() => [...new Set(options.map((o) => o.category))], [options])
   const [category, setCategory] = React.useState<BlockCategory | null>(initial?.category ?? null)
   const [choice, setChoice] = React.useState<string>(initial?.value ?? '')
   const [custom, setCustom] = React.useState('')
+  const [kbps, setKbps] = React.useState(0)
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -130,6 +161,7 @@ export function BlockDialog({
     setCategory(initial?.category ?? categories[0] ?? null)
     setChoice(initial?.value ?? '')
     setCustom('')
+    setKbps(0)
     setError(null)
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [open, initial, categories])
@@ -150,7 +182,7 @@ export function BlockDialog({
     setError(null)
     try {
       // The dialog builds one condition today; the API takes the full AND list.
-      await onConfirm([{ category, value }])
+      await onConfirm([{ category, value }], kbps)
       onOpenChange(false)
     } catch (e) {
       setError(extractApiError(e))
@@ -165,11 +197,11 @@ export function BlockDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <Ban className="h-4 w-4" aria-hidden="true" />
-            Block access
+            Block or throttle access
           </DialogTitle>
           <DialogDescription>
-            Sends the category and value to your blocklist endpoint. You can undo this from the notification or the
-            Blocked list.
+            Sends the category, value and rate to your blocklist endpoint. You can undo this from the notification or
+            the Blocked &amp; Throttled list.
           </DialogDescription>
         </DialogHeader>
 
@@ -218,6 +250,23 @@ export function BlockDialog({
             )}
           </div>
 
+          <div className="space-y-2">
+            <Label id="block-action-label">Action</Label>
+            <Select value={String(kbps)} onValueChange={(v) => v != null && setKbps(Number(v))}>
+              <SelectTrigger aria-labelledby="block-action-label" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">Block (no traffic allowed)</SelectItem>
+                {THROTTLE_KBPS.map((rate) => (
+                  <SelectItem key={rate} value={String(rate)}>
+                    {`Throttle to: ${rate} kbps`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           {configured === false && (
             <p className="text-xs text-muted-foreground">
               No blocklist endpoint is configured. Set one in{' '}
@@ -239,8 +288,14 @@ export function BlockDialog({
             Cancel
           </Button>
           <Button variant="destructive" onClick={() => void confirm()} disabled={!canConfirm}>
-            {busy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Ban className="h-3 w-3 mr-1" />}
-            {busy ? 'Blocking…' : 'Block'}
+            {busy ? (
+              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+            ) : kbps === 0 ? (
+              <Ban className="h-3 w-3 mr-1" />
+            ) : (
+              <Gauge className="h-3 w-3 mr-1" />
+            )}
+            {kbps === 0 ? (busy ? 'Blocking…' : 'Block') : busy ? 'Throttling…' : 'Throttle'}
           </Button>
         </DialogFooter>
       </DialogContent>

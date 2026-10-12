@@ -80,8 +80,9 @@ export function ContentSecuritySettingsPanel() {
         <p className="text-xs text-muted-foreground">
           Blocklist endpoint for Streaming → Content Security. Blocking sends{' '}
           <code className="font-mono">POST</code> with JSON{' '}
-          <code className="font-mono">{'{"conditions": [{"category": "country", "value": "CN"}]}'}</code>. All
-          conditions must match. Undo sends <code className="font-mono">DELETE</code> with the same body. Leave empty
+          <code className="font-mono">{'{"kbps": 0, "conditions": [{"category": "country", "value": "CN"}]}'}</code>.
+          All conditions must match; <code className="font-mono">kbps</code> 0 blocks, a positive value throttles to that
+          rate. Undo sends <code className="font-mono">DELETE</code> with the same body. Leave empty
           to turn blocking off.
         </p>
       </div>

@@ -7079,6 +7079,11 @@ export interface components {
             id: string;
             /** Conditions */
             conditions: components["schemas"]["ContentSecurityBlockCondition"][];
+            /**
+             * Kbps
+             * @default 0
+             */
+            kbps: number;
             /** Created At */
             created_at: string;
             /** Created By */
@@ -7102,6 +7107,11 @@ export interface components {
         ContentSecurityBlockRequest: {
             /** Conditions */
             conditions: components["schemas"]["ContentSecurityBlockCondition"][];
+            /**
+             * Kbps
+             * @default 0
+             */
+            kbps: number;
         };
         /** ContentSecurityBlocksResponse */
         ContentSecurityBlocksResponse: {

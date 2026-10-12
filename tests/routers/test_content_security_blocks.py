@@ -46,8 +46,8 @@ def _cond(category, value):
     return {"category": category, "value": value}
 
 
-def _post(client, conditions):
-    return client.post("/api/admin/content-security/blocks", headers=_HEADERS, json={"conditions": conditions})
+def _post(client, conditions, **extra):
+    return client.post("/api/admin/content-security/blocks", headers=_HEADERS, json={"conditions": conditions, **extra})
 
 
 def _block(client, category="country", value="CN"):
@@ -221,7 +221,7 @@ def test_block_posts_conditions_array_and_records_block(client, remote, configur
     assert block["unblocked_at"] is None
 
     # Always an array, even for one condition.
-    assert remote.calls == [("POST", _URL, {"conditions": [_cond("proxy_type", "hosting")]})]
+    assert remote.calls == [("POST", _URL, {"kbps": 0, "conditions": [_cond("proxy_type", "hosting")]})]
 
     listing = client.get("/api/admin/content-security/blocks", headers=_HEADERS).json()
     assert listing["configured"] is True
@@ -229,7 +229,7 @@ def test_block_posts_conditions_array_and_records_block(client, remote, configur
 
     assert (
         "content_security_block",
-        {"block_id": block["id"], "conditions": [_cond("proxy_type", "hosting")], "status": 200},
+        {"block_id": block["id"], "conditions": [_cond("proxy_type", "hosting")], "kbps": 0, "status": 200},
     ) in _audit_events()
 
 
@@ -271,7 +271,47 @@ def test_ip_block_validates_and_normalizes(client, remote, configured):
     resp = _block(client, "ip", "2001:DB8::0001")
     assert resp.status_code == 201
     assert resp.json()["conditions"] == [_cond("ip", "2001:db8::1")]
-    assert remote.calls[-1][2] == {"conditions": [_cond("ip", "2001:db8::1")]}
+    assert remote.calls[-1][2] == {"kbps": 0, "conditions": [_cond("ip", "2001:db8::1")]}
+
+
+def test_throttle_sends_kbps_and_records_it(client, remote, configured):
+    resp = _post(client, [_cond("country", "RS")], kbps=256)
+    assert resp.status_code == 201
+    block = resp.json()
+    assert block["kbps"] == 256
+    assert remote.calls == [("POST", _URL, {"kbps": 256, "conditions": [_cond("country", "RS")]})]
+    assert (
+        "content_security_block",
+        {
+            "block_id": block["id"],
+            "conditions": [_cond("country", "RS")],
+            "kbps": 256,
+            "status": 200,
+        },
+    ) in _audit_events()
+
+    # Removing it sends the same body, rate included.
+    client.delete(f"/api/admin/content-security/blocks/{block['id']}", headers=_HEADERS)
+    assert remote.calls[-1] == ("DELETE", _URL, {"kbps": 256, "conditions": [_cond("country", "RS")]})
+
+
+def test_block_defaults_to_kbps_zero(client, remote, configured):
+    assert _block(client).json()["kbps"] == 0
+    assert remote.calls[0][2]["kbps"] == 0
+
+
+def test_one_active_rule_per_condition_set_regardless_of_rate(client, remote, configured):
+    assert _post(client, [_cond("country", "RS")], kbps=128).status_code == 201
+    resp = _block(client, "country", "RS")
+    assert resp.status_code == 409
+    assert "already throttled to 128 kbps" in resp.json()["detail"]["message"]
+    assert len(remote.calls) == 1
+
+
+@pytest.mark.parametrize("kbps", [-1, 10_000_001, "fast"])
+def test_invalid_kbps_rejected(client, remote, configured, kbps):
+    assert _post(client, [_cond("country", "RS")], kbps=kbps).status_code == 422
+    assert remote.calls == []
 
 
 def test_unknown_category_rejected(client, remote, configured):
@@ -284,12 +324,14 @@ def test_multiple_conditions_are_sent_together_in_canonical_order(client, remote
     assert resp.status_code == 201
     expected = [_cond("country", "RS"), _cond("proxy_type", "hosting")]
     assert resp.json()["conditions"] == expected
-    assert remote.calls == [("POST", _URL, {"conditions": expected})]
+    assert remote.calls == [("POST", _URL, {"kbps": 0, "conditions": expected})]
 
     # Same condition set in another order is the same block.
     dup = _post(client, [_cond("country", "RS"), _cond("proxy_type", "hosting")])
     assert dup.status_code == 409
-    assert dup.json()["detail"]["message"] == "country=RS AND proxy_type=hosting is already blocked"
+    assert dup.json()["detail"]["message"] == (
+        "country=RS AND proxy_type=hosting is already blocked. Remove that rule before adding a different one."
+    )
     assert len(remote.calls) == 1
 
     # A subset is a different (broader) block.
@@ -319,7 +361,7 @@ def test_unblock_sends_delete_with_same_body(client, remote, configured):
     resp = client.delete(f"/api/admin/content-security/blocks/{block['id']}", headers=_HEADERS)
     assert resp.status_code == 200
     assert resp.json()["unblocked_at"] is not None
-    assert remote.calls[-1] == ("DELETE", _URL, {"conditions": [_cond("subscriber_id", "acct-123")]})
+    assert remote.calls[-1] == ("DELETE", _URL, {"kbps": 0, "conditions": [_cond("subscriber_id", "acct-123")]})
     assert client.get("/api/admin/content-security/blocks", headers=_HEADERS).json()["blocks"] == []
     assert "content_security_unblock" in [e for e, _ in _audit_events()]
 
@@ -338,7 +380,7 @@ def test_unblock_multi_condition_block_sends_all_conditions(client, remote, conf
     assert remote.calls[-1] == (
         "DELETE",
         _URL,
-        {"conditions": [_cond("country", "RS"), _cond("ip", "203.0.113.7")]},
+        {"kbps": 0, "conditions": [_cond("country", "RS"), _cond("ip", "203.0.113.7")]},
     )
 
 

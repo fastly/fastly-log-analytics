@@ -536,12 +536,14 @@ _SCHEMA = [
     # HTTP function. ``conditions`` is the canonical JSON list of
     # {category, value} pairs (sorted by category, compact separators) — all
     # must match (AND) — so the text itself is the dedupe key. A row is active
-    # until unblocked_at is set; history is kept (the audit log also records
+    # until unblocked_at is set; history is kept. ``kbps`` 0 blocks; > 0
+    # throttles matching traffic to that rate (the audit log also records
     # every call).
     """CREATE TABLE IF NOT EXISTS content_security_blocklist (
         id TEXT PRIMARY KEY,
         service_id TEXT NOT NULL,
         conditions TEXT NOT NULL,
+        kbps INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         created_by TEXT NOT NULL,
         unblocked_at TEXT,

@@ -119,10 +119,12 @@ The **Content Security** tab (`?tab=security`) lets an admin act on what it show
 ### HTTP function contract
 | Action | Request | Success |
 |---|---|---|
-| Block | `POST <url>` with JSON `{"conditions": [{"category": "<category>", "value": "<value>"}]}` | any 2xx |
+| Block / throttle | `POST <url>` with JSON `{"kbps": <n>, "conditions": [{"category": "<category>", "value": "<value>"}]}` | any 2xx |
 | Revert | `DELETE <url>` with the same JSON body | any 2xx |
 
-Example: `{"conditions": [{"category": "country", "value": "CN"}]}`.
+Example: `{"kbps": 0, "conditions": [{"category": "country", "value": "CN"}]}`.
+
+- **`kbps`** sets the action: `0` blocks matching traffic outright, and a positive number throttles (paces) it to that many kbps. It's always present and is repeated on `DELETE`. The dialog offers **Block (no traffic allowed)** and **Throttle to: 128 / 256 / 512 kbps**; the API accepts any integer 0–10,000,000. A condition set has one active rule at a time, so to switch between block and a rate, remove the existing rule first (otherwise `409 already_blocked`).
 
 - **`conditions` is always an array**, even for one condition, so receivers handle a single shape. **All conditions must match (AND)**: `[{country: RS}, {proxy_type: hosting}]` blocks hosting-proxy traffic from Serbia, not all of Serbia. The UI sends one condition today; the API accepts up to one per category.
 - Conditions are sent sorted by `category`, and the same order is used on `DELETE`.
@@ -131,9 +133,9 @@ Example: `{"conditions": [{"category": "country", "value": "CN"}]}`.
 `ip` values are validated and normalized (e.g. `2001:DB8::0001` → `2001:db8::1`). Redirects are **not** followed (a 3xx is a failure), and calls time out after 10 s.
 
 ### Where Block appears
-- **Leaderboards** (Countries, Referers, Hosts, Proxy Types, Proxy Descriptions): **Block…** in each value's menu, below the filter and copy actions.
-- **Subscriber IDs by Distinct IPs:** a new per-row actions menu (**⋯**) with **Show IP addresses** and **Block…**.
-- **Subscriber dialog:** a **Block…** button. This is the only place to block an **IP address**.
+- **Leaderboards** (Countries, Referers, Hosts, Proxy Types, Proxy Descriptions): **Block or throttle…** in each value's menu, below the filter and copy actions.
+- **Subscriber IDs by Distinct IPs:** a new per-row actions menu (**⋯**) with **Show IP addresses** and **Block or throttle…**.
+- **Subscriber dialog:** a **Block or throttle…** button. This is the only place to block an **IP address**.
 
 ### Block dialog
 The dialog defaults to the value that was clicked. The user can pick another value from the same list or enter a **Custom value…**. From the Subscriber dialog the user can also switch **Category** between the subscriber ID and any of its IPs (an IP seen from several countries appears once). Confirm stays disabled while no blocklist URL is configured, and the dialog links to Admin settings.
@@ -142,11 +144,11 @@ The dialog defaults to the value that was clicked. The user can pick another val
 - The backend calls the function. **Only a 2xx records the block**, so a rejected call leaves no row; the dialog stays open with the error.
 - A success toast (`Blocked Country US`) offers **Undo** for 10 s; Undo sends the `DELETE`.
 - Values with an active block show a red ban mark, and their menu offers **Unblock** instead of Block.
-- The **Blocked** card lists every active block for the service with an **Unblock** button. If the `DELETE` fails, the block stays active and an error toast is shown.
+- The **Blocked & Throttled** card lists every active rule for the service with its **Action** (Block, or Throttle to N kbps) and an **Unblock** / **Remove throttle** button. Values with a block show a red ban mark; values with a throttle show an amber gauge mark (hover for the rate). If the `DELETE` fails, the block stays active and an error toast is shown.
 
 ### Storage & audit
-- Postgres `content_security_blocklist` (`id`, `service_id`, `conditions`, `created_at/by`, `unblocked_at/by`). `conditions` is canonical JSON (sorted by category, compact), so the same set in any order is the same block. Unblocking stamps `unblocked_at` rather than deleting, so history is kept. A partial unique index allows at most one *active* block per (service, condition set), and a duplicate returns `409 already_blocked` without calling the function. A subset is a different, broader block.
-- Only single-condition blocks put the red mark on a leaderboard value; a multi-condition block doesn't block that value on its own. The **Blocked** card lists each block's conditions joined by "and".
+- Postgres `content_security_blocklist` (`id`, `service_id`, `conditions`, `kbps`, `created_at/by`, `unblocked_at/by`). `conditions` is canonical JSON (sorted by category, compact), so the same set in any order is the same block. Unblocking stamps `unblocked_at` rather than deleting, so history is kept. A partial unique index allows at most one *active* block per (service, condition set), and a duplicate returns `409 already_blocked` without calling the function. A subset is a different, broader block.
+- Only single-condition blocks put the red mark on a leaderboard value; a multi-condition block doesn't block that value on its own. The **Blocked & Throttled** card lists each rule's conditions joined by "and".
 - Every attempt is written to the service's audit log: `content_security_block`, `content_security_unblock`, and `*_failed` variants with the error.
 
 ### Endpoints

@@ -46446,6 +46446,11 @@
             "type": "array",
             "title": "Conditions"
           },
+          "kbps": {
+            "type": "integer",
+            "title": "Kbps",
+            "default": 0
+          },
           "created_at": {
             "type": "string",
             "title": "Created At"
@@ -46525,6 +46530,13 @@
             "maxItems": 7,
             "minItems": 1,
             "title": "Conditions"
+          },
+          "kbps": {
+            "type": "integer",
+            "maximum": 10000000.0,
+            "minimum": 0.0,
+            "title": "Kbps",
+            "default": 0
           }
         },
         "type": "object",
