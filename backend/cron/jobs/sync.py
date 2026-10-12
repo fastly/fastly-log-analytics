@@ -61,16 +61,19 @@ def _ingest_with_adaptive_followups(
     }
     max_files = ingest_kwargs.get("max_files")
     pass_new_files = 0
+    adaptive_deadline_s = float(os.environ.get("INGEST_INCREMENTAL_ADAPTIVE_DEADLINE_S", "5.0"))
 
     while True:
         if pass_number:
             sleep_time = 0.0 if (max_files and pass_new_files >= max_files) else 0.5
-            if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > 15:
+            if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > adaptive_deadline_s:
                 break
             # Publish this pass's rows now; the caller's final refresh only
             # runs after the whole polling window.
             if after_pass is not None and pass_rows > 0:
                 after_pass()
+            if time.monotonic() - started + sleep_time > adaptive_deadline_s:
+                break
             if sleep_time > 0:
                 time.sleep(sleep_time)
             yield {"type": "status", "message": "Adaptive polling: checking for newly arrived log files."}
@@ -407,15 +410,6 @@ def _run_log_discovery_cron(
 
             refresh_view_and_warm_pool(src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress)
             try:
-                t_status = time.time()
-                refresh_config_status(service_id, include_top_values=False)
-                _progress(
-                    {
-                        "type": "status",
-                        "message": f"{elapsed()} [adaptive] refresh_config_status: "
-                        f"{int((time.time() - t_status) * 1000)}ms",
-                    }
-                )
                 from backend.sync_status_publisher import publisher as _pub
                 from backend.sync_status_snapshot import compute_sync_status_cached as _snap
 
@@ -584,27 +578,27 @@ def _run_log_discovery_cron(
                                 ),
                             )
 
-                            if done_event.get("new_files", 0) > 1:
-                                import threading as _t
+                        if done_event.get("new_files", 0) > 1:
+                            import threading as _t
 
-                                def _compact_and_refresh():
-                                    try:
-                                        from backend.core import local_compaction as _lc
+                            def _compact_and_refresh():
+                                try:
+                                    from backend.core import local_compaction as _lc
 
-                                        # Compact active hour since new files just landed there
-                                        res = _lc.compact_local_partitions(src, compact_active_hour=True)
-                                        if res.get("files_merged", 0) > 0:
-                                            refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
-                                    except Exception as e:
-                                        logger.warning(
-                                            "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
-                                        )
+                                    # Compact active hour since new files just landed there
+                                    res = _lc.compact_local_partitions(src, compact_active_hour=True)
+                                    if res.get("files_merged", 0) > 0:
+                                        refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
+                                except Exception as e:
+                                    logger.warning(
+                                        "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
+                                    )
 
-                                _t.Thread(
-                                    target=_compact_and_refresh,
-                                    name=f"local-compact-on-sync:{service_id}",
-                                    daemon=True,
-                                ).start()
+                            _t.Thread(
+                                target=_compact_and_refresh,
+                                name=f"local-compact-on-sync:{service_id}",
+                                daemon=True,
+                            ).start()
 
                         touched_hours = done_event.get("touched_hours", [])
                         if touched_hours:
@@ -677,8 +671,8 @@ def _run_log_discovery_cron(
     # the heavy usage-log phase (reconcile_fastly_stats) — claim once per tick
     # and share the verdict so they don't drift relative to each other.
     do_heavy_refresh = _claim_heavy_refresh(service_id) or bool(force)
-    already_published = bool(published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0))
-    if not already_published or do_heavy_refresh:
+    should_refresh_status = bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force)
+    if should_refresh_status:
         if (sync_enabled or force) and run_id is not None:
             _msg_suffix = "+ filter suggestions" if do_heavy_refresh else "(header only)"
             _log_and_add_progress(
