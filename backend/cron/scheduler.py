@@ -656,10 +656,11 @@ class Scheduler:
                 max_instances=1,
                 coalesce=True,
                 misfire_grace_time=120,
+                executor="maintenance",
             )
             self._job_ids[recycle_id] = recycle_id
             logger.info(
-                "♻️  \x1b[35m[recycle]\x1b[0m Registered DuckDB instance recycle job (every %gm).",
+                "♻️  \x1b[35m[recycle]\x1b[0m Registered DuckDB instance recycle job (every %gm, executor=maintenance).",
                 recycle_interval,
             )
 
@@ -1662,6 +1663,7 @@ class Scheduler:
                     "optimize_",
                     "ngwaf_sync_",
                     "share_audit_purge",
+                    "duckdb_recycle",
                 )
             ):
                 kwargs["executor"] = "maintenance"

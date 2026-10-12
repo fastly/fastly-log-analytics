@@ -25,8 +25,8 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Cycles idle connections in `backend.core.duckdb_pool`; forces memory garbage collection and C-allocator heap trim. | Connection pool lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Cycles web serving pool connections; never scheduled to Celery workers. | Local pool lock. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process, `executor="maintenance"`) | Cycles idle connections in `backend.core.duckdb_pool`; forces memory garbage collection and C-allocator heap trim. | Connection pool lock. Permitted under `FLA_DEV_NO_CRONS=1` (local-safe). Routed to `maintenance` executor pool to protect streaming ingest capacity. |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only, `executor="maintenance"`) | Cycles web serving pool connections; never scheduled to Celery workers. | Local pool lock. Routed to `maintenance` executor pool. |
 
 ---
 
@@ -89,7 +89,8 @@
 - [x] 1. Unit tests verify `_trim_memory` calls `gc.collect()` and handles `malloc_trim(0)` gracefully.
 - [x] 2. Unit tests verify `get_pool_status` and `is_recycle_barrier_active` return complete metrics.
 - [x] 3. Unit tests verify `run_duckdb_recycle` skips when below RSS threshold and executes when exceeded.
-- [x] 4. Unit tests verify adaptive dynamic scheduling tightens interval to 2m under elevated RSS and relaxes to baseline.
+- [x] 4. Unit tests verify adaptive dynamic scheduling tightens interval to 2m under elevated RSS (>= 80%) or incomplete drain, and relaxes to baseline (< 50%).
 - [x] 5. Unit tests verify `POST /api/admin/duckdb/recycle` triggers recycle on demand.
 - [x] 6. Unit tests verify `GET /api/admin/duckdb/status` returns memory metrics, barrier state, and connection pools.
-- [x] 7. Confirm zero FOS Class A/B calls.
+- [x] 7. Unit tests verify `duckdb_recycle` routes to `maintenance` executor pool to protect streaming ingest capacity.
+- [x] 8. Confirm zero FOS Class A/B calls.

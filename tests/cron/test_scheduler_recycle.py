@@ -38,8 +38,20 @@ def test_recycle_job_registered_when_interval_positive(monkeypatch):
     assert kw["max_instances"] == 1
     assert kw["coalesce"] is True
     assert kw["minutes"] == 15.0
+    assert kw["executor"] == "maintenance"
 
 
 def test_recycle_job_not_registered_when_interval_zero(monkeypatch):
     ids = _registered_job_ids(monkeypatch, "0")
     assert "duckdb_recycle" not in ids
+
+
+def test_recycle_job_routes_to_maintenance_executor():
+    """Job ID duckdb_recycle routes to maintenance executor threadpool."""
+    sched = Scheduler()
+    mock_sched = MagicMock()
+    sched._sched = mock_sched
+    sched._job_ids = {}
+
+    sched._add_job(lambda: None, id="duckdb_recycle")
+    assert mock_sched.add_job.call_args.kwargs["executor"] == "maintenance"

@@ -234,7 +234,9 @@ def recycle_once(reason: str = "interval") -> str:
             results.append({"db_path": db_path, "status": "error", "error": str(e)})
     recycled = sum(1 for r in results if r.get("status") == "recycled")
     freed = sum(r.get("freed_bytes") or 0 for r in results if (r.get("freed_bytes") or 0) > 0)
-    return f"{reason}: recycled {recycled}/{len(results)} instance(s), freed ~{freed / 1e6:.0f}MB"
+    incomplete = sum(1 for r in results if r.get("status") in ("incomplete", "skipped_locked", "error"))
+    extra = f" (incomplete: {incomplete})" if incomplete else ""
+    return f"{reason}: recycled {recycled}/{len(results)} instance(s), freed ~{freed / 1e6:.0f}MB{extra}"
 
 
 # The ``@global_job``-decorated scheduler entry (``run_duckdb_recycle``) lives in

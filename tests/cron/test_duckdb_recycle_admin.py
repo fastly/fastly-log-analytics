@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
-from backend.cron.jobs.duckdb_recycle import _maybe_adjust_recycle_schedule, run_duckdb_recycle
+from backend.cron.jobs.duckdb_recycle import run_duckdb_recycle
 from backend.main import app
 
 
@@ -62,17 +62,84 @@ def test_run_duckdb_recycle_adaptive_expedite():
 
     with (
         patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
-        patch("backend.core.duckdb.current_rss_bytes", side_effect=[850 * 1024 * 1024, 400 * 1024 * 1024]),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
+        patch("backend.core.duckdb.current_rss_bytes", return_value=850 * 1024 * 1024),
+        patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
+        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_once") as mock_recycle,
+    ):
+        # 850MB is >= 800MB (80% of 1000MB threshold), skips recycle but tightens interval to 2m
+        result = run_duckdb_recycle.__wrapped__()
+        assert "skipped" in result
+        mock_recycle.assert_not_called()
+        mock_job.reschedule.assert_called_with("interval", minutes=2.0)
+
+
+def test_run_duckdb_recycle_adaptive_incomplete():
+    """Recycle expedites schedule down to 2m when recycle_once reports incomplete."""
+    mock_sched = MagicMock()
+    mock_job = MagicMock()
+    trigger = MagicMock()
+    trigger.interval.total_seconds.return_value = 3600
+    mock_job.trigger = trigger
+    mock_sched.get_job.return_value = mock_job
+
+    with (
+        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=0),
+        patch("backend.core.duckdb.current_rss_bytes", return_value=200 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
         patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch(
-            "backend.core.duckdb_recycle.recycle_once", return_value="interval: recycled 1/1 instance(s), freed ~450MB"
-        ) as mock_recycle,
+            "backend.cron.jobs.duckdb_recycle.recycle_once",
+            return_value="interval: recycled 0/1 instance(s), freed ~0MB (incomplete: 1)",
+        ),
     ):
-        # 850MB is >= 800MB (80% of threshold), should adapt schedule
-        _maybe_adjust_recycle_schedule(expedite=True)
+        result = run_duckdb_recycle.__wrapped__()
+        assert "incomplete" in result
         mock_job.reschedule.assert_called_with("interval", minutes=2.0)
+
+
+def test_run_duckdb_recycle_adaptive_relax():
+    """Recycle relaxes schedule back to baseline when RSS drops below 50% threshold."""
+    mock_sched = MagicMock()
+    mock_job = MagicMock()
+    trigger = MagicMock()
+    trigger.interval.total_seconds.return_value = 120  # currently expedited to 2m
+    mock_job.trigger = trigger
+    mock_sched.get_job.return_value = mock_job
+
+    with (
+        patch("backend.core.memory_guard.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
+        patch("backend.core.duckdb.current_rss_bytes", side_effect=[1100 * 1024 * 1024, 400 * 1024 * 1024]),
+        patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
+        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch(
+            "backend.cron.jobs.duckdb_recycle.recycle_once",
+            return_value="interval: recycled 1/1 instance(s), freed ~700MB",
+        ),
+    ):
+        result = run_duckdb_recycle.__wrapped__()
+        assert "recycled 1/1" in result
+        # 400MB is < 500MB (50% of 1000MB threshold), relaxes back to 60.0m baseline
+        mock_job.reschedule.assert_called_with("interval", minutes=60.0)
+
+
+def test_recycle_once_incomplete_reporting(monkeypatch):
+    """recycle_once adds (incomplete: N) detail when any instance drain fails."""
+    monkeypatch.setattr(
+        _recycle,
+        "_sources_by_db_path",
+        lambda: {"/tmp/test.duckdb": [{"name": "s1"}]},
+    )
+    monkeypatch.setattr(
+        _recycle,
+        "_recycle_db_path",
+        lambda path, sources: {"db_path": path, "status": "incomplete", "drained": False, "live_after": 1},
+    )
+    detail = _recycle.recycle_once()
+    assert "incomplete: 1" in detail
 
 
 def test_admin_duckdb_recycle_endpoint():

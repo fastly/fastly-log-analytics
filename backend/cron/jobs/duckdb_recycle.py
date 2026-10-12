@@ -81,10 +81,14 @@ def run_duckdb_recycle() -> str:
 
     # Evaluate post-recycle memory to adapt schedule for next tick
     rss_after = _db.current_rss_bytes()
-    if threshold > 0 and rss_after is not None:
-        if rss_after >= int(threshold * 0.7) or "incomplete" in res:
+    if "incomplete" in res:
+        _maybe_adjust_recycle_schedule(expedite=True)
+    elif threshold > 0 and rss_after is not None:
+        if rss_after >= int(threshold * 0.8):
             _maybe_adjust_recycle_schedule(expedite=True)
         elif rss_after < int(threshold * 0.5):
             _maybe_adjust_recycle_schedule(expedite=False)
+    elif threshold == 0:
+        _maybe_adjust_recycle_schedule(expedite=False)
 
     return res
