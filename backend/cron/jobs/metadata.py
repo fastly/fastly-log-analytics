@@ -647,13 +647,18 @@ def _run_rdns_enrichment() -> tuple[str, str]:
 
 
 @global_job("share_audit_purge", color="35", tag="share_audit_purge", label="Share audit purge")
-def _run_share_audit_purge() -> str:
+def _run_share_audit_purge() -> tuple[str, str]:
     """Drop remote-share audit rows older than retention, expired invites, tokens, and stale sessions (daily 03:45 UTC).
 
     Retention is read from the `share_audit_retention_days` setting, defaulting
     to 90 days. The companion endpoint is `POST /api/admin/share/purge`.
     """
     from backend.core import share_db
+    from backend.cron.decorators import dev_mode_no_crons
+
+    if dev_mode_no_crons():
+        logger.info("⏸️  \x1b[35m[share_audit_purge]\x1b[0m dev_mode_no_crons active, skipping share audit purge.")
+        return ("skipped", "skipped (dev_mode_no_crons)")
 
     raw = share_db.get_setting(share_db.SHARE_AUDIT_RETENTION_DAYS_KEY, "90")
     try:
@@ -669,12 +674,13 @@ def _run_share_audit_purge() -> str:
         stale_res.get("deleted_stale_sessions", 0),
         stale_res.get("deleted_claim_tokens", 0),
     )
-    return (
+    detail = (
         f"deleted={deleted} retention_days={retention} "
         f"expired_invites={stale_res.get('deleted_expired_invites', 0)} "
         f"stale_sessions={stale_res.get('deleted_stale_sessions', 0)} "
         f"claim_tokens={stale_res.get('deleted_claim_tokens', 0)}"
     )
+    return ("success", detail)
 
 
 # ── _run_service_alerts_evaluation ───────────────────────────────────────────

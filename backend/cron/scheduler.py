@@ -1586,7 +1586,9 @@ class Scheduler:
                 misfire_grace_time=3600,
             )
             self._job_ids[share_purge_id] = share_purge_id
-            logger.info("🧹 \x1b[35m[share_audit_purge]\x1b[0m Registered share audit purge job (daily 03:45 UTC).")
+            logger.info(
+                "🧹 \x1b[35m[share_audit_purge]\x1b[0m Registered share audit purge job (daily 03:45 UTC, executor=maintenance)."
+            )
 
         # ── Operational-vital snapshots (Trends tab + System Health sparklines) ──
         self._register_metric_snapshot_job(seen_ids)
@@ -1659,6 +1661,7 @@ class Scheduler:
                     "bot_data_refresh",
                     "optimize_",
                     "ngwaf_sync_",
+                    "share_audit_purge",
                 )
             ):
                 kwargs["executor"] = "maintenance"

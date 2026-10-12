@@ -1,11 +1,11 @@
-"""Tests for share_audit_purge background job and POST /api/admin/share/purge endpoint.
+"""Tests for share_audit_purge background job, POST /api/admin/share/purge, and GET /api/admin/share/audit-logs endpoints.
 
 Covers:
-- purge_old_audit_logs retention window filtering.
+- purge_old_audit_logs retention window filtering (PostgreSQL ADR-22).
 - purge_stale_share_records for expired invites, tokens, and stale sessions.
-- PRAGMA wal_checkpoint(TRUNCATE) execution.
-- _run_share_audit_purge background job lifecycle and telemetry.
+- _run_share_audit_purge background job lifecycle, maintenance executor routing, dev-mode skip, and telemetry.
 - POST /api/admin/share/purge admin endpoint.
+- GET /api/admin/share/audit-logs admin endpoint.
 """
 
 from __future__ import annotations
@@ -143,10 +143,36 @@ def test_run_share_audit_purge_lifecycle():
 
     mock_audit.assert_called_once_with(retention_days=60)
     mock_stale.assert_called_once_with(max_idle_session_days=30)
-    assert "deleted=5" in result
-    assert "retention_days=60" in result
-    assert "expired_invites=2" in result
-    assert "stale_sessions=3" in result
+    status, detail = result if isinstance(result, tuple) else ("success", result)
+    assert status == "success"
+    assert "deleted=5" in detail
+    assert "retention_days=60" in detail
+    assert "expired_invites=2" in detail
+    assert "stale_sessions=3" in detail
+
+
+def test_share_audit_purge_routes_to_maintenance_executor():
+    """Job ID share_audit_purge routes to maintenance executor threadpool."""
+    from backend.cron.scheduler import Scheduler
+
+    s = Scheduler()
+    with patch.object(s._sched, "add_job") as mock_add_job:
+        s._add_job(lambda: None, "cron", hour=3, minute=45, id="share_audit_purge")
+        mock_add_job.assert_called_once()
+        assert mock_add_job.call_args[1]["executor"] == "maintenance"
+
+
+def test_run_share_audit_purge_skips_when_dev_mode_active():
+    """FLA_DEV_NO_CRONS=1 causes job to skip execution safely."""
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=True),
+        patch("backend.core.share_db.purge_old_audit_logs") as mock_audit,
+    ):
+        result = _run_share_audit_purge.__wrapped__()
+        status, detail = result if isinstance(result, tuple) else ("success", result)
+        assert status == "skipped"
+        assert "dev_mode_no_crons" in detail
+        mock_audit.assert_not_called()
 
 
 def test_admin_share_purge_endpoint():
@@ -172,3 +198,21 @@ def test_admin_share_purge_endpoint():
         assert data["deleted_expired_invites"] == 1
         assert data["deleted_stale_sessions"] == 4
         mock_purge_all.assert_called_once_with(audit_retention_days=45, max_idle_session_days=15)
+
+
+def test_admin_share_audit_logs_endpoint(test_share_db):
+    """GET /api/admin/share/audit-logs returns audit log entries."""
+    con = test_share_db
+    recent_ts = iso_z(datetime.now(UTC) - timedelta(hours=1))
+    con.execute(
+        "INSERT INTO remote_share_audit_logs(timestamp, event_type, email, ip_address, details) VALUES (?,?,?,?,?)",
+        (recent_ts, "LOGIN_SUCCESS", "analyst@example.com", "127.0.0.1", "{}"),
+    )
+    con.commit()
+
+    client = TestClient(app)
+    resp = client.get("/api/admin/share/audit-logs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "audit_logs" in data
+    assert any(entry["email"] == "analyst@example.com" for entry in data["audit_logs"])
