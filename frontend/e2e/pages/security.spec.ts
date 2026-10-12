@@ -62,10 +62,22 @@ test.describe('Security Page Contract (/security)', () => {
     const botCard = page.locator('#main [data-slot="card-title"]').filter({ hasText: /Well-Known Bots|Verified Bots/i }).first()
     await expect(botCard).toBeVisible({ timeout: 15_000 })
 
-    // Verify intrinsic size reservation classes across KPI, timeseries, and table cards
-    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
-    const count = await reservedContainers.count()
-    expect(count).toBeGreaterThanOrEqual(6)
+    // Verify intrinsic size reservation classes across initial tab cards
+    const initialReservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const initialCount = await initialReservedContainers.count()
+    expect(initialCount).toBeGreaterThanOrEqual(2)
+
+    // Switch to VPN & Proxy Watchdog tab and verify its reserved containers
+    const proxyTab = page.getByRole('tab', { name: /vpn & proxy watchdog/i })
+    await expect(proxyTab).toBeVisible({ timeout: 10_000 })
+    await proxyTab.click()
+
+    const proxyCard = page.locator('#main [data-slot="card-title"]').filter({ hasText: /Active VPN & Proxy Users/i }).first()
+    await expect(proxyCard).toBeVisible({ timeout: 15_000 })
+
+    const proxyReservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const proxyCount = await proxyReservedContainers.count()
+    expect(proxyCount).toBeGreaterThanOrEqual(6)
   })
 
   test('3. Data contract & round-trip verification (/api/security/aggregates & /api/security/bundle)', async ({ page }) => {
