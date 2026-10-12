@@ -302,6 +302,24 @@ def get_sync_status(
         # query + fingerprint stat).
         stats = None
         data_fp = _data_stats_fingerprint(src)
+        lake_table: str | None = None
+        if data_fp is None:
+            try:
+                from backend.core.iceberg._ducklake import ducklake_current_snapshot_id, ducklake_table_name
+
+                lt = ducklake_table_name(src)
+                exists = con.execute(
+                    "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
+                    [lt],
+                ).fetchone()
+                if exists and exists[0]:
+                    snap_id = ducklake_current_snapshot_id(con)
+                    if snap_id is not None:
+                        data_fp = ("ducklake", snap_id)
+                        lake_table = lt
+            except Exception:
+                pass
+
         cache_key = src["name"]
         direct_stats = None
         if data_fp is not None:
@@ -311,14 +329,19 @@ def get_sync_status(
                 if cached is not None and cached[0] == data_fp:
                     d_count, d_min, d_max = cached[1], cached[2], cached[3]
                 else:
-                    from backend.utils.sql_validator import escape_sql_literal
+                    if lake_table is not None:
+                        d_row = con.execute(
+                            f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
+                        ).fetchone()
+                    else:
+                        from backend.utils.sql_validator import escape_sql_literal
 
-                    data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
-                    safe_glob = escape_sql_literal(data_glob)
-                    d_row = con.execute(
-                        "SELECT count(*), min(timestamp), max(timestamp) "
-                        f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
-                    ).fetchone()
+                        data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
+                        safe_glob = escape_sql_literal(data_glob)
+                        d_row = con.execute(
+                            "SELECT count(*), min(timestamp), max(timestamp) "
+                            f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
+                        ).fetchone()
                     d_count = (d_row[0] or 0) if d_row else 0
                     d_min = d_row[1] if d_row else None
                     d_max = d_row[2] if d_row else None
@@ -349,6 +372,8 @@ def get_sync_status(
                     min(mins) if mins else None,
                     max(maxs) if maxs else None,
                 )
+                if lake_table is not None and stats[0] > 0:
+                    direct_stats = stats
             except Exception as split_err:
                 # Bust the data cache so we don't pin a half-built result.
                 with _db_main._data_stats_cache_lock:

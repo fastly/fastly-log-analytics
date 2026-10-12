@@ -1721,6 +1721,63 @@ def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
     )
 
 
+def test_get_sync_status_ducklake_snapshot_cached_split_stats(in_memory_duckdb, fos_source, tmp_path):
+    """When cache/bucket/data does not exist (cloud-backed DuckLake mode),
+    get_sync_status must probe DuckLake snapshot ID, cache the lake stats in
+    _data_stats_cache, and reuse the cached count without re-querying the lake table."""
+    import backend.core.duckdb as _db_main
+    from backend.core._duckdb_status import get_sync_status
+
+    cache_dir = tmp_path / "cache" / fos_source["bucket"]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    src = {**fos_source, "_cache_dir_override": str(cache_dir)}
+
+    in_memory_duckdb.execute("ATTACH ':memory:' AS lake")
+    in_memory_duckdb.execute("CREATE TABLE lake.logs (timestamp TIMESTAMP)")
+    in_memory_duckdb.execute("INSERT INTO lake.logs VALUES ('2026-10-12 12:00:00'), ('2026-10-12 12:01:00')")
+
+    table_name = _db_main._safe_table_name(src["name"])
+    in_memory_duckdb.execute(f"CREATE VIEW {table_name} AS SELECT * FROM lake.logs")
+
+    with _db_main._data_stats_cache_lock:
+        _db_main._data_stats_cache.pop(src["name"], None)
+
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=42),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out1 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out1["local_rows"] == 2
+    with _db_main._data_stats_cache_lock:
+        cached = _db_main._data_stats_cache.get(src["name"])
+    assert cached is not None
+    assert cached[0] == ("ducklake", 42)
+    assert cached[1] == 2
+
+    # Insert another row into lake.logs without changing snapshot_id; second call hits cache
+    in_memory_duckdb.execute("INSERT INTO lake.logs VALUES ('2026-10-12 12:02:00')")
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=42),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out2 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out2["local_rows"] == 2  # Hit cache!
+
+    # Now bump snapshot_id; cache should miss and re-query
+    with (
+        patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value="logs"),
+        patch("backend.core.iceberg._ducklake.ducklake_current_snapshot_id", return_value=43),
+        patch("backend.config.get_status", return_value={}),
+    ):
+        out3 = get_sync_status(in_memory_duckdb, src, force=True)
+
+    assert out3["local_rows"] == 3
+
+
 # Silence ruff unused-imports
 _ = MagicMock
 _ = pytest

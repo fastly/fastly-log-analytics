@@ -570,21 +570,31 @@ def list_fos_files(
 
     # Determine StartAfter marker for incremental discovery to avoid scanning the entire bucket.
     start_after_key = None
-    if st_dt and not already:
-        # Use the configured start to bound the FOS list only on the very first import
-        # (no previously ingested files). On subsequent cron runs `already` is non-empty,
-        # so we fall through to the incremental lookback — scanning only the last 4 hours
-        # instead of the entire bucket from the original import start date.
-        norm_subpath = prefix_subpath.strip("/")
-        start_after_key = st_dt.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
-        logger.info("[ingest] %s: Using requested start_time to bound FOS scan: %s", src.get("name"), start_after_key)
-    elif incremental_only and already:
-        try:
-            start_after_key = _compute_incremental_start_after(already, lookback_hours=4, prefix_subpath=prefix_subpath)
-        except Exception as e:
-            logger.warning(
-                "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", src.get("name"), e
+
+    def _resolve_start_after_key() -> str | None:
+        nonlocal start_after_key
+        if start_after_key is not None:
+            return start_after_key
+        if st_dt and not already:
+            # Use the configured start to bound the FOS list only on the very first import
+            # (no previously ingested files). On subsequent cron runs `already` is non-empty,
+            # so we fall through to the incremental lookback — scanning only the last 4 hours
+            # instead of the entire bucket from the original import start date.
+            norm_subpath = prefix_subpath.strip("/")
+            start_after_key = st_dt.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+            logger.info(
+                "[ingest] %s: Using requested start_time to bound FOS scan: %s", src.get("name"), start_after_key
             )
+        elif incremental_only and already:
+            try:
+                start_after_key = _compute_incremental_start_after(
+                    already, lookback_hours=4, prefix_subpath=prefix_subpath
+                )
+            except Exception as e:
+                logger.warning(
+                    "[ingest] %s: Failed to calculate lookback marker, scanning full bucket: %s", src.get("name"), e
+                )
+        return start_after_key
 
     if fos_client is None:
         fos_client = _get_fos_client(src)
@@ -611,13 +621,9 @@ def list_fos_files(
 
         now_utc = datetime.now(UTC)
         norm_subpath = prefix_subpath.strip("/")
+        has_v3_files = bool(already) and any("year=" in f for f in already)
         use_minute_prefixes = (
-            incremental_only
-            and not st_dt
-            and not et_dt
-            and norm_subpath in ("raw/request", "raw/rum")
-            and bool(already)
-            and any("year=" in f for f in already)
+            incremental_only and not st_dt and not et_dt and norm_subpath in ("raw/request", "raw/rum") and has_v3_files
         )
 
         scan_batches: list[dict[str, Any]] = []
@@ -629,11 +635,12 @@ def list_fos_files(
                 scan_batches.append({"Bucket": src["bucket"], "Prefix": pfx})
 
         if not scan_batches:
+            sak = _resolve_start_after_key()
             kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
-            if start_after_key:
+            if sak:
                 if prefix_path:
-                    start_after_key = f"{prefix_path}/{start_after_key}"
-                kwargs["StartAfter"] = start_after_key
+                    sak = f"{prefix_path}/{sak}"
+                kwargs["StartAfter"] = sak
             scan_batches.append(kwargs)
 
         seen_keys: set[str] = set()
@@ -689,10 +696,11 @@ def list_fos_files(
         # (e.g. non-v3 key layout or legacy test environment), fall back to standard lookback scan.
         # But if the service has confirmed v3 layout, an idle tick (0 objects in the last 5 minutes)
         # must NOT scan the full lookback.
-        if use_minute_prefixes and total_listed == 0 and not any("year=" in f for f in already):
+        if use_minute_prefixes and total_listed == 0 and not has_v3_files:
+            sak = _resolve_start_after_key()
             fb_kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
-            if start_after_key:
-                fb_kwargs["StartAfter"] = f"{prefix_path}/{start_after_key}" if prefix_path else start_after_key
+            if sak:
+                fb_kwargs["StartAfter"] = f"{prefix_path}/{sak}" if prefix_path else sak
             for page in paginator.paginate(**fb_kwargs):
                 yield from _process_contents(page.get("Contents", []))
                 if max_files and len(new_files) >= max_files:
@@ -788,13 +796,13 @@ def ingest(
     # ``incremental_only=True`` is the cron hot path: LIST is bounded by
     # ``StartAfter`` (or, for delete_after=True, the bucket itself only holds
     # un-ingested files) so dedup membership only needs the most recent rows.
-    # Capping the fetch to 200k rows turns this from a ~4 s full-table
-    # fetchall into ~600 ms on services with >1 M ingested_files. Full sweeps
+    # Capping the fetch to 20k rows turns this from a ~4 s full-table
+    # fetchall into ~80 ms on services with >1 M ingested_files. Full sweeps
     # (incremental_only=False) keep the unbounded load because they LIST the
     # entire bucket and may match arbitrarily old files.
     yield {"type": "status", "message": f"{elapsed()} Fetching ingestion history..."}
 
-    dedup_limit: int | None = 200_000 if incremental_only else None
+    dedup_limit: int | None = 20_000 if incremental_only else None
     already = metadata_db.get_ingested_filenames(source_name, limit=dedup_limit)
 
     # Use list_fos_files generator
