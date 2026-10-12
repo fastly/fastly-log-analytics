@@ -1,7 +1,13 @@
 # ADR-18 — Durable Serving Mode Removes Native DuckDB File Ownership
 
-**Status:** Accepted — v3.0 serving increment; rollups and other pod-local accelerators remain follow-up work.
+**Status:** Accepted (Amended by [ADR-21](21-high-scale-serving-architecture.md) & [ADR-22](22-postgres-only-metadata.md))
 **Decided by:** v3.0.0-beta1 scalability review, 2026-09-01/02
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **Deployment Mode Renamed ([ADR-21](21-high-scale-serving-architecture.md)):** The intermediate mode name `DEPLOYMENT_MODE=high_throughput` was consolidated into `DEPLOYMENT_MODE=high_scale`.
+> - **PostgreSQL Metadata Unified ([ADR-22](22-postgres-only-metadata.md)):** PostgreSQL 16 is mandatory across all deployment topologies, retiring dual SQLite/Postgres mode.
+> - **Single-Pod Serving Tier Invariant Preserved:** Ingest scales horizontally across Celery / High-Scale workers, but the FastAPI backend serving tier remains strictly pinned to `replicaCount: 1` without HPA to avoid cache and lease conflicts.
 
 ## Context
 

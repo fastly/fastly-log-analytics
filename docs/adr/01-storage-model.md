@@ -1,8 +1,13 @@
 # ADR-01 — Storage Model
 
-**Status:** Accepted (Phase 0). Partially superseded by [ADR-14](14-ducklake-replacement.md) — the commit-path catalog is DuckLake, not pyiceberg, as of v3.0.0-beta1. The live-buffer tier, the "rollups are a query optimization, not a tier" decision, and the local-warehouse fallback rule below are still in force.
+**Status:** Partially Superseded (Amended by [ADR-14](14-ducklake-replacement.md) & [ADR-21](21-high-scale-serving-architecture.md))
 **Decided by:** v2.0 cleanup planning
 **Supersedes:** implicit storage model that grew over the perf-improvement branch
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **DuckLake Cutover ([ADR-14](14-ducklake-replacement.md)):** The commit-path durable catalog replaced PyIceberg with DuckLake. Raw logs stream to Fastly Object Storage (FOS), are transformed into Parquet in the local buffer, and commit to DuckLake.
+> - **High-Scale Data Plane ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ingest micro-batches directly to ClickHouse and writes durable FOS archive Parquet. Serving queries ClickHouse directly or uses ephemeral in-memory DuckDB reading durable DuckLake state. The live-buffer tier and rollups-as-query-optimization pattern remain active in standard mode.
 
 ## Context
 

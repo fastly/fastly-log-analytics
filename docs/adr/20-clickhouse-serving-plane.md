@@ -1,9 +1,12 @@
 # ADR-20 - Reject This ClickHouse Dashboard Serving Prototype
 
-**Status:** Decided — this prototype rejected for dashboard serving; bounded
-diagnostic index/replay tooling retained. Task 11 not implemented: Docker
-prerequisite failed, as required.
+**Status:** Decided (Historical Prototype — Evolved into [ADR-21](21-high-scale-serving-architecture.md))
 **Date:** 2026-09-08 UTC
+
+> [!NOTE]
+> **Architectural Context & Evolution (v3.0):**
+> - **Prototype Rejection vs. Final High-Scale Architecture:** This ADR documents the rejection of an early experimental *runtime hybrid dispatcher* that attempted to run ClickHouse alongside DuckLake in standard workloads.
+> - **Evolution into ADR-21 ([ADR-21](21-high-scale-serving-architecture.md)):** The lessons learned from this prototype led directly to the formal separation of two explicit deployment modes: `DEPLOYMENT_MODE=standard` (DuckDB + DuckLake) and `DEPLOYMENT_MODE=high_scale` (dedicated ClickHouse ingest and serving tier micro-batching directly to ClickHouse and FOS archive Parquet).
 
 ## Measured decision
 

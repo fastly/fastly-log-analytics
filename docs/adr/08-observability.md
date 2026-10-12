@@ -1,7 +1,12 @@
 # ADR-08 — Observability Strategy
 
-**Status:** Accepted (2026-06-10)
+**Status:** Accepted (Storage Updated by [ADR-22](22-postgres-only-metadata.md))
 **Decided by:** v2.0 cleanup retrospective (2026-06-10)
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployment modes via `/api/admin/log-accounting`.
+> - **High-Scale Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ClickHouse and micro-batch worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
 
 ## 1. Context & Motivation
 
