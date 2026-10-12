@@ -82,7 +82,7 @@ Background jobs respect tenant isolation and dual-role permission models:
 
 | Role | Permitted Jobs | Prohibited Jobs | Architectural Rationale |
 |---|---|---|---|
-| **Admin (`read_write`)** | **All 26 Jobs:** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, backups, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
+| **Admin (`read_write`)** | **All 24 Active Jobs (+ retired clickhouse_backup):** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
 | **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_sync_{id}` / `rum_discovery_{id}`, `rum_commit_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
 | **Analyst Path B (Remote Live Share)** | **Zero Cron Execution:** Read-only analyst sessions connect over HTTPS to the admin's running process. | All cron execution APIs blocked with HTTP 403. | Analysts share the running host server; all background maintenance is handled by the host admin process. |
 
@@ -92,33 +92,33 @@ Background jobs respect tenant isolation and dual-role permission models:
 
 Below is the master catalog of all 24 active scheduled background tasks plus one retired entry. Standard (`rum_sync_{id}`) and High-Scale (`rum_discovery_{id}`) RUM discovery are execution variants of the same logical job, so they appear in one row. Click the link in the **Specification File** column to view the complete operational contract, query audit rules, and testing checklist for each job:
 
-| Job Identifier | Default Cadence | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
-|---|---|---|---|---|---|
-| `log_discovery_{id}` | Derived (`log_period // 2`) | APScheduler | RedBeat + Celery | Admin | [log-discovery.md](jobs/log-discovery.md) |
-| `commit_{id}` | Every 5 min (configurable) | APScheduler | RedBeat + Celery | Admin | [commit.md](jobs/commit.md) |
-| `local_compact_{id}` | Every 2 min (`LOCAL_COMPACT_INTERVAL_MIN`) | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](jobs/local-compact.md) |
-| `partial_hour_merge_{id}` | Every 30 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](jobs/partial-hour-merge.md) |
-| `rollup_heal_{id}` | Hourly at :05 | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) |
-| `rollup_compact_{id}` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) |
-| `optimize_{id}` | Daily 04:00 UTC | APScheduler | RedBeat / Worker | Admin | [optimize.md](jobs/optimize.md) (Verified) |
-| `expire_{id}` | Hourly | APScheduler | Serving-pod APScheduler | Admin | [expire.md](jobs/expire.md) (Verified) |
-| `full_sync_{id}` | Every 6h (:30 UTC) | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
-| `gap_heal_{id}` | Every 30 min | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
-| `metadata_cleanup_{id}` | Daily 03:15 UTC | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
-| `alerts_evaluation_{id}` | Every `log_period` sec | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
-| `insights_prewarmer_{id}` | Every 240 sec | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
-| `sync_metadata_{id}` | Every `log_period` sec | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
-| `ledger_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
-| `clickhouse_backup_{id}` | **Retired** | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
-| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Every 60 sec | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (request parity unified); [High-Scale mode](jobs/rum-discovery.md) (Verified) |
-| `rum_commit_{id}` | Post-sync immediate & 1m periodic | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) |
-| `ledger_rum_sweep_{id}` | Every 15 min | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) |
-| `metric_snapshot` | Every 60 sec | APScheduler | Pod APScheduler | Global / Admin | [metric-snapshot.md](jobs/metric-snapshot.md) |
-| `rdns_enrichment` | Every 5 min | APScheduler | Pod APScheduler | Global / Admin | [rdns-enrichment.md](jobs/rdns-enrichment.md) |
-| `bot_data_refresh` | Daily 02:00 UTC | APScheduler | Pod APScheduler | Global / Admin | [bot-data-refresh.md](jobs/bot-data-refresh.md) |
-| `ngwaf_sync_{id}` | Every 5 min | APScheduler | Pod APScheduler | Admin | [ngwaf-sync.md](jobs/ngwaf-sync.md) |
-| `share_audit_purge` | Daily 03:45 UTC | APScheduler | Pod APScheduler | Global / Admin | [share-audit-purge.md](jobs/share-audit-purge.md) |
-| `duckdb_recycle` | Every 60 min | APScheduler | Pod APScheduler | Process-Wide | [duckdb-recycle.md](jobs/duckdb-recycle.md) |
+| Job Identifier | Default Cadence | Executor Threadpool | Standard Mode Engine | High-Scale Mode Engine | Role Scope | Specification File |
+|---|---|---|---|---|---|---|
+| `log_discovery_{id}` | Derived (`log_period // 2`, min 5s) | streaming [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [log-discovery.md](jobs/log-discovery.md) (Verified) |
+| `commit_{id}` | Every 5 min (configurable) | streaming [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [commit.md](jobs/commit.md) (Verified) |
+| `local_compact_{id}` | Every 2 min (`LOCAL_COMPACT_INTERVAL_MIN`) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](jobs/local-compact.md) (Verified) |
+| `partial_hour_merge_{id}` | Every 30 sec (`PARTIAL_HOUR_MERGE_INTERVAL_SEC`) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](jobs/partial-hour-merge.md) (Verified) |
+| `rollup_heal_{id}` | Hourly at :05 | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) (Verified) |
+| `rollup_compact_{id}` | Daily 02:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) (Verified) |
+| `optimize_{id}` | Daily 04:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [optimize.md](jobs/optimize.md) (Verified) |
+| `expire_{id}` | Hourly (`expire_interval_mins=60`) | default [10] | APScheduler | Serving-pod APScheduler | Admin | [expire.md](jobs/expire.md) (Verified) |
+| `full_sync_{id}` | Every 6h (:30 UTC) | default [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
+| `gap_heal_{id}` | Every 30 min (configurable) | default [10] / RedBeat/Celery | APScheduler | RedBeat + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
+| `metadata_cleanup_{id}` | Daily 03:15 UTC (configurable) | maintenance [3] | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
+| `alerts_evaluation_{id}` | Every `log_period` sec (configurable) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
+| `insights_prewarmer_{id}` | Every 240 sec (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
+| `sync_metadata_{id}` | Every `log_period` sec (configurable) | streaming [10] | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
+| `ledger_sweep_{id}` | Every 15 min (configurable) | RedBeat/Celery | Disabled | RedBeat + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
+| `clickhouse_backup_{id}` | **Retired** | Retired | Retired | Retired | N/A | [clickhouse-backup.md](jobs/clickhouse-backup.md) (Retired — FOS is authoritative; rebuild on-demand via replay) |
+| `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Derived / 60 sec (min 5s) | streaming [10] (Standard) / RedBeat/Celery (High-Scale) | APScheduler | RedBeat + Celery | Admin | [Standard mode](jobs/rum-sync.md) (Verified); [High-Scale mode](jobs/rum-discovery.md) (Verified) |
+| `rum_commit_{id}` | Post-sync immediate & 1m periodic | default [10] | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) (Verified) |
+| `ledger_rum_sweep_{id}` | Every 15 min (configurable) | RedBeat/Celery | Disabled | RedBeat + Celery | Admin | [ledger-rum-sweep.md](jobs/ledger-rum-sweep.md) (Verified) |
+| `metric_snapshot` | Every 60 sec (jitter 5s) | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin & Analyst A | [metric-snapshot.md](jobs/metric-snapshot.md) (Verified) |
+| `rdns_enrichment` | Every 5 min (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin | [rdns-enrichment.md](jobs/rdns-enrichment.md) (Verified) |
+| `bot_data_refresh` | Daily 02:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin | [bot-data-refresh.md](jobs/bot-data-refresh.md) (Verified) |
+| `ngwaf_sync_{id}` | Every 5 min | maintenance [3] | APScheduler | Pod APScheduler | Admin | [ngwaf-sync.md](jobs/ngwaf-sync.md) (Verified) |
+| `share_audit_purge` | Daily 03:45 UTC | maintenance [3] | APScheduler | Pod APScheduler | Global / Admin & Analyst A | [share-audit-purge.md](jobs/share-audit-purge.md) (Verified) |
+| `duckdb_recycle` | Every 60 min (dynamic down to 2m) | maintenance [3] | APScheduler | Pod APScheduler | Process-Wide | [duckdb-recycle.md](jobs/duckdb-recycle.md) (Verified) |
 
 ---
 
@@ -147,16 +147,29 @@ Every background job must participate in the comprehensive telemetry and audit h
 
 To maintain sub-second UI responsiveness while background jobs run:
 
-1. **Per-Service Write Locks:**
+1. **3-Executor Thread Pool Architecture (`backend/cron/scheduler.py`):**
+   - The in-process APScheduler partitions execution across three isolated `ThreadPoolExecutor` pools configured in `backend/cron/scheduler.py`:
+     - **`streaming` (10 worker threads):** Dedicated exclusively to latency-critical, high-frequency data ingestion, buffer flushing, and metadata pointer synchronization (`log_discovery_`, `rum_discovery_`, `rum_sync_`, `commit_`, `sync_metadata_`).
+     - **`maintenance` (3 worker threads):** Dedicated to periodic, heavy, multi-step housekeeping and analytics precomputation jobs (`local_compact_`, `rollup_compact_`, `rollup_heal_`, `optimize_`, `insights_prewarmer_`, `metadata_cleanup`, `rdns_enrichment`, `bot_data_refresh`, `ngwaf_sync_`, `share_audit_purge`, `duckdb_recycle`, `reconcile_fastly_`, `metric_snapshot`).
+     - **`default` (10 worker threads):** Allocated for general alerting, active-hour speed layer, and retention enforcement (`alerts_evaluation_`, `partial_hour_merge_`, `expire_`, `rum_commit_`, `full_sync_`, `gap_heal_`).
+   - **Starvation Isolation:** Segregating heavy maintenance jobs into a tightly bounded pool (3 threads) prevents multi-minute operations (such as DuckLake cloud compaction, daily rollup merges, or statistical prewarming) from monopolizing execution slots. High-frequency streaming discovery and commit cycles are guaranteed immediate thread allocation in `streaming`, preventing log ingestion lag and buffer backlog accumulation.
+
+2. **Per-Service Write Locks:**
    - Ingest, commit, and compaction operations acquire an exclusive per-service file or distributed lock. Only one write operation can mutate a service's Parquet buffers or DuckLake catalog at a time.
-2. **Heavy Refresh Throttling (`_claim_heavy_refresh`):**
+
+3. **Heavy Refresh Throttling (`_claim_heavy_refresh`):**
    - Auxiliary background updates (`update_top_values()` and `reconcile_fastly_stats()`) are strictly throttled to run at most once every 60 seconds per service, preventing continuous CPU churn on busy ingest streams.
-3. **Queue-Depth Backpressure:**
+
+4. **Queue-Depth Backpressure:**
    - Distributed task dispatchers inspect Redis queue depth before enqueuing conversion tasks, preventing task queue saturation during worker restarts.
-4. **Adaptive Gap Healing Throttle:**
+
+5. **Adaptive Gap Healing Throttle:**
    - If sustained log loss is detected by `gap_heal_{service_id}`, subsequent sweeps are throttled to prevent cascading full sweeps when losses are caused by upstream Fastly edge drop policies.
-5. **Memory Leak Mitigation:**
-   - `duckdb_recycle` periodically flushes C++ object cache footers, releasing native memory heaps back to the OS without dropping active queries.
+
+6. **DuckDB Recycle: Dynamic Interval Adaptation & RSS Memory Gating:**
+   - `duckdb_recycle` periodically drains and re-instantiates DuckDB connection pools to reclaim resident memory accumulated by C++ Parquet metadata caching (`enable_object_cache`):
+     - **RSS Memory Gating (`_recycle_rss_threshold_bytes`):** Configured via `DUCKDB_RECYCLE_RSS_THRESHOLD_MB`. If process RSS is below this threshold, recycling is skipped (`"skipped: RSS XMB < threshold YMB"`), preserving warm Parquet footer metadata caches and avoiding cold-cache latency penalties when memory headroom is ample. It also integrates with `maybe_graceful_restart()` (`BACKEND_GRACEFUL_RESTART_RSS_MB`) to trigger a clean exit and container restart before the OS kernel issues an unrecoverable OOM-SIGKILL.
+     - **Dynamic Interval Adaptation (`_maybe_adjust_recycle_schedule`):** Under elevated memory pressure (when RSS reaches or exceeds 80% of threshold, or when a previous drain was incomplete), the scheduler dynamically accelerates the recycle interval down to a rapid 2-minute cadence (`target_mins = min(2.0, baseline_mins)`). Once memory drops safely below 50% of the threshold, the schedule automatically relaxes back to the baseline setting (`DUCKDB_RECYCLE_INTERVAL_MIN`, default: 60m).
 
 ---
 
