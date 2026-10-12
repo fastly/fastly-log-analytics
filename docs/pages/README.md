@@ -54,7 +54,7 @@ docs/pages/
 | Route | Page Name | Primary Focus | Spec Status |
 |---|---|---|---|
 | `/dashboard` | [Dashboard](dashboard.md) | Top-level KPIs, multi-trace traffic chart, geo map, categorized Top-N cards | **Complete** |
-| `/control-room` | [Control Room](control-room.md) | Real-time operations, live throughput, recent error stream | **Scaffolded (Pending AI Verification)** |
+| `/control-room` | [Control Room](control-room.md) | Real-time operations, live throughput, recent error stream | **Live-certified** |
 | `/fastly-value` | [Service Summary / Value](fastly-value.md) | Bandwidth saved, edge compute efficiency, cost avoidance | **Scaffolded (Pending AI Verification)** |
 | `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Scaffolded (Pending AI Verification)** |
 | `/origin` | [Origin Health](origin.md) | Backend latency, connect times, shielding ratio, retries | **Scaffolded (Pending AI Verification)** |

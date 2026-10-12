@@ -311,9 +311,14 @@ function CorrelatorLeaderboard({
     if (!serviceId) return
     setLoading(true)
     try {
+      const pageLoadId = getPageLoadId()
       const res = await fetch(`/api/services/${serviceId}/control-room/correlate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+          ...(pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : {}),
+        },
         body: JSON.stringify({ dimension, window_minutes: 60, limit }),
       })
       if (res.ok) {

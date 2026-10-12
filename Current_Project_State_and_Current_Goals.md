@@ -603,9 +603,8 @@ deployed and certified. The Plotly nested-scroll-container fix is also
 deployed. Do not revisit TLS, gateway routing, or the former hardcoded-trends
 root cause for this issue.
 
-Next session: read the Cron 2 specification for `log_commit_{service_id}`,
-review its tests and current implementation, then run the next cron health
-check before making changes. Keep this private state document uncommitted.
+Next session: read the Page specification for `/fastly-value` (`docs/pages/fastly-value.md`),
+review its tests and current implementation, then run page health check before making changes.
 Preserve the pre-existing Local High-Scale removal hunks in
 `scripts/dev/report_server.py` and untracked `.github/instructions/`.
 
@@ -656,6 +655,12 @@ After all cron jobs are implemented and verified, audit pages one at a time
 using the specifications under [`docs/pages/`](docs/pages/). Each page must
 preserve shared layout/filter/time-range behavior, Standard/High-Scale parity,
 role boundaries, telemetry completeness, and documented performance budgets.
+
+- **`/control-room` — Live-certified (`docs/pages/control-room.md`).** Audited and
+  verified across Standard and High-Scale deployment modes, with `X-Page-Load-ID`
+  telemetry propagation, zero layout shift (CLS = 0.00), real-time SSE streaming,
+  IP masking for Analyst Path B, and comprehensive e2e test suite
+  (`frontend/e2e/control-room.spec.ts`).
 
 Known page-parity investigation after the environment rebuild:
 
