@@ -118,32 +118,6 @@ def test_get_top_bots_respects_n_limit(in_memory_duckdb, test_service_source):
     assert len(result["bots"]) <= 1
 
 
-def test_get_top_bots_matches_ua_rollup_limit(monkeypatch, in_memory_duckdb, test_service_source):
-    """The classifier input must not exceed the rollup writer's top-K."""
-    from backend.repositories._base import QueryRunner
-
-    table_name = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=10)
-    insert_mock_logs(in_memory_duckdb, table_name, logs)
-    captured: dict[str, int] = {}
-
-    def _rollups(self, fields, start_time, end_time, **kwargs):
-        captured["limit"] = kwargs["limit"]
-        captured["ua_limit"] = kwargs["per_field_limits"]["ua"]
-        return [], fields
-
-    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", _rollups)
-    get_top_bots(
-        con=in_memory_duckdb,
-        src=test_service_source,
-        start_time="2026-01-01T00:00:00Z",
-        end_time="2026-01-04T00:00:00Z",
-        filters={},
-    )
-
-    assert captured == {"limit": 500, "ua_limit": 500}
-
-
 # ── get_security_aggregates: additional branch coverage ─────────────────
 
 

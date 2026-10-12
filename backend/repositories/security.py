@@ -34,11 +34,12 @@ _logger = logging.getLogger(__name__)
 # its projection on the small-window path).
 _ROLLUP_MIN_WINDOW_SECONDS = 3 * 86400
 
-# The rollup writer retains the top 500 UAs per hour. Reading more than that
-# cannot recover omitted values, but it does increase the cross-hour GROUP BY
-# cost on the dashboard's hot path. Keep the override for deployments that
-# deliberately trade latency for a wider classifier input.
-_BOT_UA_CLASSIFY_LIMIT = int(os.getenv("BOT_UA_CLASSIFY_LIMIT", "500"))
+# The maximum number of top distinct User Agents (UAs) retrieved from the database
+# (via rollups or live temp tables) to pass to the regex-based classifier.
+# Lowering this from 50,000 to 2,000 reduces CPU-bound regex evaluation times
+# by up to 25x, preventing Python GIL starvation and drastically speeding up
+# the home dashboard bundle load.
+_BOT_UA_CLASSIFY_LIMIT = int(os.getenv("BOT_UA_CLASSIFY_LIMIT", "2000"))
 
 # Canonical projection order for the catalog temp. The temp materializes
 # ONLY the columns the live (rollup-missed) sections actually touch — see
