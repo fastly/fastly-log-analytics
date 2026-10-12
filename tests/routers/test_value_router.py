@@ -173,3 +173,58 @@ def test_value_summary_range_token(client, in_memory_duckdb, test_service_source
         )
     assert resp.status_code == 200
     assert "overview" in resp.json()
+
+
+def test_value_summary_analyst_session_clamps_window(client, in_memory_duckdb, test_service_source):
+    """An analyst session causes the value router to clamp requested time window to the analyst bounds."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from backend.core.request_context import build_request_context
+    from backend.main import app
+    from backend.utils.remote_access import TimeBounds
+    from tests.conftest import override_request_context
+
+    start = datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
+    end = datetime(2026, 6, 17, 10, 0, tzinfo=UTC)
+    session = SimpleNamespace(
+        session_id="sess-analyst-1",
+        pii_policy={"mask_ips": True},
+        service_ids=[test_service_source["service_id"]],
+    )
+
+    captured: dict = {}
+
+    def _fake_get_summary(**kw):
+        captured.update(kw)
+        return {
+            "overview": {
+                "total_requests": 100,
+                "origin_offload_pct": 95.0,
+            }
+        }
+
+    app.dependency_overrides[build_request_context] = override_request_context(
+        source=test_service_source,
+        _con_override=in_memory_duckdb,
+        session=session,
+        path="/api/value/summary",
+        time_bounds=TimeBounds(start=start, end=end),
+    )
+    try:
+        with patch("backend.repositories.value.get_summary", side_effect=_fake_get_summary):
+            resp = client.post(
+                "/api/value/summary",
+                headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+                json={
+                    "filters": {},
+                    "start_time": "2026-06-17T00:00:00Z",
+                    "end_time": "2026-06-17T23:59:59Z",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        assert captured["start_time"] == start.isoformat()
+        assert captured["end_time"] == end.isoformat()
+    finally:
+        app.dependency_overrides.pop(build_request_context, None)

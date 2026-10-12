@@ -603,7 +603,7 @@ deployed and certified. The Plotly nested-scroll-container fix is also
 deployed. Do not revisit TLS, gateway routing, or the former hardcoded-trends
 root cause for this issue.
 
-Next session: read the Page specification for `/fastly-value` (`docs/pages/fastly-value.md`),
+Next session: read the Page specification for `/performance` (`docs/pages/performance.md`),
 review its tests and current implementation, then run page health check before making changes.
 Preserve the pre-existing Local High-Scale removal hunks in
 `scripts/dev/report_server.py` and untracked `.github/instructions/`.
@@ -661,6 +661,16 @@ role boundaries, telemetry completeness, and documented performance budgets.
   telemetry propagation, zero layout shift (CLS = 0.00), real-time SSE streaming,
   IP masking for Analyst Path B, and comprehensive e2e test suite
   (`frontend/e2e/control-room.spec.ts`).
+- **`/fastly-value` — Live-certified (`docs/pages/fastly-value.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed 8-tab
+  architecture (`Summary`, `CDN & Caching`, `Assets & Shield`, `Security`,
+  `Bot Management`, `Performance`, `Network`, `Image Optimizer`), dynamic section
+  expansion via `POST /api/value/summary`, rollup fast paths (`overview_rollup` and
+  `network_rollup`), Fastly Historical Stats API integration with TTL caching for
+  Image Optimizer, `ReportLayout` integration with `X-Page-Load-ID` telemetry,
+  Analyst Path B role verification and session time-clamping, and comprehensive
+  test suites (`frontend/e2e/a11y-routes.spec.ts`, `frontend/__tests__/app/fastly-value.test.tsx`,
+  `tests/routers/test_value_router.py`).
 
 Known page-parity investigation after the environment rebuild:
 
