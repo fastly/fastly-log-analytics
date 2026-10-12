@@ -56,7 +56,7 @@ docs/pages/
 | `/dashboard` | [Dashboard](dashboard.md) | Top-level KPIs, multi-trace traffic chart, geo map, categorized Top-N cards | **Complete** |
 | `/control-room` | [Control Room](control-room.md) | Real-time operations, live throughput, recent error stream | **Live-certified** |
 | `/fastly-value` | [Service Summary / Value](fastly-value.md) | Bandwidth saved, edge compute efficiency, cost avoidance | **Live-certified** |
-| `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Scaffolded (Pending AI Verification)** |
+| `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Live-certified** |
 | `/origin` | [Origin Health](origin.md) | Backend latency, connect times, shielding ratio, retries | **Scaffolded (Pending AI Verification)** |
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Scaffolded (Pending AI Verification)** |
 | `/insights` | [Insights](insights.md) | 45 automated anomaly detectors across 5 category tabs | **Scaffolded (Pending AI Verification)** |

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from backend.models.common import BaseResponse
 
 
 class PerformanceAggregatesResponse(BaseResponse):
+    model_config = ConfigDict(populate_by_name=True)
+
     top_urls: list[dict[str, Any]] = []
     top_asns: list[dict[str, Any]] = []
     ttl_dist: list[dict[str, Any]] = []
@@ -17,4 +19,4 @@ class PerformanceAggregatesResponse(BaseResponse):
     # (>= 48 h unfiltered windows): the cross-hour percentile combine is a
     # request-weighted average, so the values are approximate. Emitted as
     # ``_approx`` (same key the origin Aggregates badge reads).
-    approx: bool = Field(default=False, serialization_alias="_approx")
+    approx: bool = Field(default=False, alias="_approx")
