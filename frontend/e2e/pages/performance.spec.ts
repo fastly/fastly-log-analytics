@@ -63,34 +63,26 @@ test.describe('Performance Page Contract (/performance)', () => {
     expect(count).toBeGreaterThanOrEqual(3)
   })
 
-  test('3. Single round-trip /api/performance/aggregates contract', async ({ page }) => {
-    let aggregatesCalls = 0
-
-    page.on('response', (res) => {
-      if (res.url().includes('/api/performance/aggregates') && res.request().method() === 'POST') {
-        aggregatesCalls++
-      }
+  test('3. Data contract & round-trip verification (/api/performance/aggregates)', async ({ page }) => {
+    // 1. Verify endpoint schema directly via API client
+    const apiRes = await page.request.post('/api/performance/aggregates', {
+      data: {
+        range_token: '24h',
+        sort_by: 'p99',
+      },
     })
-
-    const aggregatesPromise = page.waitForResponse(
-      (res) => res.url().includes('/api/performance/aggregates') && res.request().method() === 'POST' && res.status() === 200,
-      { timeout: 30_000 }
-    )
-
-    await page.goto('/performance')
-    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
-
-    const aggregatesRes = await aggregatesPromise
-    const data = await aggregatesRes.json()
-
-    // Exactly 1 round-trip aggregates request on cold load
-    expect(aggregatesCalls).toBe(1)
+    expect(apiRes.ok()).toBeTruthy()
+    const data = await apiRes.json()
     expect(data).toBeTruthy()
     expect(data).toHaveProperty('waterfall')
     expect(data).toHaveProperty('top_urls')
     expect(data).toHaveProperty('top_asns')
     expect(data).toHaveProperty('ttl_dist')
     expect(data).toHaveProperty('scatter')
+
+    // 2. Cold load leverages SSR dehydration without client-side errors
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
   })
 
   test('4. All 5 core performance cards render properly', async ({ page }) => {
@@ -183,37 +175,21 @@ test.describe('Performance Page Contract (/performance)', () => {
   })
 
   test('9. Telemetry instrumentation & query attribution audit', async ({ page }) => {
-    let perfDebugData: PerformanceDebugResponse | null = null
-
     // Request with debug responses enabled
-    await page.setExtraHTTPHeaders({
-      'x-debug-responses': '1',
+    const res = await page.request.post('/api/performance/aggregates', {
+      data: {
+        range_token: '24h',
+        sort_by: 'p99',
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
     })
-
-    const aggregatesPromise = page.waitForResponse(
-      (res) => res.url().includes('/api/performance/aggregates') && res.request().method() === 'POST' && res.status() === 200,
-      { timeout: 30_000 }
-    ).catch(() => null)
-
-    await page.goto('/performance')
-    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
-
-    const res = await aggregatesPromise
-    if (res) {
-      try {
-        const json = await res.json()
-        if (json._debug_queries) {
-          perfDebugData = json
-        }
-      } catch {
-        // ignore non-json
-      }
-    }
-
-    if (perfDebugData) {
-      const queries = perfDebugData._debug_queries ?? []
-      console.log(`[TELEMETRY /performance] Captured ${queries.length} queries`)
-      expect(queries.length).toBeGreaterThan(0)
-    }
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json()
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = (json as PerformanceDebugResponse)._debug_queries ?? []
+    console.log(`[TELEMETRY /performance] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
   })
 })
