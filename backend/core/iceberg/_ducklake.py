@@ -4,12 +4,12 @@ The v3 storage layer replaces the pyiceberg write path with a DuckLake
 catalog attached as ``lake`` on each DuckDB connection. This module owns
 the attach contract:
 
-- **Durability**: for cloud-backed sources the default ``DATA_PATH`` is
-  ``s3://{bucket}/{prefix}/ducklake/`` so committed parquet lands in FOS.
-  The raw ``.gz`` files are deleted after ingest, so a local-disk default
-  would leave the ONLY copy of the data on the VM's ephemeral disk.
-  Local-only sources (and an explicit ``DUCKLAKE_DATA_PATH`` override)
-  keep a local data path.
+- **Local Storage Architecture**: Standard deployments store all committed
+  DuckLake parquet files locally under ``/app/data/services/{service_id}/ducklake/``
+  on fast local disk for instant analytical queries with 0 network latency.
+  FOS / S3 is strictly an ingress drop bucket for incoming raw ``.gz`` logs.
+  Remote S3 parquet scans are prohibited unless explicitly permitted via
+  ``ALLOW_REMOTE_S3_PARQUET_SCAN=1``.
 - **Tenant isolation**: when ``DUCKLAKE_CATALOG`` points every service at
   one shared catalog (e.g. a Postgres DSN), a bare ``lake.logs`` would mix
   tenants. :func:`ducklake_table_name` derives a per-service table name

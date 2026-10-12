@@ -1722,7 +1722,8 @@ def test_refresh_config_status_rum_latest_is_real_timestamp_not_hour_bucket():
 
 
 def test_get_sync_status_ducklake_snapshot_cached_split_stats(in_memory_duckdb, fos_source, tmp_path):
-    """When cache/bucket/data does not exist (cloud-backed DuckLake mode),
+    """When legacy cache/bucket/data does not exist (DuckLake mode where
+    committed data resides on local disk under /app/data/services/{service_id}/ducklake),
     get_sync_status must probe DuckLake snapshot ID, cache the lake stats in
     _data_stats_cache, and reuse the cached count without re-querying the lake table."""
     import backend.core.duckdb as _db_main
