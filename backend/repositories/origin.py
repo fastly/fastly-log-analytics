@@ -636,6 +636,95 @@ def get_ip_health(
     return _store_response_cache(cache_key, payload, runner)
 
 
+_DIM_CANDIDATES: dict[str, list[str]] = {
+    "host": ["host", "server", "req_header_host"],
+    "shield_pop": ["shield_pop", "fastly_info_shield_pop", "shield", "pop"],
+    "datacenter": ["server_region", "datacenter", "datacenter_code", "pop"],
+    "protocol": ["proto", "protocol"],
+    "pop": ["pop"],
+    "oip": ["oip"],
+}
+
+
+def get_drilldown(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    dimension: str = "host",
+    limit: int = 30,
+) -> dict:
+    runner = QueryRunner(con, src)
+    cache_key, hit = _check_response_cache(
+        "drilldown", src, start_time, end_time, filters, runner, dimension=dimension, limit=limit
+    )
+    if hit:
+        return hit
+
+    table_name = _safe_table(src["name"])
+    actual_cols = runner.get_schema_cols()
+    if not actual_cols:
+        return empty_schema_response(has_data=False, dimension=dimension, rows=[], **runner.telemetry())
+
+    candidates = _DIM_CANDIDATES.get(dimension, [dimension])
+    dim_col = next((c for c in candidates if c in actual_cols), None)
+    if not dim_col:
+        return empty_schema_response(has_data=False, dimension=dimension, rows=[], **runner.telemetry())
+
+    params, where = build_where_clause(start_time, end_time, filters, actual_cols)
+    lat_val = origin_latency_us_expr(actual_cols)
+
+    if "ost" in actual_cols:
+        error_expr = '"ost" >= 500'
+    elif "status" in actual_cols:
+        error_expr = '"status" >= 500'
+    else:
+        error_expr = "false"
+
+    if "obytes" in actual_cols:
+        bytes_expr = 'ROUND(MEDIAN("obytes"), 0)'
+    elif "bytes" in actual_cols:
+        bytes_expr = 'ROUND(MEDIAN("bytes"), 0)'
+    else:
+        bytes_expr = "NULL"
+
+    rows = runner.execute(
+        SQL.DRILLDOWN.format(
+            dim_col=dim_col,
+            lat_val=lat_val,
+            error_expr=error_expr,
+            bytes_expr=bytes_expr,
+            table=table_name,
+            where=where,
+        ),
+        params + [limit],
+    ).fetchall()
+
+    if not rows:
+        payload = {"has_data": False, "dimension": dimension, "rows": []}
+        return _store_response_cache(cache_key, payload, runner)
+
+    rows_out = [
+        {
+            "key": str(r[0]),
+            "requests": int(r[1]),
+            "p50_ms": float(r[2]) if r[2] is not None else None,
+            "p95_ms": float(r[3]) if r[3] is not None else None,
+            "p99_ms": float(r[4]) if r[4] is not None else None,
+            "error_rate": float(r[5]) if r[5] is not None else 0.0,
+            "bytes": int(r[6]) if r[6] is not None else None,
+        }
+        for r in rows
+    ]
+    payload = {
+        "has_data": True,
+        "dimension": dimension,
+        "rows": rows_out,
+    }
+    return _store_response_cache(cache_key, payload, runner)
+
+
 def get_shielding_analysis(
     con: duckdb.DuckDBPyConnection,
     src: dict,

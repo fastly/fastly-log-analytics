@@ -123,7 +123,9 @@ export function LatencyHeatmap({
           icon={<Server className="h-4 w-4" />}
           isLoading={slowUrls.isLoading}
           isFetching={slowUrls.isFetching}
+          loadingMessage="Loading slowest URLs at origin..."
           error={slowUrls.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>A list of specific URLs that take the longest time to fetch from the origin.</p>}
           headerAction={
@@ -154,7 +156,9 @@ export function LatencyHeatmap({
           icon={<MapPin className="h-4 w-4" />}
           isLoading={popLatency.isLoading}
           isFetching={popLatency.isFetching}
+          loadingMessage="Loading origin performance by POP..."
           error={popLatency.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>Backend latency aggregated by Fastly POP location.</p>}
           headerAction={
@@ -187,7 +191,9 @@ export function LatencyHeatmap({
           icon={<Globe className="h-4 w-4" />}
           isLoading={ipHealth.isLoading}
           isFetching={ipHealth.isFetching}
+          loadingMessage="Loading origin IP health..."
           error={ipHealth.error as AnalyticsCardError | null}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<p>Latency and error rates for individual backend IP addresses.</p>}
           headerAction={
@@ -218,7 +224,9 @@ export function LatencyHeatmap({
           icon={<Globe className="h-4 w-4" />}
           isLoading={summary.isLoading}
           isFetching={summary.isFetching}
+          loadingMessage="Loading origin payload size..."
           error={summary.error as AnalyticsCardError | null}
+          className="min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto]"
           helpContent={<p>The median size of the response body transferred from the origin to Fastly.</p>}
         >
           <div className="flex flex-col items-center justify-center py-4 text-center">

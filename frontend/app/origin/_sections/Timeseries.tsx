@@ -33,9 +33,10 @@ export function Timeseries({
       <AnalyticsCard
         title="Origin Latency"
         icon={<Activity className="h-4 w-4" />}
-        className="lg:col-span-2 h-[400px]"
+        className="lg:col-span-2 h-[400px] [contain-intrinsic-size:400px] [content-visibility:auto]"
         isLoading={originTs.isLoading}
         isFetching={originTs.isFetching}
+        loadingMessage="Loading origin latency timeseries..."
         error={originTs.error as AnalyticsCardError | null}
         helpContent={<p>Time to First Byte (TTFB) measures the time to receive the first byte of the response headers from the origin. Time to Last Byte (TTLB) measures the time to receive the full response body.</p>}
         headerAction={
@@ -131,9 +132,10 @@ export function Timeseries({
         icon={<Activity className="h-4 w-4" />}
         isLoading={statusCodes.isLoading}
         isFetching={statusCodes.isFetching}
+        loadingMessage="Loading origin status code breakdown..."
         error={statusCodes.error as AnalyticsCardError | null}
         isEmpty={!statusData?.length}
-        className="h-[400px]"
+        className="h-[400px] [contain-intrinsic-size:400px] [content-visibility:auto]"
         contentClassName="p-2"
         helpContent={<p>A breakdown of the HTTP status codes returned directly by your backend servers during the selected time period.</p>}
       >

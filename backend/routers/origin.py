@@ -12,6 +12,7 @@ from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
     OriginAggregatesResponse,
+    OriginDrilldownResponse,
     OriginIpHealthResponse,
     OriginPathBreakdownResponse,
     OriginPopLatencyResponse,
@@ -79,6 +80,11 @@ class OriginIpHealthRequest(FilteredRequest):
 
 class OriginShieldingAnalysisRequest(FilteredRequest):
     limit: Limit200 = 50
+
+
+class OriginDrilldownRequest(FilteredRequest):
+    dimension: Literal["host", "shield_pop", "datacenter", "protocol", "pop", "oip"] = "host"
+    limit: Limit100 = 30
 
 
 class OriginAggregatesRequest(FilteredRequest):
@@ -316,3 +322,22 @@ def origin_shielding_analysis(
         limit=req.limit,
     )
     return OriginShieldingAnalysisResponse.with_telemetry(**res)
+
+
+@router.post("/drilldown", response_model=OriginDrilldownResponse)
+@query_errors()
+def origin_drilldown(
+    req: OriginDrilldownRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    res = repo.get_drilldown(
+        con=ctx.con,
+        src=ctx.source,
+        start_time=start_time,
+        end_time=end_time,
+        filters=req.filters,
+        dimension=req.dimension,
+        limit=req.limit,
+    )
+    return OriginDrilldownResponse.with_telemetry(**res)

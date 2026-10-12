@@ -362,3 +362,63 @@ def test_origin_aggregates_dispatches_registered_high_scale_service(
     high_scale_aggregates.assert_called_once()
     assert high_scale_aggregates.call_args.kwargs["sections"] == {"summary"}
     standard.assert_not_awaited()
+
+
+# ── /api/origin/drilldown: parameter validation & execution ─────────────────
+
+
+def test_origin_drilldown_accepts_default_request(client, in_memory_duckdb, test_service_source):
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    resp = client.post(
+        "/api/origin/drilldown",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "has_data" in data
+    assert data["dimension"] == "host"
+    assert isinstance(data["rows"], list)
+
+
+def test_origin_drilldown_validates_dimension_enum(client):
+    resp = client.post(
+        "/api/origin/drilldown",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "dimension": "invalid_dimension"},
+    )
+    assert resp.status_code == 422
+
+
+def test_origin_drilldown_passes_dimension_and_limit(client, in_memory_duckdb, test_service_source):
+    _seed_origin_table(in_memory_duckdb, test_service_source)
+    with patch(
+        "backend.repositories.origin.get_drilldown", return_value={"has_data": True, "dimension": "pop", "rows": []}
+    ) as mock:
+        resp = client.post(
+            "/api/origin/drilldown",
+            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+            json={
+                "filters": {},
+                "dimension": "pop",
+                "limit": 15,
+            },
+        )
+    assert resp.status_code == 200
+    kwargs = mock.call_args.kwargs
+    assert kwargs["dimension"] == "pop"
+    assert kwargs["limit"] == 15
+
+
+def test_origin_drilldown_empty_table(client, in_memory_duckdb, test_service_source):
+    # Table exists but no rows seeded with matching criteria
+    resp = client.post(
+        "/api/origin/drilldown",
+        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
+        json={"filters": {}, "dimension": "oip"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dimension"] == "oip"
+    assert data["has_data"] is False
+    assert data["rows"] == []

@@ -599,7 +599,7 @@ deployed and certified. The Plotly nested-scroll-container fix is also
 deployed. Do not revisit TLS, gateway routing, or the former hardcoded-trends
 root cause for this issue.
 
-Next session: read the Page specification for `/performance` (`docs/pages/performance.md`),
+Next session: read the Page specification for `/security` (`docs/pages/security.md`),
 review its tests and current implementation, then run page health check before making changes.
 Preserve the pre-existing Local High-Scale removal hunks in
 `scripts/dev/report_server.py` and untracked `.github/instructions/`.
@@ -667,6 +667,22 @@ role boundaries, telemetry completeness, and documented performance budgets.
   Analyst Path B role verification and session time-clamping, and comprehensive
   test suites (`frontend/e2e/a11y-routes.spec.ts`, `frontend/__tests__/app/fastly-value.test.tsx`,
   `tests/routers/test_value_router.py`).
+- **`/performance` — Live-certified (`docs/pages/performance.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Edge Performance suite:
+  Performance KPIs (Edge Latency, TTFB, TTLB, Fastly Overhead), time-series latency trends,
+  status distribution, regional TTFB breakdown, slow URL analysis, and device/country matrices.
+  Enforced zero-CLS layout reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`)
+  and contextual loading states. Comprehensive unit tests and Playwright E2E integration spec
+  (`frontend/e2e/pages/performance.spec.ts`).
+- **`/origin` — Live-certified (`docs/pages/origin.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Origin Health & Shielding suite:
+  Origin KPIs (shielding ratio, origin TTFB/TTLB, connect time, retry rates, status code distribution),
+  time-series latency trends, latency distribution heatmap, POP latency matrix, slow URLs, and origin IP
+  health table. Enforced zero-CLS layout reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`)
+  and contextual loading states across all 10 cards. Implemented typed Pydantic models (`OriginDrilldownRow`,
+  `OriginDrilldownResponse`) and backend drill-down API (`POST /api/origin/drilldown`). Comprehensive unit tests
+  (`tests/routers/test_origin_router.py`, `frontend/__tests__/app/origin.test.tsx`) and Playwright E2E integration
+  spec (`frontend/e2e/pages/origin.spec.ts`).
 
 Known page-parity investigation after the environment rebuild:
 

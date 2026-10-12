@@ -2,7 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from backend.models.common import BaseResponse, HasDataMixin
+
+
+class OriginDrilldownRow(BaseModel):
+    key: str
+    requests: int = 0
+    p50_ms: float | None = None
+    p95_ms: float | None = None
+    p99_ms: float | None = None
+    error_rate: float | None = None
+    bytes: int | None = None
+
+
+class OriginDrilldownResponse(HasDataMixin, BaseResponse):
+    dimension: str = "host"
+    rows: list[dict[str, Any]] = []
 
 
 class OriginSummaryResponse(HasDataMixin, BaseResponse):

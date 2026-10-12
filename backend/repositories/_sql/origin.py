@@ -287,6 +287,38 @@ At most ``2 * limit`` rows (the two rank sets when fully disjoint).
 """
 
 
+DRILLDOWN = """
+        SELECT
+          COALESCE(CAST("{dim_col}" AS VARCHAR), 'unknown')                   AS dim_key,
+          COUNT(*)                                                            AS requests,
+          ROUND(MEDIAN({lat_val}) / 1000.0, 2)                                AS p50_ms,
+          ROUND(APPROX_QUANTILE({lat_val}, 0.95) / 1000.0, 2)                 AS p95_ms,
+          ROUND(APPROX_QUANTILE({lat_val}, 0.99) / 1000.0, 2)                 AS p99_ms,
+          ROUND(COUNT(*) FILTER (WHERE {error_expr}) * 100.0
+                / NULLIF(COUNT(*), 0), 2)                                     AS error_rate,
+          {bytes_expr}                                                        AS bytes
+        FROM {table}
+        WHERE {where} AND ({lat_val} IS NOT NULL) AND "{dim_col}" IS NOT NULL AND "{dim_col}" != ''
+        GROUP BY 1
+        ORDER BY requests DESC
+        LIMIT ?
+        """
+"""Origin metrics drill-down by arbitrary dimension (host, shield POP, etc.).
+
+Inputs:
+- ``{dim_col}`` — dimension column name
+- ``{lat_val}`` — origin-latency expression
+- ``{error_expr}`` — 5xx error condition expression
+- ``{bytes_expr}`` — bytes aggregation expression
+- ``{table}`` — quoted base-table identifier
+- ``{where}`` — pre-built WHERE clause
+
+The trailing ``?`` placeholder binds ``limit``.
+
+Output columns per row: ``(dim_key, requests, p50_ms, p95_ms, p99_ms, error_rate, bytes)``
+"""
+
+
 # ── Composite endpoint: get_aggregates → CREATE TEMP TABLE + 8 reads ──────────
 
 AGGREGATES_CREATE_TEMP = (
@@ -340,6 +372,7 @@ __all__ = [
     "PATH_BREAKDOWN",
     "POP_LATENCY",
     "IP_HEALTH",
+    "DRILLDOWN",
     "SHIELDING_ANALYSIS",
     "AGGREGATES_CREATE_TEMP",
 ]
