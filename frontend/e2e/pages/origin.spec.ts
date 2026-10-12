@@ -56,7 +56,7 @@ test.describe('Origin Page Contract (/origin)', () => {
     await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
 
     // Verify pre-allocated cards exist with content-visibility / contain-intrinsic-size
-    const originLatencyCard = page.locator('text=Origin Latency')
+    const originLatencyCard = page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Latency' }).first()
     await expect(originLatencyCard).toBeVisible({ timeout: 15_000 })
 
     // Verify intrinsic size reservation classes across KPI, timeseries, and table cards
@@ -95,20 +95,20 @@ test.describe('Origin Page Contract (/origin)', () => {
     await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
 
     // Check KPI Cards
-    await expect(page.getByText('Origin TTFB (P50)')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin TTFB (P95)')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin Error Rate')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Fetch Volume')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin TTFB (P50)' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin TTFB (P95)' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Error Rate' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Fetch Volume' }).first()).toBeVisible({ timeout: 15_000 })
 
     // Check Timeseries & Distribution Cards
-    await expect(page.getByText('Origin Latency')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Status Code Distribution')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Latency' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Status Code Distribution' }).first()).toBeVisible({ timeout: 15_000 })
 
     // Check Heatmap & Breakdown Cards
-    await expect(page.getByText('Slowest URLs at Origin')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin Performance by POP')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin IP Health')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Origin Payload Size')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Slowest URLs at Origin' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Performance by POP' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin IP Health' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Payload Size' }).first()).toBeVisible({ timeout: 15_000 })
   })
 
   test('5. Time range presets and adaptive history extents (15m, 24h, 30d)', async ({ page }) => {
