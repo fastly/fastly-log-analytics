@@ -70,3 +70,7 @@ class SecurityProxiesResponse(BaseResponse):
     traffic_quality: list[dict[str, Any]] = []
     suspicious_isps: list[dict[str, Any]] = []
     active_clients: list[ActiveClientItem] = []
+
+
+# Alias for bundle endpoint contract
+SecurityBundleResponse = SecurityAggregatesResponse

@@ -308,7 +308,7 @@ export function ProxyWatchdogSection({
   return (
     <div className="space-y-6">
       {/* Top Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
           title="Active VPN & Proxy Users"
           value={isLoading ? <Skeleton className="h-8 w-16" /> : activeProxiesCount.toLocaleString()}
@@ -316,6 +316,7 @@ export function ProxyWatchdogSection({
           icon={Globe}
           iconClassName="text-blue-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Active VPN & Proxy Users Detection"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
@@ -367,6 +368,7 @@ export function ProxyWatchdogSection({
           icon={Activity}
           iconClassName="text-violet-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Tunnel Requests Volume"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
@@ -395,6 +397,7 @@ export function ProxyWatchdogSection({
           icon={AlertTriangle}
           iconClassName="text-amber-500"
           loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
           helpTitle="Impossible Distance Mismatch Auditing"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
@@ -427,7 +430,7 @@ export function ProxyWatchdogSection({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left column: Traffic Quality & Suspicious ISPs */}
         <div className="lg:col-span-1 space-y-6">
-          <Card>
+          <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -478,7 +481,7 @@ export function ProxyWatchdogSection({
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -549,7 +552,7 @@ export function ProxyWatchdogSection({
         {/* Right column: Export block & Active Clients */}
         <div className="lg:col-span-2 space-y-6">
           {/* Export block */}
-          <Card className="border-primary/20 bg-primary/5">
+          <Card className="border-primary/20 bg-primary/5 [contain-intrinsic-size:140px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -616,7 +619,7 @@ export function ProxyWatchdogSection({
           </Card>
 
           {/* Active Clients */}
-          <Card>
+          <Card className="min-h-[400px] [contain-intrinsic-size:600px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">

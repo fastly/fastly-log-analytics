@@ -69,8 +69,9 @@ export function NetworkSection({
           icon={<Globe className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading IPv6 adoption data..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.ipv6.title}
           helpContent={SECURITY_INFO.ipv6.body}
@@ -94,8 +95,9 @@ export function NetworkSection({
           icon={<Network className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading proxy/anonymizer breakdown..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.proxy.title}
           helpContent={SECURITY_INFO.proxy.body}
@@ -117,8 +119,9 @@ export function NetworkSection({
           icon={<Repeat className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading connection reuse distribution..."
           error={error as AnalyticsCardError | null}
-          className="h-[360px]"
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.conn_reuse.title}
           helpContent={SECURITY_INFO.conn_reuse.body}

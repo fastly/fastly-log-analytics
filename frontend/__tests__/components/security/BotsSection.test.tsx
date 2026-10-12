@@ -106,8 +106,16 @@ describe('BotsSection', () => {
 
   it('shows loading skeleton (AnalyticsCard overlay) when data is undefined and isLoading=true', () => {
     render(<BotsSection {...baseProps({ isLoading: true })} />)
-    // AnalyticsCard's spinner overlay renders "Loading data..." per card; multiple cards => multiple labels.
-    expect(screen.getAllByText(/loading data/i).length).toBeGreaterThan(0)
+    expect(screen.getByText('Loading NGWAF verified bots...')).toBeInTheDocument()
+    expect(screen.getByText('Loading NGWAF bot names...')).toBeInTheDocument()
+    expect(screen.getByText('Loading well-known bots...')).toBeInTheDocument()
+    expect(screen.getByText('Loading TLS fingerprints...')).toBeInTheDocument()
+  })
+
+  it('enforces zero-CLS layout reservations on all cards', () => {
+    const { container } = render(<BotsSection {...baseProps()} />)
+    const containedElements = container.querySelectorAll('.\\\[contain-intrinsic-size\\:360px\\\], .\\\[contain-intrinsic-size\\:300px\\\]')
+    expect(containedElements.length).toBeGreaterThanOrEqual(4)
   })
 
   it('renders empty-state messages when arrays are empty', () => {

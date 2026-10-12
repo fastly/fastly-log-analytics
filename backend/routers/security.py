@@ -10,13 +10,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend import config as svcconfig
+from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
+from backend.core.share_db.validation import mask_ip
 from backend.models.common import BaseResponse, FilteredRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesResponse,
+    SecurityBundleResponse,
 )
 from backend.repositories import security as repo
+from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import track_query
 from backend.utils.time_window import is_valid_range_token, resolve_window
@@ -82,6 +86,7 @@ class SecurityAggregatesRequest(FilteredRequest):
 
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
+@router.post("/bundle", response_model=SecurityBundleResponse)
 @query_errors()
 def security_aggregates(
     req: SecurityAggregatesRequest,
@@ -106,6 +111,7 @@ def security_aggregates(
 
         return hs_aggregates(high_scale_service, req, start_time, end_time)
     sections = _expand_sections(req.sections)
+    mask_ips = mask_ips_for(ctx.analyst_session)
     res = repo.get_security_aggregates(
         con=ctx.con,
         src=ctx.source,
@@ -114,6 +120,7 @@ def security_aggregates(
         filters=req.filters,
         bucket_seconds=req.bucket_seconds,
         sections=sections,
+        mask_ips=mask_ips,
     )
     # 30-s edge cache + 120-s stale-while-revalidate. Aggregates are
     # hourly-bucketed at minimum, so 30 s staleness is well inside
@@ -121,6 +128,27 @@ def security_aggregates(
     # tweak round-trips collapse from 3-14 s to near-zero.
     response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
     return SecurityAggregatesResponse.with_telemetry(**res)
+
+
+@router.get("/bundle", response_model=SecurityBundleResponse)
+@query_errors()
+def security_bundle_get(
+    response: Response,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    range_token: str | None = None,
+    anchor: str | None = None,
+    bucket_seconds: int = 300,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    req = SecurityAggregatesRequest(
+        start_time=start_time,
+        end_time=end_time,
+        range_token=range_token,
+        anchor=anchor,
+        bucket_seconds=bucket_seconds,
+    )
+    return security_aggregates(req, response, ctx)
 
 
 @router.get("/proxies/export")
@@ -141,6 +169,8 @@ def export_proxies_csv(
     # Enforce correct date-bounds tenancy
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
 
+    mask_ips = mask_ips_for(ctx.analyst_session)
+
     # Query repository
     res = repo.get_security_proxies(
         con=ctx.con,
@@ -148,6 +178,7 @@ def export_proxies_csv(
         start_time=resolved_start,
         end_time=resolved_end,
         filters=None,
+        mask_ips=mask_ips,
     )
 
     # Filter clients by risk threshold
@@ -161,10 +192,15 @@ def export_proxies_csv(
     seen_ips = set()
     unique_clients = []
     for c in filtered_clients:
-        ip = c.get("ip")
-        if ip and ip not in seen_ips:
+        raw_ip = c.get("ip")
+        if not raw_ip:
+            continue
+        ip = mask_ip(str(raw_ip)) if mask_ips else str(raw_ip)
+        if ip not in seen_ips:
             seen_ips.add(ip)
-            unique_clients.append(c)
+            item = dict(c)
+            item["ip"] = ip
+            unique_clients.append(item)
     filtered_clients = unique_clients
 
     # Create CSV memory buffer
@@ -239,53 +275,56 @@ def get_security_threat_intel(
     time_filter = "WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND timestamp <= CAST(? AS TIMESTAMPTZ)"
     params = [resolved_start, resolved_end]
 
-    probe = ctx.con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-    cols = {d[0] for d in probe}
+    def _run_threat_intel(con) -> list[ThreatIntelItem]:
+        probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
+        cols = {d[0] for d in probe}
 
-    if "ja3" in cols:
-        fingerprint_col = "ja3"
-    elif "ja4" in cols:
-        fingerprint_col = "ja4"
-    else:
-        fingerprint_col = "CAST('Unknown' AS VARCHAR)"
+        if "ja3" in cols:
+            fingerprint_col = "ja3"
+        elif "ja4" in cols:
+            fingerprint_col = "ja4"
+        else:
+            fingerprint_col = "CAST('Unknown' AS VARCHAR)"
 
-    proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
-    waf_conditions = []
-    if "waf_logged_rules" in cols:
-        waf_conditions.append("waf_logged_rules IS NOT NULL")
-    if "waf_blocked_rules" in cols:
-        waf_conditions.append("waf_blocked_rules IS NOT NULL")
-    waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
-    bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
-    country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
+        proxy_col = "p_type" if "p_type" in cols else "CAST(NULL AS VARCHAR)"
+        waf_conditions = []
+        if "waf_logged_rules" in cols:
+            waf_conditions.append("waf_logged_rules IS NOT NULL")
+        if "waf_blocked_rules" in cols:
+            waf_conditions.append("waf_blocked_rules IS NOT NULL")
+        waf_col = f"COUNT(*) FILTER (WHERE {' OR '.join(waf_conditions)})" if waf_conditions else "CAST(0 AS BIGINT)"
+        bot_filter = "is_bot = true" if "is_bot" in cols else "FALSE"
+        country_col = "country" if "country" in cols else "CAST('Unknown' AS VARCHAR)"
 
-    query = f"""
-        SELECT
-            {fingerprint_col} AS tls_fingerprint,
-            COUNT(*) AS requests,
-            mode({country_col}) AS top_country,
-            {waf_col} AS matched_waf_rules_count,
-            ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
-            MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
-        FROM {table_name}
-        {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
-        GROUP BY tls_fingerprint
-        ORDER BY requests DESC
-        LIMIT 50
-    """
+        query = f"""
+            SELECT
+                {fingerprint_col} AS tls_fingerprint,
+                COUNT(*) AS requests,
+                mode({country_col}) AS top_country,
+                {waf_col} AS matched_waf_rules_count,
+                ROUND(COUNT(*) FILTER (WHERE {bot_filter}) * 100.0 / COUNT(*), 2) AS bot_percentage,
+                MAX(CASE WHEN {proxy_col} IS NOT NULL AND {proxy_col} != '' THEN 1 ELSE 0 END) AS is_anonymized_proxy
+            FROM {table_name}
+            {time_filter} AND {fingerprint_col} IS NOT NULL AND {fingerprint_col} != ''
+            GROUP BY tls_fingerprint
+            ORDER BY requests DESC
+            LIMIT 50
+        """
 
-    data = []
-    with track_query(ctx.con, query, params, "threat_intel") as cursor:
-        for row in cursor.fetchall():
-            data.append(
-                ThreatIntelItem(
-                    tls_fingerprint=row[0],
-                    requests=row[1],
-                    top_country=row[2] or "Unknown",
-                    matched_waf_rules_count=row[3],
-                    bot_percentage=row[4] or 0.0,
-                    is_anonymized_proxy=bool(row[5]),
+        data = []
+        with track_query(con, query, params, "threat_intel") as cursor:
+            for row in cursor.fetchall():
+                data.append(
+                    ThreatIntelItem(
+                        tls_fingerprint=row[0],
+                        requests=row[1],
+                        top_country=row[2] or "Unknown",
+                        matched_waf_rules_count=row[3],
+                        bot_percentage=row[4] or 0.0,
+                        is_anonymized_proxy=bool(row[5]),
+                    )
                 )
-            )
+        return data
 
+    data = execute_with_stale_view_retry(ctx.con, ctx.source, _run_threat_intel)
     return ThreatIntelListResponse.with_telemetry(data=data)

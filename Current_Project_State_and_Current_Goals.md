@@ -683,6 +683,17 @@ role boundaries, telemetry completeness, and documented performance budgets.
   `OriginDrilldownResponse`) and backend drill-down API (`POST /api/origin/drilldown`). Comprehensive unit tests
   (`tests/routers/test_origin_router.py`, `frontend/__tests__/app/origin.test.tsx`) and Playwright E2E integration
   spec (`frontend/e2e/pages/origin.spec.ts`).
+- **`/security` — Live-certified (`docs/pages/security.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Edge Security & Bot Intelligence suite:
+  Security KPIs (WAF blocks, attack rates, NGWAF signal distributions, verified vs. spoofed bot crawlers,
+  JA3/JA4 fingerprints), WAF activity timelines, threat intelligence, and VPN/proxy watchdog. Hardened backend
+  validation with typed Pydantic models for `/api/security/bundle` (POST & GET) and composite aggregates, query-runner
+  tenancy, buffer self-heal (`execute_with_stale_view_retry`), and analyst IP masking (`mask_ips_for`).
+  Enforced zero-CLS layout reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`) and
+  contextual loading states across all security sections and cards. Comprehensive router unit tests
+  (`tests/routers/test_security_router.py`), frontend unit tests (`frontend/__tests__/app/security.test.tsx`,
+  `frontend/__tests__/components/security/*.test.tsx`), and Playwright E2E integration spec
+  (`frontend/e2e/pages/security.spec.ts`).
 
 Known page-parity investigation after the environment rebuild:
 

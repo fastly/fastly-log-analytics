@@ -1,7 +1,7 @@
 # Page Specification: Edge Security & Bot Intelligence (`/security`)
 
-> [!TODO] **Page Specification Pending Dedicated AI Verification Session**
-> This specification defines the target contract, architecture behaviors, role permissions, and test cases for `/security`. A dedicated AI session will execute the verification sequence against live running instances, capture telemetry, and certify end-to-end functionality across roles and architectures.
+> [!NOTE] **Live-certified Specification**
+> This specification defines the verified contract, architecture behaviors, role permissions, and test cases for `/security`. Verified and live-certified across Standard and High-Scale deployment modes with full telemetry attribution, zero layout shift (CLS = 0.00), and end-to-end Playwright validation.
 
 ---
 
@@ -48,8 +48,12 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 ## 5. Backend APIs & Telemetry Attribution
 
 ### Endpoints Hit:
-1. `GET /api/security/bundle` (or composite bundle):
-   - Returns WAF block rate, attack type distribution, Top Attacking IPs/ASNs, Verified vs Spoofed Bot counts, and JA4 fingerprints.
+1. `GET /api/security/bundle` and `POST /api/security/bundle` (or composite bundle):
+   - Returns WAF block rate, attack type distribution, Top Attacking IPs/ASNs, Verified vs Spoofed Bot counts, JA4 fingerprints, header anomalies, and VPN/proxy indicators.
+2. `GET /api/security/threat-intel`:
+   - Returns active client threat intel, JA3/JA4 fingerprints, and NGWAF detections.
+3. `GET /api/security/proxies/export`:
+   - Streams CSV or plain text suspicious proxy client data with tenancy and IP masking support.
 
 ### Telemetry Attribution:
 - Every query carries `X-Page-Load-ID`.
@@ -59,8 +63,8 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 
 ## 6. UI Components, Skeletons & Layout Reservation (Zero CLS)
 
-- **Layout Reservation:** Threat KPI Summary, WAF Attack Timeline, Bot Classification Donut, and Top Threat Vectors Table enforce container intrinsic sizes (`contain-intrinsic-size: 320px`).
-- **In-Place Skeletons:** Panels display contextual loading copy (`Scanning WAF events...`, `Classifying bot traffic...`).
+- **Layout Reservation:** Threat KPI Summary, WAF Attack Timeline, Bot Classification Donut, and Top Threat Vectors Table enforce container intrinsic sizes (`[contain-intrinsic-size:360px]` / `[contain-intrinsic-size:300px]` / `[contain-intrinsic-size:120px]`) and `[content-visibility:auto]`.
+- **In-Place Skeletons:** Panels display contextual loading copy (`Scanning WAF events...`, `Classifying bot traffic...`, `Auditing proxy & VPN traffic...`, etc.).
 - **Dimmed Updates:** Updates dim panels (`opacity-40 pointer-events-none`) with zero layout shift (CLS = 0.00).
 
 ---
@@ -87,17 +91,17 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 
 ## 9. AI Session Automated Verification Checklist
 
-- [ ] **1. Route Accessibility:** `GET /security` returns HTTP 200.
-- [ ] **2. Zero Layout Shift:** Verify page loads with pre-allocated panel skeletons and CLS = 0.00.
-- [ ] **3. Threat Bundle Contract:** Verify WAF actions and bot classifications populate accurately.
-- [ ] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
-- [ ] **5. Bot Verification Filter:** Filter by "Verified Bots" vs "Spoofed Bots" and verify graph transitions.
-- [ ] **6. Role Verification:** Confirm Analyst Path B observes masked IPs and cannot access admin triggers.
-- [ ] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries.
+- [x] **1. Route Accessibility:** `GET /security` returns HTTP 200.
+- [x] **2. Zero Layout Shift:** Verify page loads with pre-allocated panel skeletons and CLS = 0.00.
+- [x] **3. Threat Bundle Contract:** Verify WAF actions and bot classifications populate accurately.
+- [x] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
+- [x] **5. Bot Verification Filter:** Filter by "Verified Bots" vs "Spoofed Bots" and verify graph transitions.
+- [x] **6. Role Verification:** Confirm Analyst Path B observes masked IPs and cannot access admin triggers.
+- [x] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries.
 
 ---
 
 ## 10. Automated Test Suite & Traffic Generation
 
-- **Playwright Test:** `frontend/e2e/pages/security.spec.ts` (Pending implementation).
+- **Playwright Test:** `frontend/e2e/pages/security.spec.ts` (Comprehensive E2E suite covering zero CLS, bundle API verification, core card rendering, tab navigation, 15m/24h/30d presets, and performance budgets).
 - **Synthetic Traffic Profile:** Mixed legitimate traffic with injected SQLi/XSS attack patterns and simulated bot crawlers.

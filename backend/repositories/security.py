@@ -591,6 +591,7 @@ def get_security_aggregates(
     filters: FiltersDict,
     bucket_seconds: int = 300,
     sections: set[str] | None = None,
+    mask_ips: bool = False,
 ) -> dict:
     import time as _time
 
@@ -643,6 +644,7 @@ def get_security_aggregates(
         end_time=end_time,
         filters=filters,
         sections=sections,
+        mask_ips=mask_ips,
     )
 
 
@@ -661,6 +663,7 @@ def _build_security_response(
     end_time: str | None = None,
     filters: FiltersDict | None = None,
     sections: set[str] | None = None,
+    mask_ips: bool = False,
 ) -> dict:
     import time as _time
 
@@ -1271,7 +1274,9 @@ def _build_security_response(
         if "proxies" in live_sections and temp_table:
             _t = _time.perf_counter()
             try:
-                px = get_security_proxies(con, src, start_time, end_time, filters, shared_temp_table=temp_table)
+                px = get_security_proxies(
+                    con, src, start_time, end_time, filters, shared_temp_table=temp_table, mask_ips=mask_ips
+                )
                 for k, v in px.items():
                     if k not in ["section_timings", "debug_calls", "debug_queries"]:
                         results[k] = v
@@ -1309,6 +1314,14 @@ def _build_security_response(
             results["suspicious_isps"] = []
             results["active_clients"] = []
 
+    if mask_ips and "top_ips_header" in results and results["top_ips_header"]:
+        from backend.core.share_db.validation import mask_ip
+
+        results["top_ips_header"] = [
+            {"ip": mask_ip(str(r["ip"])) if r.get("ip") else r.get("ip"), "max_header": r.get("max_header")}
+            for r in results["top_ips_header"]
+        ]
+
     results["section_timings"] = section_timings
     return results
 
@@ -1320,6 +1333,7 @@ def get_security_proxies(
     end_time: Any,
     filters: dict[str, Any] | None = None,
     shared_temp_table: str | None = None,
+    mask_ips: bool = False,
 ) -> dict[str, Any]:
     from backend.repositories._base import QueryRunner, _safe_table
     from backend.repositories._sql import security as SQL
@@ -1457,6 +1471,10 @@ def get_security_proxies(
                 asn_int = None
             name = asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
             client_item = {**row}
+            if mask_ips and client_item.get("ip"):
+                from backend.core.share_db.validation import mask_ip
+
+                client_item["ip"] = mask_ip(str(client_item["ip"]))
             client_item["asn_name"] = name
             if "asn" in client_item:
                 del client_item["asn"]

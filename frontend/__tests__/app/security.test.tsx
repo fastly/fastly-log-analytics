@@ -93,7 +93,7 @@ afterEach(() => {
   errorSpy.mockRestore()
 })
 
-test('security page mounts and renders title', async () => {
+test('security page mounts and renders title and tab navigation', async () => {
   render(
     <QueryClientProvider client={queryClient}>
       <SecurityClient />
@@ -101,6 +101,9 @@ test('security page mounts and renders title', async () => {
   )
 
   expect(screen.getByText('Security')).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /waf activity/i })).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /threat intelligence/i })).toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: /vpn & proxy watchdog/i })).toBeInTheDocument()
 
   await waitFor(() => {
     expect(screen.getByTestId('bots-section')).toBeInTheDocument()

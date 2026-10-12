@@ -84,7 +84,14 @@ describe('HeaderAnomaliesSection', () => {
 
   it('shows loading skeleton overlay across both cards when isLoading', () => {
     render(<HeaderAnomaliesSection {...baseProps({ isLoading: true })} />)
-    expect(screen.getAllByText(/loading data/i).length).toBe(2)
+    expect(screen.getByText('Loading request header size distribution...')).toBeInTheDocument()
+    expect(screen.getByText('Loading oversized request headers...')).toBeInTheDocument()
+  })
+
+  it('enforces zero-CLS layout reservations on all cards', () => {
+    const { container } = render(<HeaderAnomaliesSection {...baseProps()} />)
+    const containedElements = container.querySelectorAll('.\\\[contain-intrinsic-size\\:360px\\\], .\\\[contain-intrinsic-size\\:300px\\\]')
+    expect(containedElements.length).toBe(2)
   })
 
   it('renders the not-enabled "Requires Group A" copy when req_header_bytes is inactive', () => {

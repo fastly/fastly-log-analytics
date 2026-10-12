@@ -69,8 +69,9 @@ export function HeaderAnomaliesSection({
         icon={<Scale className="h-4 w-4" />}
         isLoading={isLoading}
         isFetching={isFetching}
+        loadingMessage="Loading request header size distribution..."
         error={error as AnalyticsCardError | null}
-        className="h-[360px]"
+        className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
         contentClassName="p-2"
         helpTitle={SECURITY_INFO.req_size.title}
         helpContent={SECURITY_INFO.req_size.body}
@@ -98,8 +99,9 @@ export function HeaderAnomaliesSection({
         }
         isLoading={isLoading}
         isFetching={isFetching}
+        loadingMessage="Loading oversized request headers..."
         error={error as AnalyticsCardError | null}
-        className="min-h-[300px]"
+        className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
         contentClassName="p-0"
         helpTitle={SECURITY_INFO.top_ips_header.title}
         helpContent={SECURITY_INFO.top_ips_header.body}

@@ -253,8 +253,9 @@ export function BotsSection({
             headerAction={intervalButtons}
             isLoading={isLoading}
             isFetching={isFetching}
+            loadingMessage="Loading NGWAF verified bots..."
             error={error as AnalyticsCardError | null}
-            className="h-[360px]"
+            className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-2"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
             helpContent={SECURITY_INFO.ngwaf_bots.body}
@@ -287,8 +288,9 @@ export function BotsSection({
             }
             isLoading={isLoading}
             isFetching={isFetching}
+            loadingMessage="Loading NGWAF bot names..."
             error={error as AnalyticsCardError | null}
-            className="min-h-[360px]"
+            className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-0"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
             helpContent={SECURITY_INFO.ngwaf_bots.body}
@@ -314,8 +316,9 @@ export function BotsSection({
           }
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading well-known bots..."
           error={error as AnalyticsCardError | null}
-          className="min-h-[360px]"
+          className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-0"
           helpTitle={SECURITY_INFO.wellknown_bots.title}
           helpContent={SECURITY_INFO.wellknown_bots.body}
@@ -338,8 +341,9 @@ export function BotsSection({
           }
           isLoading={isLoading}
           isFetching={isFetching}
+          loadingMessage="Loading TLS fingerprints..."
           error={error as AnalyticsCardError | null}
-          className="min-h-[300px]"
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
           contentClassName="p-0"
           helpTitle={SECURITY_INFO.fingerprints.title}
           helpContent={SECURITY_INFO.fingerprints.body}

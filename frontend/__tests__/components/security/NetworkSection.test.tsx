@@ -58,8 +58,15 @@ describe('NetworkSection', () => {
 
   it('shows loading skeleton overlay across all three cards when isLoading', () => {
     render(<NetworkSection {...baseProps({ isLoading: true })} />)
-    // AnalyticsCard overlays "Loading data..." on top of each card.
-    expect(screen.getAllByText(/loading data/i).length).toBe(3)
+    expect(screen.getByText('Loading IPv6 adoption data...')).toBeInTheDocument()
+    expect(screen.getByText('Loading proxy/anonymizer breakdown...')).toBeInTheDocument()
+    expect(screen.getByText('Loading connection reuse distribution...')).toBeInTheDocument()
+  })
+
+  it('enforces zero-CLS layout reservations on all cards', () => {
+    const { container } = render(<NetworkSection {...baseProps()} />)
+    const containedElements = container.querySelectorAll('.\\\[contain-intrinsic-size\\:360px\\\]')
+    expect(containedElements.length).toBe(3)
   })
 
   it('renders "No data available" empty card for each chart when arrays are empty', () => {

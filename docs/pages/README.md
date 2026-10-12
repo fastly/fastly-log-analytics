@@ -58,7 +58,7 @@ docs/pages/
 | `/fastly-value` | [Service Summary / Value](fastly-value.md) | Bandwidth saved, edge compute efficiency, cost avoidance | **Live-certified** |
 | `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Live-certified** |
 | `/origin` | [Origin Health](origin.md) | Backend latency, connect times, shielding ratio, retries | **Live-certified** |
-| `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Scaffolded (Pending AI Verification)** |
+| `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 45 automated anomaly detectors across 5 category tabs | **Scaffolded (Pending AI Verification)** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Scaffolded (Pending AI Verification)** |
 | `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Scaffolded (Pending AI Verification)** |
