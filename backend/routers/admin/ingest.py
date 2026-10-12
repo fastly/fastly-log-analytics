@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Query
 
 from backend.deps import get_source, require_admin
 from backend.models.admin import SyncStartResponse
+from backend.utils.router_utils import make_error
 
 from ._router import router
 
@@ -213,21 +214,23 @@ def rum_ledger_sweep_service(
     source: dict = Depends(get_source),
 ) -> SyncStartResponse:
     if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run RUM ledger sweep.")
+        raise HTTPException(
+            status_code=403, detail=make_error("admin_only", "Read-only services cannot run RUM ledger sweep.")
+        )
 
     from backend import config as svcconfig
 
     if not svcconfig.is_high_scale_mode(source):
         raise HTTPException(
             status_code=400,
-            detail="RUM ledger sweep is only supported under high-scale mode.",
+            detail=make_error("high_scale_required", "RUM ledger sweep is only supported under high-scale mode."),
         )
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(
             status_code=400,
-            detail="Service configuration not found.",
+            detail=make_error("service_not_found", "Service configuration not found."),
         )
 
     raw_rum = cfg.get("rum")
@@ -240,7 +243,7 @@ def rum_ledger_sweep_service(
     if not rum_enabled:
         raise HTTPException(
             status_code=400,
-            detail="RUM is not enabled for this service.",
+            detail=make_error("rum_not_enabled", "RUM is not enabled for this service."),
         )
 
     from backend.cron.jobs.rum_ledger import _run_rum_ledger_sweep

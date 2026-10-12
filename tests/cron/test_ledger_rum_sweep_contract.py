@@ -154,7 +154,8 @@ def test_manual_trigger_rum_sweep_endpoint_standard_mode_rejected():
             headers={"x-fastly-service-id": SERVICE_ID},
         )
         assert resp.status_code == 400
-        assert "high-scale" in resp.json()["detail"].lower()
+        assert resp.json()["detail"]["error"] == "high_scale_required"
+        assert "high-scale" in resp.json()["detail"]["message"].lower()
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)
@@ -173,7 +174,8 @@ def test_manual_trigger_rum_sweep_endpoint_rum_disabled_rejected():
                 headers={"x-fastly-service-id": SERVICE_ID},
             )
         assert resp.status_code == 400
-        assert "rum is not enabled" in resp.json()["detail"].lower()
+        assert resp.json()["detail"]["error"] == "rum_not_enabled"
+        assert "rum is not enabled" in resp.json()["detail"]["message"].lower()
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)
@@ -191,7 +193,8 @@ def test_manual_trigger_rum_sweep_endpoint_read_only_rejected():
             headers={"x-fastly-service-id": SERVICE_ID},
         )
         assert resp.status_code == 403
-        assert "read-only" in resp.json()["detail"].lower()
+        assert resp.json()["detail"]["error"] == "admin_only"
+        assert "read-only" in resp.json()["detail"]["message"].lower()
     finally:
         app.dependency_overrides.pop(get_source, None)
         app.dependency_overrides.pop(get_service_id, None)

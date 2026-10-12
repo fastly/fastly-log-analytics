@@ -540,6 +540,7 @@ export const handlers = [
     }),
   ),
   http.post(`${API_BASE}/api/admin/ngwaf/sync/:service_id`, ok({ ok: true, service_id: 'svc-default', stats: {} })),
+  http.post(`${API_BASE}/api/admin/rum/ledger/sweep/:service_id`, ok({ status: 'started', run_id: 1 })),
   http.get(`${API_BASE}/api/admin/ngwaf/status`, ok({ ok: true })),
 
   // ── AppLayout always-on calls (every page render hits these) ─────

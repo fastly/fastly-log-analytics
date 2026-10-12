@@ -215,11 +215,9 @@ def test_ledger_quarantine_endpoint_success(monkeypatch):
             "quarantined_at": "2026-08-27T10:05:00+00:00",
         }
     ]
-    mock_summary = {"total_items": 1, "category_counts": {"json_parse_error": 1}}
-
     with (
         patch("backend.routers.admin.quarantine.list_quarantine_evidence", return_value=mock_items),
-        patch("backend.routers.admin.quarantine.get_quarantine_evidence_summary", return_value=mock_summary),
+        patch("backend.routers.admin.quarantine.count_quarantine_evidence", return_value=1),
     ):
         client = TestClient(app)
         resp = client.get(f"/api/admin/ledger/quarantine?service_id={SERVICE_ID}")

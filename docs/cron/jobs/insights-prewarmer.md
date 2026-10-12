@@ -2,10 +2,11 @@
 
 ## 1. Overview & Objectives
 - **Job Identifier:** `insights_prewarmer_{service_id}`
-- **Status:** **Verified** (`release/v3.0.0-beta3`)
+- **Status:** Resource-contention mitigation; production latency remeasurement pending rollout.
 - **Category:** Analytics Cache Prewarming & Anomaly Pre-Computation
 - **Purpose:** Precomputes baseline statistical distributions and anomaly detection metrics for the Insights page (`/insights`), prewarming the in-memory cache every 240 seconds.
-- **Why It Runs:** Calculating statistical anomaly baselines across up to 720 hours (30 days) of historical data requires multi-dimensional aggregations and percentile calculations that take 1.5–20 seconds on cold scans. The cache TTL is 300 seconds (`INSIGHTS_CACHE_TTL = 300`). By running at a 240s cadence, the prewarmer guarantees that the default Insights view (window/baseline derived adaptively from log history) is always cached, ensuring instantaneous UI loads (< 50ms) with zero wait time for users.
+- **Why It Runs:** Calculating statistical anomaly baselines requires multi-dimensional aggregations and percentile calculations. The cache TTL is 300 seconds (`INSIGHTS_CACHE_TTL = 300`). The 240s cadence aims to keep the adaptive default warm, but contention, deferral and run duration can still cause cache misses.
+- **Resource Policy:** Warm only the adaptive default for admin and eligible analyst shapes, using `max_workers=1`. Do not automatically warm the additional 24h/720h month comparison; it remains available on demand. Standard-mode measurements found repeated 91–95s prewarmer runs alongside 3.0–4.8s dashboard requests, compared with 1.1–2.2s after prewarming finished. This mitigation reduces background query concurrency and removes the extra historical scan; it does not guarantee sub-second dashboard latency.
 
 ---
 
@@ -45,19 +46,19 @@
    - Checks `should_defer_cron("insights_prewarmer", service_id)`. If active user requests are running on the dashboard, defers to avoid DuckDB thread/CPU contention.
 2. **Adaptive Parameter Resolution:**
    - Reads cached extent status via `svcconfig.get_status(src["name"])`.
-   - Derives `(window_hours, baseline_hours)` adaptively from `history_hours_from_earliest(...)` using `pick_insights_default`. (e.g. >= 7d history defaults to 1h/168h, matching the frontend picker).
+   - Derives `(window_hours, baseline_hours)` adaptively from `history_hours_from_earliest(...)` using `pick_insights_default` (e.g. >= 7d history defaults to 24h/168h, matching the frontend picker).
 3. **Execution & Progress Initialization:**
    - Calls `start_cron_run(src, "insights_prewarmer")`.
    - Initializes live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="insights_prewarmer")`.
-4. **Connection Acquisition & Memory Tuning:**
+4. **Connection Acquisition & Resource Safety:**
    - Opens read-only DuckDB connection: `get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)`.
-   - Applies unconstrained memory limit (`DUCKDB_MEMORY_LIMIT`) if configured to prevent OOM on 720h scans.
+   - Keeps the configured connection-open tuning. Never changes DuckDB's instance-global thread count or memory limit during the job.
 5. **Admin Prewarming:**
-   - Calls `get_insights(con, src, window_hours, baseline_hours, service_id, force_refresh=True)`.
+   - Calls `get_insights(con, src, window_hours, baseline_hours, service_id, force_refresh=True, max_workers=1)`.
    - Recomputes and populates `_insights_cache` for the admin view.
 6. **Analyst Shape Prewarming (Remote Share):**
    - If sharing is live (`is_sharing_active()`), extracts distinct clamp shapes from active invites (capped at `_MAX_ANALYST_SHAPES = 8`).
-   - For each active clamp shape, computes clamp extents via `resolve_analyst_insights_clamp` and calls `get_insights(...)` with `clamp_cache_key`.
+   - For each active clamp shape, computes clamp extents via `resolve_analyst_insights_clamp` and calls `get_insights(...)` with `clamp_cache_key` and `max_workers=1`. Existing API-load checks still defer remaining shapes; they do not interrupt an already-running query.
 7. **Telemetry & Duration Finalization:**
    - Emits done event to `cron_progress`.
    - Logs `success` run to `cron_runs` with detailed summary of warmed shapes and hours.

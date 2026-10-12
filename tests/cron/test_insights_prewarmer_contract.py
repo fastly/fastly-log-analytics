@@ -345,27 +345,25 @@ def test_contract_adaptive_parameter_resolution(base_context):
     """Requirement 7: Derives (window_hours, baseline_hours) adaptively via pick_insights_default
     from service log history extents:
     - >= 7 days history -> (24.0, 168.0) (prior 7-day period)
-    - >= 30 days history -> (24.0, 168.0) plus secondary month option preload (24.0, 720.0)
+    - >= 30 days history -> (24.0, 168.0), with month comparison left on demand
     - ~2 hours history -> (1.0, 1.0)
     - empty / None history -> fallback (24.0, 168.0)
     """
     mock_get_insights = MagicMock(return_value={})
 
     # Case A: >= 30 days history (e.g. 45 days) -> defaults to prior 7-day period (24h/168h)
-    # and preloads the secondary month option (24h/720h).
+    # without an additional month-baseline scan.
     earliest_30d = (datetime.now(UTC) - timedelta(days=45)).isoformat()
     base_context["get_status"].return_value = {"earliest_log_at": earliest_30d}
 
     with patch("backend.repositories.insights.get_insights", mock_get_insights):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-prewarm-contract")
-        assert mock_get_insights.call_count == 2
+        mock_get_insights.assert_called_once()
         kwargs_primary = mock_get_insights.call_args_list[0].kwargs
         assert (kwargs_primary["window_hours"], kwargs_primary["baseline_hours"]) == (24.0, 168.0)
-        kwargs_month = mock_get_insights.call_args_list[1].kwargs
-        assert (kwargs_month["window_hours"], kwargs_month["baseline_hours"]) == (24.0, 720.0)
         summary = base_context["log_run"].call_args.kwargs["summary"]
         assert "24h/168h" in summary
-        assert "+ month option (24h/720h)" in summary
+        assert "month option" not in summary
 
     mock_get_insights.reset_mock()
     base_context["log_run"].reset_mock()
@@ -440,7 +438,7 @@ def test_contract_admin_cache_prewarming(base_context, stub_source):
         assert kwargs["service_id"] == "svc-prewarm-contract"
         assert kwargs["force_refresh"] is True
         assert kwargs.get("clamp_cache_key") is None
-        assert kwargs["max_workers"] == 2
+        assert kwargs["max_workers"] == 1
 
 
 # ── Requirement 10: Remote Share Analyst Clamp Shapes ──────────────────────────

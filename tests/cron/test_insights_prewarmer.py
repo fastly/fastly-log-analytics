@@ -177,6 +177,7 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
     assert len(analyst_calls) == 2
     for c in analyst_calls:
         assert c.kwargs["force_refresh"] is True
+        assert c.kwargs["max_workers"] == 1
         assert c.kwargs["clamp_start"] is not None and c.kwargs["clamp_end"] is not None
     # The two shapes warm distinct stable keys + the masking split is preserved.
     keys = {c.kwargs["clamp_cache_key"] for c in analyst_calls}
@@ -190,11 +191,8 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
 
 
 def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
-    """A service with ≥7 d of history warms the (24, 168) pair the adaptive
-    frontend default will actually request. Services with ≥30 d of history
-    additionally preload the month option (24, 720). This ensures the /api/insights
-    cache key (which includes window+baseline) hits immediately for every
-    default page load."""
+    """Long-history services warm only the adaptive default, not an additional
+    month comparison that competes with foreground dashboard queries."""
     from datetime import UTC, datetime, timedelta
 
     earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
@@ -205,20 +203,14 @@ def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     stub_cron_run["get_status"].assert_called_once_with(stub_source["name"])
-    # 2 calls: primary (24, 168) + month option preload (24, 720)
-    assert get_insights_mock.call_count == 2
+    get_insights_mock.assert_called_once()
     primary_call = get_insights_mock.call_args_list[0]
     assert primary_call.kwargs["window_hours"] == 24.0
     assert primary_call.kwargs["baseline_hours"] == 168.0
-
-    month_call = get_insights_mock.call_args_list[1]
-    assert month_call.kwargs["window_hours"] == 24.0
-    assert month_call.kwargs["baseline_hours"] == 720.0
-
-    # The warmed shape and month preload are surfaced in the cron_runs summary for prod audit.
+    assert primary_call.kwargs["max_workers"] == 1
     summary = stub_cron_run["log"].call_args.kwargs["summary"]
     assert "24h/168h" in summary
-    assert "+ month option (24h/720h)" in summary
+    assert "month option" not in summary
 
 
 def test_adaptive_shape_without_month_preload(monkeypatch, stub_source, stub_cron_run):

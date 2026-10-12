@@ -54,17 +54,9 @@ def test_list_quarantine_evidence_filters_and_paginates(client, override_source)
     with (
         patch("backend.routers.admin.quarantine.list_quarantine_evidence", return_value=[item]) as list_items,
         patch(
-            "backend.routers.admin.quarantine.get_quarantine_evidence_summary",
-            return_value={
-                "total_items": 1,
-                "total_bytes": 11,
-                "request_items": 1,
-                "rum_items": 0,
-                "oldest_at": item["quarantined_at"],
-                "newest_at": item["quarantined_at"],
-                "category_counts": {"invalid_json": 1},
-            },
-        ),
+            "backend.routers.admin.quarantine.count_quarantine_evidence",
+            return_value=1,
+        ) as count_items,
     ):
         response = client.get("/api/admin/quarantine?limit=20&offset=5&error_category=invalid_json")
 
@@ -72,7 +64,10 @@ def test_list_quarantine_evidence_filters_and_paginates(client, override_source)
     payload = clean_res(response.json())
     assert payload["total"] == 1
     assert payload["items"][0] == item
-    list_items.assert_called_once_with("service123", limit=20, offset=5, error_category="invalid_json")
+    list_items.assert_called_once_with(
+        "service123", limit=20, offset=5, error_category="invalid_json", source_type=None
+    )
+    count_items.assert_called_once_with("service123", error_category="invalid_json", source_type=None)
 
 
 def test_quarantine_summary_uses_item_evidence(client, override_source):

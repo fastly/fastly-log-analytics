@@ -22,6 +22,11 @@ import pytest
 from backend.cron.jobs import metadata
 
 
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
+
 def test_post_commit_metadata_sync_dispatch_coalesces_overlapping_requests(monkeypatch):
     dispatched_threads = []
     calls = []

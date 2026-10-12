@@ -26,6 +26,11 @@ from backend.cron.scheduler import Scheduler
 from backend.utils.telemetry import process_context_scope
 
 
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
+
 def _source(tmp_path, service_id: str = "svc-expire-contract") -> dict:
     cache_root = tmp_path / service_id
     cache_root.mkdir(parents=True, exist_ok=True)

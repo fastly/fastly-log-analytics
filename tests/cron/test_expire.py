@@ -18,6 +18,11 @@ import pytest
 from backend.cron.jobs import expire
 
 
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
+
+
 @pytest.fixture
 def stub_source(monkeypatch) -> dict:
     src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}

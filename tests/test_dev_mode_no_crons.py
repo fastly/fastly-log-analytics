@@ -99,6 +99,7 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     assert sorted(sched._job_ids) == [
         "insights_prewarmer_svc-x",
         "local_compact_svc-x",
+        "metric_snapshot",
         "partial_hour_merge_svc-x",
         "rollup_compact_svc-x",
         "rollup_heal_svc-x",
@@ -107,6 +108,7 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     assert added == [
         "insights_prewarmer_svc-x",
         "local_compact_svc-x",
+        "metric_snapshot",
         "partial_hour_merge_svc-x",
         "rollup_compact_svc-x",
         "rollup_heal_svc-x",
@@ -132,12 +134,14 @@ def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
     assert sorted(sched._job_ids) == [
         "insights_prewarmer_svc-ro",
         "local_compact_svc-ro",
+        "metric_snapshot",
         "partial_hour_merge_svc-ro",
     ]
     added = sorted(c.kwargs["id"] for c in add_job.call_args_list)
     assert added == [
         "insights_prewarmer_svc-ro",
         "local_compact_svc-ro",
+        "metric_snapshot",
         "partial_hour_merge_svc-ro",
     ]
 
@@ -161,8 +165,8 @@ def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
     ):
         sched._register_dev_local_safe_jobs()
 
-    assert sched._job_ids == {}
-    add_job.assert_not_called()
+    assert sorted(sched._job_ids) == ["metric_snapshot"]
+    assert [call.kwargs["id"] for call in add_job.call_args_list] == ["metric_snapshot"]
 
 
 def test_scheduler_reload_is_a_noop_when_kill_switch_on(monkeypatch):
