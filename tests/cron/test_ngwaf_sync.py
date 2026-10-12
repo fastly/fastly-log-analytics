@@ -203,3 +203,135 @@ def test_admin_ngwaf_endpoints(fake_cfg):
         assert status_data["ok"] is True
         assert status_data["total_cached_bots"] == 42
         assert status_data["service_configured"] is True
+
+
+def test_ngwaf_sync_adaptive_rescheduling_on_budget_exceeded(fake_cfg):
+    """When execution runtime exceeds 240s budget, job halts and tightens interval to 2m."""
+    mock_src = {"name": "test_service", "id": "test_service"}
+    fake_records = [{"waf_req_id": f"req_{i}", "bot_name": "Googlebot"} for i in range(5)]
+
+    mock_sched = MagicMock()
+    mock_job = MagicMock()
+    mock_sched.get_job.return_value = mock_job
+
+    # Mock time.time so initial call is 1000.0, and loop check sees 1245.0 (>= 240s elapsed)
+    time_calls = [1000.0, 1000.0, 1245.0, 1245.0, 1245.0, 1245.0, 1245.0, 1245.0]
+
+    def mock_time():
+        if time_calls:
+            return time_calls.pop(0)
+        return 1245.0
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", return_value=1),
+        patch("backend.core.duckdb.log_cron_run") as mock_log,
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch(
+            "backend.utils.ngwaf.fetch_verified_bots_paged",
+            return_value=[(fake_records, "2026-09-01T01:00:00Z", 5)],
+        ),
+        patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
+        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
+        patch("time.time", side_effect=mock_time),
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][3] == "success"
+    summary = mock_log.call_args[1]["summary"]
+    assert "budget reached — will continue next run" in summary
+    assert "Synced 5 bot record(s)" in summary
+    mock_job.reschedule.assert_called_with("interval", minutes=2)
+
+
+def test_ngwaf_sync_progress_lifecycle(fake_cfg):
+    """Verifies start_progress, end_progress, and finalize_cron_duration are called in full lifecycle."""
+    mock_src = {"name": "test_service", "id": "test_service"}
+    fake_records = [{"waf_req_id": "req_1", "bot_name": "Googlebot"}]
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", return_value=42),
+        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch(
+            "backend.utils.ngwaf.fetch_verified_bots_paged",
+            return_value=[(fake_records, "2026-09-01T01:00:00Z", 1)],
+        ),
+        patch("backend.utils.ngwaf_bot_cache.upsert_bots"),
+        patch("backend.utils.ngwaf_bot_cache.cleanup_old_bots", return_value=0),
+        patch("backend.cron_progress.start_progress") as mock_start_prog,
+        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_start_prog.assert_called_once_with(42, service_id="test_service", task="ngwaf_sync")
+    mock_end_prog.assert_called_once_with(42)
+    mock_finalize.assert_called_once()
+    assert mock_finalize.call_args[0][0] == mock_src
+    assert mock_finalize.call_args[0][1] == 42
+
+
+def test_ngwaf_sync_guaranteed_cleanup_on_error(fake_cfg):
+    """Verifies end_progress and finalize_cron_duration run in finally even if an error occurs."""
+    mock_src = {"name": "test_service", "id": "test_service"}
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", return_value=99),
+        patch("backend.core.duckdb.log_cron_run") as mock_log,
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value="2026-09-01T00:00:00Z"),
+        patch("backend.utils.ngwaf.fetch_verified_bots_paged", side_effect=ValueError("Unexpected fetch failure")),
+        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][3] == "error"
+    mock_end_prog.assert_called_once_with(99)
+    mock_finalize.assert_called_once()
+    assert mock_finalize.call_args[0][0] == mock_src
+    assert mock_finalize.call_args[0][1] == 99
+
+
+def test_ngwaf_sync_first_run_watermark_guaranteed_cleanup(fake_cfg):
+    """Verifies end_progress and finalize_cron_duration execute even on first-run watermark seed early exit."""
+    mock_src = {"name": "test_service", "id": "test_service"}
+
+    with (
+        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.config.load_config", return_value=fake_cfg),
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
+        patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
+        patch("backend.core.duckdb.start_cron_run", return_value=101),
+        patch("backend.core.duckdb.log_cron_run") as mock_log,
+        patch("backend.utils.ngwaf_bot_cache.ensure_schema"),
+        patch("backend.utils.ngwaf_bot_cache.get_last_timestamp", return_value=None),
+        patch("backend.utils.ngwaf_bot_cache.update_sync_watermark"),
+        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
+    ):
+        _run_ngwaf_bot_sync("test_service")
+
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][3] == "success"
+    mock_end_prog.assert_called_once_with(101)
+    mock_finalize.assert_called_once()
+    assert mock_finalize.call_args[0][0] == mock_src
+    assert mock_finalize.call_args[0][1] == 101

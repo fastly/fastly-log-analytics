@@ -1484,10 +1484,11 @@ class Scheduler:
                         max_instances=1,
                         coalesce=True,
                         misfire_grace_time=300,
+                        executor="maintenance",
                     )
                     self._job_ids[ngwaf_job_id] = ngwaf_job_id
                     logger.info(
-                        "👾 \x1b[36m[ngwaf_sync]\x1b[0m Registered NGWAF bot sync job %s (every %dm).",
+                        "👾 \x1b[36m[ngwaf_sync]\x1b[0m Registered NGWAF bot sync job %s (every %dm, executor=maintenance).",
                         ngwaf_job_id,
                         ngwaf_interval_mins,
                     )
@@ -1657,6 +1658,7 @@ class Scheduler:
                     "rdns_refresh",
                     "bot_data_refresh",
                     "optimize_",
+                    "ngwaf_sync_",
                 )
             ):
                 kwargs["executor"] = "maintenance"

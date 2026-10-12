@@ -417,6 +417,9 @@ def test_sync_jobs_registers_ngwaf_job_when_workspace_configured():
         s._sync_jobs()
 
     assert "ngwaf_sync_ngwaf-svc" in s._job_ids
+    job = s._sched.get_job("ngwaf_sync_ngwaf-svc")
+    assert job is not None
+    assert job.executor == "maintenance"
 
 
 def test_sync_jobs_omits_optimize_and_expire_when_compact_disabled():

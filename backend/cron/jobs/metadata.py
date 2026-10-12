@@ -424,7 +424,7 @@ _run_metadata_sync.delay = _run_metadata_sync_celery.delay  # type: ignore[attr-
 
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
-    """Fetch NGWAF VERIFIED-BOT records and upsert into the local SQLite cache.
+    """Fetch NGWAF VERIFIED-BOT records and upsert into the PostgreSQL ngwaf_bots table.
 
     Skips silently if ngwaf_workspace_id is not configured for the service.
     Resumes from last_timestamp_synced so restarts after a crash don't lose progress.
@@ -440,8 +440,6 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         return
 
     # Make sure the cache file + tables exist before anything else touches it.
-    # Otherwise the planner query in oldest_unenriched_timestamp throws on the
-    # very first run and the cron exits without ever populating data.
     try:
         ensure_schema()
     except Exception:
@@ -470,6 +468,12 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         logger.info("[ngwaf_sync] %s: skipping — %s", service_id, e)
         return
 
+    start_time_exec = time.time()
+    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+
+    cleanup_progress_and_reap()
+    start_progress(run_id, service_id=service_id, task="ngwaf_sync")
+
     svc_display = cfg.get("name", service_id)
     logger.info("🏎️  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job started.", svc_display)
 
@@ -477,38 +481,31 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     retention_days = int(prov.get("cron_ngwaf", {}).get("log_retention_days", 30))
     server_name_filter = cfg.get("server_name") or None
 
-    from backend.utils.bot_sources import build_matcher
-    from backend.utils.ngwaf_bot_cache import get_last_timestamp, update_sync_watermark
-
-    matcher = build_matcher()
-    # Watermark-only resume path. upsert_bots() advances last_timestamp_synced
-    # after every successful page, so steady state reads from local SQLite with
-    # zero cloud I/O. On first-ever sync the watermark is NULL — seed it with
-    # "now" and skip this cycle so the next one starts cleanly from "now".
-    # We don't enrich pre-provisioning log rows (rarely the user's intent) and
-    # we don't fall back to a cloud planner that scans every iceberg manifest.
-    from_ts = get_last_timestamp(workspace_id)
-    if not from_ts:
-        from backend.utils.date_utils import iso_z_now
-
-        now_ts = iso_z_now()
-        update_sync_watermark(workspace_id, now_ts)
-        summary = (
-            f"First sync — seeded watermark at {now_ts}. Next cycle will fetch new bot records from this point forward."
-        )
-        log_cron_run(src, "ngwaf_sync", 0.0, "success", summary=summary, run_id=run_id)
-        _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
-        logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
-        return
-
-    total_records = 0
-    start_time = time.time()
-    # Budget: page for up to 4 minutes per execution. Each page is committed so
-    # a crash or budget cut never loses partially-synced data.
-    max_runtime_secs = 240
-    budget_exceeded = False
-
     try:
+        from backend.utils.bot_sources import build_matcher
+        from backend.utils.ngwaf_bot_cache import get_last_timestamp, update_sync_watermark
+
+        matcher = build_matcher()
+        # Watermark-only resume path. upsert_bots() advances last_timestamp_synced
+        # after every successful page, so steady state reads from PostgreSQL with
+        # zero cloud I/O. On first-ever sync the watermark is NULL — seed it with
+        # "now" and skip this cycle so the next one starts cleanly from "now".
+        from_ts = get_last_timestamp(workspace_id)
+        if not from_ts:
+            from backend.utils.date_utils import iso_z_now
+
+            now_ts = iso_z_now()
+            update_sync_watermark(workspace_id, now_ts)
+            summary = f"First sync — seeded watermark at {now_ts}. Next cycle will fetch new bot records from this point forward."
+            log_cron_run(src, "ngwaf_sync", time.time() - start_time_exec, "success", summary=summary, run_id=run_id)
+            _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
+            logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
+            return
+
+        total_records = 0
+        max_runtime_secs = 240
+        budget_exceeded = False
+
         for page_records, page_latest_ts, _raw_count in fetch_verified_bots_paged(api_key, workspace_id, from_ts):
             if server_name_filter:
                 page_records = [
@@ -532,7 +529,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                 upsert_bots(enriched, workspace_id, page_latest_ts)
             total_records += len(enriched)
 
-            if time.time() - start_time >= max_runtime_secs:
+            if time.time() - start_time_exec >= max_runtime_secs:
                 budget_exceeded = True
                 break
 
@@ -544,7 +541,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         log_cron_run(
             src,
             "ngwaf_sync",
-            time.time() - start_time,
+            time.time() - start_time_exec,
             "success",
             files_downloaded=total_records,
             summary=summary,
@@ -553,7 +550,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
 
         # Adaptive scheduling under load:
-        # If budget was reached or high bot volume (> 500 records), tighten interval to 2 minutes
+        # If budget was reached or high bot volume (>= 500 records), tighten interval to 2 minutes
         # to rapidly catch up. When backlog subsides, restore baseline configured interval (default 5m).
         try:
             from backend.cron.scheduler import get_scheduler
@@ -585,7 +582,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         log_cron_run(
             src,
             "ngwaf_sync",
-            time.time() - start_time,
+            time.time() - start_time_exec,
             "error",
             files_downloaded=total_records if "total_records" in locals() else 0,
             error_message=err_msg,
@@ -594,6 +591,11 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
         )
         _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "error", "message": summary})
         logger.exception("[ngwaf_sync] %s: sync failed: %s", svc_display, err_msg)
+    finally:
+        end_progress(run_id)
+        from backend.cron.jobs._common import finalize_cron_duration
+
+        finalize_cron_duration(src, run_id, start_time_exec)
 
     logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
 

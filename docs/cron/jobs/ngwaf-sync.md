@@ -4,7 +4,7 @@
 - **Job Identifier:** `ngwaf_sync_{service_id}`
 - **Category:** Fastly Next-Gen WAF (Signal Sciences) Intelligence Sync
 - **Status:** Verified (Automated Unit Tests & Lifecycle Audited)
-- **Purpose:** Synchronizes verified bot requests and security signals from the Fastly Next-Gen WAF (NGWAF) API into local SQLite `ngwaf_bot_cache.db`.
+- **Purpose:** Synchronizes verified bot requests and security signals from the Fastly Next-Gen WAF (NGWAF) API into PostgreSQL `ngwaf_bots` and `ngwaf_sync_state` tables (ADR-22).
 - **Why It Runs:** Fastly edge logs include NGWAF security tags (e.g. `SIGSCI-TAGS`, `x-sigsci-tags`). To cross-correlate edge log hits with WAF decisions and display comprehensive threat actor profiles on the Security and WAF dashboards, the system periodically imports active attack and verified bot signals directly from the Fastly NGWAF API.
 
 ---
@@ -17,6 +17,7 @@
   - Automatically relaxes back to baseline (5m) once the backlog clears.
 - **Configurable Overrides:** `provisioning.cron_ngwaf.interval_mins` (default: 5).
 - **Registration Gate:** Registered **ONLY** if `get_ngwaf_workspace_id(service_id)` resolves to an active NGWAF workspace.
+- **Executor Pool:** Assigned explicitly to the `"maintenance"` executor pool to ensure heavy outbound API syncs do not starve streaming log ingestion threads.
 - **Jitter & Misfire Policy:**
   - Jitter: 15 seconds.
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=300s`.
@@ -26,8 +27,8 @@
 ## 3. Architecture Execution Matrix
 | Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Calls Fastly NGWAF API, enriches with known bot signatures, upserts into `data/ngwaf_bot_cache.db`. | Local SQLite thread-local pool lock. Gated by `FLA_DEV_NO_CRONS=1` (outbound API suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Calls NGWAF API and populates shared/local SQLite bot cache. | Local SQLite lock; decorated with `@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")`. |
+| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod, `executor="maintenance"`) | Calls Fastly NGWAF API, enriches with known bot signatures, upserts into PostgreSQL `ngwaf_bots` and `ngwaf_sync_state`. | PostgreSQL connection pool (`get_pg_thread_connection()`). Gated by `FLA_DEV_NO_CRONS=1` (outbound API suppressed). |
+| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only, `executor="maintenance"`) | Calls NGWAF API and populates shared PostgreSQL `ngwaf_bots` and `ngwaf_sync_state` tables. | Dedicated serving pod; decorated with `@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")`. |
 
 ---
 
@@ -45,7 +46,7 @@
    - Evaluates `dev_mode_no_crons()`. If active (`FLA_DEV_NO_CRONS=1`), immediately skips outbound API calls.
 2. **Prerequisite Validation:**
    - Verifies `ngwaf_workspace_id` and `fastly_api_key` are configured. Skips gracefully if unconfigured.
-   - Ensures local SQLite schema exists (`ensure_schema()`).
+   - Ensures PostgreSQL schema exists (`ensure_schema()`).
 3. **Watermark Management:**
    - Inspects `ngwaf_sync_state.last_timestamp_synced` for the workspace.
    - On the very first run (watermark is None), seeds the watermark with the current UTC timestamp (`iso_z_now()`), records initial success in `cron_runs`, and begins incremental sync on the next cycle.
@@ -60,23 +61,26 @@
 6. **Adaptive Rescheduling:**
    - If `budget_exceeded` is True or `total_records >= 500`, reschedules the APScheduler job to 2 minutes.
    - Otherwise, restores the baseline interval (5 minutes).
-7. **Telemetry & Log Recording:**
+7. **Telemetry, Progress & Log Recording:**
+   - Registers progress via `start_progress` and updates live status with `_log_and_add_progress`.
    - Logs execution outcome into `cron_runs` table via `log_cron_run`.
    - Distinguishes authentication errors (HTTP 401/403) with explicit guidance for Fastly API key or workspace permissions.
+   - Unconditional `finally:` block executes `end_progress(run_id)` and `finalize_cron_duration(src, run_id, start_time_exec)` across normal completions, early exits, and error states.
 
 ---
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
   - **Fastly NGWAF API Calls:** Outbound HTTP request status and exceptions logged with service display name.
-  - **SQLite Operations:** Every batch upsert and schema check flows through `open_small_cache_db` / thread-local pool.
-  - **Zero FOS Calls:** Strictly external NGWAF API and local SQLite; zero cloud FOS calls.
+  - **PostgreSQL Operations:** Every batch upsert, watermark update, and cleanup flows through `get_pg_thread_connection()`.
+  - **Zero FOS Calls:** Strictly external NGWAF API and PostgreSQL metadata; zero cloud FOS calls.
 - **Timing & Resource Budgets:**
   - Max per-tick runtime: 240 seconds budget ceiling.
   - Normal tick runtime: < 2.0s when caught up.
 - **Audit Checklist:**
   - Confirm partial batch commits persist so crashes/interruptions do not lose data.
   - Verify expired records (> retention_days) are regularly purged without table locks.
+  - Verify progress lifecycle and duration finalization occur reliably under all exit paths.
 
 ---
 
@@ -105,3 +109,6 @@
 - [x] 4. Unit tests verify adaptive rescheduling to 2 minutes under heavy bot volume (>= 500 records).
 - [x] 5. Unit tests verify authentication error (401/403) classification.
 - [x] 6. Unit tests verify manual `POST /api/admin/ngwaf/sync/{service_id}` and `GET /api/admin/ngwaf/status` endpoints.
+- [x] 7. Unit tests verify adaptive rescheduling when 240s runtime budget is exceeded.
+- [x] 8. Unit tests verify progress lifecycle (`start_progress`, `end_progress`) and duration finalization (`finalize_cron_duration`) in normal, early exit, and error branches.
+- [x] 9. Unit tests verify `ngwaf_sync_{service_id}` is assigned to `"maintenance"` executor pool.
