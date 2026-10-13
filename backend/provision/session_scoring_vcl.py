@@ -43,23 +43,7 @@ normally to origin and the log line still has populated score fields
 
 from __future__ import annotations
 
-import re
-
-# EC-07: generator-local guard against breaking out of (or injecting into) a VCL
-# double-quoted string literal. Every value below is f-string-substituted into a
-# ``"..."`` VCL literal, so an embedded double-quote terminates the string and a
-# C0 control char / newline can't live inside it. Two char classes:
-#   * STRICT  — bans " \ and control chars. For request_secret (hex only) and
-#     other opaque tokens that never legitimately contain a backslash.
-#   * REGEX   — bans " and control chars but ALLOWS backslash, because the recv
-#     exclusion regex legitimately uses ``\.`` etc.
-# These never fire on real input (persisted writers validate the regex via
-# validate_recv_exclusion_regex_with_lint, request_secret is secrets.token_hex,
-# and every change is Fastly /validate-gated before activate) — this is
-# belt-and-suspenders so a future caller bypassing those paths can't emit
-# malformed/injected VCL.
-_VCL_STR_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f]')
-_VCL_STR_FORBIDDEN_REGEX = re.compile(r'["\x00-\x1f\x7f]')
+from backend.utils.vcl_safety import VclSafetyError, validate_quoted_literal
 
 
 def _assert_vcl_string_safe(value: str, *, field: str, allow_backslash: bool = False) -> str:
@@ -67,17 +51,16 @@ def _assert_vcl_string_safe(value: str, *, field: str, allow_backslash: bool = F
     double-quoted string literal; return it unchanged otherwise. See the module
     note above — this is a defense-in-depth guard at the generation boundary, not
     the primary validation (that lives in the persisted-write + Fastly /validate
-    path). ``allow_backslash`` for regex inputs that legitimately contain ``\\``."""
-    pattern = _VCL_STR_FORBIDDEN_REGEX if allow_backslash else _VCL_STR_FORBIDDEN_STRICT
-    m = pattern.search(value)
-    if m is not None:
-        raise ValueError(
-            f"{field} contains a character unsafe to embed in VCL at offset "
-            f"{m.start()} ({value[m.start()]!r}); refusing to generate VCL "
-            "(values are validated upstream + Fastly /validate-gated, so this "
-            "indicates a caller that bypassed those checks)."
-        )
-    return value
+    path). ``allow_backslash`` for regex inputs that legitimately contain ``\\``.
+
+    Delegates to the unified :mod:`backend.utils.vcl_safety` char policy so the
+    forbidden-char rules can't drift from the other generators/validators.
+    ``VclSafetyError`` subclasses ``ValueError`` so existing callers catching
+    ``ValueError`` are unaffected."""
+    try:
+        return validate_quoted_literal(value, allow_backslash=allow_backslash, field=field)
+    except VclSafetyError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 # Backend name handling. Fastly's API creates a backend whose VCL-visible

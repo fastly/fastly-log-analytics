@@ -15,6 +15,7 @@ from backend.core.fastly.service import (
 )
 from backend.core.fastly.utils import load_vcl, region_endpoint
 from backend.provision.utils import BOLD, _c, fail, info, ok, warn
+from backend.provision.vcl_builder import VclBuilder
 from backend.utils import field_codes as fc
 from backend.utils import vcl_utils
 
@@ -420,7 +421,7 @@ def generate_capture_vcl(
         scrub_lines.extend(routing_lines)
 
     scrub_lines.append("}")
-    recv_vcl = "\n".join(scrub_lines)
+    recv_vcl = VclBuilder.join_lines(scrub_lines)
 
     # miss and pass: unset edge headers + optional group-L timing
     base_unset_lines = ["if (req.backend.is_origin) {", "  unset bereq.http.x-fos-edge-data;"]
@@ -428,7 +429,7 @@ def generate_capture_vcl(
         base_unset_lines.append("  unset bereq.http.x-edge-score;")
         base_unset_lines.append("  unset bereq.http.X-Edge-Scoring-Pass;")
     base_unset_lines.append("}")
-    base_unset = "\n".join(base_unset_lines) + "\n"
+    base_unset = VclBuilder.join_lines(base_unset_lines) + "\n"
 
     # Session-scoring services route the first-pass request to the scorer
     # Compute backend via `return(pass)` in vcl_recv. That triggers the
@@ -526,7 +527,7 @@ def generate_capture_vcl(
                 fetch_lines.append(f"  set beresp.http.x-fos-origin-data:{cf['name']} = {cf['vcl_log_expression']};")
             fetch_lines.append("}")
             fetch_lines.append("# --- Custom Origin Fields End ---")
-        snippets["fetch"] = "\n".join(fetch_lines)
+        snippets["fetch"] = VclBuilder.join_lines(fetch_lines)
 
     if group_l:
         error_lines = [
@@ -544,7 +545,7 @@ def generate_capture_vcl(
             "  set req.http.x-of-oretries = req.restarts;\n"
             "}"
         ]
-        snippets["error"] = "\n".join(error_lines)
+        snippets["error"] = VclBuilder.join_lines(error_lines)
 
     if group_l or group_m or custom_origin or custom_deliver:
         deliver_lines = []
@@ -676,7 +677,7 @@ def generate_capture_vcl(
                 deliver_lines.append("}")
             deliver_lines.append("# --- Custom Deliver Fields End ---")
 
-        snippets["deliver"] = "\n".join(deliver_lines)
+        snippets["deliver"] = VclBuilder.join_lines(deliver_lines)
 
     return snippets
 

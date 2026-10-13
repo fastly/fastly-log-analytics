@@ -23,6 +23,7 @@ from backend.provision.session_scoring_vcl import (
     SCORING_BACKEND_API_NAME,
     generate_scoring_vcl,
 )
+from backend.provision.vcl_builder import VclBuilder
 
 
 def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
@@ -266,7 +267,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
 
     # Now wrap all edge_first_hop_statements in a SINGLE condition block!
     if edge_first_hop_statements:
-        body = "\n".join(edge_first_hop_statements)
+        body = VclBuilder.join_lines(edge_first_hop_statements)
         sections.append(f"if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{\n{body}\n}}")
 
     # B. RUM Phase 3 Routing (asset GET /js/rum.js [+ /js/faro-sdk.js])
@@ -286,7 +287,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         scoring_body = _generate_scoring_section_vcl(state, "vcl_recv")
         sections.append(scoring_body)
 
-    return "\n\n".join(s for s in sections if s.strip())
+    return VclBuilder.join_sections(sections)
 
 
 def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
@@ -340,7 +341,7 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
         sections.append(rum_body)
 
     # Join non-empty sections with blank lines
-    consolidated = "\n\n".join(s for s in sections if s.strip())
+    consolidated = VclBuilder.join_sections(sections)
     return consolidated
 
 
