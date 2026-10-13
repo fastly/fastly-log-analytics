@@ -4,7 +4,7 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { NuqsTestingAdapter, type UrlUpdateEvent } from 'nuqs/adapters/testing'
 import React from 'react'
-import SecurityTab from '@/app/streaming/_sections/tabs/SecurityTab'
+import SecurityTab, { coarsenEnforcement } from '@/app/streaming/_sections/tabs/SecurityTab'
 import { recencyOf } from '@/app/streaming/_sections/tabs/SubscriberIpsDialog'
 import { client } from '@/lib/api'
 import { showToastWithAction } from '@/lib/toast'
@@ -208,7 +208,7 @@ test('shows the reason when the service is not supported', async () => {
 })
 
 function subscriberCard() {
-  const title = screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === 'Subscriber IDs by Distinct IPs (Top 10)')
+  const title = screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === 'Subscriber Usage (Top 10)')
   return title.closest('[data-slot="card"]') as HTMLElement
 }
 
@@ -760,7 +760,7 @@ test('a throttle is listed with its rate and offers Remove throttle', async () =
 })
 
 
-test('Enforcement splits enforced from recorded-only requests, most severe first', async () => {
+test('Enforcement splits enforced from warned requests, most severe first', async () => {
   renderTab()
   await screen.findByText('pirate.example')
 
@@ -793,4 +793,29 @@ test('Enforcement says which Log Settings option is missing', async () => {
   renderTab()
   await screen.findByText('pirate.example')
   expect(screen.getByText(/Log enforcement outcome option to be enabled/)).toBeInTheDocument()
+})
+
+
+test('coarsenEnforcement picks a round bucket for about 48 bars and sums into it', () => {
+  const ts = [
+    { bucket: '2026-01-01 09:05:00', status: 'blocked', requests: 2 },
+    { bucket: '2026-01-01 09:10:00', status: 'blocked', requests: 3 },
+    { bucket: '2026-01-01 09:10:00', status: 'allowed', requests: 7 },
+    { bucket: '2026-01-01 11:30:00', status: 'blocked', requests: 4 },
+  ]
+  // 24 h of 5-minute buckets -> 30-minute bars (86400 / 48 = 1800).
+  const day = coarsenEnforcement(ts, 300, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')
+  expect(day.bucketSeconds).toBe(1800)
+  const at = (iso: string, status: string) =>
+    day.points.find((p) => p.bucketMs === Date.parse(iso) && p.status === status)?.requests
+  expect(at('2026-01-01T09:00:00Z', 'blocked')).toBe(5)
+  expect(at('2026-01-01T09:00:00Z', 'allowed')).toBe(7)
+  expect(at('2026-01-01T11:30:00Z', 'blocked')).toBe(4)
+
+  // A short range keeps the page's own bucket; it never goes finer than that.
+  expect(coarsenEnforcement(ts, 300, '2026-01-01T09:00:00Z', '2026-01-01T10:00:00Z').bucketSeconds).toBe(300)
+  // An open range is sized from the data instead.
+  expect(coarsenEnforcement(ts, 300).bucketSeconds).toBe(300)
+  // 7 days -> round 4-hour bars.
+  expect(coarsenEnforcement(ts, 300, '2026-01-01T00:00:00Z', '2026-01-08T00:00:00Z').bucketSeconds).toBe(14400)
 })

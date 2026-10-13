@@ -110,7 +110,7 @@ const ENFORCEMENT_LAYOUT = {
 
 /**
  * Requests per enforcement outcome. "Enforced" counts only requests whose mode was ENFORCE;
- * "Recorded only" is the WARN remainder, which was served normally.
+ * "Warned" is the WARN remainder, which was served normally.
  */
 export function EnforcementTable({ rows }: { rows: EnforcementRow[] }) {
   const showUsers = rows.some((r) => r.users != null)
@@ -127,7 +127,7 @@ export function EnforcementTable({ rows }: { rows: EnforcementRow[] }) {
           <TableHead>Outcome</TableHead>
           <TableHead className="text-right">Requests</TableHead>
           <TableHead className="text-right">Enforced</TableHead>
-          <TableHead className="text-right">Recorded only</TableHead>
+          <TableHead className="text-right">Warned</TableHead>
           {showUsers && <TableHead className="text-right">Users</TableHead>}
           {showBytes && <TableHead className="text-right">Bandwidth</TableHead>}
         </TableRow>
@@ -172,6 +172,45 @@ export function EnforcementTable({ rows }: { rows: EnforcementRow[] }) {
       </TableBody>
     </Table>
   )
+}
+
+/** Round bucket sizes (seconds) the Enforcement chart snaps to. */
+const ENFORCEMENT_BUCKETS = [60, 300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 604800]
+/** Aim for about this many bars across the range; more and they are too thin to read. */
+const ENFORCEMENT_TARGET_BARS = 48
+
+const utcMs = (bucket: string) => Date.parse(`${bucket.replace(' ', 'T')}Z`)
+
+/**
+ * Re-bucket the per-status counts into coarser buckets for the stacked bars. The API buckets
+ * by the page's interval, which is fine for lines but leaves hairline bars on a wide range
+ * with bursty traffic. Picks the smallest round multiple of `bucketSeconds` that gives about
+ * ENFORCEMENT_TARGET_BARS bars over the range (or over the data, when the range is open).
+ */
+export function coarsenEnforcement(
+  ts: { bucket: string; status: string; requests: number }[],
+  bucketSeconds: number,
+  startTime?: string | null,
+  endTime?: string | null,
+): { bucketSeconds: number; points: { bucketMs: number; status: string; requests: number }[] } {
+  const times = ts.map((d) => utcMs(d.bucket))
+  const start = startTime ? Date.parse(startTime) : Math.min(...times)
+  const end = endTime ? Date.parse(endTime) : Math.max(...times) + bucketSeconds * 1000
+  const spanSeconds = Math.max((end - start) / 1000, bucketSeconds)
+  const wanted = spanSeconds / ENFORCEMENT_TARGET_BARS
+  const size =
+    ENFORCEMENT_BUCKETS.find((b) => b >= wanted && b >= bucketSeconds && b % bucketSeconds === 0) ??
+    Math.max(Math.ceil(wanted / bucketSeconds) * bucketSeconds, bucketSeconds)
+
+  const sums = new Map<string, { bucketMs: number; status: string; requests: number }>()
+  ts.forEach((d, i) => {
+    const bucketMs = Math.floor(times[i] / 1000 / size) * size * 1000
+    const key = `${d.status}\u0000${bucketMs}`
+    const row = sums.get(key)
+    if (row) row.requests += d.requests
+    else sums.set(key, { bucketMs, status: d.status, requests: d.requests })
+  })
+  return { bucketSeconds: size, points: [...sums.values()] }
 }
 
 /** Subscriber ids ranked server-side by distinct client IPs (then requests). */
@@ -650,27 +689,32 @@ export default function SecurityTab({
     return traces
   }, [data?.bandwidth_ts, data?.has_shield_split, timezone, bucketSeconds])
 
-  // One stacked bar series per outcome, zero-filled across every bucket that has any outcome.
+  // One stacked bar series per outcome, re-bucketed so the bars are wide enough to read and
+  // zero-filled across every bucket that has any outcome.
   const enforcementData = React.useMemo(() => {
     const ts = data?.enforcement_ts
     if (!ts?.length) return []
-    const buckets = [...new Set(ts.map((d) => d.bucket))].sort()
-    const x = buckets.map((b) => formatDate(b, timezone, 'yyyy-MM-dd HH:mm:ss'))
-    const byKey = new Map(ts.map((d) => [`${d.status}\u0000${d.bucket}`, d.requests]))
-    const present = new Set(ts.map((d) => d.status))
+    const { bucketSeconds: size, points } = coarsenEnforcement(ts, bucketSeconds, startTime, endTime)
+    const buckets = [...new Set(points.map((d) => d.bucketMs))].sort((a, b) => a - b)
+    const x = buckets.map((ms) => formatDate(new Date(ms), timezone, 'yyyy-MM-dd HH:mm:ss'))
+    const byKey = new Map(points.map((d) => [`${d.status}\u0000${d.bucketMs}`, d.requests]))
+    const present = new Set(points.map((d) => d.status))
     const statuses = [
       ...ENFORCEMENT_ORDER.filter((st) => present.has(st)),
       ...[...present].filter((st) => !ENFORCEMENT_ORDER.includes(st)).sort(),
     ]
     return statuses.map((status) => ({
       x,
-      y: buckets.map((b) => byKey.get(`${status}\u0000${b}`) ?? 0),
+      y: buckets.map((ms) => byKey.get(`${status}\u0000${ms}`) ?? 0),
       name: enforcementLabel(status),
       type: 'bar' as const,
+      // Each bar spans its whole bucket instead of being a sliver centred on its start.
+      xperiod: size * 1000,
+      xperiodalignment: 'start' as const,
       marker: { color: ENFORCEMENT_STATUSES[status]?.color },
       hovertemplate: `%{y:,} requests<extra>${enforcementLabel(status)}</extra>`,
     }))
-  }, [data?.enforcement_ts, timezone])
+  }, [data?.enforcement_ts, timezone, bucketSeconds, startTime, endTime])
 
 
   if (data && !data.available) {
@@ -774,7 +818,7 @@ export default function SecurityTab({
       <AnalyticsCard
         title={
           <>
-            Subscriber IDs by Distinct IPs{' '}
+            Subscriber Usage{' '}
             <span className="ml-1 text-xs font-normal text-muted-foreground">(Top {TOP_N})</span>
           </>
         }
@@ -817,6 +861,16 @@ export default function SecurityTab({
         )}
       </AnalyticsCard>
 
+      {isAdmin && (
+        <BlockedCard
+          blocks={activeBlocks}
+          configured={blocklist.data?.configured}
+          isLoading={blocklist.isLoading}
+          timezone={timezone}
+          onUnblock={unblock}
+        />
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <AnalyticsCard
           title="Enforcement"
@@ -825,12 +879,7 @@ export default function SecurityTab({
           className="min-h-[200px]"
         >
           {data?.enforcement?.length ? (
-            <>
-              <EnforcementTable rows={data.enforcement} />
-              <p className="px-2 pt-2 text-[11px] text-muted-foreground">
-                Recorded-only requests matched a rule in WARN mode and were served normally.
-              </p>
-            </>
+            <EnforcementTable rows={data.enforcement} />
           ) : (
             <ChartEmptyState
               requires={
@@ -862,16 +911,6 @@ export default function SecurityTab({
           )}
         </AnalyticsCard>
       </div>
-
-      {isAdmin && (
-        <BlockedCard
-          blocks={activeBlocks}
-          configured={blocklist.data?.configured}
-          isLoading={blocklist.isLoading}
-          timezone={timezone}
-          onUnblock={unblock}
-        />
-      )}
 
       <AnalyticsCard
         title="Bandwidth: Edge vs Shield"
