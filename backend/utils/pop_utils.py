@@ -29,7 +29,7 @@ def fetch_pop_locations(api_key: str) -> bool:
 
     # /datacenters endpoint requires auth but provides the exact flat
     # list of coordinates we need. fastly() handles auth + retry +
-    # telemetry internally — replaces the old urllib.request flow plus
+    # telemetry internally — replaces the old raw-urllib flow plus
     # the redundant outer tracked_call wrapper.
     try:
         from backend.core.fastly.client import fastly

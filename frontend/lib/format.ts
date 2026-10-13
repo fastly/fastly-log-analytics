@@ -48,6 +48,19 @@ export function formatCompactCount(n: number): string {
 }
 
 /**
+ * Locale-grouped number (e.g. 1234567 → "1,234,567"). Thin wrapper over
+ * ``Intl.NumberFormat`` — byte-identical to ``n.toLocaleString()`` with the
+ * same options, but centralized so analytics UI can't drift back into inline
+ * ``.toLocaleString()`` calls (enforced by the ESLint ban in analytics dirs).
+ *
+ * Pass ``Intl.NumberFormatOptions`` for precision control, e.g.
+ * ``formatCount(n, { maximumFractionDigits: 1 })``.
+ */
+export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
+  return new Intl.NumberFormat(undefined, options).format(n)
+}
+
+/**
  * Formats a raw value (like bytes or country codes) based on its field name.
  */
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {

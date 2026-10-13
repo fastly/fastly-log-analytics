@@ -18,6 +18,7 @@
  */
 
 import * as React from 'react'
+import { formatCount } from '@/lib/format'
 import { useQuery } from '@tanstack/react-query'
 import Link from 'next/link'
 import { Activity, Database, AlertTriangle } from 'lucide-react'
@@ -174,7 +175,7 @@ function IngestHealthCard() {
   const secondary = isError
     ? 'unconfigured or credentials missing'
     : sustained
-      ? `sustained: ${sustained.n_buckets} bucket(s), ${sustained.total_lost_lines.toLocaleString()} lost`
+      ? `sustained: ${sustained.n_buckets} bucket(s), ${formatCount(sustained.total_lost_lines)} lost`
       : gapPct >= 0.02
         ? 'recent loss — check ingest accounting'
         : 'healthy · 24h'

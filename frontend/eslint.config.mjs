@@ -12,6 +12,25 @@ const eslintConfig = defineConfig([
       "jsx-a11y/no-static-element-interactions": "error",
     },
   },
+  // F5/F6 DRY enforcement: analytics UI must format numbers/dates through the
+  // shared helpers in lib/format.ts (formatCount) and lib/date.ts
+  // (formatLocalDateTime), never ad-hoc `.toLocaleString()`. This keeps
+  // locale/precision consistent and prevents the inline-formatting drift the
+  // 2026 DRY audit flagged. The shared helpers themselves live in lib/ and are
+  // intentionally outside this scope.
+  {
+    files: ["app/network/**", "app/security/**", "app/admin/**"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='toLocaleString']",
+          message:
+            "Don't call .toLocaleString() in analytics UI — use formatCount() from @/lib/format (numbers) or formatLocalDateTime() from @/lib/date (dates).",
+        },
+      ],
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

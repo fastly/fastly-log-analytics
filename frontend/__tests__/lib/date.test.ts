@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { toUTCDate, formatCompactRelative, formatTimeAgo } from '@/lib/date'
+import { toUTCDate, formatCompactRelative, formatTimeAgo, formatLocalDateTime } from '@/lib/date'
 
 describe('toUTCDate', () => {
   it('parses ISO strings', () => {
@@ -51,5 +51,32 @@ describe('relative time formatting', () => {
     it('formats hours', () => {
       expect(formatTimeAgo(new Date(now.getTime() - 3600000 * 2 - 60000))).toBe('2h 1m 0s ago')
     })
+  })
+})
+
+describe('formatLocalDateTime', () => {
+  it('matches new Date(x).toLocaleString() for ISO strings', () => {
+    const iso = '2026-07-01T12:34:56Z'
+    expect(formatLocalDateTime(iso)).toBe(new Date(iso).toLocaleString())
+  })
+
+  it('matches for epoch-millis numbers', () => {
+    const ms = 1_750_000_000_000
+    expect(formatLocalDateTime(ms)).toBe(new Date(ms).toLocaleString())
+  })
+
+  it('accepts a Date instance directly', () => {
+    const d = new Date('2026-01-15T00:00:00Z')
+    expect(formatLocalDateTime(d)).toBe(d.toLocaleString())
+  })
+
+  it('surfaces Invalid Date like the native call', () => {
+    expect(formatLocalDateTime('not-a-date')).toBe(new Date('not-a-date').toLocaleString())
+  })
+
+  it('forwards Intl.DateTimeFormatOptions', () => {
+    const iso = '2026-07-01T12:34:56Z'
+    const opts: Intl.DateTimeFormatOptions = { dateStyle: 'short' }
+    expect(formatLocalDateTime(iso, opts)).toBe(new Date(iso).toLocaleString(undefined, opts))
   })
 })

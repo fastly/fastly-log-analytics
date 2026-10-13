@@ -7,6 +7,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { formatDate } from '@/lib/date'
+import { formatCount } from '@/lib/format'
 import {
   SECURITY_INFO,
   NGWAF_BOT_COLUMN_IDS,
@@ -162,13 +163,13 @@ export function BotsSection({
       header: 'Category',
       cell: (info: any) => <span className="capitalize">{info.getValue()?.replace(/-/g, ' ')}</span>
     },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
     {
       accessorKey: 'verified_count',
       header: 'Verified',
       cell: (info: any) => info.getValue() > 0 ? (
         <span className="flex items-center gap-1 text-green-500">
-          <CheckCircle2 className="h-3 w-3" />{info.getValue().toLocaleString()}
+          <CheckCircle2 className="h-3 w-3" />{formatCount(info.getValue())}
         </span>
       ) : '—'
     },
@@ -177,7 +178,7 @@ export function BotsSection({
       header: 'Spoofed',
       cell: (info: any) => info.getValue() > 0 ? (
         <span className="flex items-center gap-1 text-red-500">
-          <AlertTriangle className="h-3 w-3" />{info.getValue().toLocaleString()}
+          <AlertTriangle className="h-3 w-3" />{formatCount(info.getValue())}
         </span>
       ) : '—'
     },
@@ -186,7 +187,7 @@ export function BotsSection({
       header: 'Unverified',
       cell: (info: any) => info.getValue() > 0 ? (
         <span className="flex items-center gap-1 text-muted-foreground" title="Unverifiable (no IPs/domains in source)">
-          <HelpCircle className="h-3 w-3" />{info.getValue().toLocaleString()}
+          <HelpCircle className="h-3 w-3" />{formatCount(info.getValue())}
         </span>
       ) : '—'
     },
@@ -195,7 +196,7 @@ export function BotsSection({
       header: 'Pending',
       cell: (info: any) => info.getValue() > 0 ? (
         <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup">
-          <Clock className="h-3 w-3" />{info.getValue().toLocaleString()}
+          <Clock className="h-3 w-3" />{formatCount(info.getValue())}
         </span>
       ) : '—'
     }
@@ -224,7 +225,7 @@ export function BotsSection({
         ? <span className="capitalize">{info.getValue().replace(/-/g, ' ')}</span>
         : <span className="text-muted-foreground">—</span>
     },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
   ]
 
   const fingerprintColumns = [
@@ -239,8 +240,8 @@ export function BotsSection({
         />
       )
     },
-    { accessorKey: 'ip_count', header: 'Unique IPs', cell: (info: any) => info.getValue().toLocaleString() },
-    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'ip_count', header: 'Unique IPs', cell: (info: any) => formatCount(info.getValue()) },
+    { accessorKey: 'request_count', header: 'Requests', cell: (info: any) => formatCount(info.getValue()) },
   ]
 
   return (

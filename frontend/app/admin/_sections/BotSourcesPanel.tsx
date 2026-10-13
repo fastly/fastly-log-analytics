@@ -1,5 +1,6 @@
 'use client'
 import React, { useState } from 'react'
+import { formatCount } from '@/lib/format'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -155,7 +156,7 @@ export function BotSourcesPanel() {
                   )}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {src.entry_count?.toLocaleString() ?? '—'}
+                  {src.entry_count != null ? formatCount(src.entry_count) : '—'}
                 </td>
                 <td className="px-3 py-2 text-right text-muted-foreground">
                   {fmtRelative(src.last_updated)}
@@ -184,10 +185,10 @@ export function BotSourcesPanel() {
         <div className="flex items-center gap-4 text-muted-foreground text-xs">
           <span className="flex items-center gap-1.5">
             <Wifi className="h-3.5 w-3.5" />
-            rDNS cache: <strong className="text-foreground">{botSourcesData?.rdns.total.toLocaleString() ?? '—'}</strong> IPs
+            rDNS cache: <strong className="text-foreground">{botSourcesData?.rdns.total != null ? formatCount(botSourcesData.rdns.total) : '—'}</strong> IPs
           </span>
           <span>
-            Pending: <strong className="text-foreground">{botSourcesData?.rdns.pending.toLocaleString() ?? '—'}</strong>
+            Pending: <strong className="text-foreground">{botSourcesData?.rdns.pending != null ? formatCount(botSourcesData.rdns.pending) : '—'}</strong>
           </span>
           <span>Last enrichment: {fmtRelative(botSourcesData?.rdns.last_enrichment_at ?? null)}</span>
         </div>

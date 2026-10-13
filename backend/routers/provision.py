@@ -12,7 +12,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 
 from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -34,7 +33,8 @@ from backend.models.provision import (
     ProvisionValidateResponse,
 )
 from backend.provision.fos_setup import _get_fos_s3_client
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal
+from backend.utils.router_utils import make_error, raise_internal
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAULT_ERROR_RESPONSES)
@@ -539,7 +539,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         except Exception as e:
             yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/lake-info", response_model=ProvisionLakeInfoResponse, response_model_exclude_unset=True)
@@ -792,7 +792,7 @@ def provision_execute(req: ProvisionExecuteRequest):
             if not error_already_emitted:
                 yield json.dumps({"type": "error", "message": str(e)})
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/reconcile")
@@ -873,7 +873,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
             except queue.Empty:
                 pass
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.post("/terraform/preview", response_model=dict[str, str])

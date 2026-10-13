@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { FilterValueCell } from "@/components/FilterValueCell";
 import { PopLabel } from "@/components/PopLabel";
 import { cn } from "@/lib/utils";
+import { formatCount } from "@/lib/format";
 import { Activity, Shield, AlertTriangle, Search, ActivitySquare, AlertCircle, Globe, Zap, Network as NetworkIcon } from "lucide-react";
 export const GlobalHealthHelp = () => (
   <div className="space-y-4 text-sm text-muted-foreground">
@@ -10,7 +11,7 @@ export const GlobalHealthHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>How it's calculated:</strong> Combines TCP RTT, packet loss (<code>ploss</code>), and RTT variance (jitter) into a single normalized score for each ASN, then takes a traffic-weighted average.</span>
+        <span><strong>How it&apos;s calculated:</strong> Combines TCP RTT, packet loss (<code>ploss</code>), and RTT variance (jitter) into a single normalized score for each ASN, then takes a traffic-weighted average.</span>
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -42,11 +43,11 @@ export const WorstAsnHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <NetworkIcon className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>What causes this:</strong> High RTT + packet loss from a specific ASN typically indicates a peering issue between that ISP and Fastly's edge nodes, or congestion on a transit link.</span>
+        <span><strong>What causes this:</strong> High RTT + packet loss from a specific ASN typically indicates a peering issue between that ISP and Fastly&apos;s edge nodes, or congestion on a transit link.</span>
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>How to act:</strong> Check the ASN Leaderboard to see how many requests this affects and whether the trend is degrading. If it's a large ISP with a worsening trend, Fastly support can investigate peering.</span>
+        <span><strong>How to act:</strong> Check the ASN Leaderboard to see how many requests this affects and whether the trend is degrading. If it&apos;s a large ISP with a worsening trend, Fastly support can investigate peering.</span>
       </li>
     </ul>
   </div>
@@ -58,7 +59,7 @@ export const WorstRegionHelp = () => (
     <ul className="space-y-3 list-none pl-0">
       <li className="flex gap-3">
         <Globe className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
-        <span><strong>ISP vs. regional:</strong> If the same country appears in both this card and the Worst ASN, the issue is likely a single dominant ISP. If the ASN is healthy but the country isn't, a regional routing or infrastructure problem is more likely.</span>
+        <span><strong>ISP vs. regional:</strong> If the same country appears in both this card and the Worst ASN, the issue is likely a single dominant ISP. If the ASN is healthy but the country isn&apos;t, a regional routing or infrastructure problem is more likely.</span>
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
@@ -98,7 +99,7 @@ export const AsnLeaderboardHelp = () => (
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-red-500" />
-        <span><strong>Trend:</strong> Based on a longer trajectory than 1h Change. An ASN showing "DEGRADING" trend but a high current score may be slowly sliding toward a threshold breach.</span>
+        <span><strong>Trend:</strong> Based on a longer trajectory than 1h Change. An ASN showing &quot;DEGRADING&quot; trend but a high current score may be slowly sliding toward a threshold breach.</span>
       </li>
     </ul>
   </div>
@@ -114,7 +115,7 @@ export const MetroLeaderboardHelp = () => (
       </li>
       <li className="flex gap-3">
         <Activity className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>Requires metro logging:</strong> This panel only appears when <code>req.http.Fastly-Metro</code> or equivalent metro-level fields are present in your logs. If you don't see it, check your log field configuration.</span>
+        <span><strong>Requires metro logging:</strong> This panel only appears when <code>req.http.Fastly-Metro</code> or equivalent metro-level fields are present in your logs. If you don&apos;t see it, check your log field configuration.</span>
       </li>
     </ul>
   </div>
@@ -189,7 +190,7 @@ export const NetworkQualityHelp = () => (
       </li>
       <li className="flex gap-3">
         <AlertCircle className="h-5 w-5 shrink-0 text-yellow-500" />
-        <span><strong>Requires Network Quality (Group F) fields</strong> — <code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren't present.</span>
+        <span><strong>Requires Network Quality (Group F) fields</strong> — <code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren&apos;t present.</span>
       </li>
     </ul>
   </div>
@@ -242,7 +243,7 @@ export const SHIELDING_COLUMNS = [
           className={cn('tabular-nums', lowSample ? 'text-muted-foreground' : '')}
           title={lowSample ? 'Fewer than 30 requests — percentiles unreliable, route not flagged' : undefined}
         >
-          {info.getValue().toLocaleString()}
+          {formatCount(info.getValue())}
         </span>
       )
     }

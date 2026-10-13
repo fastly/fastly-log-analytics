@@ -1,6 +1,5 @@
 """Tests for backend/utils/ngwaf.py — NGWAF API client."""
 
-import json
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -123,13 +122,9 @@ def test_extract_bot_record_ignores_non_verified_bot_subcategory():
 # ── fetch_verified_bots_paged pagination ──────────────────────────────────────
 
 
-def _make_mock_response(data: list, next_cursor: str = "") -> MagicMock:
-    payload = {"data": data, "meta": {"next_cursor": next_cursor}}
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(payload).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
-    return mock_resp
+def _make_page(data: list, next_cursor: str = "") -> dict:
+    """A parsed NGWAF response dict, as the central ``fastly()`` client returns it."""
+    return {"data": data, "meta": {"next_cursor": next_cursor}}
 
 
 def _bot_request(req_id: str, bot_name: str = "TestBot") -> dict:
@@ -147,9 +142,9 @@ def _bot_request(req_id: str, bot_name: str = "TestBot") -> dict:
 
 def test_fetch_verified_bots_paged_single_page():
     page1 = [_bot_request("req1"), _bot_request("req2")]
-    responses = [_make_mock_response(page1, next_cursor="")]
+    responses = [_make_page(page1, next_cursor="")]
 
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -160,11 +155,26 @@ def test_fetch_verified_bots_paged_single_page():
     assert records[1]["waf_req_id"] == "req2"
 
 
+def test_fetch_verified_bots_paged_routes_through_central_client():
+    """The call must go through the central ``fastly()`` wrapper: GET, the
+    workspace path under /ngwaf/v1, and the token threaded as the ``token`` kwarg."""
+    responses = [_make_page([_bot_request("req1")], next_cursor="")]
+
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses) as mock_fastly:
+        list(fetch_verified_bots_paged("api-key", "ws-id", "2026-05-06T00:00:00Z"))
+
+    args, kwargs = mock_fastly.call_args
+    assert args[0] == "GET"
+    assert args[1].startswith("/ngwaf/v1/workspaces/ws-id/requests?")
+    assert kwargs["token"] == "api-key"
+    assert kwargs["timeout"] == 30
+
+
 def test_fetch_verified_bots_paged_stops_on_empty_cursor():
     """Empty string cursor must stop pagination (API uses '' not null)."""
-    responses = [_make_mock_response([_bot_request("req1")], next_cursor="")]
+    responses = [_make_page([_bot_request("req1")], next_cursor="")]
 
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -174,16 +184,18 @@ def test_fetch_verified_bots_paged_multi_page():
     page1 = [_bot_request("req1")]
     page2 = [_bot_request("req2")]
     responses = [
-        _make_mock_response(page1, next_cursor="cursor-abc"),
-        _make_mock_response(page2, next_cursor=""),
+        _make_page(page1, next_cursor="cursor-abc"),
+        _make_page(page2, next_cursor=""),
     ]
 
-    with patch("urllib.request.urlopen", side_effect=responses), patch("time.sleep"):  # skip the 100ms inter-page sleep
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses) as mock_fastly, patch("time.sleep"):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 2
     assert pages[0][0][0]["waf_req_id"] == "req1"
     assert pages[1][0][0]["waf_req_id"] == "req2"
+    # Second request carries the cursor from page 1 in the query string.
+    assert "cursor=cursor-abc" in mock_fastly.call_args_list[1].args[1]
 
 
 def test_fetch_verified_bots_paged_skips_non_verified_bot_records():
@@ -194,9 +206,9 @@ def test_fetch_verified_bots_paged_skips_non_verified_bot_records():
         "user_agent": "curl/7.0",
     }
     bot = _bot_request("req_bot")
-    responses = [_make_mock_response([non_bot, bot], next_cursor="")]
+    responses = [_make_page([non_bot, bot], next_cursor="")]
 
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     records, _, raw_count = pages[0]
@@ -210,9 +222,9 @@ def test_fetch_verified_bots_paged_latest_ts_is_max_in_page():
     earlier["signals"] = [{"id": "VERIFIED-BOT", "value": "Bot"}]
     later = {**_bot_request("req2"), "timestamp": "2026-05-07T11:00:00Z"}
     later["signals"] = [{"id": "VERIFIED-BOT", "value": "Bot"}]
-    responses = [_make_mock_response([earlier, later], next_cursor="")]
+    responses = [_make_page([earlier, later], next_cursor="")]
 
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     _, latest_ts, _ = pages[0]
@@ -220,9 +232,9 @@ def test_fetch_verified_bots_paged_latest_ts_is_max_in_page():
 
 
 def test_fetch_verified_bots_paged_empty_page_yields_none_timestamp():
-    responses = [_make_mock_response([], next_cursor="")]
+    responses = [_make_page([], next_cursor="")]
 
-    with patch("urllib.request.urlopen", side_effect=responses):
+    with patch("backend.utils.ngwaf.fastly", side_effect=responses):
         pages = list(fetch_verified_bots_paged("key", "ws1", "2026-05-06T00:00:00Z"))
 
     assert len(pages) == 1
@@ -235,25 +247,23 @@ def test_fetch_verified_bots_paged_empty_page_yields_none_timestamp():
 # ── NGWAF query syntax & rounding ─────────────────────────────────────────────
 
 
+def _parse_q(mock_fastly: MagicMock) -> str:
+    """Pull the ``q`` query param from the path passed to ``fastly()``."""
+    path = mock_fastly.call_args.args[1]
+    parsed = urllib.parse.urlparse(path)
+    return urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+
+
 def test_fetch_verified_bots_paged_uses_proper_query_syntax():
     # Setup: 4.5 days ago
     from_dt = datetime.now(UTC) - timedelta(days=4, hours=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps({"data": [], "meta": {"next_cursor": ""}}).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(fetch_verified_bots_paged("api-key", "ws-id", from_ts))
 
-        args, _ = mock_urlopen.call_args
-        req = args[0]
-        url = req.full_url
-
-        # Parse the URL to check params
-        parsed = urllib.parse.urlparse(url)
+        path = mock_fastly.call_args.args[1]
+        parsed = urllib.parse.urlparse(path)
         params = urllib.parse.parse_qs(parsed.query)
 
         # Implementation should have:
@@ -270,21 +280,10 @@ def test_fetch_verified_bots_paged_rounds_up_to_15min():
     from_dt = datetime.now(UTC) - timedelta(minutes=12)
     from_ts = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps({"data": [], "meta": {"next_cursor": ""}}).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(fetch_verified_bots_paged("api-key", "ws-id", from_ts))
 
-        args, _ = mock_urlopen.call_args
-        req = args[0]
-        parsed = urllib.parse.urlparse(req.full_url)
-        params = urllib.parse.parse_qs(parsed.query)
-
-        q = params.get("q", [""])[0]
-        assert "from:-15min" in q
+        assert "from:-15min" in _parse_q(mock_fastly)
 
 
 # ── _get_relative_time_range: direct branch coverage ────────────────────────
@@ -338,12 +337,7 @@ def test_fetch_verified_bots_paged_includes_until_when_provided():
     from_dt = datetime.now(UTC) - timedelta(days=3)
     until_dt = datetime.now(UTC) - timedelta(days=1)
 
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps({"data": [], "meta": {"next_cursor": ""}}).encode()
-    mock_resp.__enter__ = lambda s: s
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+    with patch("backend.utils.ngwaf.fastly", return_value=_make_page([], "")) as mock_fastly:
         list(
             fetch_verified_bots_paged(
                 "k",
@@ -353,8 +347,7 @@ def test_fetch_verified_bots_paged_includes_until_when_provided():
             )
         )
 
-    parsed = urllib.parse.urlparse(mock_urlopen.call_args[0][0].full_url)
-    q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+    q = _parse_q(mock_fastly)
     assert "from:-" in q
     assert "until:-" in q
 

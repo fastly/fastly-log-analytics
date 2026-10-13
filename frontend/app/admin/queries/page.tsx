@@ -19,6 +19,7 @@
  */
 
 import * as React from 'react'
+import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminFetch } from '@/lib/api'
 import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
@@ -350,7 +351,7 @@ export default function QueryMonitorPage() {
 
     queries.forEach((row, i) => {
       text += `--------------------------------------------------\n`
-      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${row.duration_ms.toLocaleString()} ms | Outcome: ${row.outcome}\n`
+      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${formatCount(row.duration_ms)} ms | Outcome: ${row.outcome}\n`
 
       const started = row.started_at_utc
         ? new Date(row.started_at_utc < 10000000000 ? row.started_at_utc * 1000 : row.started_at_utc).toISOString()

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query

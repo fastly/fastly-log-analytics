@@ -11,12 +11,12 @@ import os
 import re
 import tempfile
 import threading
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from backend.utils.date_utils import iso_z_now
+from backend.utils.http import http_get_text
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +154,7 @@ def fetch_external_cidrs(source_config: dict) -> list[str]:
         return []
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "fastly-log-analysis/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            content = resp.read().decode()
+        content = http_get_text(url, timeout=15)
 
         try:
             data = json.loads(content)
@@ -228,9 +226,7 @@ def fetch_and_cache_source(source_id: str) -> dict:
     if src is None:
         raise ValueError(f"Unknown bot source: {source_id!r}")
 
-    req = urllib.request.Request(src["url"], headers={"User-Agent": "fastly-log-analysis/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw_content = resp.read().decode()
+    raw_content = http_get_text(src["url"], timeout=30)
 
     if source_id == "well-known-bots":
         raw = json.loads(raw_content)

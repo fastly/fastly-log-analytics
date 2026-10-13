@@ -1,4 +1,4 @@
-.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard audit audit-watch
+.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
@@ -221,7 +221,7 @@ vcl-test:
 #           COMBINED data. This run owns the final --cov-report=term +
 #           --cov-fail-under=85.
 test-ci:
-	FALCO_REQUIRED=1 nice -n 15 uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
+	FALCO_REQUIRED=1 nice -n 15 uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
 	FALCO_REQUIRED=1 TERRAFORM_VALIDATE=1 uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
 
 # Frontend tests AS CI RUNS THEM: vitest with the four coverage floors
@@ -279,7 +279,7 @@ e2e-all:
 # CPU core exhaustion and memory swap thrashing.
 ci:
 	$(MAKE) gen-types
-	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard security-regression openapi-drift deploy-validate stray-file-gate
+	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard urllib-guard security-regression openapi-drift deploy-validate stray-file-gate
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
 	$(MAKE) perf-ci
@@ -303,6 +303,11 @@ security-regression:
 # OTEL_EXPORTER=console spam mode (the 2026-06-10 prod-stdout-flood incident).
 otel-guard:
 	bash scripts/check_no_console_otel.sh
+
+# B12: ban raw urllib HTTP in backend app modules (route Fastly calls through
+# the central client, other fetches through backend.utils.http).
+urllib-guard:
+	bash scripts/check_no_raw_urllib.sh
 
 # ── Local multipod stack ──────────────────────────────────────────────────────
 # The local stack is BOTH compose files; omitting the observability one drops

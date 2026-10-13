@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -59,12 +59,7 @@ def _seed_cache(source_id: str, entries: list[dict]) -> Path:
 def test_fetch_external_cidrs_json_array():
     source_config = {"url": "https://example.com/ips.json", "selector": None}
 
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(["1.1.1.1", "2.2.2.2/24"]).encode()
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps(["1.1.1.1", "2.2.2.2/24"])):
         res = fetch_external_cidrs(source_config)
         assert len(res) == 2
         assert "1.1.1.1" in res
@@ -73,12 +68,7 @@ def test_fetch_external_cidrs_json_array():
 def test_fetch_external_cidrs_plaintext():
     source_config = {"url": "https://example.com/ips.txt", "selector": None}
 
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"# Comments\n1.1.1.1\n2.2.2.2/24\n\n"
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
+    with patch("backend.utils.bot_sources.http_get_text", return_value="# Comments\n1.1.1.1\n2.2.2.2/24\n\n"):
         res = fetch_external_cidrs(source_config)
         assert len(res) == 2
         assert "1.1.1.1" in res
@@ -86,14 +76,9 @@ def test_fetch_external_cidrs_plaintext():
 
 def test_fetch_external_cidrs_google_format():
     source_config = {"url": "https://example.com/ips.json", "selector": '$.prefixes[*]["ipv4Prefix","ipv6Prefix"]'}
+    google_mock = {"prefixes": [{"ipv4Prefix": "1.1.1.1/32"}, {"ipv6Prefix": "2001:db8::/32"}]}
 
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_resp = MagicMock()
-        google_mock = {"prefixes": [{"ipv4Prefix": "1.1.1.1/32"}, {"ipv6Prefix": "2001:db8::/32"}]}
-        mock_resp.read.return_value = json.dumps(google_mock).encode()
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps(google_mock)):
         res = fetch_external_cidrs(source_config)
         assert len(res) == 2
         assert "1.1.1.1/32" in res
@@ -334,11 +319,7 @@ def test_fetch_and_cache_source_writes_envelope_to_cache(tmp_path, monkeypatch):
         }
     ]
 
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(fake_data).encode()
-    mock_resp.__enter__.return_value = mock_resp
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps(fake_data)):
         meta = bot_sources.fetch_and_cache_source("well-known-bots")
 
     # Returned metadata
@@ -370,11 +351,7 @@ def test_fetch_and_cache_source_normalises_cidr_verification():
         }
     ]
 
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(fake_data).encode()
-    mock_resp.__enter__.return_value = mock_resp
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps(fake_data)):
         bot_sources.fetch_and_cache_source("well-known-bots")
 
     entries = bot_sources.load_source("well-known-bots")
@@ -402,12 +379,8 @@ def test_fetch_and_cache_source_resolves_dynamic_cidr_sources():
         }
     ]
 
-    mock_main_resp = MagicMock()
-    mock_main_resp.read.return_value = json.dumps(fake_well_known).encode()
-    mock_main_resp.__enter__.return_value = mock_main_resp
-
     with (
-        patch("urllib.request.urlopen", return_value=mock_main_resp),
+        patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps(fake_well_known)),
         patch("backend.utils.bot_sources.fetch_external_cidrs", return_value=["8.8.8.0/24"]),
     ):
         bot_sources.fetch_and_cache_source("well-known-bots")
@@ -435,11 +408,7 @@ def test_fetch_and_cache_source_invalidates_matcher_cache():
     assert bot_sources._matcher_cache.get("fn") is not None
 
     # Fetch new data → cache should be invalidated
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps([{"id": "new"}]).encode()
-    mock_resp.__enter__.return_value = mock_resp
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps([{"id": "new"}])):
         bot_sources.fetch_and_cache_source("well-known-bots")
 
     # The cache was cleared as a side-effect of the fetch
@@ -464,11 +433,7 @@ def test_fetch_and_cache_source_invalidates_all_in_memory_caches():
     assert bot_sources._version_cache != {}
 
     # 2. Fetch new data
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps([{"id": "new_bot"}]).encode()
-    mock_resp.__enter__.return_value = mock_resp
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("backend.utils.bot_sources.http_get_text", return_value=json.dumps([{"id": "new_bot"}])):
         bot_sources.fetch_and_cache_source("well-known-bots")
 
     # 3. All in-memory caches must be invalidated

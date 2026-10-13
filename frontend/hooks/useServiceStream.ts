@@ -1,10 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { getApiBase } from '@/lib/api'
-import { parseSSEFrames } from '@/lib/sse-parser'
+import { useEventStream, type EventStreamRequest, type SSEConnectionState } from '@/hooks/useEventStream'
 
 /** Public connection-state for the SSE stream, surfaced for UI affordances.
  *  - ``idle`` — hook disabled (no service / not enabled).
@@ -14,8 +14,11 @@ import { parseSSEFrames } from '@/lib/sse-parser'
  *
  *  There's no ``error`` terminal — the hook retries forever, so callers
  *  treat ``reconnecting`` lasting "too long" as the error condition.
+ *
+ *  Re-exported from ``useEventStream`` so existing importers of this type from
+ *  ``@/hooks/useServiceStream`` keep working unchanged.
  */
-export type SSEConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting'
+export type { SSEConnectionState }
 
 interface UseServiceStreamOpts {
   /** Pass ``cache: 'no-store'`` for endpoints whose response must not
@@ -144,92 +147,29 @@ export function useServiceStream(
   // install). Streams that gate on serviceId don't need this: they don't connect
   // until serviceId is truthy, which is itself post-hydration.
   const awaitingHydration = optionalService && !storeHydrated
-  const [state, setState] = useState<SSEConnectionState>('idle')
 
-  useEffect(() => {
-    if (!enabled || (gateOnService && !serviceId) || awaitingHydration) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setState('idle')
-      return
-    }
+  const effectiveEnabled = enabled && !(gateOnService && !serviceId) && !awaitingHydration
 
-    const abort = new AbortController()
-    let cancelled = false
-    let attempt = 0
-
-    const safeSetState = (next: SSEConnectionState) => {
-      if (!cancelled) setState(next)
-    }
-
-    const run = async () => {
-      while (!cancelled) {
-        safeSetState(attempt === 0 ? 'connecting' : 'reconnecting')
-        try {
-          const url = `${getApiBase()}${path}`
-          const res = await fetch(url, {
-            signal: abort.signal,
-            ...(cache ? { cache } : {}),
-            headers: {
-              'Accept': 'text/event-stream',
-              ...(serviceId ? { 'x-service-id': serviceId } : {}),
-              // Admin SSE endpoints sit behind ADMIN_SHARED_SECRET when
-              // configured; lib/api.ts injects X-Admin-Token on the
-              // openapi-fetch path but fetch() here bypasses that
-              // middleware, so without this the stream 401-loops
-              // silently inside the catch.
-              ...(adminToken ? { 'X-Admin-Token': adminToken } : {}),
-            },
-          })
-          if (!res.ok || !res.body) {
-            if (res.status === 401 || res.status === 403) {
-              cancelled = true
-            }
-            throw new Error(`HTTP ${res.status}`)
-          }
-          attempt = 0  // successful connect resets the backoff
-          safeSetState('open')
-
-          const reader = res.body.getReader()
-          const decoder = new TextDecoder()
-          let buf = ''
-          while (!cancelled) {
-            const { done, value } = await reader.read()
-            if (done) break
-            buf += decoder.decode(value, { stream: true })
-            const { frames: events, remainder } = parseSSEFrames(buf)
-            buf = remainder
-            for (const ev of events) {
-              const dataLine = ev.split('\n').find(l => l.startsWith('data:'))
-              if (!dataLine) continue
-              const raw = dataLine.slice('data:'.length).trim()
-              if (!raw) continue
-              onEvent(raw)
-            }
-          }
-        } catch {
-          if (cancelled) return
-          // Fall through to backoff retry — surface as reconnecting.
-        }
-        if (cancelled) return
-        safeSetState('reconnecting')
-        const delay = Math.min(30_000, 1_000 * 2 ** attempt++)
-        await new Promise(resolve => setTimeout(resolve, delay))
+  // Build the request lazily — the adapter owns url/header construction, the
+  // primitive owns the fetch/read/reconnect loop.
+  const request: EventStreamRequest | null = effectiveEnabled
+    ? {
+        // URL construction: string concat (not `new URL(path, base)`) so an
+        // empty base (public Fastly deploy where `getApiBase()` returns "" for
+        // relative proxying) doesn't TypeError into the silent-retry catch.
+        url: `${getApiBase()}${path}`,
+        headers: {
+          Accept: 'text/event-stream',
+          ...(serviceId ? { 'x-service-id': serviceId } : {}),
+          // Admin SSE endpoints sit behind ADMIN_SHARED_SECRET when
+          // configured; lib/api.ts injects X-Admin-Token on the openapi-fetch
+          // path but the raw fetch inside the primitive bypasses that
+          // middleware, so without this the stream 401-loops silently.
+          ...(adminToken ? { 'X-Admin-Token': adminToken } : {}),
+        },
+        ...(cache ? { cache } : {}),
       }
-    }
+    : null
 
-    run()
-
-    return () => {
-      cancelled = true
-      abort.abort()
-    }
-    // onEvent is intentionally NOT a dep — callers pass an inline
-    // arrow that changes every render; including it would tear down
-    // and reopen the stream on every render. Callers should rely on
-    // closure-captured values being read at event time (the typical
-    // setQueryData / scheduler patterns are stable across renders).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, gateOnService, serviceId, adminToken, path, cache, awaitingHydration])
-
-  return { state }
+  return useEventStream(effectiveEnabled, request, onEvent)
 }

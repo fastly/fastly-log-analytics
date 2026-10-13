@@ -15,7 +15,7 @@ import { useRouter } from 'next/navigation'
 import { buildServiceHref } from '@/lib/navigation'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { useMounted } from '@/hooks/useMounted'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 import {
   Dialog,
   DialogContent,
@@ -205,7 +205,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           .map(([op, count]) => (
             <div key={op} className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
               <span className="truncate mr-2">{op}</span>
-              <span className="font-mono">{count.toLocaleString()}</span>
+              <span className="font-mono">{formatCount(count)}</span>
             </div>
           ))}
       </div>
@@ -295,7 +295,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
                 <div className="mt-1.5 pt-1.5 border-t border-border/50 space-y-0.5">
                   <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
                     <span className="truncate mr-2">Requests</span>
-                    <span className="font-mono">{agg.total_cdn_downloads.toLocaleString()}</span>
+                    <span className="font-mono">{formatCount(agg.total_cdn_downloads)}</span>
                   </div>
                 </div>
               )}

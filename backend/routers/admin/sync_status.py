@@ -16,7 +16,8 @@ from backend.deps import get_service_id, get_source
 from backend.models.admin import IngestedFilesResponse, LogExtentsResponse, SyncStatusResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.sync_status_publisher import publisher as sync_status_publisher
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, query_errors, raise_internal
+from backend.utils.router_utils import make_error, query_errors, raise_internal
+from backend.utils.sse import sse_response
 from backend.utils.sse_subscription import iter_with_disconnect_ping
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ async def log_extents_stream(
             if projected is not None:
                 yield json.dumps(projected)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
 @router.get("/admin/ingested-files", response_model=IngestedFilesResponse)

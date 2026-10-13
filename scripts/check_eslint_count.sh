@@ -61,8 +61,13 @@ cd "$REPO_ROOT/frontend"
 # PopHealthHeatmap, ThreatIntelPanel, and DeployRemoteFrontendDialog). 843 -> 842: ratchet down ceiling following successful routing and query telemetry fixes. 842 -> 839: adopt shared useMounted hook in all Client analytical views to remove manual effects. 839 -> 835: ratchet down ceiling following absolute type-safety refactor of DebugPanel.tsx (0 any, 0 array-index-keys).
 # 835 -> 834: net drop from the log_ingest -> commit cron rename (CronColumns.tsx task-string comparisons collapsed).
 # 834 -> 831: net drop from the Cron 1 frontend changes.
+# 831 -> 824: F5/F6 DRY refactor — merge-base measured at 832 (ceiling 831 was
+# set by Cron-1 work not present at this merge-base); escaped 8 pre-existing
+# react/no-unescaped-entities violations in network/help-content.tsx (JSX
+# apostrophes/quotes, render-identical) while converting its number formatting
+# to the shared formatCount helper.
 # Drive toward zero.
-CEILING=831
+CEILING=824
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

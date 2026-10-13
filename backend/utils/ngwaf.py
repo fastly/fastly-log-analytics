@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import math
 import time
 import urllib.parse
-import urllib.request
 from collections.abc import Generator
 from datetime import UTC, datetime
 
+from backend.core.fastly.client import fastly
 from backend.utils.date_utils import iso_z, parse_iso_utc
 
-_API_BASE = "https://api.fastly.com/ngwaf/v1"
+# NGWAF requests live under the shared Fastly API host; fastly() prepends
+# https://api.fastly.com, so paths here start with the /ngwaf/v1 prefix.
+_API_PREFIX = "/ngwaf/v1"
 
 
 def fetch_verified_bots_paged(
@@ -60,16 +61,10 @@ def fetch_verified_bots_paged(
 
     while cursor:
         query_string = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items())
-        url = f"{_API_BASE}/workspaces/{workspace_id}/requests?{query_string}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Fastly-Key": api_key,
-                "Accept": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
+        path = f"{_API_PREFIX}/workspaces/{workspace_id}/requests?{query_string}"
+        # Route through the central client (retry + auth + telemetry). It
+        # returns parsed JSON, so no local urlopen / json.loads here.
+        data = fastly("GET", path, token=api_key, timeout=30)
 
         raw_data = data.get("data", [])
         records: list[dict] = []

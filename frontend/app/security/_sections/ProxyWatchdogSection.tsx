@@ -15,6 +15,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { HelpDialog } from '@/components/ui/help-dialog'
+import { formatCount } from '@/lib/format'
 
 const ImpossibleDistanceModal = dynamic(
   () => import('@/components/Insights/ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
@@ -137,7 +138,7 @@ export function ProxyWatchdogSection({
           <div className="flex flex-col items-start w-full">
             <span className="font-mono">
               {row.distance_km !== null && row.distance_km !== undefined
-                ? row.distance_km.toLocaleString(undefined, { maximumFractionDigits: 1 })
+                ? formatCount(row.distance_km, { maximumFractionDigits: 1 })
                 : '—'}
             </span>
             {row.impossible_distance && (
@@ -311,7 +312,7 @@ export function ProxyWatchdogSection({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
           title="Active VPN & Proxy Users"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : activeProxiesCount.toLocaleString()}
+          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(activeProxiesCount)}
           sub="Unique suspicious IP addresses detected"
           icon={Globe}
           iconClassName="text-blue-500"
@@ -359,7 +360,7 @@ export function ProxyWatchdogSection({
                 className="text-2xl font-bold text-violet-600 dark:text-violet-400 hover:underline inline-flex items-center gap-1 group/link"
                 title="Open Tunnel Requests on Dashboard"
               >
-                {tunnelRequestsCount.toLocaleString()}
+                {formatCount(tunnelRequestsCount)}
                 <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity text-muted-foreground" />
               </a>
             )
@@ -392,7 +393,7 @@ export function ProxyWatchdogSection({
         />
         <StatCard
           title="Impossible Distance Mismatches"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : distanceMismatchesCount.toLocaleString()}
+          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(distanceMismatchesCount)}
           sub="IP-to-latency geographical anomalies"
           icon={AlertTriangle}
           iconClassName="text-amber-500"
@@ -532,12 +533,12 @@ export function ProxyWatchdogSection({
                         {hasAsn ? (
                           <a href={dashboardUrl} title={`Filter Dashboard by ${ispName}`}>
                             <Badge variant="outline" className="font-mono hover:bg-violet-50 dark:hover:bg-violet-950/30 hover:border-violet-300 dark:hover:border-violet-700 hover:text-violet-600 dark:hover:text-violet-400 cursor-pointer transition-colors">
-                              {Number(item.count || 0).toLocaleString()} reqs
+                              {formatCount(Number(item.count || 0))} reqs
                             </Badge>
                           </a>
                         ) : (
                           <Badge variant="outline" className="font-mono">
-                            {Number(item.count || 0).toLocaleString()} reqs
+                            {formatCount(Number(item.count || 0))} reqs
                           </Badge>
                         )}
                       </div>

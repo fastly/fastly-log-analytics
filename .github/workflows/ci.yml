@@ -229,7 +229,7 @@ jobs:
         #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
           uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
-          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=84
+          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
 
       - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
         # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with
@@ -237,6 +237,14 @@ jobs:
         # in code; this catches a hardcoded `console` slipping into a tracked
         # compose/Dockerfile/env. Also runnable locally via `make ci`.
         run: bash scripts/check_no_console_otel.sh
+
+      - name: HTTP client guard (no raw urllib in backend app modules)
+        # B12: all Fastly API traffic must route through the central
+        # backend.core.fastly.client.fastly() wrapper and other external
+        # fetches through backend.utils.http.http_get_text(); a hand-rolled
+        # urllib.request bypasses auth/retry/telemetry. Baseline ratchet with a
+        # documented allowlist. Also runnable locally via `make urllib-guard`.
+        run: bash scripts/check_no_raw_urllib.sh
 
       - name: Deploy config validation (compose + helm chart)
         # Mirrors `make deploy-validate`. Both compose configurations are

@@ -25,7 +25,7 @@ import {
   KeyRound,
   Eye,
 } from 'lucide-react'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 
 type ServiceConfig = components["schemas"]["ServiceConfig"]
 
@@ -142,7 +142,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1">
-                {files.toLocaleString()} file{files === 1 ? '' : 's'}
+                {formatCount(files)} file{files === 1 ? '' : 's'}
                 {files > 0 && (
                   <Button
                     variant="ghost"
@@ -160,7 +160,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                 )}
               </span>
               <span>•</span>
-              <span>{rows.toLocaleString()} rows</span>
+              <span>{formatCount(rows)} rows</span>
             </div>
           </div>
         ) : (

@@ -13,6 +13,7 @@ import { FilterValueCell } from '@/components/FilterValueCell'
 import { PopLabel } from '@/components/PopLabel'
 import { downloadAsCsv } from '@/lib/utils'
 import { cn } from '@/lib/utils'
+import { formatCount } from '@/lib/format'
 import dynamic from 'next/dynamic'
 import { Skeleton } from '@/components/ui/skeleton'
 // PlotlyChart renders conditionally on heatmapData (the RTT heatmap card).
@@ -98,7 +99,7 @@ function RttBarList({ rows, filterColumn }: { rows: QualityBarRow[]; filterColum
               <div className="h-full bg-primary/70" style={{ width: `${(r.rtt_ms / max) * 100}%` }} />
             </div>
             <div className="w-16 text-right font-mono shrink-0">{r.rtt_ms.toFixed(1)}ms</div>
-            <div className="w-16 text-right font-mono text-muted-foreground shrink-0">{(r.reqs ?? 0).toLocaleString()}</div>
+            <div className="w-16 text-right font-mono text-muted-foreground shrink-0">{formatCount(r.reqs ?? 0)}</div>
           </div>
         )
       })}
@@ -318,7 +319,7 @@ export default function NetworkPage() {
               display={asn.label}
             />
           </td>
-          <td className="px-4 py-3 text-right font-mono text-xs">{(asn.total_reqs ?? 0).toLocaleString()}</td>
+          <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(asn.total_reqs ?? 0)}</td>
           <td className="px-4 py-3 text-right"><HealthBadge score={asn.health_score_now} /></td>
           <td className="px-4 py-3 text-right font-mono text-xs">
             {asn.p95_rtt_us != null ? `${(asn.p95_rtt_us / 1000).toFixed(1)}ms` : '—'}
@@ -606,7 +607,7 @@ export default function NetworkPage() {
                       the table is complete. (shieldingData is already `any`.) */}
                   {shieldingData?.truncated && (
                     <p className="px-4 py-2 text-[11px] text-muted-foreground border-t bg-muted/20">
-                      Showing {(shieldingData?.rows?.length ?? 0).toLocaleString()} of {Number(shieldingData.total_routes ?? 0).toLocaleString()} routes — top by request volume and by transit overhead.
+                      Showing {formatCount(shieldingData?.rows?.length ?? 0)} of {formatCount(Number(shieldingData.total_routes ?? 0))} routes — top by request volume and by transit overhead.
                     </p>
                   )}
                 </>
@@ -734,7 +735,7 @@ export default function NetworkPage() {
                             <span>{m.city}</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs">{(m.total_reqs ?? 0).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-right font-mono text-xs">{formatCount(m.total_reqs ?? 0)}</td>
                         <td className="px-4 py-3 text-right"><HealthBadge score={m.health_score} /></td>
                       </tr>
                     ))}

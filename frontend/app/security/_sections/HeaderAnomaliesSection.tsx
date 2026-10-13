@@ -7,6 +7,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { ChartEmptyState } from '@/components/ChartEmptyState'
+import { formatCount } from '@/lib/format'
 import { SECURITY_INFO, TOP_IP_COLUMN_IDS } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
@@ -59,7 +60,7 @@ export function HeaderAnomaliesSection({
         />
       )
     },
-    { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: (info: any) => info.getValue().toLocaleString() },
+    { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: (info: any) => formatCount(info.getValue()) },
   ]
 
   return (

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { getApiBase } from '@/lib/api'
-import { parseSSEFrames } from '@/lib/sse-parser'
+import { runEventStream } from '@/hooks/useEventStream'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useAdminTokenStore } from '@/stores/adminTokenStore'
 
@@ -26,8 +26,9 @@ export function useSSE() {
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
 
-  // Track the active stream reader
-  const readerRef = useRef<ReadableStreamDefaultReader | null>(null)
+  // AbortController for the active stream — stop()/unmount aborts it, which
+  // cancels the underlying reader inside runEventStream.
+  const abortRef = useRef<AbortController | null>(null)
 
   // Track the current request ID to avoid race conditions from StrictMode
   const requestIdRef = useRef<number>(0)
@@ -37,12 +38,14 @@ export function useSSE() {
   const lineSeqRef = useRef<number>(0)
 
   const stop = useCallback(() => {
-    // 1. Cancel the reader if it exists
-    if (readerRef.current) {
+    // 1. Abort the active connection (cancels the reader in runEventStream)
+    if (abortRef.current) {
       try {
-        readerRef.current.cancel().catch(() => {});
-      } catch (e) {}
-      readerRef.current = null;
+        abortRef.current.abort()
+      } catch {
+        /* best-effort */
+      }
+      abortRef.current = null
     }
     // 2. Invalidate any pending fetch by incrementing the request ID
     requestIdRef.current++;
@@ -79,6 +82,9 @@ export function useSSE() {
     }
 
     const currentReqId = requestIdRef.current
+    const abort = new AbortController()
+    abortRef.current = abort
+    const isActive = () => currentReqId === requestIdRef.current && mountedRef.current
 
     try {
       const headers: Record<string, string> = {
@@ -91,9 +97,9 @@ export function useSSE() {
       }
       // Admin SSE endpoints (cron-runs stream, provision stream, etc.)
       // sit behind ADMIN_SHARED_SECRET when configured; lib/api.ts
-      // injects X-Admin-Token on the openapi-fetch path but fetch()
-      // here bypasses that middleware, so without this the stream
-      // 401-loops silently inside the catch.
+      // injects X-Admin-Token on the openapi-fetch path but the raw
+      // fetch inside runEventStream bypasses that middleware, so
+      // without this the stream 401-loops silently inside the catch.
       const adminToken = useAdminTokenStore.getState().token
       if (adminToken) {
         headers['X-Admin-Token'] = adminToken
@@ -102,94 +108,47 @@ export function useSSE() {
         Object.assign(headers, extraHeaders)
       }
 
-      // Raw fetch (not typed `client`): SSE needs ReadableStream access via
-      // `response.body.getReader()`. openapi-fetch's middleware consumes the
-      // body as JSON before we can stream it.
-      const response = await fetch(url.toString(), {
+      await runEventStream({
+        url,
         method: body ? 'POST' : 'GET',
         cache: 'no-store',
         headers,
         body: body ? JSON.stringify(body) : undefined,
-      })
-
-      // If stop() was called or component unmounted while fetch was pending
-      if (currentReqId !== requestIdRef.current || !mountedRef.current) {
-        // Cancel the response body to avoid a connection leak
-        const reader = response.body?.getReader()
-        if (reader) {
-          try { reader.cancel().catch(() => {}); } catch(e) {}
-        }
-        return
-      }
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('Response body is null')
-      }
-
-      readerRef.current = reader
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-
-        // Always check if we're still the active request AND still mounted
-        if (currentReqId !== requestIdRef.current || !mountedRef.current) {
-          if (reader) try { reader.cancel().catch(() => {}); } catch(e) {}
-          return;
-        }
-
-        if (done) break
-
-        if (value) {
-          buffer += decoder.decode(value, { stream: true })
-          // SSE event-boundary is an empty line, which the spec allows as
-          // "\n\n", "\r\n\r\n", or "\r\r". sse-starlette emits CRLF; the
-          // prior hand-rolled backend emitted LF. parseSSEFrames covers
-          // all three separators — see lib/sse-parser.ts.
-          const { frames: parts, remainder } = parseSSEFrames(buffer)
-          buffer = remainder
-
-          const newLines: SSELine[] = []
-          let finalStatus: SSEStatus | null = null
-          let finalError: string | null = null
-
-          for (let part of parts) {
-            part = part.trim()
-            if (part.startsWith('data:')) {
-              const dataStr = part.replace(/^data:\s*/, '')
-              try {
-                const data = JSON.parse(dataStr) as SSELine
-                newLines.push(data)
-                if (data.type === 'done') {
-                  finalStatus = 'done'
-                } else if (data.type === 'error') {
-                  finalStatus = 'error'
-                  finalError = typeof data.message === 'string' ? data.message : 'Unknown error'
-                }
-              } catch (e) {
-                console.error('Failed to parse SSE message:', dataStr, e)
-              }
-            }
+        signal: abort.signal,
+        isActive,
+        onFrame: (frame) => {
+          const part = frame.trim()
+          if (!part.startsWith('data:')) return
+          const dataStr = part.replace(/^data:\s*/, '')
+          let data: SSELine
+          try {
+            data = JSON.parse(dataStr) as SSELine
+          } catch (e) {
+            console.error('Failed to parse SSE message:', dataStr, e)
+            return
           }
 
-          if (mountedRef.current && newLines.length > 0) {
-            const stamped = newLines.map((line) => ({ ...line, _id: ++lineSeqRef.current }))
-            setLines((prev) => [...prev, ...stamped])
+          let finalStatus: SSEStatus | null = null
+          let finalError: string | null = null
+          if (data.type === 'done') {
+            finalStatus = 'done'
+          } else if (data.type === 'error') {
+            finalStatus = 'error'
+            finalError = typeof data.message === 'string' ? data.message : 'Unknown error'
+          }
+
+          if (mountedRef.current) {
+            const stamped = { ...data, _id: ++lineSeqRef.current }
+            setLines((prev) => [...prev, stamped])
             if (finalStatus) {
               setStatus(finalStatus)
               if (finalError) setError(finalError)
             }
           }
-        }
-      }
+        },
+      })
 
-      if (currentReqId !== requestIdRef.current || !mountedRef.current) return
+      if (!isActive()) return
 
       // Stream ended without a 'done' event — if we are still 'streaming',
       // that means the connection was closed unexpectedly before a terminal
@@ -203,7 +162,7 @@ export function useSSE() {
       })
     } catch (err) {
       // If we unmounted or the request was replaced, ignore all errors
-      if (currentReqId !== requestIdRef.current || !mountedRef.current) return
+      if (!isActive()) return
 
       setStatus('error')
       if (err instanceof TypeError && (err.message === 'Failed to fetch' || err.message.includes('network error'))) {
@@ -212,8 +171,8 @@ export function useSSE() {
         setError(err instanceof Error ? err.message : 'Unknown error')
       }
     } finally {
-      if (readerRef.current) {
-        readerRef.current = null
+      if (abortRef.current === abort) {
+        abortRef.current = null
       }
     }
   }, [stop])
@@ -223,9 +182,13 @@ export function useSSE() {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      if (readerRef.current) {
-        try { readerRef.current.cancel().catch(() => {}); } catch(e) {}
-        readerRef.current = null
+      if (abortRef.current) {
+        try {
+          abortRef.current.abort()
+        } catch {
+          /* best-effort */
+        }
+        abortRef.current = null
       }
     }
   }, [])

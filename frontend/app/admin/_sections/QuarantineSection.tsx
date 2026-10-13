@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { formatLocalDateTime } from '@/lib/date'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Download, FileWarning, Loader2, Trash2 } from 'lucide-react'
 
@@ -178,7 +179,7 @@ export function QuarantineSection() {
               {summary?.oldest_at && (
                 <div>
                   <span className="text-muted-foreground">Oldest: </span>
-                  <span className="font-medium">{new Date(summary.oldest_at).toLocaleString()}</span>
+                  <span className="font-medium">{formatLocalDateTime(summary.oldest_at)}</span>
                 </div>
               )}
             </div>
@@ -279,7 +280,7 @@ function QuarantineItemRow({
           <p className="text-xs text-muted-foreground">
             {item.line_ordinal === null ? 'Container' : `Line ${item.line_ordinal}`}
             {item.byte_offset !== null && ` · byte ${item.byte_offset}`}
-            {' · '}{new Date(item.quarantined_at).toLocaleString()}
+            {' · '}{formatLocalDateTime(item.quarantined_at)}
           </p>
           <p className="break-words text-sm">{item.error_text}</p>
           <p className="break-all font-mono text-[11px] text-muted-foreground">SHA-256: {item.sha256}</p>

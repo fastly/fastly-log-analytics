@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { formatLocalDateTime } from '@/lib/date'
 import { useQuery } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import {
@@ -215,7 +216,7 @@ export function QueueClient() {
                             {JSON.stringify(task.args)}
                           </TableCell>
                           <TableCell className="text-xs">
-                            {new Date(task.time_start * 1000).toLocaleString()}
+                            {formatLocalDateTime(task.time_start * 1000)}
                           </TableCell>
                         </TableRow>
                       ))}

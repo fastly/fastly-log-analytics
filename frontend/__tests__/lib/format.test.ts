@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest'
-import { formatValue, formatBytes, calculateDelta } from '@/lib/format'
+import { formatValue, formatBytes, calculateDelta, formatCount } from '@/lib/format'
+
+describe('formatCount', () => {
+  it('matches Number.prototype.toLocaleString() byte-for-byte', () => {
+    for (const n of [0, 5, 42, 1000, 1234567, -9876, 1234.5, 0.125]) {
+      expect(formatCount(n)).toBe(n.toLocaleString())
+    }
+  })
+
+  it('passes through Intl.NumberFormatOptions', () => {
+    expect(formatCount(3.14159, { maximumFractionDigits: 1 })).toBe(
+      (3.14159).toLocaleString(undefined, { maximumFractionDigits: 1 }),
+    )
+  })
+})
 
 describe('formatBytes', () => {
   it('formats bytes correctly', () => {

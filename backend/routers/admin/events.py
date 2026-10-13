@@ -50,7 +50,8 @@ from backend.cron_runs_publisher import publisher as cron_runs_publisher
 from backend.deps import get_service_id
 from backend.sync_status_publisher import publisher as sync_status_publisher
 from backend.system_metrics_sampler import sample_system_metrics_cached
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
+from backend.utils.router_utils import make_error
+from backend.utils.sse import sse_response
 from backend.utils.sse_subscription import iter_with_disconnect_ping
 
 from ._router import router
@@ -235,4 +236,4 @@ async def admin_events_stream(
                 t.cancel()
             await asyncio.gather(*feeders, return_exceptions=True)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
