@@ -7,10 +7,9 @@ import { useTimezone } from '@/hooks/useTimezone'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useFieldLabel } from '@/hooks/useFieldLabel'
 import { useTimeLayout } from '@/lib/chart-helpers'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useFilterStore } from '@/stores/filterStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { ReportLayout } from '@/components/ReportLayout'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
@@ -143,10 +142,13 @@ function SecurityBody({
   // cache. On a cold load rangeKey is "24h". A custom absolute range instead keys
   // on "abs:<start>|<end>" and sends the explicit bounds, so it scans exactly
   // what the chart x-axis (startTime/endTime) displays.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const securityQuery = useServiceQuery<SecurityData | undefined>(
-    ['security', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, bucketSeconds],
-    async ({ signal }) => {
+  const securityQuery = useAnalyticsReportQuery<SecurityData | undefined>({
+    namespace: ['security', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: [bucketSeconds],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data, error } = await client.POST('/api/security/aggregates', {
         signal,
         body: {
@@ -164,7 +166,7 @@ function SecurityBody({
       }
       return data
     },
-  )
+  })
 
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">

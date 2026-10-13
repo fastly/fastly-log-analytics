@@ -5,13 +5,12 @@ import React from 'react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { Server } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { INTERVAL_SECONDS } from '@/lib/constants'
@@ -92,10 +91,13 @@ function OriginReportContent({
   // "24h" (resolveRangeWire's token default). A custom absolute range instead
   // keys on "abs:<start>|<end>" and sends the explicit bounds, so it scans
   // exactly what the chart x-axis (hard-clamped to startTime/endTime) displays.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const bundle = useServiceQuery(
-    ['origin', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
-    async ({ signal }) => {
+  const bundle = useAnalyticsReportQuery({
+    namespace: ['origin', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: [bucketMinutes, originMetric, originPercentile, ORIGIN_SECTIONS],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data, error } = await client.POST('/api/origin/aggregates', { signal,
         body: {
           // Token mode → {range_token, anchor} (server resolves the window).
@@ -130,7 +132,7 @@ function OriginReportContent({
       // compile error) — that is the type-safety win for this file.
       return data as any
     },
-  )
+  })
 
   // useMemo so identity stays stable across re-renders for the same bundle
   // tick; the section components are dumb consumers and re-renders fan out

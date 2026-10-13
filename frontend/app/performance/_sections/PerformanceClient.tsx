@@ -5,12 +5,11 @@ import React from 'react'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
+import { useAnalyticsReportQuery } from '@/hooks/useAnalyticsReportQuery'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { useFilterStore } from '@/stores/filterStore'
 import { useServiceStore } from '@/stores/serviceStore'
 import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { DataTable } from '@/components/DataTable'
 import { Zap, Server, Shield, Clock, Network } from 'lucide-react'
@@ -99,10 +98,13 @@ function PerformanceBody({
   // rangeKey is "24h". A custom absolute range instead keys on "abs:<start>|<end>"
   // and sends the explicit bounds, so the tables/distributions reflect exactly the
   // selected window. Both queries share one wire so they stay on one cache key.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const performanceQuery = useServiceQuery(
-    ['performance', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, 'p99'],
-    async ({ signal }) => {
+  const performanceQuery = useAnalyticsReportQuery({
+    namespace: ['performance', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: ['p99'],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data, error } = await client.POST("/api/performance/aggregates", { signal,
         body: {
           filters: filterPayload,
@@ -114,7 +116,7 @@ function PerformanceBody({
       if (error) throw error
       return data
     }
-  )
+  })
 
   const coreData = performanceQuery.data
   const distData = performanceQuery.data
