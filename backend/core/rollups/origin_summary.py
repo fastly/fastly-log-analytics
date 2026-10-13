@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import metric_expressions
 from ._common import (
     ORIGIN_SUMMARY_BUNDLE_FILENAME,
     backfill_missing_bundles,
@@ -67,15 +68,10 @@ def build_origin_summary_bundles(service_id: str, source: dict, hours: list[str]
     """
 
     def eligibility(cols, table_ident):
-        # Latency expression matches origin_latency_us_expr in _base.py
-        # (kept in sync rather than imported to dodge the import cycle).
-        if "ottfb" in cols and "ttfb" in cols:
-            lat_us_expr = 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-        elif "ottfb" in cols:
-            lat_us_expr = '"ottfb"'
-        elif "ttfb" in cols:
-            lat_us_expr = '"ttfb" * 1000000.0'
-        else:
+        # Latency expression from the canonical catalog; absent=None skips a
+        # service with no latency column (nothing to summarise).
+        lat_us_expr = metric_expressions.origin_latency_us(cols, absent=None)
+        if lat_us_expr is None:
             return None
 
         # Adapt each optional column to whether it exists on this

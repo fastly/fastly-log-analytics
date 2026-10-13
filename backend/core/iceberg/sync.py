@@ -29,6 +29,7 @@ _retry_sleep = time.sleep
 
 # Late-bind helpers from the main _core module.
 from backend.core.iceberg import _core as _core_mod
+from backend.core.retry import retry_call
 
 
 def __getattr__(name: str):
@@ -362,29 +363,35 @@ def sync_data(
                 # usage_log row's elapsed reflects actual CDN service time,
                 # not the cumulative cost of retries.
                 cdn_elapsed_ms = 0.0
-                for attempt in range(3):
-                    try:
-                        t0 = time.time()
-                        # Go through ``_cdn_open`` (module-level indirection) so
-                        # tests can mock the network seam without poking into the
-                        # SSRF-hardened opener's internals.
-                        with _cdn_open(cdn_opener, req, 30) as response, open(tmp_path, "wb") as out_file:
-                            cdn_headers = response.headers
-                            shutil.copyfileobj(response, out_file)
-                        cdn_elapsed_ms = round((time.time() - t0) * 1000, 2)
-                        success = True
-                        break
-                    except urllib.error.HTTPError as e:
-                        last_err = e
-                        if e.code in (401, 403):
-                            # Don't retry on auth errors
-                            break
-                        if attempt < 2:
-                            _retry_sleep(1)
-                    except Exception as e:
-                        last_err = e
-                        if attempt < 2:
-                            _retry_sleep(1)
+
+                def _is_retryable_cdn_error(exc: BaseException) -> bool:
+                    # Auth failures won't recover on retry; everything else
+                    # (timeouts, resets, 5xx) is worth another attempt.
+                    return not (isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403))
+
+                def _download_once() -> None:
+                    nonlocal cdn_headers, cdn_elapsed_ms
+                    t0 = time.time()
+                    # Go through ``_cdn_open`` (module-level indirection) so
+                    # tests can mock the network seam without poking into the
+                    # SSRF-hardened opener's internals.
+                    with _cdn_open(cdn_opener, req, 30) as response, open(tmp_path, "wb") as out_file:
+                        cdn_headers = response.headers
+                        shutil.copyfileobj(response, out_file)
+                    cdn_elapsed_ms = round((time.time() - t0) * 1000, 2)
+
+                try:
+                    retry_call(
+                        _download_once,
+                        retry_on=_is_retryable_cdn_error,
+                        attempts=3,
+                        base_delay=1.0,
+                        multiplier=1.0,
+                        sleep=_retry_sleep,
+                    )
+                    success = True
+                except Exception as e:
+                    last_err = e
 
                 if not success:
                     raise RuntimeError(

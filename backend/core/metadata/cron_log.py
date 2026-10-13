@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import statistics
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -94,27 +93,6 @@ def _publish_cron_run_change(service_id: str, run_id: int, task: str, status: st
         logger.exception("[cron_log] cron-runs SSE publish failed for %s/%s", service_id, task)
 
 
-def _retry_on_locked[T](con: Any, fn: Callable[[], T]) -> T:
-    """Run ``fn`` (a complete, idempotent write+commit unit).
-
-    Historically retried on SQLite's transient ``OperationalError: database
-    is locked`` (converging cron writes — sync / commit / local-compact /
-    metadata_sync firing on the same minute boundary all hit the one
-    per-service ``metadata.db`` file). That failure mode has no Postgres
-    analogue: the pool runs ``autocommit=True`` (see
-    :mod:`backend.core.metadata.pg_connection`'s module docstring), so every
-    statement here is already its own committed unit with no multi-statement
-    lock window for a converging writer to contend on — there is no
-    Postgres ``SQLITE_BUSY`` equivalent for this codebase's write shape.
-    Kept as a passthrough (rather than deleted) so every call site below
-    doesn't need touching, and so a retry policy can be reinstated here in
-    one place if a real transient-Postgres-error case (e.g.
-    ``psycopg.errors.SerializationFailure`` under pool exhaustion) turns up
-    in practice — none has yet.
-    """
-    return fn()
-
-
 def start_cron_run(service_id: str, task: str) -> int:
     import time
 
@@ -183,9 +161,9 @@ def start_cron_run(service_id: str, task: str) -> int:
         con.commit()
         return int(cur.lastrowid or 0)
 
-    # Retry the whole reap→guard→insert unit on a transient lock so a
-    # converging cron minute can't crash the tick (see _retry_on_locked).
-    new_id = _retry_on_locked(con, _write)
+    # Run the whole reap→guard→insert unit so a converging cron minute
+    # can't crash the tick.
+    new_id = _write()
 
     try:
         from backend.utils.cache_registry import CacheRegistry
@@ -352,8 +330,8 @@ def log_cron_run(
 
     # A leaked terminal write is worse than a leaked start (the row stays
     # 'running' and blocks the task until the orphan cutoff — the 2026-06-19
-    # incident), so retry the terminal write on a transient lock too.
-    _retry_on_locked(con, _write)
+    # incident).
+    _write()
 
     try:
         from backend.utils.cache_registry import CacheRegistry
@@ -501,7 +479,7 @@ def finalize_cron_run_if_running(
         con.commit()
         return bool(cur.rowcount)
 
-    if not _retry_on_locked(con, _write):
+    if not _write():
         return False
 
     try:

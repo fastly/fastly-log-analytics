@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import metric_expressions
 from ._common import (
     ORIGIN_DIMS_BUNDLE_TOP_K,
     ORIGIN_IP_BUNDLE_FILENAME,
@@ -93,17 +94,11 @@ logger = logging.getLogger(__name__)
 
 
 def _lat_us_expr(cols: set[str]) -> str | None:
-    """Origin latency-us expression, matching origin_latency_us_expr in
-    ``backend.repositories._base`` (kept in sync rather than imported to
-    dodge the import cycle). Returns ``None`` when no latency column exists.
+    """Origin latency-us expression. Delegates to the canonical catalog
+    (:func:`backend.core.metric_expressions.origin_latency_us`); returns
+    ``None`` when no latency column exists.
     """
-    if "ottfb" in cols and "ttfb" in cols:
-        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-    if "ottfb" in cols:
-        return '"ottfb"'
-    if "ttfb" in cols:
-        return '"ttfb" * 1000000.0'
-    return None
+    return metric_expressions.origin_latency_us(cols, absent=None)
 
 
 def _build_pop_copy_sql(lat_us_expr: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:

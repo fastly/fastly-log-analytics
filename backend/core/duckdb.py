@@ -23,6 +23,7 @@ from botocore import UNSIGNED
 from botocore.config import Config
 
 from backend import config as svcconfig
+from backend.core.retry import retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -491,10 +492,26 @@ def fos_reachable(source: dict) -> dict:
         return {"reachable": False, "error": str(e)[:200]}
 
 
+def _is_transient_query_error(exc: BaseException) -> bool:
+    """Retry predicate for :func:`_execute_query_with_retry`.
+
+    The auth-failure translation below raises ``RuntimeError`` — never retry
+    that (its message contains "http"/"401" and would otherwise match the
+    transient-keyword check). Every other exception is retried only when its
+    message looks like a transient network/IO failure.
+    """
+    if isinstance(exc, RuntimeError):
+        return False
+    err_lower = str(exc).lower()
+    return any(
+        kw in err_lower for kw in ["io error", "http", "network", "timeout", "connection", "could not resolve hostname"]
+    )
+
+
 def _execute_query_with_retry(con: duckdb.DuckDBPyConnection, query: str, max_retries: int = 5):
     """Execute a DuckDB query with retry on transient network failures."""
-    backoff = 1.0
-    for attempt in range(max_retries + 1):
+
+    def _attempt():
         try:
             return con.execute(query)
         except Exception as e:
@@ -510,19 +527,15 @@ def _execute_query_with_retry(con: duckdb.DuckDBPyConnection, query: str, max_re
                     raise RuntimeError(
                         f"HTTP {code} Unauthorized{url_hint}. Check your FASTLY_CDN_SECRET and CDN VCL configuration."
                     ) from e
+            raise
 
-            # Only retry on network/IO errors to avoid 30s delays on data errors
-            is_transient = any(
-                kw in err_lower
-                for kw in ["io error", "http", "network", "timeout", "connection", "could not resolve hostname"]
-            )
-            if not is_transient:
-                raise e
-
-            if attempt == max_retries:
-                raise e
-            time.sleep(backoff)
-            backoff *= 2
+    return retry_call(
+        _attempt,
+        retry_on=_is_transient_query_error,
+        attempts=max_retries + 1,
+        base_delay=1.0,
+        multiplier=2.0,
+    )
 
 
 def _cache_dir(source: dict) -> str:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from backend import config as svcconfig
+from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.rollup_readiness import rollup_coverage_ready as _rollup_coverage_ready
 from backend.core.rollups._common import quote_path_list
@@ -748,15 +749,16 @@ def error_rate_expr(status_col: str = "status", threshold: int = 500, filter_exp
 
 
 def origin_latency_us_expr(actual_cols: set[str] | list[str]) -> str:
-    """Unified expression resolving ottfb (us) vs ttfb (s) vs nothing."""
-    if "ottfb" in actual_cols and "ttfb" in actual_cols:
-        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-    elif "ottfb" in actual_cols:
-        return '"ottfb"'
-    elif "ttfb" in actual_cols:
-        return '"ttfb" * 1000000.0'
-    else:
-        return "NULL"
+    """Unified expression resolving ottfb (us) vs ttfb (s) vs nothing.
+
+    Thin delegate over :func:`backend.core.metric_expressions.origin_latency_us`
+    (the canonical catalog). Kept as a named export because origin.py and the
+    base-branch tests import this symbol directly.
+    """
+    expr = metric_expressions.origin_latency_us(actual_cols, absent="NULL")
+    # absent="NULL" guarantees a non-None result.
+    assert expr is not None
+    return expr
 
 
 def empty_schema_response(**extra_fields) -> dict:
@@ -3781,13 +3783,7 @@ class QueryRunner:
         ``None`` when the metric's column is absent.
         """
         if metric == "ttfb":
-            if "ottfb" in cols and "ttfb" in cols:
-                return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-            if "ottfb" in cols:
-                return '"ottfb"'
-            if "ttfb" in cols:
-                return '"ttfb" * 1000000.0'
-            return None
+            return metric_expressions.origin_latency_us(cols, absent=None)
         # ttlb
         if "ottlb" in cols:
             return '"ottlb"'

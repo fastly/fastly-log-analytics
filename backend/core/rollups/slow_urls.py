@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import metric_expressions
 from ._common import (
     SLOW_URLS_BUNDLE_FILENAME,
     SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR,
@@ -96,17 +97,9 @@ def build_slow_urls_bundles(service_id: str, source: dict, hours: list[str]) -> 
             # the reader's "missing closed hour" check will fall back to
             # raw, which itself returns has_data=False for this service.
             return None
-        # Build the latency expression matching backend.repositories._base
-        # .origin_latency_us_expr — kept in sync rather than imported to
-        # avoid the import-graph cycle (repositories depends on core).
-        if "ottfb" in cols and "ttfb" in cols:
-            return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
-        elif "ottfb" in cols:
-            return '"ottfb"'
-        elif "ttfb" in cols:
-            return '"ttfb" * 1000000.0'
-        # No latency columns at all → no percentile to rank on.
-        return None
+        # Latency expression from the canonical catalog; absent=None →
+        # no latency column, no percentile to rank on.
+        return metric_expressions.origin_latency_us(cols, absent=None)
 
     def build_copy_sql(lat_us_expr, table_ident, start_iso, end_iso, tmp_path):
         return (

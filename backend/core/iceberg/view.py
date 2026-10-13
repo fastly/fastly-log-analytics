@@ -38,6 +38,7 @@ logger = logging.getLogger("backend.core.iceberg._core")
 # Late-bind helpers from the main _core module — bare-name resolution
 # for any unmoved global falls through __getattr__ to _core.
 from backend.core.iceberg import _core as _core_mod
+from backend.core.retry import retry_call
 from backend.utils.sql_validator import escape_sql_literal
 
 
@@ -174,14 +175,17 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs
     :meth:`QueryRunner.execute_with_retry` so a caller refactor can
     swap one for the other.
     """
-    try:
-        return fn(con, *args, **kwargs)
-    except Exception as e:
-        if not is_stale_view_error(e):
-            raise
+
+    def _recover(_exc: BaseException) -> None:
         _core_mod.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
         _core_mod.update_iceberg_view(con, source, force=True, target_table=table_name)
-        return fn(con, *args, **kwargs)
+
+    return retry_call(
+        lambda: fn(con, *args, **kwargs),
+        retry_on=is_stale_view_error,
+        attempts=2,
+        before_retry=_recover,
+    )
 
 
 def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -> None:
