@@ -1,13 +1,12 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-import requests
 
-from backend.provision.sharing_domain import deploy_remote_frontend
+from backend.provision.sharing_domain import delete_remote_frontend, deploy_remote_frontend
 
 
 def test_deploy_remote_frontend_success():
-    """Verify that deploy_remote_frontend executes the correct sequential calls with proper payloads."""
+    """deploy_remote_frontend issues the correct sequential calls via the shared fastly() client."""
     service_name = "test-service"
     domain_name = "test-domain.global.ssl.fastly.net"
     origin_host = "1.2.3.4"
@@ -15,73 +14,22 @@ def test_deploy_remote_frontend_success():
     use_ssl = False
     token = "fake-token"
 
-    # Define mock responses
-    mock_service_resp = MagicMock(spec=requests.Response)
-    mock_service_resp.status_code = 201
-    mock_service_resp.json.return_value = {"id": "service123", "name": service_name}
-    mock_service_resp.raise_for_status.return_value = None
-
-    mock_version_resp = MagicMock(spec=requests.Response)
-    mock_version_resp.status_code = 200
-    mock_version_resp.json.return_value = {"number": 1, "service_id": "service123"}
-    mock_version_resp.raise_for_status.return_value = None
-
-    mock_domain_resp = MagicMock(spec=requests.Response)
-    mock_domain_resp.status_code = 200
-    mock_domain_resp.json.return_value = {"name": domain_name}
-    mock_domain_resp.raise_for_status.return_value = None
-
-    mock_backend_resp = MagicMock(spec=requests.Response)
-    mock_backend_resp.status_code = 200
-    mock_backend_resp.json.return_value = {"name": "gce_vm_origin"}
-    mock_backend_resp.raise_for_status.return_value = None
-
-    mock_activate_resp = MagicMock(spec=requests.Response)
-    mock_activate_resp.status_code = 200
-    mock_activate_resp.json.return_value = {"number": 1, "active": True}
-    mock_activate_resp.raise_for_status.return_value = None
-
-    # Track sequential post requests
-    post_responses = [
-        mock_service_resp,
-        mock_version_resp,
-        mock_domain_resp,
-        mock_backend_resp,
+    # Sequential parsed-JSON responses returned by the shared client.
+    responses = [
+        {"id": "service123", "name": service_name},  # Create Service
+        {"number": 1, "service_id": "service123"},  # Verify Draft Version
+        {"name": domain_name},  # Attach Domain
+        {"name": "gce_vm_origin"},  # Attach Backend Origin
+        {"number": 1, "active": True},  # Activate Version
     ]
+    calls: list[tuple] = []
 
-    def mock_post(url, headers, json=None, **kwargs):
-        assert headers == {"Fastly-Key": token, "Accept": "application/json"}
-        resp = post_responses.pop(0)
-        # Match expected URL and JSON payload
-        if len(post_responses) == 3:  # Create Service call was popped
-            assert url == "https://api.fastly.com/service"
-            assert json == {"name": service_name, "type": "vcl"}
-        elif len(post_responses) == 2:  # Verify Draft Version call was popped
-            assert url == "https://api.fastly.com/service/service123/version"
-            assert json is None
-        elif len(post_responses) == 1:  # Attach Domain call was popped
-            assert url == "https://api.fastly.com/service/service123/version/1/domain"
-            assert json == {"name": domain_name}
-        elif len(post_responses) == 0:  # Attach Backend call was popped
-            assert url == "https://api.fastly.com/service/service123/version/1/backend"
-            assert json == {
-                "name": "gce_vm_origin",
-                "address": origin_host,
-                "port": origin_port,
-                "use_ssl": use_ssl,
-                "ssl_check_cert": False,
-            }
-        return resp
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        assert token == "fake-token"
+        calls.append((method, path, body))
+        return responses.pop(0)
 
-    def mock_put(url, headers, **kwargs):
-        assert url == "https://api.fastly.com/service/service123/version/1/activate"
-        assert headers == {"Fastly-Key": token, "Accept": "application/json"}
-        return mock_activate_resp
-
-    with (
-        patch("backend.provision.sharing_domain.requests.post", side_effect=mock_post) as mock_p,
-        patch("backend.provision.sharing_domain.requests.put", side_effect=mock_put) as mock_u,
-    ):
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
         res = deploy_remote_frontend(
             service_name=service_name,
             domain_name=domain_name,
@@ -91,256 +39,137 @@ def test_deploy_remote_frontend_success():
             token=token,
         )
 
-        assert res == {
-            "service_id": "service123",
-            "version": 1,
-            "domain_name": domain_name,
-            "origin_host": origin_host,
-        }
-        assert mock_p.call_count == 4
-        assert mock_u.call_count == 1
-
-
-@pytest.mark.parametrize(
-    "step_fail,json_err,text_err,expected_msg",
-    [
-        (0, {"msg": "Name already taken"}, "", "Fastly API error during Create Service: HTTP 400 - Name already taken"),
+    assert res == {
+        "service_id": "service123",
+        "version": 1,
+        "domain_name": domain_name,
+        "origin_host": origin_host,
+    }
+    assert calls == [
+        ("POST", "/service", {"name": service_name, "type": "vcl"}),
+        ("POST", "/service/service123/version", None),
+        ("POST", "/service/service123/version/1/domain", {"name": domain_name}),
         (
-            1,
-            {"detail": "Failed to create version"},
-            "",
-            "Fastly API error during Verify Draft Version: HTTP 400 - Failed to create version",
-        ),
-        (
-            2,
-            {"message": "Invalid domain name"},
-            "",
-            "Fastly API error during Attach Domain: HTTP 422 - Invalid domain name",
-        ),
-        (
-            3,
-            {},
-            "Invalid backend config",
-            "Fastly API error during Attach Backend Origin: HTTP 400 - Invalid backend config",
-        ),
-        (4, None, "Could not activate", "Fastly API error during Activate Version: HTTP 500 - Could not activate"),
-    ],
-)
-def test_deploy_remote_frontend_failures(step_fail, json_err, text_err, expected_msg):
-    """Verify that any failed Fastly API call triggers a descriptive exception."""
-    service_name = "test-service"
-    domain_name = "test-domain.global.ssl.fastly.net"
-    origin_host = "1.2.3.4"
-    origin_port = 80
-    use_ssl = False
-    token = "fake-token"
-
-    responses = []
-    # Mocking first step
-    if step_fail == 0:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 400
-        resp.json.return_value = json_err or {}
-        resp.text = text_err
-        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
-        responses.append(resp)
-    else:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 201
-        resp.json.return_value = {"id": "service123"}
-        resp.raise_for_status.return_value = None
-        responses.append(resp)
-
-    # Mocking second step
-    if step_fail == 1:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 400
-        resp.json.return_value = json_err or {}
-        resp.text = text_err
-        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
-        responses.append(resp)
-    elif step_fail > 1:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 200
-        resp.json.return_value = {"number": 1}
-        resp.raise_for_status.return_value = None
-        responses.append(resp)
-
-    # Mocking third step
-    if step_fail == 2:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 422
-        resp.json.return_value = json_err or {}
-        resp.text = text_err
-        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
-        responses.append(resp)
-    elif step_fail > 2:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 200
-        resp.json.return_value = {}
-        resp.raise_for_status.return_value = None
-        responses.append(resp)
-
-    # Mocking fourth step
-    if step_fail == 3:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 400
-        if json_err is not None:
-            resp.json.return_value = json_err
-        else:
-            resp.json.side_effect = ValueError()
-        resp.text = text_err
-        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
-        responses.append(resp)
-    elif step_fail > 3:
-        resp = MagicMock(spec=requests.Response)
-        resp.status_code = 200
-        resp.json.return_value = {}
-        resp.raise_for_status.return_value = None
-        responses.append(resp)
-
-    # Mocking fifth step (put)
-    mock_activate_resp = MagicMock(spec=requests.Response)
-    if step_fail == 4:
-        mock_activate_resp.status_code = 500
-        if json_err is not None:
-            mock_activate_resp.json.return_value = json_err
-        else:
-            mock_activate_resp.json.side_effect = ValueError()
-        mock_activate_resp.text = text_err
-        mock_activate_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_activate_resp)
-    else:
-        mock_activate_resp.status_code = 200
-        mock_activate_resp.raise_for_status.return_value = None
-
-    def mock_post(url, headers, json=None, **kwargs):
-        return responses.pop(0)
-
-    def mock_put(url, headers, **kwargs):
-        return mock_activate_resp
-
-    with (
-        patch("backend.provision.sharing_domain.requests.post", side_effect=mock_post),
-        patch("backend.provision.sharing_domain.requests.put", side_effect=mock_put),
-    ):
-        with pytest.raises(RuntimeError) as exc_info:
-            deploy_remote_frontend(
-                service_name=service_name,
-                domain_name=domain_name,
-                origin_host=origin_host,
-                origin_port=origin_port,
-                use_ssl=use_ssl,
-                token=token,
-            )
-        assert expected_msg in str(exc_info.value)
-
-
-def test_deploy_remote_frontend_missing_keys_in_json():
-    """Verify error raised when service_id or version_number is missing in response."""
-    service_name = "test-service"
-    domain_name = "test-domain.global.ssl.fastly.net"
-    origin_host = "1.2.3.4"
-    origin_port = 80
-    use_ssl = False
-    token = "fake-token"
-
-    # Define mock response missing 'id'
-    mock_service_resp = MagicMock(spec=requests.Response)
-    mock_service_resp.status_code = 201
-    mock_service_resp.json.return_value = {"not_id": "service123"}
-    mock_service_resp.raise_for_status.return_value = None
-
-    with patch("backend.provision.sharing_domain.requests.post", return_value=mock_service_resp):
-        with pytest.raises(RuntimeError) as exc_info:
-            deploy_remote_frontend(
-                service_name=service_name,
-                domain_name=domain_name,
-                origin_host=origin_host,
-                origin_port=origin_port,
-                use_ssl=use_ssl,
-                token=token,
-            )
-        assert "Failed to retrieve service ID" in str(exc_info.value)
-
-
-def test_deploy_remote_frontend_with_override_host_success():
-    """Verify that deploy_remote_frontend executes correct calls with override_host."""
-    service_name = "test-service"
-    domain_name = "test-domain.global.ssl.fastly.net"
-    origin_host = "1.2.3.4"
-    origin_port = 80
-    use_ssl = False
-    token = "fake-token"
-    override_host = "my-override.example.com"
-
-    # Define mock responses
-    mock_service_resp = MagicMock(spec=requests.Response)
-    mock_service_resp.status_code = 201
-    mock_service_resp.json.return_value = {"id": "service123", "name": service_name}
-    mock_service_resp.raise_for_status.return_value = None
-
-    mock_version_resp = MagicMock(spec=requests.Response)
-    mock_version_resp.status_code = 200
-    mock_version_resp.json.return_value = {"number": 1, "service_id": "service123"}
-    mock_version_resp.raise_for_status.return_value = None
-
-    mock_domain_resp = MagicMock(spec=requests.Response)
-    mock_domain_resp.status_code = 200
-    mock_domain_resp.json.return_value = {"name": domain_name}
-    mock_domain_resp.raise_for_status.return_value = None
-
-    mock_backend_resp = MagicMock(spec=requests.Response)
-    mock_backend_resp.status_code = 200
-    mock_backend_resp.json.return_value = {"name": "gce_vm_origin"}
-    mock_backend_resp.raise_for_status.return_value = None
-
-    mock_activate_resp = MagicMock(spec=requests.Response)
-    mock_activate_resp.status_code = 200
-    mock_activate_resp.json.return_value = {"number": 1, "active": True}
-    mock_activate_resp.raise_for_status.return_value = None
-
-    # Track sequential post requests
-    post_responses = [
-        mock_service_resp,
-        mock_version_resp,
-        mock_domain_resp,
-        mock_backend_resp,
-    ]
-
-    def mock_post(url, headers, json=None, **kwargs):
-        assert headers == {"Fastly-Key": token, "Accept": "application/json"}
-        resp = post_responses.pop(0)
-        # Match expected URL and JSON payload
-        if len(post_responses) == 3:  # Create Service call was popped
-            assert url == "https://api.fastly.com/service"
-            assert json == {"name": service_name, "type": "vcl"}
-        elif len(post_responses) == 2:  # Verify Draft Version call was popped
-            assert url == "https://api.fastly.com/service/service123/version"
-            assert json is None
-        elif len(post_responses) == 1:  # Attach Domain call was popped
-            assert url == "https://api.fastly.com/service/service123/version/1/domain"
-            assert json == {"name": domain_name}
-        elif len(post_responses) == 0:  # Attach Backend call was popped
-            assert url == "https://api.fastly.com/service/service123/version/1/backend"
-            assert json == {
+            "POST",
+            "/service/service123/version/1/backend",
+            {
                 "name": "gce_vm_origin",
                 "address": origin_host,
                 "port": origin_port,
                 "use_ssl": use_ssl,
                 "ssl_check_cert": False,
-                "override_host": override_host,
-            }
-        return resp
+            },
+        ),
+        ("PUT", "/service/service123/version/1/activate", None),
+    ]
 
-    def mock_put(url, headers, **kwargs):
-        assert url == "https://api.fastly.com/service/service123/version/1/activate"
-        assert headers == {"Fastly-Key": token, "Accept": "application/json"}
-        return mock_activate_resp
 
-    with (
-        patch("backend.provision.sharing_domain.requests.post", side_effect=mock_post) as mock_p,
-        patch("backend.provision.sharing_domain.requests.put", side_effect=mock_put) as mock_u,
-    ):
+@pytest.mark.parametrize(
+    "step_fail,client_err,expected_step",
+    [
+        (0, "HTTP 400 POST /service\n    Name already taken", "Create Service"),
+        (1, "HTTP 400 POST /service/service123/version\n    Failed to create version", "Verify Draft Version"),
+        (2, "HTTP 422 POST /service/service123/version/1/domain\n    Invalid domain name", "Attach Domain"),
+        (3, "HTTP 400 POST /service/service123/version/1/backend\n    Invalid backend config", "Attach Backend Origin"),
+        (4, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
+    ],
+)
+def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
+    """Any failed Fastly call is re-raised with the human-readable step name preserved."""
+    token = "fake-token"
+
+    ok_responses = [
+        {"id": "service123"},
+        {"number": 1},
+        {},
+        {},
+        {"active": True},
+    ]
+    state = {"i": 0}
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        idx = state["i"]
+        state["i"] += 1
+        if idx == step_fail:
+            raise RuntimeError(client_err)
+        return ok_responses[idx]
+
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token=token,
+            )
+
+    msg = str(exc_info.value)
+    assert f"Fastly API error during {expected_step}:" in msg
+    # The underlying client error (HTTP code + body) is preserved.
+    assert client_err in msg
+
+
+def test_deploy_remote_frontend_missing_keys_in_json():
+    """Error raised when service_id is missing from the create-service response."""
+    with patch("backend.provision.sharing_domain.fastly", return_value={"not_id": "service123"}):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token="fake-token",
+            )
+    assert "Failed to retrieve service ID" in str(exc_info.value)
+
+
+def test_deploy_remote_frontend_missing_version_number():
+    """Error raised when the draft-version response has no number."""
+    responses = [{"id": "service123"}, {"service_id": "service123"}]
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        return responses.pop(0)
+
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                service_name="test-service",
+                domain_name="test-domain.global.ssl.fastly.net",
+                origin_host="1.2.3.4",
+                origin_port=80,
+                use_ssl=False,
+                token="fake-token",
+            )
+    assert "Failed to retrieve version number" in str(exc_info.value)
+
+
+def test_deploy_remote_frontend_with_override_host_success():
+    """override_host adds override_host; SNI/cert fields only when use_ssl is True."""
+    service_name = "test-service"
+    domain_name = "test-domain.global.ssl.fastly.net"
+    origin_host = "1.2.3.4"
+    origin_port = 443
+    use_ssl = True
+    token = "fake-token"
+    override_host = "my-override.example.com"
+
+    responses = [
+        {"id": "service123", "name": service_name},
+        {"number": 1},
+        {"name": domain_name},
+        {"name": "gce_vm_origin"},
+        {"active": True},
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path, body))
+        return responses.pop(0)
+
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
         res = deploy_remote_frontend(
             service_name=service_name,
             domain_name=domain_name,
@@ -351,144 +180,84 @@ def test_deploy_remote_frontend_with_override_host_success():
             override_host=override_host,
         )
 
-        assert res == {
-            "service_id": "service123",
-            "version": 1,
-            "domain_name": domain_name,
-            "origin_host": origin_host,
-        }
-        assert mock_p.call_count == 4
-        assert mock_u.call_count == 1
+    assert res["service_id"] == "service123"
+    backend_call = next(c for c in calls if c[1] == "/service/service123/version/1/backend")
+    backend_payload = backend_call[2]
+    assert backend_payload["override_host"] == override_host
+    assert backend_payload["ssl_sni_hostname"] == override_host
+    assert backend_payload["ssl_cert_hostname"] == override_host
 
 
-def test_delete_remote_frontend_success():
-    """Verify delete_remote_frontend deactivates any active version and deletes the service."""
-    remote_service_id = "service123"
+def test_delete_remote_frontend_deactivates_then_deletes():
+    """delete_remote_frontend deactivates active versions, then deletes the service."""
     token = "fake-token"
-
-    # GET versions response
-    mock_get_resp = MagicMock(spec=requests.Response)
-    mock_get_resp.status_code = 200
-    mock_get_resp.json.return_value = [
-        {"number": 1, "active": False},
-        {"number": 2, "active": True},
+    remote_service_id = "remote123"
+    responses = [
+        [{"number": 2, "active": True}, {"number": 1, "active": False}],  # Get Versions
+        {},  # Deactivate Version 2
+        {"status": "ok"},  # Delete Service
     ]
-    mock_get_resp.raise_for_status.return_value = None
+    calls: list[tuple] = []
 
-    # PUT deactivate response
-    mock_put_resp = MagicMock(spec=requests.Response)
-    mock_put_resp.status_code = 200
-    mock_put_resp.raise_for_status.return_value = None
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path))
+        return responses.pop(0)
 
-    # DELETE response
-    mock_delete_resp = MagicMock(spec=requests.Response)
-    mock_delete_resp.status_code = 200
-    mock_delete_resp.raise_for_status.return_value = None
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        delete_remote_frontend(remote_service_id=remote_service_id, token=token)
 
-    from backend.provision.sharing_domain import delete_remote_frontend
-
-    def mock_request(method, url, headers, json=None, **kwargs):
-        assert headers == {"Fastly-Key": token, "Accept": "application/json"}
-        if method.upper() == "GET":
-            assert url == "https://api.fastly.com/service/service123/version"
-            return mock_get_resp
-        elif method.upper() == "DELETE":
-            assert url == "https://api.fastly.com/service/service123"
-            return mock_delete_resp
-        raise ValueError(f"Unexpected call: {method} {url}")
-
-    with (
-        patch("backend.provision.sharing_domain.requests.request", side_effect=mock_request) as mock_req,
-        patch("backend.provision.sharing_domain.requests.put", return_value=mock_put_resp) as mock_put,
-    ):
-        delete_remote_frontend(remote_service_id, token)
-        assert mock_req.call_count == 2
-        mock_put.assert_called_once()
-        args, kwargs = mock_put.call_args
-        assert args[0] == "https://api.fastly.com/service/service123/version/2/deactivate"
-        assert kwargs["headers"] == {"Fastly-Key": token, "Accept": "application/json"}
+    assert calls == [
+        ("GET", f"/service/{remote_service_id}/version"),
+        ("PUT", f"/service/{remote_service_id}/version/2/deactivate"),
+        ("DELETE", f"/service/{remote_service_id}"),
+    ]
 
 
 def test_delete_remote_frontend_no_active_versions():
-    """Verify delete_remote_frontend skips deactivation if no active versions are found."""
-    remote_service_id = "service123"
+    """No deactivation call is issued when there are no active versions."""
     token = "fake-token"
-
-    mock_get_resp = MagicMock(spec=requests.Response)
-    mock_get_resp.status_code = 200
-    mock_get_resp.json.return_value = [
-        {"number": 1, "active": False},
+    remote_service_id = "remote123"
+    responses = [
+        [{"number": 1, "active": False}],  # Get Versions
+        {"status": "ok"},  # Delete Service
     ]
-    mock_get_resp.raise_for_status.return_value = None
+    calls: list[tuple] = []
 
-    mock_delete_resp = MagicMock(spec=requests.Response)
-    mock_delete_resp.status_code = 200
-    mock_delete_resp.raise_for_status.return_value = None
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        calls.append((method, path))
+        return responses.pop(0)
 
-    from backend.provision.sharing_domain import delete_remote_frontend
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        delete_remote_frontend(remote_service_id=remote_service_id, token=token)
 
-    def mock_request(method, url, headers, json=None, **kwargs):
-        if method.upper() == "GET":
-            return mock_get_resp
-        elif method.upper() == "DELETE":
-            return mock_delete_resp
-        raise ValueError(f"Unexpected call: {method} {url}")
-
-    with patch("backend.provision.sharing_domain.requests.request", side_effect=mock_request) as mock_req:
-        delete_remote_frontend(remote_service_id, token)
-        assert mock_req.call_count == 2
+    assert calls == [
+        ("GET", f"/service/{remote_service_id}/version"),
+        ("DELETE", f"/service/{remote_service_id}"),
+    ]
 
 
-def test_delete_remote_frontend_graceful_404():
-    """Verify delete_remote_frontend is tolerant to 404 Not Found errors during lookup/deletion."""
-    remote_service_id = "service123"
-    token = "fake-token"
+def test_delete_remote_frontend_tolerates_404():
+    """A 404 during version lookup/delete is swallowed (service already gone)."""
 
-    # GET returns 404
-    mock_get_resp = MagicMock(spec=requests.Response)
-    mock_get_resp.status_code = 404
-    mock_get_resp.json.side_effect = ValueError()
-    mock_get_resp.text = "Not Found"
-    mock_get_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_get_resp)
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        raise RuntimeError("Fastly API error during Get Versions: HTTP 404 GET /service/x/version\n    not found")
 
-    # DELETE also returns 404
-    mock_delete_resp = MagicMock(spec=requests.Response)
-    mock_delete_resp.status_code = 404
-    mock_delete_resp.json.side_effect = ValueError()
-    mock_delete_resp.text = "Not Found"
-    mock_delete_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_delete_resp)
-
-    from backend.provision.sharing_domain import delete_remote_frontend
-
-    def mock_request(method, url, headers, json=None, **kwargs):
-        if method.upper() == "GET":
-            return mock_get_resp
-        elif method.upper() == "DELETE":
-            return mock_delete_resp
-        raise ValueError(f"Unexpected call: {method} {url}")
-
-    with patch("backend.provision.sharing_domain.requests.request", side_effect=mock_request) as mock_req:
-        delete_remote_frontend(remote_service_id, token)
-        assert mock_req.call_count == 2
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        # Should not raise.
+        delete_remote_frontend(remote_service_id="remote123", token="fake-token")
 
 
-def test_delete_remote_frontend_other_error_raises():
-    """Verify delete_remote_frontend propagates any non-404 API exceptions."""
-    remote_service_id = "service123"
-    token = "fake-token"
+def test_delete_remote_frontend_reraises_non_404():
+    """A non-404 error during deletion propagates."""
+    responses = [[], RuntimeError("HTTP 500 DELETE /service/remote123\n    boom")]
 
-    # GET returns 500
-    mock_get_resp = MagicMock(spec=requests.Response)
-    mock_get_resp.status_code = 500
-    mock_get_resp.json.side_effect = ValueError()
-    mock_get_resp.text = "Server Error"
-    mock_get_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_get_resp)
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        r = responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
 
-    from backend.provision.sharing_domain import delete_remote_frontend
-
-    with (
-        patch("backend.provision.sharing_domain.requests.request", return_value=mock_get_resp),
-        pytest.raises(RuntimeError) as exc_info,
-    ):
-        delete_remote_frontend(remote_service_id, token)
-    assert "HTTP 500" in str(exc_info.value)
+    with patch("backend.provision.sharing_domain.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+    assert "500" in str(exc_info.value)
