@@ -34,7 +34,12 @@ export const dynamic = 'force-dynamic'
 export default async function InsightsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ service?: string | string[] }>
+  searchParams: Promise<{
+    service?: string | string[]
+    tab?: string | string[]
+    window?: string | string[]
+    baseline?: string | string[]
+  }>
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
@@ -43,6 +48,10 @@ export default async function InsightsPage({
     (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
     undefined
   const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
+
+  const initialTab = firstParam(params.tab)
+  const initialWindow = firstParam(params.window)
+  const initialBaseline = firstParam(params.baseline)
 
   const seed = await fetchInsightsServerSide(serviceId, logExtents)
 
@@ -57,7 +66,11 @@ export default async function InsightsPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <InsightsClient />
+      <InsightsClient
+        initialTab={initialTab}
+        initialWindow={initialWindow}
+        initialBaseline={initialBaseline}
+      />
     </HydrationBoundary>
   )
 }

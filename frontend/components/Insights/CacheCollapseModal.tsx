@@ -59,7 +59,7 @@ export function CacheCollapseModal({
 
   // 1. Calculate high-fidelity stats aggregates
   const stats = useMemo(() => {
-    if (!data) return null
+    if (!data || !data.timeline) return null
 
     const totalRequests = data.timeline.reduce((acc, curr) => acc + (curr.total_requests || 0), 0)
     const realHits = data.timeline.reduce((acc, curr) => acc + (curr.real_hits || 0), 0)
@@ -191,15 +191,15 @@ export function CacheCollapseModal({
                 </div>
                 <div className="grid grid-cols-3 gap-3 text-center">
                   <div className="p-2 rounded-md bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="font-mono text-lg font-bold text-emerald-500">{data.breakdown.hits.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-emerald-500">{(data.breakdown?.hits ?? 0).toLocaleString()}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Cacheable Hits</div>
                   </div>
                   <div className="p-2 rounded-md bg-red-500/10 border border-red-500/20">
-                    <div className="font-mono text-lg font-bold text-red-500">{data.breakdown.misses.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-red-500">{(data.breakdown?.misses ?? 0).toLocaleString()}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Misses</div>
                   </div>
                   <div className="p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
-                    <div className="font-mono text-lg font-bold text-amber-500">{data.breakdown.passes.toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-amber-500">{(data.breakdown?.passes ?? 0).toLocaleString()}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Uncacheable (PASS)</div>
                   </div>
                 </div>
@@ -225,7 +225,7 @@ export function CacheCollapseModal({
                 <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-1.5">
                   <FileText className="h-3.5 w-3.5" /> Recent Cache Misses (Max 50)
                 </h4>
-                {data.recent_misses.length === 0 ? (
+                {(!data.recent_misses || data.recent_misses.length === 0) ? (
                   <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground italic">
                     No cache misses captured for this lookback.
                   </div>

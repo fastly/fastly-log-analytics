@@ -20,6 +20,13 @@ export interface InsightSection {
   icon: LucideIcon
 }
 
+export const ALL_SECTION: InsightSection = {
+  key: 'all',
+  label: 'All Categories',
+  description: 'All automated insights and detected anomalies across every category.',
+  icon: LayoutGrid,
+}
+
 export const INSIGHT_SECTIONS: readonly InsightSection[] = [
   {
     key: 'security',
@@ -41,7 +48,7 @@ export const INSIGHT_SECTIONS: readonly InsightSection[] = [
   },
   {
     key: 'network',
-    label: 'Network Path',
+    label: 'Network & Routing Path',
     description: 'ISP / ASN reachability, RTT and packet loss, and metro/region delivery quality.',
     icon: Network,
   },
@@ -52,6 +59,24 @@ export const INSIGHT_SECTIONS: readonly InsightSection[] = [
     icon: Globe,
   },
 ] as const
+
+export const SECTION_LOADING_MESSAGES: Record<string, string> = {
+  all: 'Evaluating detector baseline comparisons…',
+  security: 'Analyzing security signatures & JA3 patterns…',
+  origin: 'Evaluating origin 5xx errors & latency shifts…',
+  edge: 'Measuring cache collapse & delivery performance…',
+  network: 'Checking ISP latency & routing packet loss…',
+  traffic: 'Scanning traffic surges & botnet clustering…',
+  other: 'Evaluating anomaly detector results…',
+}
+
+export function normalizeTabKey(tab: string | null | undefined): string {
+  if (!tab) return 'all'
+  const lower = tab.toLowerCase().trim()
+  if (lower === 'performance') return 'edge'
+  if (lower === 'routing') return 'network'
+  return lower
+}
 
 /**
  * Fallback bucket for any card whose `category` is missing or unknown to this
@@ -149,6 +174,7 @@ export interface InsightSectionGroup<T> {
  */
 export function groupInsightsBySection<T extends SectionableInsight>(
   cards: readonly T[],
+  options?: { includeAll?: boolean; includeEmptySections?: boolean },
 ): InsightSectionGroup<T>[] {
   const buckets = new Map<string, T[]>()
   for (const card of cards) {
@@ -159,10 +185,16 @@ export function groupInsightsBySection<T extends SectionableInsight>(
   }
 
   const groups: InsightSectionGroup<T>[] = []
+  if (options?.includeAll) {
+    groups.push({ section: ALL_SECTION, cards: sortInsights(cards) })
+  }
+
   for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
     const bucket = buckets.get(section.key)
     if (bucket && bucket.length > 0) {
       groups.push({ section, cards: sortInsights(bucket) })
+    } else if (options?.includeEmptySections && section.key !== OTHER_SECTION.key) {
+      groups.push({ section, cards: [] })
     }
   }
   return groups

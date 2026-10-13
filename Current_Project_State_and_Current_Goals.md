@@ -694,6 +694,19 @@ role boundaries, telemetry completeness, and documented performance budgets.
   (`tests/routers/test_security_router.py`), frontend unit tests (`frontend/__tests__/app/security.test.tsx`,
   `frontend/__tests__/components/security/*.test.tsx`), and Playwright E2E integration spec
   (`frontend/e2e/pages/security.spec.ts`).
+- **`/insights` — Live-certified (`docs/pages/insights.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Automated Insights
+  & Anomaly Detection suite: 51 baseline detectors across 5 categories (`traffic`, `edge`/`performance`,
+  `origin`, `security`, `network`/`routing`). Hardened backend validation with typed Pydantic models
+  in `backend/models/insights.py` for `/api/insights`, query-runner tenancy, buffer self-heal
+  (`execute_with_stale_view_retry`), and analyst `force_refresh` clamping. Enforced zero-CLS
+  layout reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`) and contextual
+  loading states (`SECTION_LOADING_MESSAGES`) across all 6 tabs (`all`, `traffic`, `performance`, `origin`,
+  `security`, `routing`). Missing optional logging fields render actionable guidance linking to
+  `/service-config?service=...`. Admin Re-scan button is hidden from DOM for Remote Analysts. Comprehensive
+  router unit tests (`tests/routers/test_insights_router.py`), frontend unit tests
+  (`frontend/__tests__/app/insights.test.tsx`, `frontend/__tests__/lib/insight-sections.test.ts`), and
+  Playwright E2E integration spec (`frontend/e2e/pages/insights.spec.ts`).
 
 Known page-parity investigation after the environment rebuild:
 

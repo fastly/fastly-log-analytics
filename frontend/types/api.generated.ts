@@ -6966,13 +6966,25 @@ export interface components {
         };
         /** CacheBreakdown */
         CacheBreakdown: {
-            /** Hits */
+            /**
+             * Hits
+             * @default 0
+             */
             hits: number;
-            /** Misses */
+            /**
+             * Misses
+             * @default 0
+             */
             misses: number;
-            /** Passes */
+            /**
+             * Passes
+             * @default 0
+             */
             passes: number;
-            /** Other */
+            /**
+             * Other
+             * @default 0
+             */
             other: number;
         };
         /** CacheCollapseDetailRequest */
@@ -7013,21 +7025,43 @@ export interface components {
             _section_timings?: {
                 [key: string]: unknown;
             }[];
-            /** Url */
+            /**
+             * Url
+             * @default
+             */
             url: string;
             /** Timeline */
-            timeline: components["schemas"]["CacheCollapseTimelinePoint"][];
+            timeline?: components["schemas"]["CacheCollapseTimelinePoint"][];
             /** Recent Misses */
-            recent_misses: components["schemas"]["CacheMissPoint"][];
-            breakdown: components["schemas"]["CacheBreakdown"];
-            /** Baseline Hit Rate */
+            recent_misses?: components["schemas"]["CacheMissPoint"][];
+            breakdown?: components["schemas"]["CacheBreakdown"];
+            /**
+             * Baseline Hit Rate
+             * @default 0
+             */
             baseline_hit_rate: number;
-            /** Window Hit Rate */
+            /**
+             * Window Hit Rate
+             * @default 0
+             */
             window_hit_rate: number;
-            /** Baseline Pass Rate */
+            /**
+             * Baseline Pass Rate
+             * @default 0
+             */
             baseline_pass_rate: number;
-            /** Window Pass Rate */
+            /**
+             * Window Pass Rate
+             * @default 0
+             */
             window_pass_rate: number;
+            /**
+             * Has Data
+             * @default true
+             */
+            has_data: boolean;
+            /** Clusters */
+            clusters?: unknown[];
         };
         /** CacheCollapseTimelinePoint */
         CacheCollapseTimelinePoint: {
@@ -9086,11 +9120,8 @@ export interface components {
              * @default clean
              */
             severity: string;
-            /**
-             * Meta
-             * @default {}
-             */
-            meta: {
+            /** Meta */
+            meta?: {
                 [key: string]: unknown;
             };
             /** Investigate Url */
@@ -9107,7 +9138,10 @@ export interface components {
             /** Unavailable */
             unavailable?: components["schemas"]["InsightAvailability"][] | null;
         };
-        /** InsightsRequest */
+        /**
+         * InsightsRequest
+         * @description Request payload for /api/insights.
+         */
         InsightsRequest: {
             /** Start Time */
             start_time?: string | null;
@@ -9130,6 +9164,11 @@ export interface components {
              * @default 168
              */
             baseline_hours: number;
+            /**
+             * Force Refresh
+             * @default false
+             */
+            force_refresh: boolean;
         };
         /** InsightsResponse */
         InsightsResponse: {

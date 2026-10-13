@@ -49828,28 +49828,26 @@
         "properties": {
           "hits": {
             "type": "integer",
-            "title": "Hits"
+            "title": "Hits",
+            "default": 0
           },
           "misses": {
             "type": "integer",
-            "title": "Misses"
+            "title": "Misses",
+            "default": 0
           },
           "passes": {
             "type": "integer",
-            "title": "Passes"
+            "title": "Passes",
+            "default": 0
           },
           "other": {
             "type": "integer",
-            "title": "Other"
+            "title": "Other",
+            "default": 0
           }
         },
         "type": "object",
-        "required": [
-          "hits",
-          "misses",
-          "passes",
-          "other"
-        ],
         "title": "CacheBreakdown"
       },
       "CacheCollapseDetailRequest": {
@@ -49926,7 +49924,8 @@
           },
           "url": {
             "type": "string",
-            "title": "Url"
+            "title": "Url",
+            "default": ""
           },
           "timeline": {
             "items": {
@@ -49947,32 +49946,36 @@
           },
           "baseline_hit_rate": {
             "type": "number",
-            "title": "Baseline Hit Rate"
+            "title": "Baseline Hit Rate",
+            "default": 0.0
           },
           "window_hit_rate": {
             "type": "number",
-            "title": "Window Hit Rate"
+            "title": "Window Hit Rate",
+            "default": 0.0
           },
           "baseline_pass_rate": {
             "type": "number",
-            "title": "Baseline Pass Rate"
+            "title": "Baseline Pass Rate",
+            "default": 0.0
           },
           "window_pass_rate": {
             "type": "number",
-            "title": "Window Pass Rate"
+            "title": "Window Pass Rate",
+            "default": 0.0
+          },
+          "has_data": {
+            "type": "boolean",
+            "title": "Has Data",
+            "default": true
+          },
+          "clusters": {
+            "items": {},
+            "type": "array",
+            "title": "Clusters"
           }
         },
         "type": "object",
-        "required": [
-          "url",
-          "timeline",
-          "recent_misses",
-          "breakdown",
-          "baseline_hit_rate",
-          "window_hit_rate",
-          "baseline_pass_rate",
-          "window_pass_rate"
-        ],
         "title": "CacheCollapseDetailResponse"
       },
       "CacheCollapseTimelinePoint": {
@@ -55283,8 +55286,7 @@
           "meta": {
             "additionalProperties": true,
             "type": "object",
-            "title": "Meta",
-            "default": {}
+            "title": "Meta"
           },
           "investigate_url": {
             "anyOf": [
@@ -55411,10 +55413,16 @@
             "exclusiveMinimum": 0.0,
             "title": "Baseline Hours",
             "default": 168.0
+          },
+          "force_refresh": {
+            "type": "boolean",
+            "title": "Force Refresh",
+            "default": false
           }
         },
         "type": "object",
-        "title": "InsightsRequest"
+        "title": "InsightsRequest",
+        "description": "Request payload for /api/insights."
       },
       "InsightsResponse": {
         "properties": {

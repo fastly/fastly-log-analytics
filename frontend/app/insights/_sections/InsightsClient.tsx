@@ -1,13 +1,16 @@
 'use client'
 
 import React, { useState, useMemo } from 'react'
+import Link from 'next/link'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
+import { useSessionRoleStore } from '@/stores/sessionRoleStore'
 import { InsightCard, SEVERITY_BADGE_CLASS } from '@/components/Insights/InsightCard'
 import { InsightCardSkeleton } from '@/components/Insights/InsightCardSkeleton'
 import { InsightCardData } from '@/types/api'
+import { Button } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
@@ -18,7 +21,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from '@/components/ui/badge'
-import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2 } from 'lucide-react'
+import { Info, AlertCircle, CheckCircle, Lightbulb, Filter, Loader2, RefreshCw } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import {
   Tooltip,
@@ -30,6 +33,8 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { WINDOW_OPTIONS, BASELINE_OPTIONS, historyHoursFromExtents } from '@/lib/insights-defaults'
 import { useInsightsDefaults } from '@/hooks/useInsightsDefaults'
 import {
+  normalizeTabKey,
+  SECTION_LOADING_MESSAGES,
   groupInsightsBySection,
   summarizeSeverities,
   type InsightSectionGroup,
@@ -107,6 +112,11 @@ function TabSeverityBadges({ severities }: { severities: SeveritySummary[] }) {
 // (+ Other last), the tab bar rendered from `groups` (skeleton groups during
 // load, real groups after, so the row never pops in — CLS). base-ui Tabs give
 // roving-tabindex + arrow-key nav for free, and Tabs.Panel UNMOUNTS inactive
+// The tabs UI. One tab per section in fixed INSIGHT_SECTIONS order
+// (All Categories first, then security, origin, edge, network, traffic, + Other last),
+// the tab bar rendered from `groups` (skeleton groups during
+// load, real groups after, so the row never pops in — CLS). base-ui Tabs give
+// roving-tabindex + arrow-key nav for free, and Tabs.Panel UNMOUNTS inactive
 // panels by default (keepMounted defaults false) — so a section's cards only
 // render when its tab is active (the "load when I click it" behaviour the user
 // asked for, even though /api/insights returns everything in one call).
@@ -118,20 +128,23 @@ function InsightTabs<T extends SectionableInsight>({
   groups,
   activeTab,
   onTabChange,
+  isLoading,
   renderCards,
 }: {
   groups: InsightSectionGroup<T>[]
   activeTab: string | null
   onTabChange: (key: string) => void
+  isLoading?: boolean
   renderCards: (group: InsightSectionGroup<T>) => React.ReactNode
 }) {
+  const normalizedActive = normalizeTabKey(activeTab)
   const activeKey =
-    (activeTab && groups.some((g) => g.section.key === activeTab)
-      ? activeTab
-      : groups[0]?.section.key) ?? null
+    groups.some((g) => g.section.key === normalizedActive)
+      ? normalizedActive
+      : groups[0]?.section.key ?? 'all'
 
   return (
-    <Tabs value={activeKey} onValueChange={(value) => onTabChange(String(value))}>
+    <Tabs value={activeKey} onValueChange={(value) => onTabChange(normalizeTabKey(String(value)))}>
       {/* h-auto + flex-wrap so the richer triggers (icon + label + count +
           severity pills) aren't clipped by the primitive's default h-8 and
           wrap instead of overflowing on narrow screens. */}
@@ -142,6 +155,9 @@ function InsightTabs<T extends SectionableInsight>({
             <TabsTrigger
               key={section.key}
               value={section.key}
+              data-tab={section.key}
+              data-category={section.key}
+              data-alias={section.key === 'edge' ? 'performance' : section.key === 'network' ? 'routing' : undefined}
               className="h-auto flex-none gap-2 px-3 py-2 data-active:border-border data-active:font-semibold"
             >
               <Icon className="size-4 shrink-0" aria-hidden="true" />
@@ -157,7 +173,13 @@ function InsightTabs<T extends SectionableInsight>({
         const { section, cards } = group
         const Icon = section.icon
         return (
-          <TabsContent key={section.key} value={section.key} className="mt-4 space-y-4">
+          <TabsContent
+            key={section.key}
+            value={section.key}
+            data-tab-content={section.key}
+            data-alias={section.key === 'edge' ? 'performance' : section.key === 'network' ? 'routing' : undefined}
+            className="mt-4 space-y-4"
+          >
             <div>
               <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold tracking-tight">
                 <Icon className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -169,7 +191,36 @@ function InsightTabs<T extends SectionableInsight>({
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">{section.description}</p>
             </div>
-            {renderCards(group)}
+            {cards.length === 0 ? (
+              isLoading ? (
+                <div
+                  className="text-center py-20 text-sm text-muted-foreground min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]"
+                  data-testid="insights-loading"
+                >
+                  <Loader2 className="inline-block animate-spin h-5 w-5 mb-2 text-primary" />
+                  <span>{SECTION_LOADING_MESSAGES[section.key] ?? 'Loading insights…'}</span>
+                </div>
+              ) : (
+                <div
+                  className="py-16 text-center border rounded-xl border-dashed bg-muted/10 min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]"
+                  data-testid="insights-empty-pass"
+                >
+                  <CheckCircle className="h-10 w-10 text-emerald-500 mb-3" />
+                  <h3 className="text-base font-semibold">
+                    {section.key === 'all'
+                      ? 'No anomalies detected'
+                      : `No anomalies detected in ${section.label}`}
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+                    {section.key === 'all'
+                      ? 'All monitored metrics across all categories are operating within normal baseline parameters.'
+                      : 'All monitored metrics in this category are operating within normal baseline parameters.'}
+                  </p>
+                </div>
+              )
+            ) : (
+              renderCards(group)
+            )}
           </TabsContent>
         )
       })}
@@ -188,6 +239,7 @@ interface InsightsBodyProps {
   windowHours: string
   baselineHours: string
   statusFilter: string
+  initialTab?: string | null
   relative: (iso: string) => string
   full: (iso: string) => string
   abbr: () => string
@@ -198,6 +250,7 @@ function InsightsBody({
   windowHours,
   baselineHours,
   statusFilter,
+  initialTab,
   relative,
   full,
   abbr,
@@ -205,7 +258,7 @@ function InsightsBody({
   // Which section tab is active. Controlled here (not inside InsightTabs) so the
   // selection survives the loading→loaded swap between the two InsightTabs
   // instances and the status-filter regrouping.
-  const [activeTab, setActiveTab] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<string | null>(() => normalizeTabKey(initialTab))
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['insights', activeServiceId, windowHours, baselineHours],
@@ -215,6 +268,7 @@ function InsightsBody({
           window_size_hrs: parseFloat(windowHours),
           baseline_hours: parseFloat(baselineHours),
           filters: {},
+          force_refresh: false,
         }
       })
       return data
@@ -257,23 +311,40 @@ function InsightsBody({
   // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
   // entries have no severity → sortInsights orders them by title.
   const groupedInsights = useMemo(
-    () => groupInsightsBySection(filteredInsights as InsightCardData[]),
+    () =>
+      groupInsightsBySection(filteredInsights as InsightCardData[], {
+        includeAll: true,
+        includeEmptySections: true,
+      }),
     [filteredInsights],
   )
   const groupedSkeletons = useMemo(
-    () => groupInsightsBySection(availableInsights),
+    () =>
+      groupInsightsBySection(availableInsights, {
+        includeAll: true,
+        includeEmptySections: true,
+      }),
     [availableInsights],
   )
 
   return (
     <>
       {availability?.unavailable && availability.unavailable.length > 0 && (
-        <Alert>
-          <Info className="h-4 w-4" />
-          <AlertTitle>Some insights are unavailable</AlertTitle>
-          <AlertDescription className="text-xs">
-            {availability.unavailable.length} insights require additional log fields to be enabled.
-            Check your service configuration.
+        <Alert className="border-amber-500/30 bg-amber-500/5">
+          <Info className="h-4 w-4 text-amber-500 shrink-0" />
+          <AlertTitle className="text-amber-600 dark:text-amber-400 font-medium">
+            {availability.unavailable.length} {availability.unavailable.length === 1 ? 'insight is' : 'insights are'} unavailable
+          </AlertTitle>
+          <AlertDescription className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              {availability.unavailable.length} {availability.unavailable.length === 1 ? 'detector requires' : 'detectors require'} optional log fields to be enabled. Check service configuration.
+            </span>
+            <Link
+              href={activeServiceId ? `/service-config?service=${activeServiceId}` : '/service-config'}
+              className="inline-flex items-center text-xs font-semibold text-primary underline underline-offset-4 hover:text-primary/80"
+            >
+              Configure Service Log Fields &rarr;
+            </Link>
           </AlertDescription>
         </Alert>
       )}
@@ -294,18 +365,27 @@ function InsightsBody({
             groups={groupedSkeletons}
             activeTab={activeTab}
             onTabChange={setActiveTab}
-            renderCards={({ cards }) => (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {cards.map((i) => (
-                  <InsightCardSkeleton key={i.id} title={i.title ?? ''} description={i.description} />
+            isLoading={true}
+            renderCards={({ cards, section }) => (
+              <div
+                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+                data-testid="insights-grid-loading"
+              >
+                {cards.map((i: any) => (
+                  <InsightCardSkeleton
+                    key={i.id}
+                    title={i.title ?? ''}
+                    description={i.description}
+                    loadingMessage={SECTION_LOADING_MESSAGES[section.key] ?? 'Analyzing log patterns…'}
+                  />
                 ))}
               </div>
             )}
           />
         ) : (
-          <div className="text-center py-20 text-sm text-muted-foreground">
-            <Loader2 className="inline-block animate-spin h-4 w-4 mr-2" />
-            Loading insights…
+          <div className="text-center py-20 text-sm text-muted-foreground min-h-[300px] flex flex-col items-center justify-center [contain-intrinsic-size:300px] [content-visibility:auto]">
+            <Loader2 className="inline-block animate-spin h-5 w-5 mb-2 text-primary" />
+            <span>Evaluating anomaly detector baseline comparisons…</span>
           </div>
         )
       ) : error ? (
@@ -316,13 +396,17 @@ function InsightsBody({
             {error instanceof Error ? error.message : 'An unknown error occurred'}
           </AlertDescription>
         </Alert>
-      ) : groupedInsights.length > 0 ? (
+      ) : (
         <InsightTabs
           groups={groupedInsights}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          isLoading={false}
           renderCards={({ cards }) => (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
+              data-testid="insights-grid"
+            >
               {cards.map((insight) => (
                 <InsightCard
                   key={insight.id}
@@ -334,16 +418,6 @@ function InsightsBody({
             </div>
           )}
         />
-      ) : (
-        <div className="py-20 text-center border rounded-xl border-dashed">
-          <CheckCircle className="h-10 w-10 text-green-500 mx-auto mb-4" />
-          <h3 className="text-lg font-medium">
-            {statusFilter === 'all' ? 'No anomalies detected' : `No insights matching '${statusFilter}'`}
-          </h3>
-          <p className="text-muted-foreground">
-            {statusFilter === 'all' ? 'Traffic patterns are within normal baseline ranges.' : 'Try changing your filter criteria.'}
-          </p>
-        </div>
       )}
 
       {data && data.computed_at && (
@@ -364,14 +438,41 @@ function InsightsBody({
   )
 }
 
-export default function InsightsClient() {
+interface InsightsClientProps {
+  initialTab?: string | null
+  initialWindow?: string | null
+  initialBaseline?: string | null
+}
+
+export default function InsightsClient({
+  initialTab,
+  initialWindow,
+  initialBaseline,
+}: InsightsClientProps = {}) {
   // Window/baseline default adapt to how much history the active service has
   // (e.g. ~2h of data → "this hour vs the previous hour" instead of the 7-day
   // baseline that would just say "not enough data"). An explicit pick wins.
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const { windowHours, baselineHours, setWindowHours, setBaselineHours } =
-    useInsightsDefaults(activeServiceId)
+  const isRemoteAnalyst = useSessionRoleStore((s) => s.isRemoteAnalyst)
+  const defaults = useInsightsDefaults(activeServiceId)
+
+  const [selectedWindow, setSelectedWindow] = useState<string | null>(initialWindow ?? null)
+  const [selectedBaseline, setSelectedBaseline] = useState<string | null>(initialBaseline ?? null)
+
+  const windowHours = selectedWindow ?? defaults.windowHours
+  const baselineHours = selectedBaseline ?? defaults.baselineHours
+
+  const setWindowHours = (val: string) => {
+    setSelectedWindow(val)
+    defaults.setWindowHours(val)
+  }
+  const setBaselineHours = (val: string) => {
+    setSelectedBaseline(val)
+    defaults.setBaselineHours(val)
+  }
+
   const [statusFilter, setStatusFilter] = useState('all')
+  const [isRescanning, setIsRescanning] = useState(false)
   const { relative, full, abbr } = useDateFormat()
 
   const queryClient = useQueryClient()
@@ -399,6 +500,7 @@ export default function InsightsClient() {
               window_size_hrs: 24,
               baseline_hours: 720,
               filters: {},
+              force_refresh: false,
             },
           })
           return data
@@ -422,7 +524,35 @@ export default function InsightsClient() {
     return () => clearTimeout(t)
   }, [windowHours, baselineHours])
 
-  // Compact header controls (Status / Window / vs / Baseline) — rendered
+  const handleRescan = async () => {
+    if (!activeServiceId || isRescanning) return
+    setIsRescanning(true)
+    try {
+      const { data } = await client.POST('/api/insights', {
+        body: {
+          window_size_hrs: parseFloat(appliedWindowHours),
+          baseline_hours: parseFloat(appliedBaselineHours),
+          filters: {},
+          force_refresh: true,
+        },
+      })
+      if (data) {
+        queryClient.setQueryData(
+          ['insights', activeServiceId, appliedWindowHours, appliedBaselineHours],
+          data,
+        )
+      }
+      await queryClient.invalidateQueries({
+        queryKey: ['insights', activeServiceId],
+      })
+    } catch (err) {
+      console.error('Failed to re-scan insights:', err)
+    } finally {
+      setIsRescanning(false)
+    }
+  }
+
+  // Compact header controls (Status / Window / vs / Baseline / Re-scan) — rendered
   // in the header row next to the title instead of a separate band below.
   const headerControls = (
     <div className="flex items-end gap-2">
@@ -497,6 +627,22 @@ export default function InsightsClient() {
           </SelectContent>
         </Select>
       </div>
+
+      {!isRemoteAnalyst && (
+        <div className="flex flex-col gap-1 ml-2 justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRescan}
+            disabled={isRescanning || !activeServiceId}
+            className="h-9 gap-1.5 px-3 text-xs font-medium"
+            title="Force re-evaluation of all anomaly detectors against recent logs"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", isRescanning && "animate-spin")} />
+            <span>{isRescanning ? 'Scanning…' : 'Re-scan'}</span>
+          </Button>
+        </div>
+      )}
     </div>
   )
 
@@ -513,6 +659,7 @@ export default function InsightsClient() {
           windowHours={appliedWindowHours}
           baselineHours={appliedBaselineHours}
           statusFilter={statusFilter}
+          initialTab={initialTab}
           relative={relative}
           full={full}
           abbr={abbr}

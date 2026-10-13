@@ -925,7 +925,7 @@ def log_fields_catalog(
     return _compute_log_fields_catalog(service_id)
 
 
-from backend.models.dashboard import InsightsAvailabilityResponse
+from backend.models.insights import InsightsAvailabilityResponse
 
 
 @router.get("/insight-availability", response_model=InsightsAvailabilityResponse)
@@ -966,5 +966,7 @@ def insight_availability(
     for d in INSIGHT_DEFINITIONS:
         req_cols = d.get("required_fields", [])
         available = all(c in actual_cols for c in req_cols)
-        result.append({**d, "available": available})
-    return {"insights": result, "available": True}
+        missing_fields = [c for c in req_cols if c not in actual_cols]
+        result.append({**d, "available": available, "missing_fields": missing_fields if not available else None})
+    unavailable = [i for i in result if not i["available"]]
+    return {"insights": result, "unavailable": unavailable, "available": True}
