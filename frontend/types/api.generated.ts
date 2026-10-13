@@ -11286,6 +11286,11 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
         };
         /** PrefillResponse */
         PrefillResponse: {
@@ -11363,6 +11368,11 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /**
+             * Billing Zone
+             * @default MBZ200
+             */
+            billing_zone: string | null;
             /** Requests Per Day */
             requests_per_day?: number | null;
             /** Edge Requests Per Day */
@@ -14842,6 +14852,8 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /** Billing Zone */
+            billing_zone?: string | null;
             /** Track Duckdb Httpfs */
             track_duckdb_httpfs?: boolean | null;
         } & {
@@ -14871,6 +14883,8 @@ export interface components {
             storage_rate_per_gb_month?: number | null;
             /** Min Billed Days */
             min_billed_days?: number | null;
+            /** Billing Zone */
+            billing_zone?: string | null;
         };
         /** UsageOperationsPoint */
         UsageOperationsPoint: {

@@ -740,6 +740,7 @@ _USAGE_LOGGING_DEFAULTS: dict = {
     "cdn_egress_rate_per_gb": 0.12,
     "storage_rate_per_gb_month": 0.02,
     "min_billed_days": 30,
+    "billing_zone": "MBZ200",
     # When true, every DuckDB connection enables HTTP-only structured logging
     # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds
     # tiny per-query overhead (one in-memory log scan + truncate at close).

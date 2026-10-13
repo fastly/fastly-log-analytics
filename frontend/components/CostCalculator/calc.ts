@@ -2,6 +2,22 @@ import type { components } from '@/types/api.generated'
 
 export type PrefillResponse = components["schemas"]["PrefillResponse"]
 
+// ─── Billing Zones ────────────────────────────────────────────────────────────
+
+export type BillingZone = 'MBZ100' | 'MBZ200' | 'Global'
+
+export const BILLING_ZONE_RATES: Record<BillingZone, number> = {
+  MBZ100: 0.08,
+  MBZ200: 0.12,
+  Global: 0.18,
+}
+
+export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
+  MBZ100: 'This zone includes North America, Hawaii and European POPs only. They have the lowest egress charges ($0.08/GB).',
+  MBZ200: 'All Fastly POPs except Africa, India, and South Korea where egress charges are highest ($0.12/GB standard default).',
+  Global: "All POPs throughout Fastly's entire global network ($0.18/GB).",
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 export interface CalcState {
@@ -33,10 +49,12 @@ export interface CalcState {
   rateStorage: number
   rateEgress: number
   minDays: number
+  billingZone: BillingZone
 }
 
 export type CalcAction =
-  | { type: 'SET'; key: keyof CalcState; value: number | boolean }
+  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone }
+  | { type: 'SET_ZONE'; zone: BillingZone }
   | { type: 'PREFILL'; prefill: PrefillResponse }
   | { type: 'AUTO_NODES' }
 
@@ -49,6 +67,7 @@ export const DEFAULTS: CalcState = {
   icebergOptimizeEnabled: true,
   activeAnalysts: 2, analystFullSyncsPerMonth: 1,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
+  billingZone: 'MBZ200',
 }
 
 function suggestNodes(reqDay: number) {
@@ -65,7 +84,21 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         next.logNodes = suggestNodes(action.value as number)
       }
       if (action.key === 'logNodes') next.userEditedNodes = true
+      if (action.key === 'billingZone') {
+        const zone = action.value as BillingZone
+        if (BILLING_ZONE_RATES[zone] !== undefined) {
+          next.rateEgress = BILLING_ZONE_RATES[zone]
+        }
+      }
       return next
+    }
+    case 'SET_ZONE': {
+      const zone = action.zone
+      return {
+        ...state,
+        billingZone: zone,
+        rateEgress: BILLING_ZONE_RATES[zone] ?? state.rateEgress,
+      }
     }
     case 'PREFILL': {
       const p = action.prefill
@@ -82,6 +115,12 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         bpl = p.estimated_bytes_per_line
       }
 
+      const rawZone = (p as any).billing_zone as BillingZone | undefined
+      const resolvedZone: BillingZone = (rawZone && BILLING_ZONE_RATES[rawZone] !== undefined) ? rawZone : state.billingZone
+      const resolvedEgress = p.cdn_egress_rate_per_gb !== undefined && p.cdn_egress_rate_per_gb !== null
+        ? p.cdn_egress_rate_per_gb
+        : (BILLING_ZONE_RATES[resolvedZone] ?? state.rateEgress)
+
       return {
         ...state,
         ...(p.sample_rate !== undefined && p.sample_rate !== null && { sampleRate: p.sample_rate }),
@@ -97,7 +136,8 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         ...(p.compaction_enabled !== undefined && p.compaction_enabled !== null && { icebergOptimizeEnabled: p.compaction_enabled }),
         ...(p.class_a_rate_per_1k !== undefined && p.class_a_rate_per_1k !== null && { rateA: p.class_a_rate_per_1k }),
         ...(p.class_b_rate_per_10k !== undefined && p.class_b_rate_per_10k !== null && { rateB: p.class_b_rate_per_10k / 10 }), // Calculator uses per 1k rate
-        ...(p.cdn_egress_rate_per_gb !== undefined && p.cdn_egress_rate_per_gb !== null && { rateEgress: p.cdn_egress_rate_per_gb }),
+        rateEgress: resolvedEgress,
+        billingZone: resolvedZone,
         ...(p.storage_rate_per_gb_month !== undefined && p.storage_rate_per_gb_month !== null && { rateStorage: p.storage_rate_per_gb_month }),
         ...(p.min_billed_days !== undefined && p.min_billed_days !== null && { minDays: p.min_billed_days }),
         logNodes: p.avg_nodes_per_flush !== undefined && p.avg_nodes_per_flush !== null ? p.avg_nodes_per_flush : suggestNodes(req),

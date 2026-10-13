@@ -479,6 +479,7 @@ class UsageLoggingUpdateBody(BaseModel):
     cdn_egress_rate_per_gb: float | None = None
     storage_rate_per_gb_month: float | None = None
     min_billed_days: float | None = None
+    billing_zone: str | None = None
 
 
 # ── Wire-safe admin maintenance/config responses ───────────────────────────
@@ -511,6 +512,7 @@ class UsageLoggingConfigResponse(_AdminMaintRead):
     cdn_egress_rate_per_gb: int | float | None = None
     storage_rate_per_gb_month: int | float | None = None
     min_billed_days: int | float | None = None
+    billing_zone: str | None = None
     track_duckdb_httpfs: bool | None = None
 
 

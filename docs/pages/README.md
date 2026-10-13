@@ -53,7 +53,7 @@ docs/pages/
 
 | Route | Page Name | Primary Focus | Spec Status |
 |---|---|---|---|
-| `/dashboard` | [Dashboard](dashboard.md) | Top-level KPIs, multi-trace traffic chart, geo map, categorized Top-N cards | **Complete** |
+| `/dashboard` | [Dashboard](dashboard.md) | Top-level KPIs, multi-trace traffic chart, geo map, categorized Top-N cards | **Live-certified** |
 | `/control-room` | [Control Room](control-room.md) | Real-time operations, live throughput, recent error stream | **Live-certified** |
 | `/fastly-value` | [Service Summary / Value](fastly-value.md) | Bandwidth saved, edge compute efficiency, cost avoidance | **Live-certified** |
 | `/performance` | [Performance](performance.md) | Edge delivery latency, TTFB, TTLB, regional performance | **Live-certified** |
@@ -65,7 +65,7 @@ docs/pages/
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Session graph, threat scoring, suspicious session inspection | **Scaffolded (Pending AI Verification)** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | Real-time session transitions, score escalation alerts | **Scaffolded (Pending AI Verification)** |
-| `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Scaffolded (Pending AI Verification)** |
+| `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Live-certified** |
 | `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Scaffolded (Pending AI Verification)** |
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Scaffolded (Pending AI Verification)** |
 | `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Scaffolded (Pending AI Verification)** |

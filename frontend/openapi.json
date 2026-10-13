@@ -60874,6 +60874,18 @@
               }
             ],
             "title": "Min Billed Days"
+          },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone",
+            "default": "MBZ200"
           }
         },
         "type": "object",
@@ -61058,6 +61070,18 @@
               }
             ],
             "title": "Min Billed Days"
+          },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone",
+            "default": "MBZ200"
           },
           "requests_per_day": {
             "anyOf": [
@@ -71042,6 +71066,17 @@
             ],
             "title": "Min Billed Days"
           },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone"
+          },
           "track_duckdb_httpfs": {
             "anyOf": [
               {
@@ -71137,6 +71172,17 @@
               }
             ],
             "title": "Min Billed Days"
+          },
+          "billing_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Zone"
           }
         },
         "type": "object",

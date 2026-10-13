@@ -1173,6 +1173,71 @@ def test_prefill_calculates_rum_beacons_per_day(client, tmp_path, monkeypatch):
     assert body["rum_beacons_per_day"] == 1750
 
 
+def test_prefill_returns_billing_zone_and_default(client, tmp_path, monkeypatch):
+    """Verify that /api/usage/prefill returns the configured billing_zone or default MBZ200."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    monkeypatch.setattr(config, "SYSTEM_DATA_DIR", tmp_path / "sys")
+    monkeypatch.setattr(config, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "sys" / "usage_logging.json")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    config.save_config(
+        MOCK_SERVICE_ID,
+        {"service_id": MOCK_SERVICE_ID, "fos_bucket": "b", "name": "svc"},
+    )
+
+    # 1. Default when not configured is MBZ200
+    resp = client.get("/api/usage/prefill", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert resp.status_code == 200
+    assert resp.json()["billing_zone"] == "MBZ200"
+
+    # 2. Configured billing_zone MBZ100
+    config.save_usage_logging_config({"billing_zone": "MBZ100"})
+    resp2 = client.get("/api/usage/prefill", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert resp2.status_code == 200
+    assert resp2.json()["billing_zone"] == "MBZ100"
+
+
+def test_admin_usage_logging_patch_billing_zone(client, tmp_path, monkeypatch):
+    """Verify PATCH /api/admin/usage-logging validates billing_zone and syncs cdn_egress_rate_per_gb."""
+    from backend import config
+
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    monkeypatch.setattr(config, "SYSTEM_DATA_DIR", tmp_path / "sys")
+    monkeypatch.setattr(config, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "sys" / "usage_logging.json")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    # 1. Invalid zone raises 400
+    resp = client.patch("/api/admin/usage-logging", json={"billing_zone": "INVALID_ZONE"})
+    assert resp.status_code == 400
+    assert "Invalid billing_zone" in resp.json()["detail"]["error"]
+
+    # 2. Valid zone MBZ100 auto-syncs cdn_egress_rate_per_gb to 0.08
+    resp_mbz100 = client.patch("/api/admin/usage-logging", json={"billing_zone": "MBZ100"})
+    assert resp_mbz100.status_code == 200
+    data = resp_mbz100.json()
+    assert data["billing_zone"] == "MBZ100"
+    assert data["cdn_egress_rate_per_gb"] == 0.08
+
+    # 3. Valid zone Global auto-syncs cdn_egress_rate_per_gb to 0.18
+    resp_global = client.patch("/api/admin/usage-logging", json={"billing_zone": "Global"})
+    assert resp_global.status_code == 200
+    data = resp_global.json()
+    assert data["billing_zone"] == "Global"
+    assert data["cdn_egress_rate_per_gb"] == 0.18
+
+    # 4. Explicit override preserved
+    resp_custom = client.patch(
+        "/api/admin/usage-logging",
+        json={"billing_zone": "MBZ200", "cdn_egress_rate_per_gb": 0.15},
+    )
+    assert resp_custom.status_code == 200
+    data = resp_custom.json()
+    assert data["billing_zone"] == "MBZ200"
+    assert data["cdn_egress_rate_per_gb"] == 0.15
+
+
 # silence unused-imports
 _ = json
 _ = pytest

@@ -111,6 +111,7 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
         "storage_rate_per_gb_month": float(global_rates.get("storage_rate_per_gb_month", 0.02)),
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
+        "billing_zone": str(global_rates.get("billing_zone", "MBZ200")),
         "rum_beacons_per_day": 0,
     }
 
@@ -213,14 +214,14 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
                 WHERE source_name = ?
                   AND table_name IN ('client_vitals', 'client_errors')
                 GROUP BY file_date
-            )
+            ) sub
             """,
             (source["name"],),
         )
         val = cur.fetchone()[0]
         result["rum_beacons_per_day"] = round(float(val)) if val is not None else 0
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
 
     return result, prov
 

@@ -97,6 +97,21 @@ def update_usage_logging_settings(body: UsageLoggingUpdateBody):
                 detail={"error": f"{fld} must be a positive number", "field": fld},
             )
 
+    if "billing_zone" in updates and updates["billing_zone"] is not None:
+        zone = str(updates["billing_zone"])
+        allowed_zones = ("MBZ100", "MBZ200", "Global")
+        if zone not in allowed_zones:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Invalid billing_zone '{zone}'. Must be one of: {', '.join(allowed_zones)}",
+                    "field": "billing_zone",
+                },
+            )
+        if "cdn_egress_rate_per_gb" not in updates:
+            zone_rates = {"MBZ100": 0.08, "MBZ200": 0.12, "Global": 0.18}
+            updates["cdn_egress_rate_per_gb"] = zone_rates[zone]
+
     current = svcconfig.load_usage_logging_config()
     current.update(updates)
     svcconfig.save_usage_logging_config(current)

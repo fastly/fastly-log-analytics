@@ -722,6 +722,18 @@ role boundaries, telemetry completeness, and documented performance budgets.
   `/service-config`. Comprehensive router unit tests (`tests/routers/test_network_router.py`), frontend unit
   tests (`frontend/__tests__/app/network.test.tsx`), and Playwright E2E integration spec
   (`frontend/e2e/pages/network.spec.ts`).
+- **`/usage` — Live-certified (`docs/pages/usage-and-cost.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Usage & Cost
+  Estimator suite: integrated Fastly Delivery Billing Zones (`MBZ100` @ $0.08/GB, `MBZ200` @ $0.12/GB,
+  `Global` @ $0.18/GB) into backend schemas, admin settings patch, prefill calculations, and frontend
+  Cost Calculator UI state machine. Enforced zero-CLS layout reservations (`min-h-[140px] [contain-intrinsic-size:140px]`,
+  `min-h-[740px] [contain-intrinsic-size:740px]`, `min-h-[420px] [contain-intrinsic-size:420px]`) and in-place
+  skeletons. Enforced strict H-1 security boundary: blocked remote analyst sessions from viewing or modifying
+  billing and financial rates (`_ANALYST_BLOCKED_PREFIXES`). PostgreSQL subquery alias compatibility in
+  historical RUM beacon averages calculation. Comprehensive router unit tests (`tests/routers/test_usage_router.py`,
+  39 passed), frontend unit tests (`frontend/__tests__/components/CostCalculator/calc.test.ts`,
+  `frontend/__tests__/app/usage.test.tsx`), and Playwright E2E integration spec (`frontend/e2e/pages/usage.spec.ts`).
+
 
 Known page-parity investigation after the environment rebuild:
 

@@ -34,6 +34,10 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
     dispatch({ type: 'SET', key, value })
   }
 
+  const setZone = (zone: import('./calc').BillingZone) => {
+    dispatch({ type: 'SET_ZONE', zone })
+  }
+
   const r = useMemo(() => calculate(s), [s])
 
   return (
@@ -52,7 +56,7 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
 
         {/* ── Right: Pricing + What generates ops ── */}
         <div className='space-y-6'>
-          <Pricing s={s} />
+          <Pricing s={s} setZone={setZone} />
         </div>
       </div>
 

@@ -347,7 +347,7 @@ function UsagePageContent({
   return (
     <>
       {/* ── Stat cards ─────────────────────────────────────────────────────── */}
-      <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+      <div className={cn("grid grid-cols-2 lg:grid-cols-4 gap-4 transition-opacity duration-100 min-h-[140px] [contain-intrinsic-size:140px] [content-visibility:auto]", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
         <StatCard
           title="Storage Impact (Period)"
           value={
@@ -487,7 +487,7 @@ function UsagePageContent({
       </div>
 
       {/* ── Charts ─────────────────────────────────────────────────────────── */}
-      <div className={cn("grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+      <div className={cn("grid grid-cols-1 lg:grid-cols-2 gap-6 transition-opacity duration-100 min-h-[740px] [contain-intrinsic-size:740px] [content-visibility:auto]", isFetchingAny && !isLoadingInitial && "opacity-40 pointer-events-none")}>
         <AnalyticsCard
           title="FOS Operations"
           description="Class A and Class B operations from the Historical Stats API"
@@ -598,7 +598,7 @@ function UsagePageContent({
 
       {/* ── Cost Estimator ─────────────────────────────────────────────────── */}
       {!isAnalyst && (
-        <div ref={estimatorRef}>
+        <div ref={estimatorRef} className="min-h-[420px] [contain-intrinsic-size:420px] [content-visibility:auto]">
           <AnalyticsCard
             title="Cost Estimator"
             description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."

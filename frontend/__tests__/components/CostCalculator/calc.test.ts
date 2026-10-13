@@ -60,4 +60,45 @@ describe('CostCalculator calc logic with RUM', () => {
     const nextState = reducer(DEFAULTS, { type: 'PREFILL', prefill: prefill as any as PrefillResponse })
     expect(nextState.rumBeaconsDay).toBe(5000)
   })
+
+  test('Billing Zones (MBZ100, MBZ200, Global) configure correct rates and calculate egress costs', () => {
+    // 1. Default is MBZ200 ($0.12/GB)
+    expect(DEFAULTS.billingZone).toBe('MBZ200')
+    expect(DEFAULTS.rateEgress).toBe(0.12)
+
+    // 2. Switch to MBZ100 ($0.08/GB)
+    const mbz100State = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'MBZ100' })
+    expect(mbz100State.billingZone).toBe('MBZ100')
+    expect(mbz100State.rateEgress).toBe(0.08)
+
+    // 3. Switch to Global ($0.18/GB)
+    const globalState = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'Global' })
+    expect(globalState.billingZone).toBe('Global')
+    expect(globalState.rateEgress).toBe(0.18)
+
+    // 4. Verify calculation differences across zones for identical traffic
+    const resMBZ100 = calculate(mbz100State)
+    const resMBZ200 = calculate(DEFAULTS)
+    const resGlobal = calculate(globalState)
+
+    expect(resMBZ100.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
+    expect(resGlobal.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
+
+    expect(resMBZ100.costEgress).toBeCloseTo(resMBZ100.cdnEgressGB * 0.08, 4)
+    expect(resMBZ200.costEgress).toBeCloseTo(resMBZ200.cdnEgressGB * 0.12, 4)
+    expect(resGlobal.costEgress).toBeCloseTo(resGlobal.cdnEgressGB * 0.18, 4)
+
+    expect(resMBZ100.costEgress).toBeLessThan(resMBZ200.costEgress)
+    expect(resMBZ200.costEgress).toBeLessThan(resGlobal.costEgress)
+  })
+
+  test('PREFILL respects billing_zone and maps corresponding rate', () => {
+    const prefill = {
+      billing_zone: 'MBZ100',
+      cdn_egress_rate_per_gb: 0.08,
+    }
+    const state = reducer(DEFAULTS, { type: 'PREFILL', prefill: prefill as any as PrefillResponse })
+    expect(state.billingZone).toBe('MBZ100')
+    expect(state.rateEgress).toBe(0.08)
+  })
 })
