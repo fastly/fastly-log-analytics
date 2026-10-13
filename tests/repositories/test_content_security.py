@@ -64,7 +64,7 @@ def _fixture_rows():
         # movie-1: three edge requests from US via pirate.example, one shield fetch.
         _row(10, host="pirate.example", referer="https://pirate.example/watch", nbytes=1000),
         _row(10, host="pirate.example", referer="https://pirate.example/watch", nbytes=1000),
-        _row(40, host="pirate.example", referer="https://pirate.example/watch", nbytes=1000),
+        _row(40, host="pirate.example", referer="https://Pirate.example:8443/other?x=1", nbytes=1000),
         _row(40, edge=False, host="pirate.example", referer="https://pirate.example/watch", nbytes=500),
         # movie-2: two edge requests from DE via the legit player.
         _row(20, country="DE", host="player.example", cid="movie-2", nbytes=2000),
@@ -93,7 +93,7 @@ def test_leaderboards_count_edge_lines_only(in_memory_duckdb, test_service_sourc
         {"value": "player.example", "users": 1, "requests": 2, "bytes": 4000},
     ]
     # Empty referers are excluded rather than reported as a blank row.
-    assert res["top_referers"] == [{"value": "https://pirate.example/watch", "users": 1, "requests": 3, "bytes": 3000}]
+    assert res["top_referers"] == [{"value": "pirate.example", "users": 1, "requests": 3, "bytes": 3000}]
 
 
 def test_bandwidth_splits_edge_and_shield(in_memory_duckdb, test_service_source):

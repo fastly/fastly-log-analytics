@@ -41,6 +41,15 @@ _TOP_N_SECTIONS = {
     "host": "top_hosts",
 }
 
+# Leaderboard columns reported as a derived value rather than the raw column.
+# Referer is reduced to its host (scheme, userinfo, port, path and query dropped).
+_TOP_N_VALUE_EXPRS = {
+    "referer": (
+        "LOWER(NULLIF(regexp_extract(\"referer\", "
+        "'^(?:[a-zA-Z][a-zA-Z0-9+.-]*://)?(?:[^/@?#]*@)?([^/:?#]+)', 1), ''))"
+    ),
+}
+
 # Uncapped breakdown column → response section. client.geo.proxy_type and
 # client.geo.proxy_description each have ~10 possible values, so listing every
 # one is cheap; "" is logged for a non-proxy IP and is excluded.
@@ -204,11 +213,12 @@ def get_content_security(
             if not fields[col]:
                 continue
             _t = _time.perf_counter()
+            value_expr = _TOP_N_VALUE_EXPRS.get(col, f'"{col}"')
             rows = runner.execute(
                 f"""
-                SELECT "{col}" AS value, {users_agg} AS users, COUNT(*) AS requests, {bytes_agg} AS bytes
+                SELECT {value_expr} AS value, {users_agg} AS users, COUNT(*) AS requests, {bytes_agg} AS bytes
                 FROM {t}
-                WHERE {edge_where} AND "{col}" IS NOT NULL AND "{col}" != ''
+                WHERE {edge_where} AND "{col}" IS NOT NULL AND "{col}" != '' AND {value_expr} IS NOT NULL
                 GROUP BY 1
                 ORDER BY requests DESC, value
                 LIMIT {int(top_n)}
