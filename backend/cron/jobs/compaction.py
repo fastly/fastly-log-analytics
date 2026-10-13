@@ -72,7 +72,8 @@ def _run_local_compact(service_id: str) -> None:
     DOES update FOS.
     """
     from backend.core import local_compaction as _lc
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.lifecycle import cron_run
     from backend.utils.active_requests import should_defer_cron
 
     # Active-request gate (perf #84): cache compaction holds the DuckDB
@@ -84,29 +85,20 @@ def _run_local_compact(service_id: str) -> None:
     if src is None:
         return
 
-    try:
-        run_id = start_cron_run(src, "local_compact")
-    except RuntimeError as e:
-        logger.info("⏭️  \x1b[96m[local-compact]\x1b[0m %s: skipping — %s", service_id, str(e))
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="local_compact")
-    _display = _display_label(src, service_id)
-    logger.info("🏎️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
-    _log_and_add_progress(
-        run_id,
+    with cron_run(
         service_id,
-        job_name="local_compact",
-        event={"type": "status", "message": "Scanning local cache partitions..."},
-    )
+        "local_compact",
+        source=src,
+        skip_log_prefix="local-compact",
+        error_summary="local compaction failed",
+    ) as run:
+        if not run.ok:
+            return
+        _display = _display_label(src, service_id)
+        logger.info("🏎️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning local cache partitions..."})
 
-    start_time = time.time()
-    try:
         result = _lc.compact_local_partitions(src)
-        duration = time.time() - start_time
         errors = result.get("errors") or []
         merged = result.get("files_merged", 0)
         removed = result.get("files_removed", 0)
@@ -142,45 +134,12 @@ def _run_local_compact(service_id: str) -> None:
             err_preview = "\n".join(errors[:3])
             if len(errors) > 3:
                 err_preview += f"\n... ({len(errors) - 3} more)"
-            status = "warning"
             summary += f" — {len(errors)} partition error(s)"
+            run.warn(summary, error_message=err_preview, files_downloaded=merged)
         else:
-            err_preview = None
-            status = "success"
-        log_cron_run(
-            src,
-            "local_compact",
-            duration,
-            status,
-            files_downloaded=merged,
-            summary=summary,
-            error_message=err_preview,
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="local_compact",
-            event={"type": "status", "message": summary},
-        )
-        logger.info("🏁  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, duration)
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "local_compact",
-            duration,
-            "error",
-            error_message=str(e),
-            summary="local compaction failed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(run_id, service_id, job_name="local_compact", event={"type": "error", "message": str(e)})
-        logger.exception("[scheduler] %s: local_compact failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
+            run.success(summary, files_downloaded=merged)
+        run.log_progress({"type": "status", "message": summary})
+        logger.info("🏁  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, run.elapsed())
 
 
 @cron_task("rollup_hour_heal", job_name="rollup_hour_heal")
