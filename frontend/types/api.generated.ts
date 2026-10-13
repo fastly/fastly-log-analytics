@@ -425,6 +425,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/network/bundle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Network Bundle Get */
+        get: operations["network_bundle_get_api_network_bundle_get"];
+        put?: never;
+        /** Network Bundle */
+        post: operations["network_bundle_api_network_bundle_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/performance/aggregates": {
         parameters: {
             query?: never;
@@ -9738,6 +9756,87 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** NetworkBundleRequest */
+        NetworkBundleRequest: {
+            /** Start Time */
+            start_time?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /**
+             * Filters
+             * @default {}
+             */
+            filters: {
+                [key: string]: components["schemas"]["FilterSpec"];
+            };
+            /**
+             * Metric
+             * @default health_score
+             */
+            metric: string;
+            /**
+             * Bucket Seconds
+             * @default 300
+             */
+            bucket_seconds: number;
+            /**
+             * Top N
+             * @default 30
+             */
+            top_n: number;
+            /**
+             * Map Asn
+             * @default all
+             */
+            map_asn: string;
+            /** Sections */
+            sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
+            /**
+             * Region Country
+             * @default US
+             */
+            region_country: string;
+        };
+        /** NetworkBundleResponse */
+        NetworkBundleResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Available
+             * @default true
+             */
+            available: boolean;
+            /** Reason */
+            reason?: string | null;
+            health?: components["schemas"]["NetworkHealthResponse"] | null;
+            quality?: components["schemas"]["NetworkQualityResponse"] | null;
+            /** Pop Health */
+            pop_health?: components["schemas"]["PopHealthItem"][] | null;
+            transport?: components["schemas"]["TransportMetrics"] | null;
+        };
         /** NetworkCityEntry */
         NetworkCityEntry: {
             /** Name */
@@ -9781,7 +9880,7 @@ export interface components {
              */
             map_asn: string;
             /** Sections */
-            sections?: ("summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis")[] | null;
+            sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
             /** Range Token */
             range_token?: string | null;
             /** Anchor */
@@ -11027,9 +11126,9 @@ export interface components {
             /** Error Rate */
             error_rate: number;
             /** P50 Rtt Us */
-            p50_rtt_us: number | null;
+            p50_rtt_us?: number | null;
             /** P95 Ttfb Ms */
-            p95_ttfb_ms: number | null;
+            p95_ttfb_ms?: number | null;
             /** Cache Hit Rate */
             cache_hit_rate: number;
             /** Bandwidth Bytes */
@@ -14403,6 +14502,63 @@ export interface components {
             /** Text */
             text: string;
         };
+        /** TransportMetrics */
+        TransportMetrics: {
+            /**
+             * Has Transport Data
+             * @default true
+             */
+            has_transport_data: boolean;
+            /** Tcp Rtt P50 Ms */
+            tcp_rtt_p50_ms?: number | null;
+            /** Tcp Rtt P90 Ms */
+            tcp_rtt_p90_ms?: number | null;
+            /** Tcp Rtt P95 Ms */
+            tcp_rtt_p95_ms?: number | null;
+            /** Tcp Rtt P99 Ms */
+            tcp_rtt_p99_ms?: number | null;
+            /** Retrans Rate Pct */
+            retrans_rate_pct?: number | null;
+            /** Packet Loss Pct */
+            packet_loss_pct?: number | null;
+            /** Delivery Rate Mbps */
+            delivery_rate_mbps?: number | null;
+            /**
+             * Bandwidth Bytes
+             * @default 0
+             */
+            bandwidth_bytes: number;
+            /**
+             * Total Requests
+             * @default 0
+             */
+            total_requests: number;
+            /**
+             * Protocol Distribution
+             * @default []
+             */
+            protocol_distribution: components["schemas"]["TransportProtocolShare"][];
+            /**
+             * Missing Fields
+             * @default []
+             */
+            missing_fields: string[];
+        };
+        /** TransportProtocolShare */
+        TransportProtocolShare: {
+            /** Protocol */
+            protocol: string;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Share Pct
+             * @default 0
+             */
+            share_pct: number;
+        };
         /** TreeNode */
         TreeNode: {
             /** Name */
@@ -17511,6 +17667,234 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PopHealthListResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    network_bundle_get_api_network_bundle_get: {
+        parameters: {
+            query?: {
+                start_time?: string | null;
+                end_time?: string | null;
+                range_token?: string | null;
+                anchor?: string | null;
+                metric?: string;
+                bucket_seconds?: number;
+                top_n?: number;
+                map_asn?: string;
+                region_country?: string;
+                sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkBundleResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    network_bundle_api_network_bundle_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkBundleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkBundleResponse"];
                 };
             };
             /** @description Bad request */

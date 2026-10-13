@@ -3,6 +3,7 @@
 import { GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp, AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp, HealthBadge, SHIELDING_COLUMNS, getShieldingLabels } from "./help-content";
 import React, { useState } from 'react'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
+import { TransportSection } from './_sections/TransportSection'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api'
@@ -428,47 +429,63 @@ export default function NetworkPage() {
       />
 
       {/* ── Summary cards ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
           title="Global Health"
           icon={Activity}
           loading={isCoreLoadingInitial}
+          loadingMessage="Compiling ASN health matrix..."
           value={<>{summary.global_health_score ?? '--'}/100</>}
           sub="Average across top ASNs"
           helpTitle="Global Health Score"
           helpContent={<GlobalHealthHelp />}
+          className="min-h-[110px]"
         />
         <StatCard
           title="Avg RTT"
           icon={Zap}
           loading={isCoreLoadingInitial}
+          loadingMessage="Analyzing TCP round-trip times..."
           value={<>{summary.avg_rtt_ms ?? '--'}ms</>}
           sub="Across all regions"
           helpTitle="Average RTT"
           helpContent={<AvgRttHelp />}
+          className="min-h-[110px]"
         />
         <StatCard
           title="Worst ASN"
           icon={AlertCircle}
           iconClassName="text-red-500"
           loading={isCoreLoadingInitial}
+          loadingMessage="Scanning ASN degradation..."
           value={<span className="text-sm truncate block">{summary.worst_asn?.label ?? '--'}</span>}
           sub={<span className="text-red-500 font-medium">Score: {summary.worst_asn?.score ?? '--'}</span>}
           helpTitle="Worst-Performing ASN"
           helpContent={<WorstAsnHelp />}
+          className="min-h-[110px]"
         />
         <StatCard
           title="Worst Region"
           icon={Globe}
           loading={isCoreLoadingInitial}
+          loadingMessage="Evaluating regional latency..."
           value={<span className="text-sm truncate block">{summary.worst_country?.label ?? '--'}</span>}
           sub={<span className="text-red-500 font-medium">Score: {summary.worst_country?.score ?? '--'}</span>}
           helpTitle="Worst-Performing Region"
           helpContent={<WorstRegionHelp />}
+          className="min-h-[110px]"
         />
       </div>
 
-      <div className="my-6">
+      {/* ── Edge Transport & TCP Performance ── */}
+      <TransportSection
+        activeServiceId={activeServiceId}
+        startTime={startTime}
+        endTime={endTime}
+        filterPayload={filterPayload}
+      />
+
+      <div className="my-6 [contain-intrinsic-size:280px] [content-visibility:auto]">
         {activeServiceId && (
           <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />
         )}
@@ -482,6 +499,7 @@ export default function NetworkPage() {
           helpContent={<HeatmapHelp />}
           isFetching={mapQuery.isFetching}
           error={mapQuery.error as AnalyticsCardError | null}
+          className="[contain-intrinsic-size:380px] [content-visibility:auto]"
         >
           <PlotlyChart data={heatmapTrace as any[]} layout={HEATMAP_LAYOUT} height={Math.min(60 + heatmapData.y.length * 28, 600)} />
         </AnalyticsCard>
@@ -489,7 +507,7 @@ export default function NetworkPage() {
 
       {/* ── Edge → Shield POP Map ── */}
       {(shieldingData || isShieldingLoadingInitial || shieldingQuery.error) && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:460px] [content-visibility:auto]">
           <AnalyticsCard
             title="Edge → Shield Transit Map"
             helpTitle="Shielding Analysis"
@@ -640,16 +658,17 @@ export default function NetworkPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px] [content-visibility:auto]">
         {/* ── ASN Leaderboard ── */}
         <AnalyticsCard
           title="ASN Performance Leaderboard"
-          className="flex flex-col"
+          className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
           contentClassName="p-0 flex-1"
           helpTitle="ASN Performance Leaderboard"
           helpContent={<AsnLeaderboardHelp />}
           isFetching={coreQuery.isFetching}
           error={coreQuery.error as AnalyticsCardError | null}
+          loadingMessage="Compiling ASN leaderboard..."
         >
           {isCoreLoadingInitial ? (
             <div className="space-y-2 p-4">
@@ -688,12 +707,13 @@ export default function NetworkPage() {
         {data?.has_metro && (
           <AnalyticsCard
             title="Metro / Region Leaderboard"
-            className="flex flex-col"
+            className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
             contentClassName="p-0 flex-1"
             helpTitle="Metro / Region Leaderboard"
             helpContent={<MetroLeaderboardHelp />}
             isFetching={coreQuery.isFetching}
             error={coreQuery.error as AnalyticsCardError | null}
+            loadingMessage="Compiling Metro leaderboard..."
           >
             {isCoreLoadingInitial ? (
               <div className="space-y-2 p-4">
@@ -749,7 +769,7 @@ export default function NetworkPage() {
 
       {/* ── Network Quality (TCP RTT breakdowns + RTT-vs-TTFB scatter) ── */}
       {(isQualityLoadingInitial || qualityData?.available || qualityQuery.error) && (
-        <div className="space-y-4">
+        <div className="space-y-4 [contain-intrinsic-size:400px] [content-visibility:auto]">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
             Network Quality
           </h2>
@@ -765,6 +785,8 @@ export default function NetworkPage() {
                   helpContent={<NetworkQualityHelp />}
                   isFetching={qualityQuery.isFetching}
                   error={qualityQuery.error as AnalyticsCardError | null}
+                  loadingMessage="Analyzing RTT by country..."
+                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
                   <RttBarList rows={(qualityData?.by_country ?? []) as QualityBarRow[]} filterColumn="country" />
                 </AnalyticsCard>
@@ -776,6 +798,8 @@ export default function NetworkPage() {
                   helpContent={<NetworkQualityHelp />}
                   isFetching={qualityQuery.isFetching}
                   error={qualityQuery.error as AnalyticsCardError | null}
+                  loadingMessage="Analyzing RTT by ASN..."
+                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
                   <RttBarList rows={(qualityData?.by_asn ?? []) as QualityBarRow[]} filterColumn="asn" />
                 </AnalyticsCard>
@@ -787,6 +811,8 @@ export default function NetworkPage() {
                   helpContent={<NetworkQualityHelp />}
                   isFetching={qualityQuery.isFetching}
                   error={qualityQuery.error as AnalyticsCardError | null}
+                  loadingMessage="Analyzing RTT by region..."
+                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                   headerAction={
                     <select
                       aria-label="Region breakdown country"
@@ -813,6 +839,8 @@ export default function NetworkPage() {
                   helpContent={<NetworkQualityHelp />}
                   isFetching={qualityQuery.isFetching}
                   error={qualityQuery.error as AnalyticsCardError | null}
+                  loadingMessage="Analyzing RTT by POP..."
+                  className="[contain-intrinsic-size:240px] [content-visibility:auto]"
                 >
                   <RttBarList rows={(qualityData?.by_pop ?? []) as QualityBarRow[]} filterColumn="pop" />
                 </AnalyticsCard>
@@ -825,6 +853,8 @@ export default function NetworkPage() {
                   helpContent={<NetworkQualityHelp />}
                   isFetching={qualityQuery.isFetching}
                   error={qualityQuery.error as AnalyticsCardError | null}
+                  loadingMessage="Plotting RTT vs TTFB correlation..."
+                  className="[contain-intrinsic-size:380px] [content-visibility:auto]"
                 >
                   <PlotlyChart data={qualityScatterTrace as any[]} layout={QUALITY_SCATTER_LAYOUT} height={360} />
                 </AnalyticsCard>

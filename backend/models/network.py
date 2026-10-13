@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
-from backend.models.common import BaseResponse
+from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
 
 
 class NetworkWorstEntry(BaseModel):
@@ -140,3 +140,90 @@ class NetworkQualityResponse(BaseResponse):
     scatter: list[dict[str, Any]] = []
     countries: list[str] = []
     _approx: bool = False
+
+
+class PopHealthItem(BaseModel):
+    pop: str
+    requests: int
+    errors: int
+    error_rate: float
+    p50_rtt_us: float | None = None
+    p95_ttfb_ms: float | None = None
+    cache_hit_rate: float
+    bandwidth_bytes: int
+
+
+class PopHealthListResponse(BaseResponse):
+    data: list[PopHealthItem]
+
+
+class TransportProtocolShare(BaseModel):
+    protocol: str
+    requests: int = 0
+    share_pct: float = 0.0
+
+
+class TransportMetrics(BaseModel):
+    has_transport_data: bool = True
+    tcp_rtt_p50_ms: float | None = None
+    tcp_rtt_p90_ms: float | None = None
+    tcp_rtt_p95_ms: float | None = None
+    tcp_rtt_p99_ms: float | None = None
+    retrans_rate_pct: float | None = None
+    packet_loss_pct: float | None = None
+    delivery_rate_mbps: float | None = None
+    bandwidth_bytes: int = 0
+    total_requests: int = 0
+    protocol_distribution: list[TransportProtocolShare] = []
+    missing_fields: list[str] = []
+
+
+NetworkSectionName = Literal[
+    "health",
+    "summary",
+    "heatmap",
+    "buckets",
+    "leaderboard",
+    "metro_leaderboard",
+    "cities",
+    "map_buckets",
+    "shielding_analysis",
+    "quality",
+    "pop_health",
+    "transport",
+]
+SectionName = NetworkSectionName
+
+
+class NetworkHealthRequest(FilteredRequest):
+    metric: str = "health_score"
+    bucket_seconds: Seconds14400 = 300
+    top_n: Limit100 = 30
+    map_asn: str = "all"
+    sections: list[SectionName] | None = None
+    range_token: str | None = None
+    anchor: str | None = None
+
+
+class NetworkQualityRequest(FilteredRequest):
+    region_country: str = "US"
+
+
+class NetworkBundleRequest(FilteredRequest):
+    metric: str = "health_score"
+    bucket_seconds: Seconds14400 = 300
+    top_n: Limit100 = 30
+    map_asn: str = "all"
+    sections: list[SectionName] | None = None
+    range_token: str | None = None
+    anchor: str | None = None
+    region_country: str = "US"
+
+
+class NetworkBundleResponse(BaseResponse):
+    available: bool = True
+    reason: str | None = None
+    health: NetworkHealthResponse | None = None
+    quality: NetworkQualityResponse | None = None
+    pop_health: list[PopHealthItem] | None = None
+    transport: TransportMetrics | None = None

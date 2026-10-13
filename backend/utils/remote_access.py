@@ -221,6 +221,7 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/insights",  # POST /api/insights (no trailing slash — exact path)
     "/api/network-health",  # POST /api/network-health
     "/api/network-quality",  # POST /api/network-quality
+    "/api/network/",  # POST /api/network/bundle
     "/api/query",  # POST /api/query
     "/api/sessions",  # POST /api/sessions and /api/sessions/detail
     "/api/cmcd/",  # POST /api/cmcd/aggregates — streaming read-only query

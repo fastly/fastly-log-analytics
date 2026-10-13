@@ -100,12 +100,32 @@ def insert_mock_logs(con, table_name: str, logs: list[dict]):
         # We need to map JSON fields to DuckDB schema types, similar to ingest.py
         # Filter to only fields that have VCL (raw log fields), excluding computed metrics
         raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
-        schema_def = ", ".join([f'"{f["id"]}" {f["duckdb_type"]}' for f in raw_fields])
+        columns_map = {f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["duckdb_type"]) for f in raw_fields}
+        for log in logs:
+            for k, v in log.items():
+                if k not in columns_map:
+                    if isinstance(v, bool):
+                        columns_map[k] = "BOOLEAN"
+                    elif isinstance(v, int):
+                        columns_map[k] = "BIGINT"
+                    elif isinstance(v, float):
+                        columns_map[k] = "DOUBLE"
+                    else:
+                        columns_map[k] = "VARCHAR"
+
+        schema_def = ", ".join([f'"{col}" {dtype}' for col, dtype in columns_map.items()])
 
         # Create table if it doesn't exist
         con.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({schema_def})")
+        for col, dtype in columns_map.items():
+            try:
+                con.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS "{col}" {dtype}')
+            except Exception:
+                pass
+
+        cols_sql = "{" + ", ".join(f"'{k}': '{v}'" for k, v in columns_map.items()) + "}"
 
         # Load the JSON data
-        con.execute(f"INSERT INTO {table_name} BY NAME SELECT * FROM read_json_auto('{temp_path}')")
+        con.execute(f"INSERT INTO {table_name} BY NAME SELECT * FROM read_json_auto('{temp_path}', columns={cols_sql})")
     finally:
         os.unlink(temp_path)

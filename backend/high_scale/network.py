@@ -3,13 +3,18 @@ from typing import Any
 
 from backend.high_scale.registry import HighScaleService
 from backend.models.network import (
+    NetworkBundleRequest,
+    NetworkBundleResponse,
     NetworkCityEntry,
     NetworkHealthResponse,
     NetworkHealthSummary,
+    NetworkQualityRequest,
     NetworkQualityResponse,
     NetworkWorstEntry,
+    PopHealthListResponse,
+    TransportMetrics,
+    TransportProtocolShare,
 )
-from backend.routers.network import PopHealthListResponse
 from backend.utils.geo import format_city_label
 
 
@@ -534,4 +539,122 @@ def get_pop_health(
 ) -> PopHealthListResponse:
     return PopHealthListResponse.with_telemetry(
         data=[],
+    )
+
+
+def get_transport_metrics(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+) -> TransportMetrics:
+    now = datetime.now(UTC)
+    end = _range_value(end_time) or now
+    start = _range_value(start_time) or (end - timedelta(days=1))
+    params = {"service_id": service.service_id, "start": start, "end": end}
+
+    sql = f"""
+        SELECT
+            count() AS total_reqs,
+            sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes,
+            quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50,
+            quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90,
+            quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95,
+            quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99,
+            avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans,
+            avg({_PLOSS}) * 100.0 AS avg_ploss_pct,
+            avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps
+        FROM request_facts
+        WHERE {_BASE_WHERE}
+    """
+    try:
+        rows = service.client.execute(sql, params)
+    except Exception:
+        rows = []
+
+    if rows:
+        r = rows[0]
+        total_requests = int(r.get("total_reqs") or 0)
+        bandwidth_bytes = int(r.get("total_bytes") or 0)
+        tcp_rtt_p50 = round(float(r["rtt_p50"]), 2) if r.get("rtt_p50") is not None else None
+        tcp_rtt_p90 = round(float(r["rtt_p90"]), 2) if r.get("rtt_p90") is not None else None
+        tcp_rtt_p95 = round(float(r["rtt_p95"]), 2) if r.get("rtt_p95") is not None else None
+        tcp_rtt_p99 = round(float(r["rtt_p99"]), 2) if r.get("rtt_p99") is not None else None
+        retrans_rate = round(float(r["avg_retrans"]), 3) if r.get("avg_retrans") is not None else None
+        packet_loss = round(float(r["avg_ploss_pct"]), 3) if r.get("avg_ploss_pct") is not None else None
+        delivery_rate = round(float(r["avg_del_rate_mbps"]), 2) if r.get("avg_del_rate_mbps") is not None else None
+    else:
+        total_requests = 0
+        bandwidth_bytes = 0
+        tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
+        retrans_rate = packet_loss = delivery_rate = None
+
+    proto_sql = f"""
+        SELECT
+            caseWithExpression(
+                custom_fields['proto'],
+                '3.0', 'HTTP/3',
+                '3', 'HTTP/3',
+                '2.0', 'HTTP/2',
+                '2', 'HTTP/2',
+                '1.1', 'HTTP/1.1',
+                '1.0', 'HTTP/1.0',
+                if(empty(custom_fields['proto']), 'Other', custom_fields['proto'])
+            ) AS proto_clean,
+            count() AS reqs
+        FROM request_facts
+        WHERE {_BASE_WHERE}
+        GROUP BY proto_clean
+        ORDER BY reqs DESC
+    """
+    protocol_distribution = []
+    try:
+        p_rows = service.client.execute(proto_sql, params)
+        sum_p = sum(r.get("reqs", 0) for r in p_rows) or total_requests or 1
+        for pr in p_rows:
+            p_name = str(pr.get("proto_clean", "Other"))
+            p_cnt = int(pr.get("reqs", 0))
+            protocol_distribution.append(
+                TransportProtocolShare(
+                    protocol=p_name,
+                    requests=p_cnt,
+                    share_pct=round(p_cnt * 100.0 / sum_p, 2),
+                )
+            )
+    except Exception:
+        pass
+
+    return TransportMetrics(
+        has_transport_data=True,
+        tcp_rtt_p50_ms=tcp_rtt_p50,
+        tcp_rtt_p90_ms=tcp_rtt_p90,
+        tcp_rtt_p95_ms=tcp_rtt_p95,
+        tcp_rtt_p99_ms=tcp_rtt_p99,
+        retrans_rate_pct=retrans_rate,
+        packet_loss_pct=packet_loss,
+        delivery_rate_mbps=delivery_rate,
+        bandwidth_bytes=bandwidth_bytes,
+        total_requests=total_requests,
+        protocol_distribution=protocol_distribution,
+        missing_fields=[],
+    )
+
+
+def network_bundle(
+    service: HighScaleService,
+    req: NetworkBundleRequest,
+    start_time: str | None,
+    end_time: str | None,
+) -> NetworkBundleResponse:
+    health_resp = network_health(service, req, start_time, end_time)
+    quality_req = NetworkQualityRequest(region_country=req.region_country, start_time=start_time, end_time=end_time)
+    quality_resp = network_quality(service, quality_req, start_time, end_time)
+    transport_resp = get_transport_metrics(service, start_time, end_time)
+    pop_health_resp = get_pop_health(service, _range_value(start_time), _range_value(end_time))
+
+    return NetworkBundleResponse.with_telemetry(
+        available=True,
+        health=health_resp,
+        quality=quality_resp,
+        pop_health=pop_health_resp.data,
+        transport=transport_resp,
     )

@@ -156,7 +156,7 @@ def build_where_clause(
     # Filter out synthetic RUM beacons from regular dashboard request logs
     if exclude_invalid_ips and actual_cols is not None and "url" in actual_cols:
         # Use chr(63) instead of a literal '?' so that SQL placeholder checks don't count it as a parameter slot
-        conditions.append("url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'")
+        conditions.append("(url IS NULL OR (url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'))")
 
     def _add_param(val: Any) -> str:
         if inline_params:

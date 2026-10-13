@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC
 from typing import Any
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 from backend.core import duckdb as _db
 from backend.models.common import FiltersDict
@@ -1270,6 +1273,199 @@ def get_quality(
                 get_runner().execute(f'DROP TABLE IF EXISTS "{temp_table}"')
             except Exception:
                 pass
+
+
+def get_transport_metrics(
+    con_factory: Any,
+    src: dict[str, Any],
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None = None,
+) -> dict[str, Any]:
+    import time as _time
+
+    timer = SectionTimer()
+    table_name = _safe_table(src["name"])
+    runner: QueryRunner | None = None
+
+    def get_runner() -> QueryRunner:
+        nonlocal runner
+        if runner is None:
+            c = con_factory() if callable(con_factory) else con_factory
+            runner = QueryRunner(c, src)
+        return runner
+
+    actual_cols = set(get_runner().get_schema_cols())
+    optional_fields = ["tcp_rtt", "retrans", "ploss", "delivery_rate"]
+    missing_fields = [f for f in optional_fields if f not in actual_cols]
+    has_transport_data = len(missing_fields) < len(optional_fields)
+
+    default_resp = {
+        "has_transport_data": has_transport_data,
+        "tcp_rtt_p50_ms": None,
+        "tcp_rtt_p90_ms": None,
+        "tcp_rtt_p95_ms": None,
+        "tcp_rtt_p99_ms": None,
+        "retrans_rate_pct": None,
+        "packet_loss_pct": None,
+        "delivery_rate_mbps": None,
+        "bandwidth_bytes": 0,
+        "total_requests": 0,
+        "protocol_distribution": [],
+        "missing_fields": missing_fields,
+        "section_timings": timer.entries,
+        **get_runner().telemetry(),
+    }
+
+    try:
+        get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+    except Exception:
+        return default_resp
+
+    if filters is None:
+        filters = {}
+
+    params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
+
+    select_parts = ["COUNT(*) AS total_reqs"]
+    if "resp_bytes" in actual_cols:
+        select_parts.append("COALESCE(SUM(resp_bytes), 0) AS total_bytes")
+    elif "bytes" in actual_cols:
+        select_parts.append("COALESCE(SUM(bytes), 0) AS total_bytes")
+    else:
+        select_parts.append("0 AS total_bytes")
+
+    if "tcp_rtt" in actual_cols:
+        select_parts.extend(
+            [
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.50) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p50",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.90) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p90",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.95) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p95",
+                "approx_quantile(CAST(tcp_rtt AS DOUBLE), 0.99) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS rtt_p99",
+            ]
+        )
+    else:
+        select_parts.extend(["NULL AS rtt_p50", "NULL AS rtt_p90", "NULL AS rtt_p95", "NULL AS rtt_p99"])
+
+    if "retrans" in actual_cols:
+        select_parts.append("AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans")
+    else:
+        select_parts.append("NULL AS avg_retrans")
+
+    if "ploss" in actual_cols:
+        select_parts.append("AVG(CAST(ploss AS DOUBLE)) FILTER (WHERE ploss IS NOT NULL) * 100.0 AS avg_ploss_pct")
+    else:
+        select_parts.append("NULL AS avg_ploss_pct")
+
+    if "delivery_rate" in actual_cols:
+        select_parts.append(
+            "AVG(CAST(delivery_rate AS DOUBLE)) FILTER (WHERE delivery_rate IS NOT NULL AND delivery_rate > 0) * 8.0 / 1e6 AS avg_del_rate_mbps"
+        )
+    else:
+        select_parts.append("NULL AS avg_del_rate_mbps")
+
+    main_sql = f"SELECT {', '.join(select_parts)} FROM {table_name} WHERE {where_clause}"
+    _t0 = _time.perf_counter()
+    try:
+        row = get_runner().execute(main_sql, params).fetchone()
+        timer.mark("transport_aggregates", _t0)
+        if row:
+            total_requests = int(row[0] or 0)
+            bandwidth_bytes = int(row[1] or 0)
+            tcp_rtt_p50 = round(float(row[2]), 2) if row[2] is not None else None
+            tcp_rtt_p90 = round(float(row[3]), 2) if row[3] is not None else None
+            tcp_rtt_p95 = round(float(row[4]), 2) if row[4] is not None else None
+            tcp_rtt_p99 = round(float(row[5]), 2) if row[5] is not None else None
+            retrans_rate = round(float(row[6]), 3) if row[6] is not None else None
+            packet_loss = round(float(row[7]), 3) if row[7] is not None else None
+            delivery_rate = round(float(row[8]), 2) if row[8] is not None else None
+        else:
+            total_requests = 0
+            bandwidth_bytes = 0
+            tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
+            retrans_rate = packet_loss = delivery_rate = None
+    except Exception as e:
+        logger.warning("Failed to query transport aggregates: %s", e)
+        return default_resp
+
+    protocol_distribution = []
+    proto_col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
+    if proto_col:
+        _t1 = _time.perf_counter()
+        proto_sql = f"""
+            SELECT
+                CASE
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('3.0', '3', 'HTTP/3') THEN 'HTTP/3'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('2.0', '2', 'HTTP/2') THEN 'HTTP/2'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.1', 'HTTP/1.1') THEN 'HTTP/1.1'
+                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.0', 'HTTP/1.0') THEN 'HTTP/1.0'
+                    ELSE COALESCE(CAST({proto_col} AS VARCHAR), 'Other')
+                END AS proto_clean,
+                COUNT(*) AS reqs
+            FROM {table_name}
+            WHERE {where_clause}
+            GROUP BY proto_clean
+            ORDER BY reqs DESC
+        """
+        try:
+            proto_rows = get_runner().execute(proto_sql, params).fetchall()
+            timer.mark("protocol_distribution", _t1)
+            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+            for r in proto_rows:
+                p_name = str(r[0])
+                p_cnt = int(r[1])
+                p_pct = round(p_cnt * 100.0 / sum_proto_reqs, 2)
+                protocol_distribution.append(
+                    {
+                        "protocol": p_name,
+                        "requests": p_cnt,
+                        "share_pct": p_pct,
+                    }
+                )
+        except Exception as e:
+            logger.warning("Failed to query protocol distribution: %s", e)
+    elif "transport" in actual_cols:
+        _t1 = _time.perf_counter()
+        proto_sql = f"""
+            SELECT
+                UPPER(COALESCE(CAST(transport AS VARCHAR), 'TCP')) AS proto_clean,
+                COUNT(*) AS reqs
+            FROM {table_name}
+            WHERE {where_clause}
+            GROUP BY proto_clean
+            ORDER BY reqs DESC
+        """
+        try:
+            proto_rows = get_runner().execute(proto_sql, params).fetchall()
+            timer.mark("protocol_distribution", _t1)
+            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+            for r in proto_rows:
+                protocol_distribution.append(
+                    {
+                        "protocol": str(r[0]),
+                        "requests": int(r[1]),
+                        "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
+                    }
+                )
+        except Exception:
+            pass
+
+    return {
+        "has_transport_data": has_transport_data,
+        "tcp_rtt_p50_ms": tcp_rtt_p50,
+        "tcp_rtt_p90_ms": tcp_rtt_p90,
+        "tcp_rtt_p95_ms": tcp_rtt_p95,
+        "tcp_rtt_p99_ms": tcp_rtt_p99,
+        "retrans_rate_pct": retrans_rate,
+        "packet_loss_pct": packet_loss,
+        "delivery_rate_mbps": delivery_rate,
+        "bandwidth_bytes": bandwidth_bytes,
+        "total_requests": total_requests,
+        "protocol_distribution": protocol_distribution,
+        "missing_fields": missing_fields,
+        "section_timings": timer.entries,
+        **get_runner().telemetry(),
+    }
 
 
 # A-3 (CacheRegistry): register the network response cache (also

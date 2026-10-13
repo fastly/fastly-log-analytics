@@ -707,6 +707,21 @@ role boundaries, telemetry completeness, and documented performance budgets.
   router unit tests (`tests/routers/test_insights_router.py`), frontend unit tests
   (`frontend/__tests__/app/insights.test.tsx`, `frontend/__tests__/lib/insight-sections.test.ts`), and
   Playwright E2E integration spec (`frontend/e2e/pages/insights.spec.ts`).
+- **`/network` — Live-certified (`docs/pages/network.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Network Path
+  & ASN Heatmap suite: transport layer telemetry (p50/p90/p95/p99 `tcp_rtt`, retransmission
+  rate, packet loss %, delivery rate Mbps), protocol distribution (HTTP/1.1 vs HTTP/2 vs HTTP/3),
+  and interactive ASN Health Heatmap / leaderboard. Hardened backend validation with typed
+  Pydantic models in `backend/models/network.py` for `/api/network/bundle` (POST & GET) with
+  `process_context_scope("network:bundle")`, query-runner tenancy, buffer self-heal
+  (`execute_with_stale_view_retry`), and High-Scale elevation fallback (`backend/high_scale/network.py`).
+  Allowed remote analyst write access for `/api/network/` in `_ANALYST_ALLOWED_WRITE_PREFIXES`.
+  Enforced zero-CLS layout reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`)
+  and contextual loading states (`"Analyzing TCP round-trip times..."`, `"Compiling ASN health matrix..."`)
+  across all cards and sections. Missing optional logging fields render actionable guidance linking to
+  `/service-config`. Comprehensive router unit tests (`tests/routers/test_network_router.py`), frontend unit
+  tests (`frontend/__tests__/app/network.test.tsx`), and Playwright E2E integration spec
+  (`frontend/e2e/pages/network.spec.ts`).
 
 Known page-parity investigation after the environment rebuild:
 
