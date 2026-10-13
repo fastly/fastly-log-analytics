@@ -381,11 +381,23 @@ export const handlers = [
       active_clients: [],
     }),
   ),
+  http.post(`${API_BASE}/api/security/bundle`, () =>
+    HttpResponse.json({ tls_fingerprints: [], bots: [], ngwaf_configured: false }),
+  ),
+  http.get(`${API_BASE}/api/security/bundle`, () =>
+    HttpResponse.json({ tls_fingerprints: [], bots: [], ngwaf_configured: false }),
+  ),
   http.post(`${API_BASE}/api/performance/aggregates`, () =>
     HttpResponse.json({ rows: [], columns: [], total: 0 }),
   ),
   http.post(`${API_BASE}/api/network-health`, () =>
     HttpResponse.json({ rows: [], total: 0 }),
+  ),
+  http.post(`${API_BASE}/api/network/bundle`, () =>
+    HttpResponse.json({ available: false, health: {}, quality: {}, pop_health: [], transport: {} }),
+  ),
+  http.get(`${API_BASE}/api/network/bundle`, () =>
+    HttpResponse.json({ available: false, health: {}, quality: {}, pop_health: [], transport: {} }),
   ),
   http.post(`${API_BASE}/api/usage/bandwidth`, () =>
     HttpResponse.json({ rows: [], total_bytes: 0 }),
@@ -777,6 +789,9 @@ export const handlers = [
   ),
   http.post(`${API_BASE}/api/origin/shielding-analysis`, () =>
     HttpResponse.json({ shielding: [], origin: [] }),
+  ),
+  http.post(`${API_BASE}/api/origin/drilldown`, () =>
+    HttpResponse.json({ has_data: false, total: 0, dimension: '', rows: [] }),
   ),
   http.post(`${API_BASE}/api/performance/origin-ts`, () =>
     HttpResponse.json({ series: [], has_data: false }),
