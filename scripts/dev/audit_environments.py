@@ -42,6 +42,8 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, is_admin_url, validate_admin_tls_config  # noqa: E402
+from scripts.lib.environments import ENVIRONMENT_SPECS, load_dotenv  # noqa: E402
+from scripts.lib.environments import service_id as _registry_service_id  # noqa: E402
 
 # ANSI Color codes for clean terminal output
 RESET = "\033[0m"
@@ -71,50 +73,23 @@ class EnvironmentConfig:
 
 
 def load_dotenv_manually() -> None:
-    """Manually parse .env file from the workspace root and set environment variables."""
-    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
-    if os.path.exists(dotenv_path):
-        with open(dotenv_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("'\"")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
+    """Load the repo-root ``.env`` via the shared registry loader (python-dotenv)."""
+    load_dotenv()
 
 
 load_dotenv_manually()
 
 
 ENVIRONMENTS: dict[str, EnvironmentConfig] = {
-    "local-standard": EnvironmentConfig(
-        name="local-standard",
-        architecture="Standard (Local Docker/Native)",
-        backend_url="http://127.0.0.1:80",
-        frontend_url="http://127.0.0.1:80/dashboard",
-        service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
-        is_high_scale=False,
-    ),
-    "remote-standard": EnvironmentConfig(
-        name="remote-standard",
-        architecture="Standard (Remote/VM)",
-        backend_url="http://127.0.0.1:8001",
-        frontend_url="http://127.0.0.1:3001/dashboard",
-        service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", ""),
-        is_high_scale=False,
-    ),
-    "remote-high-scale": EnvironmentConfig(
-        name="remote-high-scale",
-        architecture="High-Scale (Remote/K8s)",
-        backend_url="http://127.0.0.1:8002",
-        frontend_url="http://127.0.0.1:3002/dashboard",
-        service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", ""),
-        is_high_scale=True,
-    ),
+    name: EnvironmentConfig(
+        name=spec.name,
+        architecture=spec.architecture,
+        backend_url=spec.backend_url,
+        frontend_url=spec.frontend_url,
+        service_id=_registry_service_id(name),
+        is_high_scale=spec.is_high_scale,
+    )
+    for name, spec in ENVIRONMENT_SPECS.items()
 }
 
 for _environment_name, _environment_config in ENVIRONMENTS.items():

@@ -12,39 +12,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-def load_dotenv_manually() -> None:
-    """Manually parse .env file from the workspace root and set environment variables."""
-    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if os.path.exists(dotenv_path):
-        with open(dotenv_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("'\"")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
+from scripts.lib.environments import (  # noqa: E402
+    ENVIRONMENT_SPECS,
+    load_dotenv,
+    remediation_command,
+    service_id,
+)
 
-
-# Load local overrides from .env
-load_dotenv_manually()
-
-# Resolve deployment-specific values from the local environment only.
-gce_project = os.getenv("GCE_PROJECT", "<gcp-project>")
-gce_zone = os.getenv("GCE_ZONE", "<gce-zone>")
-gce_vm_name = os.getenv("GCE_VM_NAME", "<gce-vm>")
-elevation_namespace = os.getenv("ELEVATION_NAMESPACE", "<k8s-namespace>")
+# Load local overrides from .env (python-dotenv, override=False).
+load_dotenv()
 
 
 @dataclass(frozen=True)
@@ -58,38 +44,15 @@ class EnvironmentTarget:
 
 
 ENVIRONMENTS: dict[str, EnvironmentTarget] = {
-    "local-standard": EnvironmentTarget(
-        name="local-standard",
-        architecture="Standard (Local Docker/Native)",
-        backend_url="http://127.0.0.1:80",
-        frontend_url="http://127.0.0.1:80/dashboard",
-        fastly_service_id=os.getenv("LOCAL_STANDARD_SERVICE_ID", ""),
-        remediation_cmd="docker compose up -d",
-    ),
-    "remote-standard": EnvironmentTarget(
-        name="remote-standard",
-        architecture="Standard (Remote/VM)",
-        backend_url="http://127.0.0.1:8001",
-        frontend_url="http://127.0.0.1:3001/dashboard",
-        fastly_service_id=os.getenv("REMOTE_STANDARD_SERVICE_ID", ""),
-        remediation_cmd=os.getenv(
-            "REMOTE_STANDARD_FORWARD_CMD",
-            f"gcloud compute ssh {gce_vm_name} --project={gce_project} "
-            f"--zone={gce_zone} -- -N -L 3001:127.0.0.1:3000 -L 8001:127.0.0.1:8000",
-        ),
-    ),
-    "remote-high-scale": EnvironmentTarget(
-        name="remote-high-scale",
-        architecture="High-Scale (Remote/K8s cluster)",
-        backend_url="http://127.0.0.1:8002",
-        frontend_url="http://127.0.0.1:3002/dashboard",
-        fastly_service_id=os.getenv("REMOTE_HIGH_SCALE_SERVICE_ID", ""),
-        remediation_cmd=os.getenv(
-            "REMOTE_HIGH_SCALE_FORWARD_CMD",
-            f"kubectl port-forward svc/frontend-svc -n {elevation_namespace} 3002:3000 & "
-            f"kubectl port-forward svc/backend-svc -n {elevation_namespace} 8002:8000",
-        ),
-    ),
+    name: EnvironmentTarget(
+        name=spec.name,
+        architecture=spec.architecture,
+        backend_url=spec.backend_url,
+        frontend_url=spec.frontend_url,
+        fastly_service_id=service_id(name),
+        remediation_cmd=remediation_command(name),
+    )
+    for name, spec in ENVIRONMENT_SPECS.items()
 }
 
 
