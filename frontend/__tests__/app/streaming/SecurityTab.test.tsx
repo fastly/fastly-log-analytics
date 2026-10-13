@@ -30,7 +30,7 @@ vi.mock('@/hooks/useIsAnalyst', () => ({ useIsAnalyst: vi.fn(() => false) }))
 
 vi.mock('@/components/charts/TimeSeriesChart', () => ({
   TimeSeriesChart: ({ data }: { data: { name: string; y: number[] }[] }) => (
-    <div data-testid="bandwidth-chart">
+    <div data-testid={data[0]?.name.startsWith('Edge') ? 'bandwidth-chart' : 'enforcement-chart'}>
       {data.map((t) => (
         <span key={t.name}>{`${t.name}: ${t.y.join(',')}`}</span>
       ))}
@@ -40,7 +40,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true, p_type: true, p_desc: true },
+  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true, p_type: true, p_desc: true, cs_status: true, cs_mode: true, cs_rl_mode: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -66,6 +66,17 @@ const FULL_RESPONSE = {
   bandwidth_ts: [
     { bucket: '2026-01-01 00:00:00', edge_bytes: 3000, shield_bytes: 300 },
     { bucket: '2026-01-01 00:05:00', edge_bytes: 6000, shield_bytes: 0 },
+  ],
+  enforcement: [
+    { status: 'allowed', requests: 900, enforced: 0, users: 80, bytes: 9000 },
+    { status: 'blocked', requests: 40, enforced: 25, users: 3, bytes: 400 },
+    { status: 'rate_limited', requests: 12, enforced: 12, users: 2, bytes: null },
+  ],
+  enforcement_ts: [
+    { bucket: '2026-01-01 00:00:00', status: 'allowed', requests: 500 },
+    { bucket: '2026-01-01 00:00:00', status: 'blocked', requests: 10 },
+    { bucket: '2026-01-01 00:05:00', status: 'allowed', requests: 400 },
+    { bucket: '2026-01-01 00:05:00', status: 'rate_limited', requests: 12 },
   ],
 }
 
@@ -746,4 +757,40 @@ test('a throttle is listed with its rate and offers Remove throttle', async () =
       params: { path: { block_id: 'thr-1' } },
     }),
   )
+})
+
+
+test('Enforcement splits enforced from recorded-only requests, most severe first', async () => {
+  renderTab()
+  await screen.findByText('pirate.example')
+
+  const table = (await screen.findByText('Rate limited', { selector: 'table *' })).closest('table')!
+  const rows = within(table).getAllByRole('row').slice(1)
+  expect(rows.map((r) => within(r).getAllByRole('cell')[0].textContent)).toEqual(['Blocked', 'Rate limited', 'Allowed'])
+
+  // blocked: 40 requests, 25 enforced (ENFORCE), the other 15 were WARN-only.
+  const blocked = within(rows[0]).getAllByRole('cell').map((c) => c.textContent)
+  expect(blocked.slice(1, 4)).toEqual(['40', '25', '15'])
+  // Outcomes that don't stop a request have nothing to enforce.
+  const allowed = within(rows[2]).getAllByRole('cell').map((c) => c.textContent)
+  expect(allowed.slice(1, 4)).toEqual(['900', '—', '—'])
+})
+
+test('Enforcement chart stacks one zero-filled series per outcome', async () => {
+  renderTab()
+  await screen.findByText('pirate.example')
+
+  const enforcement = screen.getByTestId('enforcement-chart')
+  expect(within(enforcement).getByText('Blocked: 10,0')).toBeInTheDocument()
+  expect(within(enforcement).getByText('Rate limited: 0,12')).toBeInTheDocument()
+  expect(within(enforcement).getByText('Allowed: 500,400')).toBeInTheDocument()
+})
+
+test('Enforcement says which Log Settings option is missing', async () => {
+  postMock.mockResolvedValue({
+    data: { ...FULL_RESPONSE, fields: { ...FULL_RESPONSE.fields, cs_status: false }, enforcement: [], enforcement_ts: [] },
+  } as never)
+  renderTab()
+  await screen.findByText('pirate.example')
+  expect(screen.getByText(/Log enforcement outcome option to be enabled/)).toBeInTheDocument()
 })

@@ -15447,6 +15447,22 @@
               ],
               "title": "Token Content Id Expr"
             }
+          },
+          {
+            "name": "token_enforcement",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token Enforcement"
+            }
           }
         ],
         "responses": {
@@ -46584,6 +46600,74 @@
         ],
         "title": "ContentSecurityContentId"
       },
+      "ContentSecurityEnforcementPoint": {
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "title": "Bucket"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "status",
+          "requests"
+        ],
+        "title": "ContentSecurityEnforcementPoint"
+      },
+      "ContentSecurityEnforcementRow": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "enforced": {
+            "type": "integer",
+            "title": "Enforced"
+          },
+          "users": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Users"
+          },
+          "bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "requests",
+          "enforced"
+        ],
+        "title": "ContentSecurityEnforcementRow"
+      },
       "ContentSecurityRequest": {
         "properties": {
           "start_time": {
@@ -46815,6 +46899,22 @@
             },
             "type": "array",
             "title": "Bandwidth Ts",
+            "default": []
+          },
+          "enforcement": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityEnforcementRow"
+            },
+            "type": "array",
+            "title": "Enforcement",
+            "default": []
+          },
+          "enforcement_ts": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityEnforcementPoint"
+            },
+            "type": "array",
+            "title": "Enforcement Ts",
             "default": []
           }
         },
@@ -56318,6 +56418,11 @@
             ],
             "title": "Token Content Id Expr"
           },
+          "token_enforcement": {
+            "type": "boolean",
+            "title": "Token Enforcement",
+            "default": false
+          },
           "logging_enabled": {
             "type": "boolean",
             "title": "Logging Enabled",
@@ -64488,6 +64593,11 @@
               }
             ],
             "title": "Content Id Expr"
+          },
+          "enforcement": {
+            "type": "boolean",
+            "title": "Enforcement",
+            "default": false
           }
         },
         "type": "object",

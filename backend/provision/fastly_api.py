@@ -1567,13 +1567,20 @@ def update_logging_endpoint(cfg: dict, token: str):
             sub_expr, content_expr = resolve_token_exprs(
                 old_token, cfg.get("token_subscriber_id_expr"), cfg.get("token_content_id_expr")
             )
-            errors = validate_token_exprs(sub_expr, content_expr)
+            # None keeps the stored choice, like the expressions above.
+            enforcement = (
+                bool(cfg["token_enforcement"])
+                if cfg.get("token_enforcement") is not None
+                else bool(old_token.get("enforcement"))
+            )
+            errors = validate_token_exprs(sub_expr, content_expr, enforcement=enforcement)
             if errors:
                 raise ValueError(f"Invalid Token configuration: {'; '.join(errors)}")
             service_cfg["token"] = {
                 "enabled": True,
                 "subscriber_id_expr": sub_expr,
                 "content_id_expr": content_expr,
+                "enforcement": enforcement,
                 "enabled_at": old_token.get("enabled_at")
                 if old_token.get("enabled")
                 else _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),

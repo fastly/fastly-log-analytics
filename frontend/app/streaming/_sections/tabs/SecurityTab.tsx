@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   Server,
   ShieldBan,
+  ShieldCheck,
   ShieldQuestion,
   Undo2,
   VenetianMask,
@@ -57,6 +58,7 @@ type ContentSecurityData = components['schemas']['ContentSecurityResponse']
 type TopRow = components['schemas']['ContentSecurityTopRow']
 type ContentIdOption = components['schemas']['ContentSecurityContentId']
 type SubscriberRow = components['schemas']['ContentSecuritySubscriberRow']
+type EnforcementRow = components['schemas']['ContentSecurityEnforcementRow']
 
 interface SecurityTabProps extends StreamingTabProps {
   bucketSeconds: number
@@ -83,6 +85,93 @@ type BlockLookup = (category: BlockCategory, value: string) => Block | undefined
 
 const BANDWIDTH_LAYOUT = {
   yaxis: { title: { text: 'Bandwidth' }, tickformat: '.3s', ticksuffix: 'bps', rangemode: 'tozero' as const },
+}
+
+/**
+ * Outcomes the operator's VCL stamps on each request (cs_status). Listed in stack order,
+ * most severe first. `stops` marks the ones that only take effect in ENFORCE mode, so
+ * the table can tell "was stopped" from "would have been stopped" (WARN).
+ */
+const ENFORCEMENT_STATUSES: Record<string, { label: string; color: string; stops: boolean }> = {
+  blocked: { label: 'Blocked', color: '#ef4444', stops: true },
+  rate_limited: { label: 'Rate limited', color: '#f97316', stops: true },
+  throttled: { label: 'Throttled', color: '#f59e0b', stops: true },
+  check_failed: { label: 'Check failed', color: '#a855f7', stops: false },
+  counted: { label: 'Counted', color: '#6366f1', stops: false },
+  allowed: { label: 'Allowed', color: '#22c55e', stops: false },
+}
+const ENFORCEMENT_ORDER = Object.keys(ENFORCEMENT_STATUSES)
+const enforcementLabel = (status: string) => ENFORCEMENT_STATUSES[status]?.label ?? status
+
+const ENFORCEMENT_LAYOUT = {
+  barmode: 'stack' as const,
+  yaxis: { title: { text: 'Requests' }, rangemode: 'tozero' as const },
+}
+
+/**
+ * Requests per enforcement outcome. "Enforced" counts only requests whose mode was ENFORCE;
+ * "Recorded only" is the WARN remainder, which was served normally.
+ */
+export function EnforcementTable({ rows }: { rows: EnforcementRow[] }) {
+  const showUsers = rows.some((r) => r.users != null)
+  const showBytes = rows.some((r) => r.bytes != null)
+  const sorted = [...rows].sort(
+    (a, b) =>
+      (ENFORCEMENT_ORDER.indexOf(a.status) + 1 || ENFORCEMENT_ORDER.length + 1) -
+      (ENFORCEMENT_ORDER.indexOf(b.status) + 1 || ENFORCEMENT_ORDER.length + 1),
+  )
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Outcome</TableHead>
+          <TableHead className="text-right">Requests</TableHead>
+          <TableHead className="text-right">Enforced</TableHead>
+          <TableHead className="text-right">Recorded only</TableHead>
+          {showUsers && <TableHead className="text-right">Users</TableHead>}
+          {showBytes && <TableHead className="text-right">Bandwidth</TableHead>}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {sorted.map((row) => {
+          const meta = ENFORCEMENT_STATUSES[row.status]
+          const stops = meta?.stops ?? false
+          return (
+            <TableRow key={row.status}>
+              <TableCell>
+                <span className="flex items-center gap-2">
+                  <span
+                    className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: meta?.color ?? '#9ca3af' }}
+                    aria-hidden="true"
+                  />
+                  <FilterValueCell
+                    filters={[{ column: 'cs_status', value: row.status }]}
+                    display={enforcementLabel(row.status)}
+                  />
+                </span>
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{row.requests.toLocaleString()}</TableCell>
+              <TableCell className="text-right tabular-nums font-medium">
+                {stops ? row.enforced.toLocaleString() : '—'}
+              </TableCell>
+              <TableCell className="text-right tabular-nums text-muted-foreground">
+                {stops ? (row.requests - row.enforced).toLocaleString() : '—'}
+              </TableCell>
+              {showUsers && (
+                <TableCell className="text-right tabular-nums">{row.users?.toLocaleString() ?? '—'}</TableCell>
+              )}
+              {showBytes && (
+                <TableCell className="text-right tabular-nums">
+                  {row.bytes == null ? '—' : formatBytes(row.bytes)}
+                </TableCell>
+              )}
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
 }
 
 /** Subscriber ids ranked server-side by distinct client IPs (then requests). */
@@ -561,6 +650,28 @@ export default function SecurityTab({
     return traces
   }, [data?.bandwidth_ts, data?.has_shield_split, timezone, bucketSeconds])
 
+  // One stacked bar series per outcome, zero-filled across every bucket that has any outcome.
+  const enforcementData = React.useMemo(() => {
+    const ts = data?.enforcement_ts
+    if (!ts?.length) return []
+    const buckets = [...new Set(ts.map((d) => d.bucket))].sort()
+    const x = buckets.map((b) => formatDate(b, timezone, 'yyyy-MM-dd HH:mm:ss'))
+    const byKey = new Map(ts.map((d) => [`${d.status}\u0000${d.bucket}`, d.requests]))
+    const present = new Set(ts.map((d) => d.status))
+    const statuses = [
+      ...ENFORCEMENT_ORDER.filter((st) => present.has(st)),
+      ...[...present].filter((st) => !ENFORCEMENT_ORDER.includes(st)).sort(),
+    ]
+    return statuses.map((status) => ({
+      x,
+      y: buckets.map((b) => byKey.get(`${status}\u0000${b}`) ?? 0),
+      name: enforcementLabel(status),
+      type: 'bar' as const,
+      marker: { color: ENFORCEMENT_STATUSES[status]?.color },
+      hovertemplate: `%{y:,} requests<extra>${enforcementLabel(status)}</extra>`,
+    }))
+  }, [data?.enforcement_ts, timezone])
+
 
   if (data && !data.available) {
     return (
@@ -705,6 +816,52 @@ export default function SecurityTab({
           />
         )}
       </AnalyticsCard>
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <AnalyticsCard
+          title="Enforcement"
+          icon={<ShieldCheck className="h-4 w-4" />}
+          {...cardState}
+          className="min-h-[200px]"
+        >
+          {data?.enforcement?.length ? (
+            <>
+              <EnforcementTable rows={data.enforcement} />
+              <p className="px-2 pt-2 text-[11px] text-muted-foreground">
+                Recorded-only requests matched a rule in WARN mode and were served normally.
+              </p>
+            </>
+          ) : (
+            <ChartEmptyState
+              requires={
+                missing('cs_status')
+                  ? 'the Streaming → Content Security → Log enforcement outcome option to be enabled in Log Settings.'
+                  : undefined
+              }
+            />
+          )}
+        </AnalyticsCard>
+        <AnalyticsCard
+          title="Enforcement over time"
+          icon={<Activity className="h-4 w-4" />}
+          {...cardState}
+          className="h-[340px]"
+          contentClassName="p-2"
+        >
+          {enforcementData.length ? (
+            <TimeSeriesChart
+              data={enforcementData}
+              layout={ENFORCEMENT_LAYOUT}
+              startTime={startTime}
+              endTime={endTime}
+              timezone={timezone}
+              height="100%"
+            />
+          ) : (
+            <ChartEmptyState />
+          )}
+        </AnalyticsCard>
+      </div>
 
       {isAdmin && (
         <BlockedCard

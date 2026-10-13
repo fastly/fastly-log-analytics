@@ -83,6 +83,23 @@ class ContentSecurityBandwidthPoint(BaseModel):
     shield_bytes: int | None = None
 
 
+class ContentSecurityEnforcementRow(BaseModel):
+    # One row per cs_status value (allowed / blocked / throttled / check_failed /
+    # counted / rate_limited). ``enforced`` is the subset of ``requests`` whose
+    # mode column said ENFORCE; the rest were only recorded (WARN).
+    status: str
+    requests: int
+    enforced: int
+    users: int | None = None
+    bytes: int | None = None
+
+
+class ContentSecurityEnforcementPoint(BaseModel):
+    bucket: str
+    status: str
+    requests: int
+
+
 class ContentSecurityResponse(BaseResponse):
     available: bool
     reason: str | None = None
@@ -99,6 +116,8 @@ class ContentSecurityResponse(BaseResponse):
     proxy_descriptions: list[ContentSecurityTopRow] = []
     subscribers_masked: bool = False
     bandwidth_ts: list[ContentSecurityBandwidthPoint] = []
+    enforcement: list[ContentSecurityEnforcementRow] = []
+    enforcement_ts: list[ContentSecurityEnforcementPoint] = []
 
 
 class SubscriberIpsRequest(FilteredRequest):

@@ -25,7 +25,7 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
-import { tokenConfigError } from '@/components/TokenConfigSection'
+import { contentSecurityConfigError, contentSecurityPayload } from '@/components/TokenConfigSection'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
 // (e.g. ProvisionWizard imports it from this path).
@@ -52,9 +52,14 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
   const [cmcdMode, setCmcdMode] = useState<string>('query_string')
   const [cmcdVersion, setCmcdVersion] = useState<number>(1)
   const [tokenEnabled, setTokenEnabled] = useState<boolean>(false)
+  const [subscriberIdEnabled, setSubscriberIdEnabled] = useState<boolean>(false)
   const [subscriberIdExpr, setSubscriberIdExpr] = useState<string>('')
+  const [contentIdEnabled, setContentIdEnabled] = useState<boolean>(false)
   const [contentIdExpr, setContentIdExpr] = useState<string>('')
-  const tokenInvalid = tokenEnabled && tokenConfigError(subscriberIdExpr, contentIdExpr) !== null
+  const [enforcementEnabled, setEnforcementEnabled] = useState<boolean>(false)
+  const contentSecurity = { subscriberIdEnabled, subscriberIdExpr, contentIdEnabled, contentIdExpr, enforcementEnabled }
+  const reviewCs = contentSecurityPayload(tokenEnabled, contentSecurity)
+  const tokenInvalid = tokenEnabled && contentSecurityConfigError(contentSecurity) !== null
   const [step, setStep] = useState<number>(1)
 
   const { data: catalog } = useLogFieldsCatalog(service?.service_id)
@@ -102,7 +107,8 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
       // the SSE-style UX without the CSRF risk. Query params stay where
       // they are because the backend reads them via Query(...).
       const encodedCond = encodeURIComponent(customCondition)
-      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}&token_enabled=${tokenEnabled}${tokenEnabled ? `&token_subscriber_id_expr=${encodeURIComponent(subscriberIdExpr.trim())}&token_content_id_expr=${encodeURIComponent(contentIdExpr.trim())}` : ''}`
+      const csPayload = contentSecurityPayload(tokenEnabled, contentSecurity)
+      const endpoint = `/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}&token_enabled=${csPayload.enabled}${csPayload.enabled ? `&token_subscriber_id_expr=${encodeURIComponent(csPayload.subscriber)}&token_content_id_expr=${encodeURIComponent(csPayload.content)}&token_enforcement=${csPayload.enforcement}` : ''}`
       start(endpoint, {})
     }
   })
@@ -126,6 +132,9 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
         setTokenEnabled(loggingSettings.token?.enabled ?? false)
         setSubscriberIdExpr(loggingSettings.token?.subscriber_id_expr ?? '')
         setContentIdExpr(loggingSettings.token?.content_id_expr ?? '')
+        setSubscriberIdEnabled(!!loggingSettings.token?.subscriber_id_expr?.trim())
+        setContentIdEnabled(!!loggingSettings.token?.content_id_expr?.trim())
+        setEnforcementEnabled(loggingSettings.token?.enforcement ?? false)
       }
     }
   }, [lfResponse, loggingSettings, open]) // Using fieldsMutation.reset directly inside breaks exhaustive-deps since it's an object, we suppress or omit it, but wait! The issue says `react-hooks/set-state-in-effect`. That's usually fine, just a warning.
@@ -362,9 +371,15 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       tokenEnabled={tokenEnabled}
                       setTokenEnabled={setTokenEnabled}
                       subscriberIdExpr={subscriberIdExpr}
+                      subscriberIdEnabled={subscriberIdEnabled}
+                      setSubscriberIdEnabled={setSubscriberIdEnabled}
                       setSubscriberIdExpr={setSubscriberIdExpr}
+                      contentIdEnabled={contentIdEnabled}
+                      setContentIdEnabled={setContentIdEnabled}
                       contentIdExpr={contentIdExpr}
                       setContentIdExpr={setContentIdExpr}
+                      enforcementEnabled={enforcementEnabled}
+                      setEnforcementEnabled={setEnforcementEnabled}
                       serviceId={service.service_id}
                       toggleGroup={toggleGroup}
                       toggleField={toggleField}
@@ -391,9 +406,10 @@ export function LogSettingsModal({ service, open, onOpenChange }: LogSettingsMod
                       cmcdEnabled={cmcdEnabled}
                       cmcdMode={cmcdMode}
                       cmcdVersion={cmcdVersion}
-                      tokenEnabled={tokenEnabled}
-                      subscriberIdExpr={subscriberIdExpr}
-                      contentIdExpr={contentIdExpr}
+                      tokenEnabled={reviewCs.enabled}
+                      subscriberIdExpr={reviewCs.subscriber}
+                      contentIdExpr={reviewCs.content}
+                      enforcementEnabled={reviewCs.enforcement}
                     />
                   )}
                 </div>

@@ -166,3 +166,13 @@ The dialog defaults to the value that was clicked. The user can pick another val
 | Analyst Path B | No block UI and no blocklist query. `/api/admin/*` is blocked by `RemoteAccessMiddleware`, and every route also depends on `require_admin`. |
 | Read-only service (Path A) | Endpoints return `403`. |
 
+## 12. Content Security enforcement reporting
+
+The Content Security tab reports what the edge actually did to requests, not just which rules exist.
+
+- **Enable:** Log Settings → Streaming → **Content Security** (the former Token section). Checking it checks its three options: **Subscriber ID**, **Content ID** and **Log enforcement outcome**, each with its own checkbox, so any can be unchecked; a checked ID needs an expression, while enforcement needs none. Enforcement adds four log fields: `cs_status`, `cs_mode`, `cs_rl_mode`, `cs_pace_kbps`, read from the request headers `cs-status`, `cs-mode`, `cs-rl-mode` and `cs-pace-kbps` that your service's VCL sets.
+- **Outcomes (`cs_status`):** `allowed`, `blocked`, `throttled`, `check_failed` (the block check failed and the request was let through), `counted` (counted against the rate limit, under it) and `rate_limited`.
+- **Enforcement card:** requests per outcome, split into **Enforced** (mode `ENFORCE`) and **Recorded only** (mode `WARN`, the request was served normally). Outcomes that don't stop a request (`allowed`, `counted`, `check_failed`) show "—".
+- **Enforcement over time card:** stacked requests per outcome per time bucket.
+- **Availability:** a service without the `cs_status` column shows which Log Settings option to enable. High-scale (ClickHouse) services get no Content Security data.
+

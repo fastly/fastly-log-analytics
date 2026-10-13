@@ -7127,6 +7127,28 @@ export interface components {
             /** Requests */
             requests: number;
         };
+        /** ContentSecurityEnforcementPoint */
+        ContentSecurityEnforcementPoint: {
+            /** Bucket */
+            bucket: string;
+            /** Status */
+            status: string;
+            /** Requests */
+            requests: number;
+        };
+        /** ContentSecurityEnforcementRow */
+        ContentSecurityEnforcementRow: {
+            /** Status */
+            status: string;
+            /** Requests */
+            requests: number;
+            /** Enforced */
+            enforced: number;
+            /** Users */
+            users?: number | null;
+            /** Bytes */
+            bytes?: number | null;
+        };
         /** ContentSecurityRequest */
         ContentSecurityRequest: {
             /** Start Time */
@@ -7243,6 +7265,16 @@ export interface components {
              * @default []
              */
             bandwidth_ts: components["schemas"]["ContentSecurityBandwidthPoint"][];
+            /**
+             * Enforcement
+             * @default []
+             */
+            enforcement: components["schemas"]["ContentSecurityEnforcementRow"][];
+            /**
+             * Enforcement Ts
+             * @default []
+             */
+            enforcement_ts: components["schemas"]["ContentSecurityEnforcementPoint"][];
         };
         /**
          * ContentSecuritySettings
@@ -11019,6 +11051,11 @@ export interface components {
             /** Token Content Id Expr */
             token_content_id_expr?: string | null;
             /**
+             * Token Enforcement
+             * @default false
+             */
+            token_enforcement: boolean;
+            /**
              * Logging Enabled
              * @default true
              */
@@ -13895,6 +13932,11 @@ export interface components {
             subscriber_id_expr?: string | null;
             /** Content Id Expr */
             content_id_expr?: string | null;
+            /**
+             * Enforcement
+             * @default false
+             */
+            enforcement: boolean;
         };
         /**
          * TosAckPayload
@@ -24066,6 +24108,7 @@ export interface operations {
                 token_enabled?: boolean | null;
                 token_subscriber_id_expr?: string | null;
                 token_content_id_expr?: string | null;
+                token_enforcement?: boolean | null;
             };
             header?: never;
             path: {

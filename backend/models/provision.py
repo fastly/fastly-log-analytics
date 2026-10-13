@@ -68,6 +68,7 @@ class ProvisionExecuteRequest(BaseModel):
     token_enabled: bool = False
     token_subscriber_id_expr: str | None = Field(default=None, max_length=512)
     token_content_id_expr: str | None = Field(default=None, max_length=512)
+    token_enforcement: bool = False
     logging_enabled: bool = True
     rum_enabled: bool = False
     faro_version: str | None = None

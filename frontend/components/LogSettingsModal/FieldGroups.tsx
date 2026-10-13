@@ -199,10 +199,16 @@ interface StandardFieldsStepProps {
   setCmcdVersion?: (v: number) => void
   tokenEnabled?: boolean
   setTokenEnabled?: (v: boolean) => void
+  subscriberIdEnabled?: boolean
+  setSubscriberIdEnabled?: (v: boolean) => void
   subscriberIdExpr?: string
   setSubscriberIdExpr?: (v: string) => void
+  contentIdEnabled?: boolean
+  setContentIdEnabled?: (v: boolean) => void
   contentIdExpr?: string
   setContentIdExpr?: (v: string) => void
+  enforcementEnabled?: boolean
+  setEnforcementEnabled?: (v: boolean) => void
   serviceId?: string
   toggleGroup: (groupId: string, checked: boolean) => void
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
@@ -231,10 +237,16 @@ export function StandardFieldsStep({
   setCmcdVersion,
   tokenEnabled,
   setTokenEnabled,
+  subscriberIdEnabled,
+  setSubscriberIdEnabled,
   subscriberIdExpr,
   setSubscriberIdExpr,
+  contentIdEnabled,
+  setContentIdEnabled,
   contentIdExpr,
   setContentIdExpr,
+  enforcementEnabled,
+  setEnforcementEnabled,
   serviceId,
   toggleGroup,
   toggleField,
@@ -392,7 +404,7 @@ export function StandardFieldsStep({
             updateFieldLimit={updateFieldLimit}
           />
         ))}
-        {setCmcdEnabled && setCmcdMode && setCmcdVersion && setTokenEnabled && setSubscriberIdExpr && setContentIdExpr && (
+        {setCmcdEnabled && setCmcdMode && setCmcdVersion && setTokenEnabled && setSubscriberIdEnabled && setSubscriberIdExpr && setContentIdEnabled && setContentIdExpr && setEnforcementEnabled && (
           <StreamingConfigSection
             cmcdEnabled={cmcdEnabled ?? false}
             onCmcdEnabledChange={setCmcdEnabled}
@@ -402,10 +414,16 @@ export function StandardFieldsStep({
             onCmcdVersionChange={setCmcdVersion}
             tokenEnabled={tokenEnabled ?? false}
             onTokenEnabledChange={setTokenEnabled}
+            subscriberIdEnabled={subscriberIdEnabled ?? false}
+            onSubscriberIdEnabledChange={setSubscriberIdEnabled}
             subscriberIdExpr={subscriberIdExpr ?? ''}
             onSubscriberIdExprChange={setSubscriberIdExpr}
+            contentIdEnabled={contentIdEnabled ?? false}
+            onContentIdEnabledChange={setContentIdEnabled}
             contentIdExpr={contentIdExpr ?? ''}
             onContentIdExprChange={setContentIdExpr}
+            enforcementEnabled={enforcementEnabled ?? false}
+            onEnforcementEnabledChange={setEnforcementEnabled}
             serviceId={serviceId}
           />
         )}

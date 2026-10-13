@@ -46,8 +46,58 @@ SUBSCRIBER_ID_FIELD = SUBSCRIBER_ID.field
 CONTENT_ID_HEADER = CONTENT_ID.header
 CONTENT_ID_FIELD = CONTENT_ID.field
 
-# Field name → header it logs; drives the per-field scrub in fastly_api.
-TOKEN_FIELD_HEADERS: dict[str, str] = {t.field: t.header for t in TOKEN_IDS}
+
+class EnforcementField(NamedTuple):
+    field: str  # system custom field (log column)
+    header: str  # request header the operator's VCL sets
+    label: str
+    description: str
+    chars: int  # longest value the VCL emits
+
+
+# Content Security enforcement outcome, stamped on the request by the operator's
+# VCL (block / throttle / rate-limit checks) and logged as-is. ``cs_status`` is
+# one of allowed / blocked / throttled / check_failed / counted / rate_limited.
+# The mode says whether the status was enforced (ENFORCE) or only recorded (WARN),
+# so reports must not treat a WARN ``blocked`` as a blocked request.
+ENFORCEMENT_FIELDS: tuple[EnforcementField, ...] = (
+    EnforcementField(
+        "cs_status",
+        "req.http.cs-status",
+        "Enforcement Status",
+        "Content Security outcome: allowed, blocked, throttled, check_failed, counted or rate_limited.",
+        12,
+    ),
+    EnforcementField(
+        "cs_mode",
+        "req.http.cs-mode",
+        "Block Mode",
+        "Whether the block/throttle result was enforced (ENFORCE) or only recorded (WARN).",
+        7,
+    ),
+    EnforcementField(
+        "cs_rl_mode",
+        "req.http.cs-rl-mode",
+        "Rate Limit Mode",
+        "Whether the rate-limit result was enforced (ENFORCE) or only recorded (WARN).",
+        7,
+    ),
+    EnforcementField(
+        "cs_pace_kbps",
+        "req.http.cs-pace-kbps",
+        "Throttle Rate (KB/s)",
+        "Effective throttle rate in KB/s; only set when the request was throttled.",
+        6,
+    ),
+)
+
+# Field name → header it logs; drives the per-field scrub in fastly_api. The
+# enforcement headers are included so a client can't forge them either (the
+# operator's VCL sets them after this scrub runs).
+TOKEN_FIELD_HEADERS: dict[str, str] = {
+    **{t.field: t.header for t in TOKEN_IDS},
+    **{e.field: e.header for e in ENFORCEMENT_FIELDS},
+}
 
 _TOKEN_FIELD_NAMES = set(TOKEN_FIELD_HEADERS)
 
@@ -67,15 +117,41 @@ def _field_def(t: TokenId) -> dict[str, Any]:
     }
 
 
-_TOKEN_CUSTOM_FIELDS: list[dict[str, Any]] = [_field_def(t) for t in TOKEN_IDS]
+def _enforcement_field_def(e: EnforcementField) -> dict[str, Any]:
+    # "deliver" stage: the outcome is only known after vcl_recv's capture has run
+    # (the check restarts the request), so it is promoted in vcl_deliver instead.
+    return {
+        "name": e.field,
+        "label": e.label,
+        "description": e.description,
+        "vcl_log_expression": e.header,
+        "collection_stage": "deliver",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": e.chars + 8,
+        "byte_limit": e.chars * 6,
+        "enabled": True,
+    }
+
+
+_TOKEN_CUSTOM_FIELDS: list[dict[str, Any]] = [_field_def(t) for t in TOKEN_IDS] + [
+    _enforcement_field_def(e) for e in ENFORCEMENT_FIELDS
+]
 
 
 def configured_token_fields(token_cfg: dict | None) -> frozenset[str]:
-    """Names of the token fields to log: Token enabled AND that id's expression set."""
+    """Names of the token fields to log: Token enabled AND that id's expression set.
+
+    The enforcement fields are added when ``token_cfg["enforcement"]`` is true: the
+    operator's VCL sets those headers, so there is no expression to configure.
+    """
     token_cfg = token_cfg if isinstance(token_cfg, dict) else {}
     if not token_cfg.get("enabled"):
         return frozenset()
-    return frozenset(t.field for t in TOKEN_IDS if (token_cfg.get(t.config_key) or "").strip())
+    names = {t.field for t in TOKEN_IDS if (token_cfg.get(t.config_key) or "").strip()}
+    if token_cfg.get("enforcement"):
+        names.update(e.field for e in ENFORCEMENT_FIELDS)
+    return frozenset(names)
 
 
 def get_token_fields(fields: Iterable[str]) -> list[dict]:
@@ -106,11 +182,17 @@ def _validate_expr(expr: str) -> list[str]:
     return [e for e in validate_custom_field(candidate, []) if not e.startswith("WARN:")]
 
 
-def validate_token_exprs(subscriber_id_expr: str | None, content_id_expr: str | None) -> list[str]:
-    """Validate the Token expressions: at least one set, and each set one safe."""
+def validate_token_exprs(
+    subscriber_id_expr: str | None, content_id_expr: str | None, *, enforcement: bool = False
+) -> list[str]:
+    """Validate the Token expressions: each set one safe, and something selected.
+
+    A Content Security config needs at least one of: a subscriber id expression, a
+    content id expression, or the enforcement log (which needs no expression).
+    """
     exprs = {SUBSCRIBER_ID: (subscriber_id_expr or "").strip(), CONTENT_ID: (content_id_expr or "").strip()}
-    if not any(exprs.values()):
-        return ["Configure at least one of Subscriber ID or Content ID"]
+    if not enforcement and not any(exprs.values()):
+        return ["Configure at least one of Subscriber ID, Content ID or the enforcement log"]
     errors: list[str] = []
     for t, expr in exprs.items():
         if expr:
@@ -124,7 +206,7 @@ def generate_token_vcl_lines(subscriber_id_expr: str | None = None, content_id_e
     Callers emit these inside the edge-only block, after the header scrub (which
     unsets the headers) and BEFORE ``get_capture_vcl_statements``.
     """
-    errors = validate_token_exprs(subscriber_id_expr, content_id_expr)
+    errors = validate_token_exprs(subscriber_id_expr, content_id_expr, enforcement=True)
     if errors:
         raise ValueError(f"Invalid token expression: {'; '.join(errors)}")
     lines = ["# Token Extraction (vcl_recv) — must precede field capture"]

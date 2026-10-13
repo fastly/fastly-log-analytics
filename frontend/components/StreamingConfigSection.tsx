@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { Checkbox } from '@/components/ui/checkbox'
 import { CmcdConfigSection } from '@/components/CmcdConfigSection'
-import { TokenConfigSection, tokenConfigError } from '@/components/TokenConfigSection'
+import { ContentSecurityConfigSection } from '@/components/TokenConfigSection'
 
 interface StreamingConfigSectionProps {
   cmcdEnabled: boolean
@@ -13,12 +13,19 @@ interface StreamingConfigSectionProps {
   onCmcdModeChange: (mode: string) => void
   cmcdVersion: number
   onCmcdVersionChange: (version: number) => void
+  /** Content Security master switch (was the Token checkbox). */
   tokenEnabled: boolean
   onTokenEnabledChange: (enabled: boolean) => void
+  subscriberIdEnabled: boolean
+  onSubscriberIdEnabledChange: (enabled: boolean) => void
   subscriberIdExpr: string
   onSubscriberIdExprChange: (expr: string) => void
+  contentIdEnabled: boolean
+  onContentIdEnabledChange: (enabled: boolean) => void
   contentIdExpr: string
   onContentIdExprChange: (expr: string) => void
+  enforcementEnabled: boolean
+  onEnforcementEnabledChange: (enabled: boolean) => void
   /** Enables live VCL lint of the token expressions (omit before provisioning). */
   serviceId?: string
   disabled?: boolean
@@ -26,7 +33,7 @@ interface StreamingConfigSectionProps {
 
 /**
  * STREAMING group: two independently toggleable sub-options, CMCD Metrics and
- * Token, each deploying its own VCL. The group checkbox shows their combined
+ * Content Security, each deploying its own VCL. The group checkbox shows their combined
  * state (checked = both, indeterminate = one). Checking it enables both and
  * opens any child that still needs input; unchecking disables both.
  */
@@ -47,8 +54,12 @@ export function StreamingConfigSection(props: StreamingConfigSectionProps) {
     }
     props.onCmcdEnabledChange(true)
     props.onTokenEnabledChange(true)
-    // CMCD works with its defaults; Token can't deploy without an id expression.
-    if (tokenConfigError(props.subscriberIdExpr, props.contentIdExpr) !== null) {
+    // Enabling Content Security checks all three of its options.
+    props.onSubscriberIdEnabledChange(true)
+    props.onContentIdEnabledChange(true)
+    props.onEnforcementEnabledChange(true)
+    // CMCD works with its defaults; a checked ID can't deploy without an expression.
+    if (props.subscriberIdExpr.trim() === '' || props.contentIdExpr.trim() === '') {
       setIsOpen(true)
       setTokenOpen(true)
     }
@@ -99,13 +110,19 @@ export function StreamingConfigSection(props: StreamingConfigSectionProps) {
             open={cmcdOpen}
             onOpenChange={setCmcdOpen}
           />
-          <TokenConfigSection
+          <ContentSecurityConfigSection
             enabled={props.tokenEnabled}
             onEnabledChange={props.onTokenEnabledChange}
+            subscriberIdEnabled={props.subscriberIdEnabled}
+            onSubscriberIdEnabledChange={props.onSubscriberIdEnabledChange}
             subscriberIdExpr={props.subscriberIdExpr}
             onSubscriberIdExprChange={props.onSubscriberIdExprChange}
+            contentIdEnabled={props.contentIdEnabled}
+            onContentIdEnabledChange={props.onContentIdEnabledChange}
             contentIdExpr={props.contentIdExpr}
             onContentIdExprChange={props.onContentIdExprChange}
+            enforcementEnabled={props.enforcementEnabled}
+            onEnforcementEnabledChange={props.onEnforcementEnabledChange}
             serviceId={props.serviceId}
             disabled={props.disabled}
             open={tokenOpen}

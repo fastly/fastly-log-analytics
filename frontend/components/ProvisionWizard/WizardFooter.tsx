@@ -7,7 +7,7 @@ import { ChevronLeft, Loader2 } from "lucide-react";
 import { panelDialogFooter } from "@/lib/panel-dialog";
 import type { WizardState } from "./useWizardState";
 import type { Step } from "./types";
-import { tokenConfigError } from "@/components/TokenConfigSection";
+import { contentSecurityConfigError } from "@/components/TokenConfigSection";
 
 export function WizardFooter({ s }: { s: WizardState }) {
   const {
@@ -136,7 +136,16 @@ export function WizardFooter({ s }: { s: WizardState }) {
           {step === "fields" && (
             <Button
               onClick={() => setStep("execute")}
-              disabled={config.token_enabled && tokenConfigError(config.token_subscriber_id_expr, config.token_content_id_expr) !== null}
+              disabled={
+                config.token_enabled &&
+                contentSecurityConfigError({
+                  subscriberIdEnabled: config.token_subscriber_id_enabled,
+                  subscriberIdExpr: config.token_subscriber_id_expr,
+                  contentIdEnabled: config.token_content_id_enabled,
+                  contentIdExpr: config.token_content_id_expr,
+                  enforcementEnabled: config.token_enforcement,
+                }) !== null
+              }
               className="h-9 text-xs"
             >
               Review Settings

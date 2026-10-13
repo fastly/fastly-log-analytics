@@ -315,6 +315,30 @@ def test_update_passes_token_settings(mock_get_source, mock_update, mock_save_co
 
 
 @patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_passes_token_enforcement(mock_get_source, mock_update, mock_save_config, mock_load_config):
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+    captured_cfg = {}
+
+    def fake_generator(cfg, token):
+        captured_cfg.update(cfg)
+        yield {"type": "done", "changed": False}
+
+    mock_update.side_effect = fake_generator
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={"token_enabled": True, "token_subscriber_id_expr": "req.http.X-Sub", "token_enforcement": True},
+    )
+
+    assert response.status_code == 200
+    assert captured_cfg["token_enforcement"] is True
+
+
+@patch("backend.config.load_config")
 @patch("backend.provision.update_logging_endpoint")
 def test_update_rejects_invalid_content_id_expression(mock_update, mock_load_config):
     mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
@@ -342,3 +366,25 @@ def test_update_rejects_token_with_no_ids(mock_update, mock_load_config):
     assert response.status_code == 400
     assert "at least one" in response.json()["detail"]["error"]
     mock_update.assert_not_called()
+
+
+@patch("backend.config.load_config")
+@patch("backend.config.save_config")
+@patch("backend.provision.update_logging_endpoint")
+@patch("backend.core.duckdb.get_source_for_service")
+def test_update_allows_enforcement_only_content_security(mock_get_source, mock_update, mock_save, mock_load_config):
+    mock_get_source.return_value = None
+    mock_load_config.return_value = {"service_id": "svc-token", "log_period": 60, "provisioning": {}}
+    mock_update.side_effect = lambda cfg, token: iter([{"type": "done", "changed": False}])
+
+    response = client.post(
+        "/api/services/svc-token/logging-settings/update",
+        params={
+            "token_enabled": True,
+            "token_subscriber_id_expr": "",
+            "token_content_id_expr": "",
+            "token_enforcement": True,
+        },
+    )
+
+    assert response.status_code == 200

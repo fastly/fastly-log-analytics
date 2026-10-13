@@ -59,6 +59,10 @@ _AUTO_INJECTED_NAMES: set[str] = {
     # Token fields
     "cs_sub_id",
     "cs_content_id",
+    "cs_status",
+    "cs_mode",
+    "cs_rl_mode",
+    "cs_pace_kbps",
 }
 
 
@@ -81,6 +85,8 @@ class TokenConfig:
     enabled: bool = False
     subscriber_id_expr: str = ""
     content_id_expr: str = ""
+    # Log the Content Security enforcement outcome (cs_status etc.) the operator's VCL sets.
+    enforcement: bool = False
 
 
 @dataclass(frozen=True)
@@ -179,7 +185,9 @@ class FeatureState:
         if self.token.enabled:
             from backend.provision.token_fields import validate_token_exprs
 
-            token_errors = validate_token_exprs(self.token.subscriber_id_expr, self.token.content_id_expr)
+            token_errors = validate_token_exprs(
+                self.token.subscriber_id_expr, self.token.content_id_expr, enforcement=self.token.enforcement
+            )
             if token_errors:
                 raise ValueError(f"token config is invalid: {'; '.join(token_errors)}")
 
@@ -279,6 +287,7 @@ class FeatureState:
             enabled=token_enabled,
             subscriber_id_expr=(token_cfg.get("subscriber_id_expr") or "").strip(),
             content_id_expr=(token_cfg.get("content_id_expr") or "").strip(),
+            enforcement=bool(token_cfg.get("enforcement", False)),
         )
 
         # Extract and construct Scoring config
@@ -440,6 +449,7 @@ class FeatureState:
                 "enabled": self.token.enabled,
                 "subscriber_id_expr": self.token.subscriber_id_expr,
                 "content_id_expr": self.token.content_id_expr,
+                "enforcement": self.token.enforcement,
             },
             "scoring_enabled": self.scoring.enabled,
             "scoring_domain": self.scoring.domain,

@@ -121,10 +121,16 @@ export function FieldsStep({ s }: { s: WizardState }) {
                 onCmcdVersionChange={(v) => setConfig((prev) => ({ ...prev, cmcd_version: v }))}
                 tokenEnabled={config.token_enabled}
                 onTokenEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_enabled: v }))}
+                subscriberIdEnabled={config.token_subscriber_id_enabled}
+                onSubscriberIdEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_subscriber_id_enabled: v }))}
                 subscriberIdExpr={config.token_subscriber_id_expr}
                 onSubscriberIdExprChange={(v) => setConfig((prev) => ({ ...prev, token_subscriber_id_expr: v }))}
+                contentIdEnabled={config.token_content_id_enabled}
+                onContentIdEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_content_id_enabled: v }))}
                 contentIdExpr={config.token_content_id_expr}
                 onContentIdExprChange={(v) => setConfig((prev) => ({ ...prev, token_content_id_expr: v }))}
+                enforcementEnabled={config.token_enforcement}
+                onEnforcementEnabledChange={(v) => setConfig((prev) => ({ ...prev, token_enforcement: v }))}
               />
             </div>
           </div>

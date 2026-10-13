@@ -660,7 +660,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         from backend.provision.token_fields import resolve_token_exprs, validate_token_exprs
 
         sub_expr, content_expr = resolve_token_exprs(None, req.token_subscriber_id_expr, req.token_content_id_expr)
-        expr_errors = validate_token_exprs(sub_expr, content_expr)
+        expr_errors = validate_token_exprs(sub_expr, content_expr, enforcement=bool(req.token_enforcement))
         if expr_errors:
             raise HTTPException(
                 status_code=400, detail={"error": f"Invalid Token configuration: {'; '.join(expr_errors)}"}
@@ -669,6 +669,7 @@ def provision_execute(req: ProvisionExecuteRequest):
             "enabled": True,
             "subscriber_id_expr": sub_expr,
             "content_id_expr": content_expr,
+            "enforcement": bool(req.token_enforcement),
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
@@ -1081,6 +1082,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
             "enabled": True,
             "subscriber_id_expr": (body.get("token_subscriber_id_expr") or "").strip(),
             "content_id_expr": (body.get("token_content_id_expr") or "").strip(),
+            "enforcement": bool(body.get("token_enforcement")),
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 

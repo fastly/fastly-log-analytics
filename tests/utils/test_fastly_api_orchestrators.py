@@ -1349,6 +1349,45 @@ def test_update_logging_endpoint_enables_token_with_field():
     assert "cs_sub_id" in {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
 
 
+def test_update_logging_endpoint_enforcement_adds_fields_and_keeps_choice():
+    stored = {"logging_enabled": True, "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []}}
+    base = {"logging_service_id": "svc-id", "endpoint_name": "MyEndpoint", "log_period": 60, "token_enabled": True}
+
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {**base, "token_subscriber_id_expr": "req.http.X-Sub", "token_enforcement": True}, stored
+    )
+    names = {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert saved_cfg["token"]["enforcement"] is True
+    assert {"cs_sub_id", "cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps"} <= names
+
+    # Omitting the flag keeps the stored choice; an explicit False strips the fields.
+    kept, _ = _run_update_logging_endpoint({**base}, {**stored, "token": saved_cfg["token"]})
+    assert kept["token"]["enforcement"] is True
+    off, _ = _run_update_logging_endpoint({**base, "token_enforcement": False}, {**stored, "token": saved_cfg["token"]})
+    assert off["token"]["enforcement"] is False
+    assert "cs_status" not in {cf["name"] for cf in off["log_fields"]["custom_fields"]}
+
+
+def test_update_logging_endpoint_enforcement_without_any_id():
+    """Content Security may log only the enforcement outcome: no id expression needed."""
+    stored = {"logging_enabled": True, "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []}}
+    saved_cfg, _ = _run_update_logging_endpoint(
+        {
+            "logging_service_id": "svc-id",
+            "endpoint_name": "MyEndpoint",
+            "log_period": 60,
+            "token_enabled": True,
+            "token_subscriber_id_expr": "",
+            "token_content_id_expr": "",
+            "token_enforcement": True,
+        },
+        stored,
+    )
+    names = {cf["name"] for cf in saved_cfg["log_fields"]["custom_fields"]}
+    assert {"cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps"} <= names
+    assert not names & {"cs_sub_id", "cs_content_id"}
+
+
 def test_update_logging_endpoint_disables_token_and_strips_field():
     stored = {
         "logging_enabled": True,

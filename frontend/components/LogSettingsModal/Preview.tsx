@@ -24,6 +24,7 @@ interface ReviewStepProps {
   tokenEnabled?: boolean
   subscriberIdExpr?: string
   contentIdExpr?: string
+  enforcementEnabled?: boolean
 }
 
 export function ReviewStep({
@@ -41,6 +42,7 @@ export function ReviewStep({
   tokenEnabled,
   subscriberIdExpr,
   contentIdExpr,
+  enforcementEnabled,
 }: ReviewStepProps) {
   return (
     <div className="space-y-6">
@@ -62,7 +64,7 @@ export function ReviewStep({
                 ? `Enabled (v${cmcdVersion ?? 1}, ${cmcdMode === 'headers' ? 'Headers' : 'Query String'})`
                 : 'Disabled'}
             </p>
-            <p className="text-sm font-medium">Token: {tokenEnabled ? 'Enabled' : 'Disabled'}</p>
+            <p className="text-sm font-medium">Content Security: {tokenEnabled ? 'Enabled' : 'Disabled'}</p>
             {tokenEnabled && (
               <>
                 {[
@@ -78,6 +80,9 @@ export function ReviewStep({
                     )}
                   </p>
                 ))}
+                <p className="text-sm font-medium pl-3">
+                  Enforcement outcome: {enforcementEnabled ? 'Logged' : <span className="text-muted-foreground">Not logged</span>}
+                </p>
               </>
             )}
           </div>

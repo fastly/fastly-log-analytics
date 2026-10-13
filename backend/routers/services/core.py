@@ -597,6 +597,7 @@ def api_service_logging_settings(service_id: str):
                 enabled=bool(token_block.get("enabled")),
                 subscriber_id_expr=token_block.get("subscriber_id_expr"),
                 content_id_expr=token_block.get("content_id_expr"),
+                enforcement=bool(token_block.get("enforcement")),
             ),
         }
         _logging_settings_cache[service_id] = cacheable
@@ -772,6 +773,7 @@ def api_service_update_logging_settings(
     token_enabled: bool | None = Query(default=None),
     token_subscriber_id_expr: str | None = Query(default=None, max_length=512),
     token_content_id_expr: str | None = Query(default=None, max_length=512),
+    token_enforcement: bool | None = Query(default=None),
 ):
     from backend import config as svcconfig
     from backend.provision.token_fields import resolve_token_exprs, validate_token_exprs
@@ -802,8 +804,10 @@ def api_service_update_logging_settings(
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
     if token_enabled:
+        stored_token = cfg.get("token") or {}
         expr_errors = validate_token_exprs(
-            *resolve_token_exprs(cfg.get("token"), token_subscriber_id_expr, token_content_id_expr)
+            *resolve_token_exprs(stored_token, token_subscriber_id_expr, token_content_id_expr),
+            enforcement=bool(token_enforcement if token_enforcement is not None else stored_token.get("enforcement")),
         )
         if expr_errors:
             raise HTTPException(
@@ -834,6 +838,7 @@ def api_service_update_logging_settings(
                 "token_enabled": token_enabled,
                 "token_subscriber_id_expr": token_subscriber_id_expr,
                 "token_content_id_expr": token_content_id_expr,
+                "token_enforcement": token_enforcement,
             }
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
@@ -876,6 +881,7 @@ def api_service_update_logging_settings(
                                     enabled=bool(deployed_token.get("enabled")),
                                     subscriber_id_expr=deployed_token.get("subscriber_id_expr"),
                                     content_id_expr=deployed_token.get("content_id_expr"),
+                                    enforcement=bool(deployed_token.get("enforcement")),
                                 ),
                             }
                         else:
@@ -920,6 +926,8 @@ def api_service_update_logging_settings(
                                 _details["token_subscriber_id_expr"] = token_subscriber_id_expr
                             if token_content_id_expr is not None:
                                 _details["token_content_id_expr"] = token_content_id_expr
+                            if token_enforcement is not None:
+                                _details["token_enforcement"] = token_enforcement
                             if update_format:
                                 _details["log_fields_deployed"] = True
 

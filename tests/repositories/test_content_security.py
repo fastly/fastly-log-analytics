@@ -24,6 +24,8 @@ _ALL_COLS = {
     "edge": "BOOLEAN",
     "cs_content_id": "VARCHAR",
 }
+# Opt-in columns (the tests above add/remove their own on _ALL_COLS).
+_ENF_TYPES = {"cs_status": "VARCHAR", "cs_mode": "VARCHAR", "cs_rl_mode": "VARCHAR"}
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +38,7 @@ def _clear_cache():
 def _make_table(con, src, rows, cols=None):
     cols = cols or list(_ALL_COLS)
     table = _safe_table(src["name"])
-    con.execute(f"CREATE TABLE {table} ({', '.join(f'{c} {_ALL_COLS[c]}' for c in cols)})")
+    con.execute(f"CREATE TABLE {table} ({', '.join(f'{c} {({**_ALL_COLS, **_ENF_TYPES})[c]}' for c in cols)})")
     for r in rows:
         con.execute(
             f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
@@ -420,3 +422,45 @@ def test_subscriber_ips_unavailable_without_token_column(in_memory_duckdb, test_
 
     assert res["available"] is False
     assert res["ips"] == []
+
+
+# ── enforcement outcomes ─────────────────────────────────────────────────────
+
+_ENF_COLS = [*_ALL_COLS, *_ENF_TYPES]
+
+
+def _enf(minutes_ago, status, mode=None, rl_mode=None, **kw):
+    return {**_row(minutes_ago, **kw), "cs_status": status, "cs_mode": mode, "cs_rl_mode": rl_mode}
+
+
+def test_enforcement_separates_enforced_from_warn_only(in_memory_duckdb, test_service_source):
+    rows = [
+        _enf(10, "blocked", mode="ENFORCE"),
+        _enf(10, "blocked", mode="WARN"),
+        _enf(10, "throttled", mode="ENFORCE"),
+        _enf(40, "rate_limited", rl_mode="ENFORCE"),
+        _enf(40, "rate_limited", rl_mode="WARN"),
+        # A block-mode of ENFORCE says nothing about a rate-limit outcome.
+        _enf(40, "rate_limited", mode="ENFORCE", rl_mode="WARN"),
+        _enf(20, "counted", rl_mode="ENFORCE"),
+        _enf(20, "allowed", mode="ENFORCE"),
+        _enf(20, "", mode="ENFORCE"),  # no enforcement ran
+        _enf(20, "blocked", mode="ENFORCE", edge=False),  # shield line: not counted
+    ]
+    _make_table(in_memory_duckdb, test_service_source, rows, cols=_ENF_COLS)
+    res = _call(in_memory_duckdb, test_service_source)
+
+    by_status = {r["status"]: r for r in res["enforcement"]}
+    assert set(by_status) == {"blocked", "throttled", "rate_limited", "counted", "allowed"}
+    assert (by_status["blocked"]["requests"], by_status["blocked"]["enforced"]) == (2, 1)
+    assert (by_status["throttled"]["requests"], by_status["throttled"]["enforced"]) == (1, 1)
+    assert (by_status["rate_limited"]["requests"], by_status["rate_limited"]["enforced"]) == (3, 1)
+    assert by_status["counted"]["enforced"] == 0 and by_status["allowed"]["enforced"] == 0
+    assert sum(p["requests"] for p in res["enforcement_ts"]) == 8
+
+
+def test_enforcement_is_empty_without_the_status_column(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, _fixture_rows())
+    res = _call(in_memory_duckdb, test_service_source)
+    assert res["fields"]["cs_status"] is False
+    assert res["enforcement"] == [] and res["enforcement_ts"] == []

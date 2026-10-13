@@ -67,8 +67,11 @@ export interface ProvisionConfig {
   cmcd_mode: string;
   cmcd_version: number;
   token_enabled: boolean;
+  token_subscriber_id_enabled: boolean;
   token_subscriber_id_expr: string;
+  token_content_id_enabled: boolean;
   token_content_id_expr: string;
+  token_enforcement: boolean;
   logging_enabled: boolean;
   rum_enabled: boolean;
   log_retention_days: number;
@@ -109,8 +112,11 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cmcd_mode: "query_string",
   cmcd_version: 1,
   token_enabled: false,
+  token_subscriber_id_enabled: false,
   token_subscriber_id_expr: "",
+  token_content_id_enabled: false,
   token_content_id_expr: "",
+  token_enforcement: false,
   logging_enabled: true,
   rum_enabled: false,
   log_retention_days: 30,

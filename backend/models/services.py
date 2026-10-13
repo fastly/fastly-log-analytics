@@ -109,6 +109,7 @@ class TokenSettingsResponse(BaseModel):
     enabled: bool = False
     subscriber_id_expr: str | None = None
     content_id_expr: str | None = None
+    enforcement: bool = False
 
 
 class LoggingSettingsResponse(BaseResponse):

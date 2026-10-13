@@ -204,7 +204,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
 
         # Token extraction likewise feeds capture (x-cs-sub-id / x-cs-content-id →
         # x-fos-edge-data:cs_sub_id / cs_content_id), so it must also come first.
-        if state.token.enabled:
+        if state.token.enabled and (state.token.subscriber_id_expr or state.token.content_id_expr):
             from backend.provision.token_fields import generate_token_vcl_lines
 
             for line in generate_token_vcl_lines(state.token.subscriber_id_expr, state.token.content_id_expr):

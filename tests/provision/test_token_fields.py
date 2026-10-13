@@ -22,6 +22,7 @@ from backend.provision.token_fields import (
     _TOKEN_FIELD_NAMES,
     CONTENT_ID,
     CONTENT_ID_FIELD,
+    ENFORCEMENT_FIELDS,
     SUBSCRIBER_ID,
     SUBSCRIBER_ID_FIELD,
     configured_token_fields,
@@ -68,8 +69,12 @@ def test_valid_combinations_pass(sub, cid):
 
 
 def test_at_least_one_id_required():
-    assert validate_token_exprs("", "  ") == ["Configure at least one of Subscriber ID or Content ID"]
+    msg = ["Configure at least one of Subscriber ID, Content ID or the enforcement log"]
+    assert validate_token_exprs("", "  ") == msg
     assert validate_token_exprs(None, None)
+    # The enforcement log needs no expression, so it counts as a selection on its own.
+    assert validate_token_exprs("", "", enforcement=True) == []
+    assert validate_token_exprs("a; b", "", enforcement=True)  # but a set expression must still be safe
 
 
 @pytest.mark.parametrize(
@@ -279,3 +284,63 @@ def test_declarative_state_rejects_invalid_token(token):
             token=token,
             log_fields=LogFieldsConfig(),
         )
+
+
+# ── enforcement fields (Content Security outcome, set by the operator's VCL) ──
+
+
+_ENFORCEMENT = frozenset({e.field for e in ENFORCEMENT_FIELDS})
+
+
+def test_enforcement_fields_need_token_enabled_and_the_flag():
+    assert configured_token_fields({"enabled": True, "subscriber_id_expr": _SUB_EXPR}) == {SUBSCRIBER_ID_FIELD}
+    assert configured_token_fields({"enabled": False, "enforcement": True}) == frozenset()
+    with_flag = configured_token_fields({"enabled": True, "subscriber_id_expr": _SUB_EXPR, "enforcement": True})
+    assert with_flag == {SUBSCRIBER_ID_FIELD} | _ENFORCEMENT
+
+
+def test_enforcement_fields_are_deliver_stage_strings_reading_the_operators_headers():
+    defs = {cf["name"]: cf for cf in get_token_fields(_ENFORCEMENT)}
+    assert set(defs) == {"cs_status", "cs_mode", "cs_rl_mode", "cs_pace_kbps"}
+    assert defs["cs_status"]["vcl_log_expression"] == "req.http.cs-status"
+    assert defs["cs_rl_mode"]["vcl_log_expression"] == "req.http.cs-rl-mode"
+    assert all(cf["collection_stage"] == "deliver" and cf["duckdb_type"] == "VARCHAR" for cf in defs.values())
+    # "check_failed" / "rate_limited" are the longest values; the cap must hold them.
+    assert defs["cs_status"]["byte_limit"] >= len("check_failed")
+
+
+def test_enforcement_fields_follow_token_fields_in_canonical_order():
+    out = reconcile_token_custom_fields([_USER_FIELD], fields=_ENFORCEMENT | _BOTH)
+    assert [cf["name"] for cf in out] == [
+        "my_custom",
+        SUBSCRIBER_ID_FIELD,
+        CONTENT_ID_FIELD,
+        "cs_status",
+        "cs_mode",
+        "cs_rl_mode",
+        "cs_pace_kbps",
+    ]
+
+
+def test_cfg_reconcile_reasserts_and_drops_enforcement_fields():
+    cfg = {"token": {"enabled": True, "subscriber_id_expr": _SUB_EXPR, "enforcement": True}}
+    names = {cf["name"] for cf in reconcile_cfg_system_custom_fields(cfg)}
+    assert _ENFORCEMENT <= names
+    cfg["token"]["enforcement"] = False
+    names = {cf["name"] for cf in reconcile_cfg_system_custom_fields(cfg)}
+    assert not _ENFORCEMENT & names
+
+
+def test_enforcement_headers_are_scrubbed_only_while_their_field_is_enabled():
+    on = get_scrub_vcl_statements({"custom_fields": get_token_fields(_ENFORCEMENT)})
+    assert {"unset req.http.cs-status;", "unset req.http.cs-rl-mode;"} <= set(on)
+    assert "unset req.http.cs-status;" not in get_scrub_vcl_statements({"custom_fields": []})
+
+
+def test_enforcement_fields_are_promoted_in_vcl_deliver():
+    from backend.provision.fastly_api import generate_capture_vcl
+
+    snippets = generate_capture_vcl({"groups": ["A"], "custom_fields": get_token_fields(_ENFORCEMENT)})
+    deliver = snippets["deliver"]
+    assert 'req.http.cs-status != ""' in deliver
+    assert "set req.http.x-fos-edge-data:cs_status = req.http.cs-status;" in deliver

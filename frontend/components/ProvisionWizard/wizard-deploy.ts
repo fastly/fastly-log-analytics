@@ -3,6 +3,7 @@
 import { adminFetch, client } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { downloadBlob } from "@/lib/utils";
+import { contentSecurityPayload } from "@/components/TokenConfigSection";
 import type { Service } from "@/stores/serviceStore";
 import type {
   FosStatus,
@@ -202,6 +203,13 @@ export function runDeploy(args: DeployArgs) {
   const { token, selectedService, config, setIsDeploying, start } = args;
   if (!selectedService) return;
   setIsDeploying(true);
+  const csPayload = contentSecurityPayload(config.token_enabled, {
+    subscriberIdEnabled: config.token_subscriber_id_enabled,
+    subscriberIdExpr: config.token_subscriber_id_expr,
+    contentIdEnabled: config.token_content_id_enabled,
+    contentIdExpr: config.token_content_id_expr,
+    enforcementEnabled: config.token_enforcement,
+  });
   const body: Record<string, any> = {
     token,
     service_id: selectedService.id,
@@ -226,9 +234,10 @@ export function runDeploy(args: DeployArgs) {
     cmcd_enabled: config.cmcd_enabled,
     cmcd_mode: config.cmcd_mode,
     cmcd_version: config.cmcd_version,
-    token_enabled: config.token_enabled,
-    token_subscriber_id_expr: config.token_enabled ? config.token_subscriber_id_expr.trim() : null,
-    token_content_id_expr: config.token_enabled ? config.token_content_id_expr.trim() : null,
+    token_enabled: csPayload.enabled,
+    token_subscriber_id_expr: csPayload.enabled ? csPayload.subscriber : null,
+    token_content_id_expr: csPayload.enabled ? csPayload.content : null,
+    token_enforcement: csPayload.enforcement,
     logging_enabled: config.logging_enabled,
     rum_enabled: config.rum_enabled,
     rum_custom_condition: config.rum_custom_condition,

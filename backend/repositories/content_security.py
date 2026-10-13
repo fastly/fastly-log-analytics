@@ -2,7 +2,8 @@
 
 Backs the Streaming → Content Security tab: top countries / referers / hosts, top subscriber ids by distinct
 client IPs (``cs_sub_id``, Streaming → Token), every proxy type / description (``p_type`` / ``p_desc``, Group I), and
-edge-vs-shield bandwidth, optionally narrowed to one content id (``cs_content_id``, Streaming → Token → Content ID).
+edge-vs-shield bandwidth, the enforcement outcome (``cs_status`` / ``cs_mode`` / ``cs_rl_mode``, the block, throttle
+and rate-limit result the operator's VCL stamps on each request), optionally narrowed to one content id (``cs_content_id``, Streaming → Token → Content ID).
 
 Subscriber ids are returned raw; analyst masking happens in the router, after
 this module's response cache (which is shared across roles).
@@ -58,11 +59,21 @@ _OPTIONAL_COLS = (
     "cs_content_id",
     "ip",
     "cs_sub_id",
+    "cs_status",
+    "cs_mode",
+    "cs_rl_mode",
     *_ALL_VALUES_SECTIONS,
 )
 
 # Cap on the content-id picker's option list.
 _CONTENT_ID_OPTIONS_LIMIT = 100
+
+
+def _enforced_expr(fields: dict[str, bool]) -> str:
+    """SQL predicate: the row's status was enforced rather than only recorded (WARN)."""
+    block = "cs_mode = 'ENFORCE'" if fields["cs_mode"] else "false"
+    rate = "cs_rl_mode = 'ENFORCE'" if fields["cs_rl_mode"] else "false"
+    return f"((cs_status IN ('blocked', 'throttled') AND {block}) OR (cs_status = 'rate_limited' AND {rate}))"
 
 
 def _response_cache_key(
@@ -263,6 +274,52 @@ def get_content_security(
                 for r in rows
             ]
             timer.mark("top_subscribers", _t)
+
+        # ── Enforcement outcomes (block / throttle / rate limit) ──────────
+        # ``cs_status`` is set by the operator's VCL. A status only counts as
+        # *enforced* when its mode column says ENFORCE (cs_mode for blocked /
+        # throttled, cs_rl_mode for rate_limited); WARN rows are recorded but
+        # the request was served, so the report must not claim they were stopped.
+        results["enforcement"] = []
+        results["enforcement_ts"] = []
+        if fields["cs_status"]:
+            _t = _time.perf_counter()
+            enforced_expr = _enforced_expr(fields)
+            rows = runner.execute(
+                f"""
+                SELECT cs_status AS status,
+                       COUNT(*) AS requests,
+                       COUNT(*) FILTER (WHERE {enforced_expr}) AS enforced,
+                       {users_agg} AS users,
+                       {bytes_agg} AS bytes
+                FROM {t}
+                WHERE {edge_where} AND cs_status IS NOT NULL AND cs_status != ''
+                GROUP BY 1
+                ORDER BY requests DESC, status
+                """
+            ).fetchall()
+            results["enforcement"] = [
+                {
+                    "status": r[0],
+                    "requests": r[1],
+                    "enforced": r[2],
+                    "users": r[3],
+                    "bytes": int(r[4]) if r[4] is not None else None,
+                }
+                for r in rows
+            ]
+            rows = runner.execute(
+                f"""
+                SELECT strftime({_bucket_expr(bucket_seconds * 1000)}, '%Y-%m-%d %H:%M:%S') AS bucket,
+                       cs_status AS status, COUNT(*) AS requests
+                FROM {t}
+                WHERE {edge_where} AND cs_status IS NOT NULL AND cs_status != ''
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+                """
+            ).fetchall()
+            results["enforcement_ts"] = [{"bucket": r[0], "status": r[1], "requests": r[2]} for r in rows]
+            timer.mark("enforcement", _t)
 
         # ── Edge vs shield bandwidth ──────────────────────────────────────
         results["bandwidth_ts"] = []
