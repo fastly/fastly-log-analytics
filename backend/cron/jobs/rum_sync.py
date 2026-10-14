@@ -321,6 +321,13 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                     except Exception as commit_err:
                         logger.warning("RUM post-sync commit failed for %s: %s", service_id, commit_err)
 
+    except RuntimeError as e:
+        if "is already running" in str(e):
+            logger.info("[rum_sync] %s: skipping — %s", service_id, str(e))
+            return
+        logger.error(f"RUM sync failed: {e}", exc_info=True)
+        if run_id:
+            add_progress(run_id, {"type": "error", "message": f"RUM sync failed: {e}"})
     except Exception as e:
         logger.error(f"RUM sync failed: {e}", exc_info=True)
         if run_id:
