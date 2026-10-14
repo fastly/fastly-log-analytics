@@ -1395,10 +1395,20 @@ def test_cron_log_hooks_bust_cache(monkeypatch):
     _cron_schedule_cache["svc-1"] = (123.45, {"data": "foo"})
 
     # We mock out database and publisher side-effects so we can test the cron_log hooks
-    # in complete isolation.
+    # in complete isolation. `_retry_on_locked` was removed when retry was unified
+    # (the Postgres pool is autocommit, so there's no SQLITE_BUSY equivalent to retry);
+    # the write paths now call their inner `_write()` directly, so we stub `get_con`
+    # with a cursor that satisfies every path (lease acquired, row id, running status).
+    fake_cursor = MagicMock()
+    fake_cursor.rowcount = 1
+    fake_cursor.lastrowid = 123
+    fake_cursor.fetchone.return_value = {"status": "running", "outcome_counters": None}
+    fake_cursor.fetchall.return_value = []
+    fake_con = MagicMock()
+    fake_con.execute.return_value = fake_cursor
+
     with (
-        patch("backend.core.metadata.cron_log.get_con"),
-        patch("backend.core.metadata.cron_log._retry_on_locked", return_value=123),
+        patch("backend.core.metadata.cron_log.get_con", return_value=fake_con),
         patch("backend.cron_runs_publisher.publisher.publish"),
     ):
         from backend.core.metadata.cron_log import finalize_cron_run_if_running, log_cron_run, start_cron_run

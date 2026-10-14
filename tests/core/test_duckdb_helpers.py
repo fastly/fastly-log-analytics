@@ -642,12 +642,18 @@ def test_execute_query_with_retry_raises_immediately_on_non_transient_error():
 def test_execute_query_with_retry_retries_on_transient_then_succeeds():
     """A transient `io error` followed by success → return the
     successful result. Pinned because losing the retry would surface
-    every momentary S3 hiccup as a failed dashboard render."""
+    every momentary S3 hiccup as a failed dashboard render.
+
+    Transient DuckDB failures surface as ``duckdb.IOException`` (and
+    kin), never ``RuntimeError`` — the latter is reserved for the
+    translated auth-failure, which is intentionally non-retryable."""
+    import duckdb
+
     from backend.core.duckdb import _execute_query_with_retry
 
     fake_con = MagicMock()
     fake_con.execute.side_effect = [
-        RuntimeError("IO Error: timeout"),
+        duckdb.IOException("IO Error: timeout"),
         "success",
     ]
 
@@ -661,13 +667,15 @@ def test_execute_query_with_retry_gives_up_after_max_retries():
     """After max_retries+1 attempts, the original exception is
     re-raised. Pinned because losing the bound would loop forever
     on permanent network failures."""
+    import duckdb
+
     from backend.core.duckdb import _execute_query_with_retry
 
     fake_con = MagicMock()
-    fake_con.execute.side_effect = RuntimeError("connection refused")
+    fake_con.execute.side_effect = duckdb.IOException("connection refused")
 
     with patch("time.sleep"):
-        with pytest.raises(RuntimeError, match="connection refused"):
+        with pytest.raises(duckdb.IOException, match="connection refused"):
             _execute_query_with_retry(fake_con, "SELECT 1", max_retries=2)
     # max_retries=2 → 3 total attempts (0, 1, 2)
     assert fake_con.execute.call_count == 3
