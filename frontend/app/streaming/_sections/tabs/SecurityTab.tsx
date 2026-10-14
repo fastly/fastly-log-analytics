@@ -69,6 +69,12 @@ const contentParser = parseAsString.withOptions({ history: 'replace', shallow: t
 
 const TOP_N = 10
 
+/**
+ * The Referers leaderboard shows domains, but the `referer` column holds full URLs, so a filter on a
+ * row matches any URL on that host (wildcards are ILIKE-matched server-side).
+ */
+const referrerHostFilter = (host: string) => `*://${host}/*`
+
 // Log column → the category the blocklist function receives.
 const FIELD_BLOCK_CATEGORY: Record<string, BlockCategory> = {
   country: 'country',
@@ -401,7 +407,8 @@ function TopTable({
               <span className="flex items-center gap-1.5">
                 <span className="min-w-0 flex-1">
                   <FilterValueCell
-                    filters={[{ column, value: row.value }]}
+                    filters={[{ column, value: column === 'referer' ? referrerHostFilter(row.value) : row.value }]}
+                    copyValue={column === 'referer' ? row.value : undefined}
                     display={formatValue(row.value)}
                     extraItems={extraItems}
                   />

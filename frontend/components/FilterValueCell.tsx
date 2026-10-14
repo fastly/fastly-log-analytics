@@ -29,6 +29,8 @@ interface FilterValueCellProps {
   containerClassName?: string
   /** Page-specific actions appended below the standard items (e.g. Block). */
   extraItems?: React.ReactNode
+  /** Text for "Copy value" when it differs from the filter value (e.g. a wildcard pattern). */
+  copyValue?: string
 }
 
 // Pathname → human-readable page name used in the menu label. Lookup is
@@ -69,6 +71,7 @@ export function FilterValueCell({
   className,
   containerClassName,
   extraItems,
+  copyValue,
 }: FilterValueCellProps) {
   const pathname = usePathname()
   const addFilter = useFilterStore(state => state.addFilter)
@@ -91,9 +94,9 @@ export function FilterValueCell({
   }, [filters])
 
   const handleCopy = React.useCallback(() => {
-    const v = filters[0]?.value
+    const v = copyValue ?? filters[0]?.value
     if (v) navigator.clipboard?.writeText(v).catch(() => {})
-  }, [filters])
+  }, [filters, copyValue])
 
   // Modifier-key shortcut: cmd/ctrl-click on the cell triggers "Filter
   // this page" directly without opening the menu. base-ui's Trigger has
@@ -135,7 +138,7 @@ export function FilterValueCell({
         render={
           <button
             type="button"
-            aria-label={`Filter actions for ${filters[0].value}`}
+            aria-label={`Filter actions for ${copyValue ?? filters[0].value}`}
             title="Click for actions · ⌘/Ctrl-click to filter this page"
             onMouseDown={handleMouseDown}
             className={cn(

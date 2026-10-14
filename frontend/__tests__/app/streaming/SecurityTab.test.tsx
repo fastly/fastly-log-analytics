@@ -48,7 +48,7 @@ const FULL_RESPONSE = {
     { content_id: 'movie-2', requests: 2 },
   ],
   top_countries: [{ value: 'US', users: 2, requests: 3, bytes: 3072 }],
-  top_referers: [{ value: 'https://pirate.example/watch', users: 2, requests: 3, bytes: 3072 }],
+  top_referers: [{ value: 'referring.example', users: 2, requests: 3, bytes: 3072 }],
   top_hosts: [{ value: 'pirate.example', users: 987, requests: 1234, bytes: 1048576 }],
   top_subscribers: [
     { subscriber_id: 'acct-shared', distinct_ips: 14, distinct_countries: 5, requests: 90, bytes: 2097152, last_seen: '2026-01-01T00:55:00+00:00' },
@@ -142,7 +142,7 @@ test('renders the three leaderboards and the edge vs shield chart', async () => 
   expect(await screen.findByText('pirate.example')).toBeInTheDocument()
   expect(screen.getByText('1,234')).toBeInTheDocument()
   expect(screen.getByText('1 MB')).toBeInTheDocument()
-  expect(screen.getByText('https://pirate.example/watch')).toBeInTheDocument()
+  expect(screen.getByText('referring.example')).toBeInTheDocument()
   expect(screen.getByText(/United States \(US\)/)).toBeInTheDocument()
   // Card titles follow the Overview page's "Name (Top 10)" style.
   for (const name of ['Countries', 'Referers', 'Hosts']) {
@@ -375,7 +375,7 @@ test('leaderboard values open the filter / copy menu keyed to their log field', 
 
   const cases: [string, string][] = [
     ['US', 'filter_country=US'],
-    ['https://pirate.example/watch', `filter_referer=${encodeURIComponent('https://pirate.example/watch')}`],
+    ['referring.example', `filter_referer=${encodeURIComponent('*://referring.example/*')}`],
     ['pirate.example', 'filter_host=pirate.example'],
     ['hosting', 'filter_p_type=hosting'],
     ['vpn', 'filter_p_desc=vpn'],

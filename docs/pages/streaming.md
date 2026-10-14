@@ -129,6 +129,7 @@ Example: `{"kbps": 0, "conditions": [{"category": "country", "value": "CN"}]}`.
 - **`conditions` is always an array**, even for one condition, so receivers handle a single shape. **All conditions must match (AND)**: `[{country: RS}, {proxy_type: hosting}]` blocks hosting-proxy traffic from Serbia, not all of Serbia. The UI sends one condition today; the API accepts up to one per category.
 - Conditions are sent sorted by `category`, and the same order is used on `DELETE`.
 - `category` is one of `country`, `referer`, `host`, `proxy_type`, `proxy_description`, `subscriber_id`, `ip`. Two conditions on the same category are rejected (`422 duplicate_category`), since they could never both match.
+- **`referer` values are bare domains** (e.g. `example.com`), not URLs. The leaderboard groups by host, and the receiver must compare against the request's `Referer` host only (the reference VCL lowercases and strips scheme, port, path and query before the check).
 
 `ip` values are validated and normalized (e.g. `2001:DB8::0001` → `2001:db8::1`). Redirects are **not** followed (a 3xx is a failure), and calls time out after 10 s.
 
