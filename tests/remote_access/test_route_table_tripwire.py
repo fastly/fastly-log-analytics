@@ -195,7 +195,10 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Security proxies export: read-only CSV export of security proxies.
     ("GET", "/api/security/proxies/export"),
     # Network pop-health & security threat-intel (read-only analytical endpoints)
+    ("GET", "/api/assets/aggregates"),
+    ("GET", "/api/network/bundle"),
     ("GET", "/api/network/pop-health"),
+    ("GET", "/api/security/bundle"),
     ("GET", "/api/security/threat-intel"),
     ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
     ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
@@ -243,7 +246,10 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/insights/cache-collapse-detail"),
     ("POST", "/api/network-health"),
     ("POST", "/api/network-quality"),
+    ("POST", "/api/network/bundle"),
+    ("POST", "/api/origin/drilldown"),
     ("POST", "/api/query"),
+    ("POST", "/api/security/bundle"),
     ("POST", "/api/sessions"),
     ("POST", "/api/sessions/detail"),
     ("POST", "/api/cmcd/aggregates"),

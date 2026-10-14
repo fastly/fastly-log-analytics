@@ -733,6 +733,24 @@ role boundaries, telemetry completeness, and documented performance budgets.
   historical RUM beacon averages calculation. Comprehensive router unit tests (`tests/routers/test_usage_router.py`,
   39 passed), frontend unit tests (`frontend/__tests__/components/CostCalculator/calc.test.ts`,
   `frontend/__tests__/app/usage.test.tsx`), and Playwright E2E integration spec (`frontend/e2e/pages/usage.spec.ts`).
+- **`/assets-shield` — Live-certified (`docs/pages/assets-shield.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Assets & Origin
+  Shielding suite: static asset categorization (`Images`, `Documents`, `JavaScript/CSS`,
+  `Fonts`, `Video`, and `API/Dynamic`), cache state distributions (`HIT`, `HIT-SYNTHETIC`,
+  `HIT-CLUSTER`, `HIT-STALE`, `MISS`, `MISS-CLUSTER`, `PASS`, `BYPASS`, `ERROR`), Content-Encoding
+  efficiency (`br`, `gzip`, `uncompressed`), and hotspot detection (large uncompressed static
+  assets >50KB and low cache-TTL hotspots). Hardened backend router (`backend/routers/assets.py`)
+  and repository (`backend/repositories/assets.py`) with `RequestContext`, query-runner tenancy,
+  buffer self-heal (`execute_with_stale_view_retry`), and telemetry attribution (`process_context_scope("assets:aggregates")`).
+  Graceful degradation with `missing_fields` (`resp_header_content_encoding`, `ttl`) surfacing an
+  in-place banner linking to `/service-config`. Configured route permissions allowing remote analyst
+  write access in `_ANALYST_ALLOWED_WRITE_PREFIXES` and `_WRITE_VERB_GATE_ROUTES` (`POST /api/assets/aggregates`)
+  and read access in `_READ_ALLOWLIST` (`GET /api/assets/aggregates`). Enforced zero-CLS layout
+  reservations (`[contain-intrinsic-size:...]` and `[content-visibility:auto]`), contextual loading
+  skeletons, refetch dimming, and defensive null-coalescing (`?? 0`) on all formatters. Comprehensive
+  backend tests (`tests/routers/test_assets.py`, 5 passed), route tripwire tests (`tests/remote_access/test_route_table_tripwire.py`),
+  frontend unit tests (`frontend/__tests__/app/assets-shield.test.tsx`, 5 passed), and Playwright E2E
+  integration spec (`frontend/e2e/pages/assets-shield.spec.ts`, 8 contract tests).
 
 
 Known page-parity investigation after the environment rebuild:

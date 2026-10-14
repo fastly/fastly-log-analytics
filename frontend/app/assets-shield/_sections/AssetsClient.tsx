@@ -7,11 +7,13 @@ import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { useFilterStore } from '@/stores/filterStore'
 import { quantizeAnchor } from '@/lib/time-window'
 import { resolveRangeWire } from '@/lib/range-wire'
-import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText } from 'lucide-react'
+import { Layers, Database, HelpCircle, Archive, Zap, AlertTriangle, FileText, Loader2 } from 'lucide-react'
 import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
+import { Skeleton } from '@/components/ui/skeleton'
 import { formatBytes, formatPercent } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 export function AssetsReportContent({
   startTime,
@@ -100,35 +102,12 @@ export function AssetsReportContent({
     )
   }
 
-  if (isLoading) {
-    return (
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 py-6">
-        {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="animate-pulse bg-card border border-border rounded-xl p-6 h-48" />
-        ))}
-      </div>
-    )
-  }
-
   const breakdown = data?.asset_type_breakdown || []
   const cachePerf = data?.cache_performance || []
   const compPerf = data?.compression_performance || []
   const largeUncompressed = data?.large_uncompressed_assets || []
   const lowTtl = data?.low_ttl_assets || []
-
-  const hasData = breakdown.length > 0
-
-  if (!hasData) {
-    return (
-      <div className="flex flex-col items-center justify-center py-24 text-center">
-        <Layers className="h-16 w-16 text-muted-foreground mb-4" />
-        <h3 className="text-lg font-bold">No Asset Metrics Yet</h3>
-        <p className="text-muted-foreground max-w-md mt-2">
-          No static assets or dynamic pages were requested in this time window.
-        </p>
-      </div>
-    )
-  }
+  const missingFields = data?.missing_fields || []
 
   // Helper to map cache statuses to pretty colors
   const cacheColors: Record<string, string> = {
@@ -154,75 +133,137 @@ export function AssetsReportContent({
   }
 
   return (
-    <div className="space-y-8 py-6">
+    <div className={cn("space-y-8 py-6 transition-opacity duration-150", isFetching && !isLoading && "opacity-60 pointer-events-none")}>
+      {/* Missing optional fields banner */}
+      {missingFields.length > 0 && (
+        <div
+          data-testid="missing-asset-fields-banner"
+          className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-800 dark:text-amber-200 flex items-start gap-3"
+        >
+          <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="font-semibold">Optional Log Fields Missing</div>
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              Advanced asset analytics works best when all static asset headers are captured. The following optional fields are currently not present in your service log format: <span className="font-mono font-bold">{missingFields.join(', ')}</span>.
+            </p>
+            <Link
+              href={`/service-config?service=${activeServiceId}`}
+              className="inline-flex items-center text-xs font-semibold text-primary underline hover:text-primary/80 mt-1"
+            >
+              Configure Service Log Fields &rarr;
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* SECTION 1: Overview Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {breakdown.map((row: any) => {
-          let icon = HelpCircle
-          if (row.asset_type === 'Images') icon = Layers
-          else if (row.asset_type === 'Documents') icon = FileText
-          else if (row.asset_type === 'JavaScript/CSS') icon = Archive
-          else if (row.asset_type === 'Video') icon = Zap
-          else if (row.asset_type === 'Fonts') icon = Database
-
-          const IconComponent = icon
-
-          return (
+      <div
+        data-testid="assets-overview-grid"
+        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[160px] [contain-intrinsic-size:160px] [content-visibility:auto]"
+      >
+        {isLoading ? (
+          ['Images', 'Documents', 'JavaScript/CSS', 'Fonts', 'Video', 'API/Dynamic'].map((type) => (
             <div
-              key={row.asset_type}
-              className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
+              key={type}
+              className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm flex flex-col justify-between"
             >
               <div className="flex items-center justify-between mb-4">
-                <h4 className="font-semibold text-lg flex items-center gap-2">
-                  <IconComponent className="h-5 w-5 text-primary" />
-                  {row.asset_type}
-                  <button
-                    onClick={() => setActiveHelp({
-                      title: `${row.asset_type} Overview Details`,
-                      calculated: `Requests are categorized as "${row.asset_type}" based on extension pattern matching against the lowercase request URL. Images: (.png, .jpg, .jpeg, .gif, .svg, .webp, .ico). Documents: (.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .csv, .zip, .tar, .gz, .tgz, .rar, .7z). JavaScript/CSS: (.js, .mjs, .css). Fonts: (.woff, .woff2, .ttf, .otf, .eot). Video: (.m3u8, .ts, .mp4, .m4s, .webm). Fallback: API/Dynamic. Values represent aggregate metrics for this group.`,
-                      means: "Shows high-level volume, cache absorption, and network payload optimization for this asset group. Highly valuable for checking general content-type health.",
-                      action: "Aim for a Cache Hit Ratio > 90% for Images, JS/CSS, and Fonts. If the compression rate is low, double-check that Fastly's dynamic compression features (Gzip and Brotli) are enabled, and verify that origin server headers correctly classify the Content-Type."
-                    })}
-                    className="text-muted-foreground hover:text-primary transition-colors focus:outline-none p-0.5 rounded hover:bg-muted"
-                    title="Click for calculation details"
-                  >
-                    <HelpCircle className="h-4 w-4" />
-                  </button>
-                </h4>
-                <Link
-                  href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(row.asset_type)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs font-medium text-muted-foreground px-2.5 py-1 bg-muted hover:bg-primary hover:text-primary-foreground hover:shadow-sm cursor-pointer transition-all rounded-full"
-                  title="Click to view these requests on the Dashboard"
-                >
-                  {row.requests.toLocaleString()} reqs
-                </Link>
+                <div className="flex items-center gap-2">
+                  <Skeleton className="h-5 w-5 rounded-full" />
+                  <span className="font-semibold text-lg">{type}</span>
+                </div>
+                <Skeleton className="h-5 w-16 rounded-full" />
               </div>
-
+              <div className="flex items-center gap-2 text-xs text-muted-foreground my-2">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                <span>Analyzing static asset cache hit ratios...</span>
+              </div>
               <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Egress</div>
-                  <div className="text-sm font-bold truncate">{formatBytes(row.egress_bytes)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Cache Hit</div>
-                  <div className="text-sm font-bold text-emerald-500">{formatPercent(row.cache_hit_ratio)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Compression</div>
-                  <div className="text-sm font-bold text-indigo-500">{formatPercent(row.compression_rate)}</div>
-                </div>
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
               </div>
             </div>
-          )
-        })}
+          ))
+        ) : breakdown.length === 0 ? (
+          <div className="col-span-full flex flex-col items-center justify-center py-12 text-center bg-card border border-border rounded-xl p-6">
+            <Layers className="h-12 w-12 text-muted-foreground mb-3" />
+            <h3 className="text-base font-bold">No Asset Metrics Yet</h3>
+            <p className="text-xs text-muted-foreground max-w-md mt-1">
+              No static assets or dynamic pages were requested in this time window.
+            </p>
+          </div>
+        ) : (
+          breakdown.map((row: any) => {
+            let icon = HelpCircle
+            if (row.asset_type === 'Images') icon = Layers
+            else if (row.asset_type === 'Documents') icon = FileText
+            else if (row.asset_type === 'JavaScript/CSS') icon = Archive
+            else if (row.asset_type === 'Video') icon = Zap
+            else if (row.asset_type === 'Fonts') icon = Database
+
+            const IconComponent = icon
+
+            return (
+              <div
+                key={row.asset_type}
+                className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="font-semibold text-lg flex items-center gap-2">
+                    <IconComponent className="h-5 w-5 text-primary" />
+                    {row.asset_type}
+                    <button
+                      onClick={() => setActiveHelp({
+                        title: `${row.asset_type} Overview Details`,
+                        calculated: `Requests are categorized as "${row.asset_type}" based on extension pattern matching against the lowercase request URL. Images: (.png, .jpg, .jpeg, .gif, .svg, .webp, .ico). Documents: (.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .csv, .zip, .tar, .gz, .tgz, .rar, .7z). JavaScript/CSS: (.js, .mjs, .css). Fonts: (.woff, .woff2, .ttf, .otf, .eot). Video: (.m3u8, .ts, .mp4, .m4s, .webm). Fallback: API/Dynamic. Values represent aggregate metrics for this group.`,
+                        means: "Shows high-level volume, cache absorption, and network payload optimization for this asset group. Highly valuable for checking general content-type health.",
+                        action: "Aim for a Cache Hit Ratio > 90% for Images, JS/CSS, and Fonts. If the compression rate is low, double-check that Fastly's dynamic compression features (Gzip and Brotli) are enabled, and verify that origin server headers correctly classify the Content-Type."
+                      })}
+                      className="text-muted-foreground hover:text-primary transition-colors focus:outline-none p-0.5 rounded hover:bg-muted"
+                      title="Click for calculation details"
+                    >
+                      <HelpCircle className="h-4 w-4" />
+                    </button>
+                  </h4>
+                  <Link
+                    href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(row.asset_type)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs font-medium text-muted-foreground px-2.5 py-1 bg-muted hover:bg-primary hover:text-primary-foreground hover:shadow-sm cursor-pointer transition-all rounded-full"
+                    title="Click to view these requests on the Dashboard"
+                  >
+                    {row.requests.toLocaleString()} reqs
+                  </Link>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Egress</div>
+                    <div className="text-sm font-bold truncate">{formatBytes(row.egress_bytes ?? 0)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Cache Hit</div>
+                    <div className="text-sm font-bold text-emerald-500">{formatPercent(row.cache_hit_ratio ?? 0)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Compression</div>
+                    <div className="text-sm font-bold text-indigo-500">{formatPercent(row.compression_rate ?? 0)}</div>
+                  </div>
+                </div>
+              </div>
+            )
+          })
+        )}
       </div>
 
       {/* SECTION 2: Stacked Visual Performance charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Cache Efficiency stacked horizontal bars */}
-        <div className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm">
+        <div
+          data-testid="assets-cache-efficiency-card"
+          className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[380px] [contain-intrinsic-size:420px] [content-visibility:auto]"
+        >
           <h3 className="font-bold text-lg mb-6 flex items-center gap-2">
             <Zap className="h-5 w-5 text-primary" />
             Cache Efficiency by Asset Type
@@ -239,68 +280,84 @@ export function AssetsReportContent({
               <HelpCircle className="h-4 w-4" />
             </button>
           </h3>
-          <div className="space-y-6">
-            <TooltipProvider delay={100}>
-              {breakdown.map((row: any) => {
-                const type = row.asset_type
-                const typeStatuses = cachePerf.filter((c: any) => c.asset_type === type)
-                const totalRequests = typeStatuses.reduce((acc: number, curr: any) => acc + curr.requests, 0)
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <span className="text-sm font-medium">Evaluating cache absorption efficiency...</span>
+            </div>
+          ) : (!cachePerf || cachePerf.length === 0) ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground text-sm">
+              No cache efficiency metrics recorded in this window.
+            </div>
+          ) : (
+            <>
+              <div className="space-y-6">
+                <TooltipProvider delay={100}>
+                  {breakdown.map((row: any) => {
+                    const type = row.asset_type
+                    const typeStatuses = cachePerf.filter((c: any) => c.asset_type === type)
+                    const totalRequests = typeStatuses.reduce((acc: number, curr: any) => acc + curr.requests, 0)
 
-                return (
-                  <div key={type} className="space-y-2">
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="font-semibold">{type}</span>
-                      <Link
-                        href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(type)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
-                        title="Click to view these requests on the Dashboard"
-                      >
-                        {totalRequests.toLocaleString()} requests
-                      </Link>
-                    </div>
-                    <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
-                      {typeStatuses.map((statusRow: any) => {
-                        const pct = totalRequests > 0 ? (statusRow.requests / totalRequests) * 100 : 0
-                        if (pct === 0) return null
-                        return (
-                          <Tooltip key={statusRow.cache_status}>
-                            <TooltipTrigger
-                              render={
-                                <div
-                                  style={{ width: `${pct}%` }}
-                                  className={`${cacheColors[statusRow.cache_status] || 'bg-slate-500'} h-full transition-all relative group flex items-center justify-center text-[10px] font-bold text-white truncate px-1 cursor-help`}
-                                >
-                                  {pct > 12 && statusRow.cache_status}
-                                </div>
-                              }
-                            />
-                            <TooltipContent side="top" className="text-xs font-semibold">
-                              {statusRow.cache_status}: {statusRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
-                            </TooltipContent>
-                          </Tooltip>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-            </TooltipProvider>
-          </div>
-          {/* Legend */}
-          <div className="flex flex-wrap gap-4 mt-6 pt-4 border-t border-border text-xs justify-center">
-            {Object.keys(cacheColors).map((status) => (
-              <div key={status} className="flex items-center gap-1.5">
-                <div className={`h-3 w-3 rounded-full ${cacheColors[status]}`} />
-                <span className="font-medium text-muted-foreground">{status}</span>
+                    return (
+                      <div key={type} className="space-y-2">
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="font-semibold">{type}</span>
+                          <Link
+                            href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(type)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
+                            title="Click to view these requests on the Dashboard"
+                          >
+                            {totalRequests.toLocaleString()} requests
+                          </Link>
+                        </div>
+                        <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
+                          {typeStatuses.map((statusRow: any) => {
+                            const pct = totalRequests > 0 ? (statusRow.requests / totalRequests) * 100 : 0
+                            if (pct === 0) return null
+                            return (
+                              <Tooltip key={statusRow.cache_status}>
+                                <TooltipTrigger
+                                  render={
+                                    <div
+                                      style={{ width: `${pct}%` }}
+                                      className={`${cacheColors[statusRow.cache_status] || 'bg-slate-500'} h-full transition-all relative group flex items-center justify-center text-[10px] font-bold text-white truncate px-1 cursor-help`}
+                                    >
+                                      {pct > 12 && statusRow.cache_status}
+                                    </div>
+                                  }
+                                />
+                                <TooltipContent side="top" className="text-xs font-semibold">
+                                  {statusRow.cache_status}: {statusRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
+                                </TooltipContent>
+                              </Tooltip>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </TooltipProvider>
               </div>
-            ))}
-          </div>
+              {/* Legend */}
+              <div className="flex flex-wrap gap-4 mt-6 pt-4 border-t border-border text-xs justify-center">
+                {Object.keys(cacheColors).map((status) => (
+                  <div key={status} className="flex items-center gap-1.5">
+                    <div className={`h-3 w-3 rounded-full ${cacheColors[status]}`} />
+                    <span className="font-medium text-muted-foreground">{status}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Compression Efficiency stacked horizontal bars */}
-        <div className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm">
+        <div
+          data-testid="assets-compression-card"
+          className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[380px] [contain-intrinsic-size:420px] [content-visibility:auto]"
+        >
           <h3 className="font-bold text-lg mb-6 flex items-center gap-2">
             <Archive className="h-5 w-5 text-primary" />
             Payload Compression Efficiency
@@ -317,71 +374,87 @@ export function AssetsReportContent({
               <HelpCircle className="h-4 w-4" />
             </button>
           </h3>
-          <div className="space-y-6">
-            <TooltipProvider delay={100}>
-              {breakdown.map((row: any) => {
-                const type = row.asset_type
-                const typeComp = compPerf.filter((c: any) => c.asset_type === type)
-                const totalRequests = typeComp.reduce((acc: number, curr: any) => acc + curr.requests, 0)
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <span className="text-sm font-medium">Evaluating payload compression efficiency...</span>
+            </div>
+          ) : (!compPerf || compPerf.length === 0) ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground text-sm">
+              No compression performance metrics recorded in this window.
+            </div>
+          ) : (
+            <>
+              <div className="space-y-6">
+                <TooltipProvider delay={100}>
+                  {breakdown.map((row: any) => {
+                    const type = row.asset_type
+                    const typeComp = compPerf.filter((c: any) => c.asset_type === type)
+                    const totalRequests = typeComp.reduce((acc: number, curr: any) => acc + curr.requests, 0)
 
-                return (
-                  <div key={type} className="space-y-2">
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="font-semibold">{type}</span>
-                      <Link
-                        href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(type)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
-                        title="Click to view these requests on the Dashboard"
-                      >
-                        {totalRequests.toLocaleString()} requests
-                      </Link>
-                    </div>
-                    <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
-                      {typeComp.map((compRow: any) => {
-                        const pct = totalRequests > 0 ? (compRow.requests / totalRequests) * 100 : 0
-                        if (pct === 0) return null
-                        return (
-                          <Tooltip key={compRow.content_encoding}>
-                            <TooltipTrigger
-                              render={
-                                <div
-                                  style={{ width: `${pct}%` }}
-                                  className={`${compColors[compRow.content_encoding] || 'bg-slate-500'} h-full transition-all relative group flex items-center justify-center text-[10px] font-bold text-white truncate px-1 cursor-help`}
-                                >
-                                  {pct > 12 && compRow.content_encoding}
-                                </div>
-                              }
-                            />
-                            <TooltipContent side="top" className="text-xs font-semibold">
-                              {compRow.content_encoding}: {compRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
-                            </TooltipContent>
-                          </Tooltip>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-            </TooltipProvider>
-          </div>
-          {/* Legend */}
-          <div className="flex flex-wrap gap-4 mt-6 pt-4 border-t border-border text-xs justify-center">
-            {Object.keys(compColors).map((enc) => (
-              <div key={enc} className="flex items-center gap-1.5">
-                <div className={`h-3 w-3 rounded-full ${compColors[enc]}`} />
-                <span className="font-medium text-muted-foreground">{enc}</span>
+                    return (
+                      <div key={type} className="space-y-2">
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="font-semibold">{type}</span>
+                          <Link
+                            href={`/dashboard?service=${activeServiceId}${getTimeQueryString()}${getFilterQueryString(type)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
+                            title="Click to view these requests on the Dashboard"
+                          >
+                            {totalRequests.toLocaleString()} requests
+                          </Link>
+                        </div>
+                        <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
+                          {typeComp.map((compRow: any) => {
+                            const pct = totalRequests > 0 ? (compRow.requests / totalRequests) * 100 : 0
+                            if (pct === 0) return null
+                            return (
+                              <Tooltip key={compRow.content_encoding}>
+                                <TooltipTrigger
+                                  render={
+                                    <div
+                                      style={{ width: `${pct}%` }}
+                                      className={`${compColors[compRow.content_encoding] || 'bg-slate-500'} h-full transition-all relative group flex items-center justify-center text-[10px] font-bold text-white truncate px-1 cursor-help`}
+                                    >
+                                      {pct > 12 && compRow.content_encoding}
+                                    </div>
+                                  }
+                                />
+                                <TooltipContent side="top" className="text-xs font-semibold">
+                                  {compRow.content_encoding}: {compRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
+                                </TooltipContent>
+                              </Tooltip>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </TooltipProvider>
               </div>
-            ))}
-          </div>
+              {/* Legend */}
+              <div className="flex flex-wrap gap-4 mt-6 pt-4 border-t border-border text-xs justify-center">
+                {Object.keys(compColors).map((enc) => (
+                  <div key={enc} className="flex items-center gap-1.5">
+                    <div className={`h-3 w-3 rounded-full ${compColors[enc]}`} />
+                    <span className="font-medium text-muted-foreground">{enc}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* SECTION 3: Hotspots tables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Large Uncompressed Assets table */}
-        <div className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm overflow-hidden flex flex-col">
+        <div
+          data-testid="assets-uncompressed-card"
+          className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm overflow-hidden flex flex-col min-h-[320px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+        >
           <h3 className="font-bold text-lg mb-2 flex items-center gap-2 text-rose-500">
             <AlertTriangle className="h-5 w-5" />
             Large Uncompressed Assets
@@ -412,7 +485,16 @@ export function AssetsReportContent({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {largeUncompressed.length === 0 ? (
+                {isLoading ? (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-muted-foreground text-xs">
+                      <div className="flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        <span>Scanning uncompressed static assets...</span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : largeUncompressed.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-4 text-center text-muted-foreground text-xs">
                       No uncompressed static assets detected! Nice work.
@@ -432,8 +514,8 @@ export function AssetsReportContent({
                         </Link>
                       </td>
                       <td className="py-3 px-2 text-right font-medium">{row.requests.toLocaleString()}</td>
-                      <td className="py-3 px-2 text-right text-muted-foreground">{formatBytes(row.avg_bytes)}</td>
-                      <td className="py-3 px-2 text-right font-bold text-rose-500">{formatBytes(row.total_bytes)}</td>
+                      <td className="py-3 px-2 text-right text-muted-foreground">{formatBytes(row.avg_bytes ?? 0)}</td>
+                      <td className="py-3 px-2 text-right font-bold text-rose-500">{formatBytes(row.total_bytes ?? 0)}</td>
                     </tr>
                   ))
                 )}
@@ -443,7 +525,10 @@ export function AssetsReportContent({
         </div>
 
         {/* Low Cache-TTL table */}
-        <div className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm overflow-hidden flex flex-col">
+        <div
+          data-testid="assets-low-ttl-card"
+          className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm overflow-hidden flex flex-col min-h-[320px] [contain-intrinsic-size:360px] [content-visibility:auto]"
+        >
           <h3 className="font-bold text-lg mb-2 flex items-center gap-2 text-amber-500">
             <AlertTriangle className="h-5 w-5" />
             Low Cache-TTL Hotspots
@@ -474,7 +559,16 @@ export function AssetsReportContent({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {lowTtl.length === 0 ? (
+                {isLoading ? (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-muted-foreground text-xs">
+                      <div className="flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        <span>Detecting low cache-TTL hotspots...</span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : lowTtl.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-4 text-center text-muted-foreground text-xs">
                       No cache miss hot spots detected.

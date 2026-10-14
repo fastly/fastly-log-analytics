@@ -34,6 +34,9 @@ def get_assets_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t)
 
+    optional_fields = ["resp_header_content_encoding", "ttl"]
+    missing_fields = [f for f in optional_fields if f not in actual_cols]
+
     if not actual_cols:
         return empty_schema_response(
             asset_type_breakdown=[],
@@ -41,6 +44,7 @@ def get_assets_aggregates(
             compression_performance=[],
             large_uncompressed_assets=[],
             low_ttl_assets=[],
+            missing_fields=missing_fields,
             section_timings=section_timings,
             **runner.telemetry(),
         )
@@ -49,7 +53,10 @@ def get_assets_aggregates(
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
     timer.mark("build_where_clause", _t)
 
-    results = {**runner.telemetry()}
+    results = {
+        "missing_fields": missing_fields,
+        **runner.telemetry(),
+    }
 
     # Graceful defaults for optional columns
     encoding_expr = (
@@ -71,6 +78,7 @@ def get_assets_aggregates(
             compression_performance=[],
             large_uncompressed_assets=[],
             low_ttl_assets=[],
+            missing_fields=missing_fields,
             section_timings=section_timings,
             **runner.telemetry(),
         )
