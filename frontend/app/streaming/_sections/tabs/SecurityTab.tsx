@@ -13,6 +13,7 @@ import {
   List,
   Loader2,
   MoreHorizontal,
+  Network,
   Server,
   ShieldBan,
   ShieldCheck,
@@ -78,6 +79,7 @@ const referrerHostFilter = (host: string) => `*://${host}/*`
 // Log column → the category the blocklist function receives.
 const FIELD_BLOCK_CATEGORY: Record<string, BlockCategory> = {
   country: 'country',
+  asn: 'asn',
   referer: 'referer',
   host: 'host',
   p_type: 'proxy_type',
@@ -409,7 +411,7 @@ function TopTable({
                   <FilterValueCell
                     filters={[{ column, value: column === 'referer' ? referrerHostFilter(row.value) : row.value }]}
                     copyValue={column === 'referer' ? row.value : undefined}
-                    display={formatValue(row.value)}
+                    display={row.label ?? formatValue(row.value)}
                     extraItems={extraItems}
                   />
                 </span>
@@ -775,7 +777,7 @@ export default function SecurityTab({
             onBlock: (value: string) => {
               const category = FIELD_BLOCK_CATEGORY[field]
               setBlockRequest({
-                options: rows.map((r) => ({ category, value: r.value, display: formatValue?.(r.value) })),
+                options: rows.map((r) => ({ category, value: r.value, display: r.label ?? formatValue?.(r.value) })),
                 initial: { category, value },
               })
             },
@@ -812,12 +814,13 @@ export default function SecurityTab({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {topCard('Countries', <Globe className="h-4 w-4" />, data?.top_countries, 'Country', formatCountry, 'country', 'Geolocation Basic (Group D) fields to be enabled in Fastly logging.')}
+        {topCard('ASNs', <Network className="h-4 w-4" />, data?.top_asns, 'ASN', undefined, 'asn', 'the ASN field (Group F) to be enabled in Fastly logging.')}
         {topCard('Referers', <Link2 className="h-4 w-4" />, data?.top_referers, 'Referer', undefined, 'referer', 'the Referer field (Group A) to be enabled in Fastly logging.')}
-        {topCard('Hosts', <Server className="h-4 w-4" />, data?.top_hosts, 'Host', undefined, 'host', 'the Host field (Group A) to be enabled in Fastly logging.')}
       </div>
 
-      {/* Every proxy type / description, not a top-N: client.geo.proxy_type and proxy_description have only ~10 values each. */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      {/* Hosts is capped; the proxy cards list every proxy type / description (client.geo.proxy_type and proxy_description have only ~10 values each). */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {topCard('Hosts', <Server className="h-4 w-4" />, data?.top_hosts, 'Host', undefined, 'host', 'the Host field (Group A) to be enabled in Fastly logging.')}
         {topCard('Proxy Types', <ShieldQuestion className="h-4 w-4" />, data?.proxy_types, 'Proxy type', undefined, 'p_type', 'the Proxy Type field (Group I) to be enabled in Fastly logging.', false)}
         {topCard('Proxy Descriptions', <VenetianMask className="h-4 w-4" />, data?.proxy_descriptions, 'Proxy description', undefined, 'p_desc', 'the Proxy Description field (Group I) to be enabled in Fastly logging.', false)}
       </div>

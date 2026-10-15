@@ -40,7 +40,7 @@ vi.mock('@/components/charts/TimeSeriesChart', () => ({
 
 const FULL_RESPONSE = {
   available: true,
-  fields: { country: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true, p_type: true, p_desc: true, cs_status: true, cs_mode: true, cs_rl_mode: true },
+  fields: { country: true, asn: true, referer: true, host: true, resp_bytes: true, edge: true, cs_content_id: true, ip: true, cs_sub_id: true, p_type: true, p_desc: true, cs_status: true, cs_mode: true, cs_rl_mode: true },
   content_id: null,
   has_shield_split: true,
   content_ids: [
@@ -48,6 +48,7 @@ const FULL_RESPONSE = {
     { content_id: 'movie-2', requests: 2 },
   ],
   top_countries: [{ value: 'US', users: 2, requests: 3, bytes: 3072 }],
+  top_asns: [{ value: '7922', label: 'Comcast Cable (7922)', users: 2, requests: 3, bytes: 3072 }],
   top_referers: [{ value: 'referring.example', users: 2, requests: 3, bytes: 3072 }],
   top_hosts: [{ value: 'pirate.example', users: 987, requests: 1234, bytes: 1048576 }],
   top_subscribers: [
@@ -145,7 +146,7 @@ test('renders the three leaderboards and the edge vs shield chart', async () => 
   expect(screen.getByText('referring.example')).toBeInTheDocument()
   expect(screen.getByText(/United States \(US\)/)).toBeInTheDocument()
   // Card titles follow the Overview page's "Name (Top 10)" style.
-  for (const name of ['Countries', 'Referers', 'Hosts']) {
+  for (const name of ['Countries', 'ASNs', 'Referers', 'Hosts']) {
     expect(screen.getByText((_, el) => el?.getAttribute('data-slot') === 'card-title' && el.textContent === `${name} (Top 10)`)).toBeInTheDocument()
   }
 
@@ -280,6 +281,7 @@ test('leaderboards show Users as the first metric', async () => {
 
   for (const [title, valueHeader] of [
     ['Countries (Top 10)', 'Country'],
+    ['ASNs (Top 10)', 'ASN'],
     ['Referers (Top 10)', 'Referer'],
     ['Hosts (Top 10)', 'Host'],
   ]) {
@@ -293,6 +295,18 @@ test('leaderboards show Users as the first metric', async () => {
     '1,234',
     '1 MB',
   ])
+})
+
+test('ASNs sit beside Countries; Hosts leads the proxy row', async () => {
+  renderTab()
+  await screen.findByText('pirate.example')
+
+  const order = screen
+    .getAllByText((_, el) => el?.getAttribute('data-slot') === 'card-title')
+    .map((el) => el.textContent?.replace(/ \(Top 10\)$/, ''))
+  expect(order.slice(0, 6)).toEqual(['Countries', 'ASNs', 'Referers', 'Hosts', 'Proxy Types', 'Proxy Descriptions'])
+  // The ASN row shows the owner name, not just the number.
+  expect(cardByTitle('ASNs (Top 10)').getByText('Comcast Cable (7922)')).toBeInTheDocument()
 })
 
 test('leaderboards omit Users when the backend sends none', async () => {
@@ -512,6 +526,20 @@ test('Block from a leaderboard menu confirms the clicked value, then offers Undo
       params: { path: { block_id: 'blk-1' } },
     }),
   )
+})
+
+test('an ASN can be blocked from its leaderboard', async () => {
+  routePosts()
+  const user = userEvent.setup()
+  renderTab()
+
+  await user.click(await screen.findByRole('button', { name: 'Filter actions for 7922' }))
+  await user.click(await screen.findByText('Block or throttle…'))
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByRole('combobox', { name: 'ASN' })).toHaveTextContent('Comcast Cable (7922)')
+  await user.click(within(dialog).getByRole('button', { name: 'Block' }))
+
+  await waitFor(() => expect(blockCalls()).toEqual([{ conditions: [{ category: 'asn', value: '7922' }], kbps: 0 }]))
 })
 
 test('Block dialog lets the user pick a different value from the list', async () => {

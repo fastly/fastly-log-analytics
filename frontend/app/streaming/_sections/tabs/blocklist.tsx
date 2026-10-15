@@ -23,6 +23,7 @@ export type BlockCategory = BlockCondition['category']
 
 export const BLOCK_CATEGORY_LABELS: Record<BlockCategory, string> = {
   country: 'Country',
+  asn: 'ASN',
   referer: 'Referer',
   host: 'Host',
   proxy_type: 'Proxy type',

@@ -315,7 +315,7 @@ def test_invalid_kbps_rejected(client, remote, configured, kbps):
 
 
 def test_unknown_category_rejected(client, remote, configured):
-    assert _block(client, "asn", "13335").status_code == 422
+    assert _block(client, "city", "Paris").status_code == 422
     assert remote.calls == []
 
 
@@ -344,12 +344,25 @@ def test_multiple_conditions_are_sent_together_in_canonical_order(client, remote
         [],
         [_cond("country", "RS"), _cond("country", "CN")],
         [_cond("country", "")],
+        [_cond("asn", "Comcast")],
+        [_cond("asn", "0")],
+        [_cond("asn", "4294967296")],
     ],
-    ids=["empty", "duplicate_category", "blank_value"],
+    ids=["empty", "duplicate_category", "blank_value", "asn_not_numeric", "asn_zero", "asn_out_of_range"],
 )
 def test_invalid_condition_sets_rejected(client, remote, configured, conditions):
     assert _post(client, conditions).status_code == 422
     assert remote.calls == []
+
+
+def test_asn_block_normalizes_to_bare_number(client, remote, configured):
+    resp = _block(client, "asn", "as7922")
+    assert resp.status_code == 201
+    assert resp.json()["conditions"] == [_cond("asn", "7922")]
+    assert remote.calls[-1] == ("POST", _URL, {"kbps": 0, "conditions": [_cond("asn", "7922")]})
+
+    # "AS7922" and "7922" are the same rule.
+    assert _block(client, "asn", "7922").status_code == 409
 
 
 # ── Unblock ──────────────────────────────────────────────────────────────────

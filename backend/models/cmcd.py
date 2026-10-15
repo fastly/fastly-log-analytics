@@ -57,6 +57,8 @@ class ContentSecurityRequest(FilteredRequest):
 
 class ContentSecurityTopRow(BaseModel):
     value: str
+    # Display name for the value when it differs from the raw value (ASN → "Comcast Cable (7922)").
+    label: str | None = None
     # Distinct (subscriber id, IP) pairs; IP alone for requests without one.
     users: int | None = None
     requests: int
@@ -108,6 +110,7 @@ class ContentSecurityResponse(BaseResponse):
     has_shield_split: bool = False
     content_ids: list[ContentSecurityContentId] = []
     top_countries: list[ContentSecurityTopRow] = []
+    top_asns: list[ContentSecurityTopRow] = []
     top_referers: list[ContentSecurityTopRow] = []
     top_hosts: list[ContentSecurityTopRow] = []
     top_subscribers: list[ContentSecuritySubscriberRow] = []
@@ -149,7 +152,7 @@ class SubscriberIpsResponse(BaseResponse):
 # ── Content Security blocklist (admin-only) ──────────────────────────────────
 
 # Categories the blocklist HTTP function receives as ``category``.
-BlockCategory = Literal["country", "referer", "host", "proxy_type", "proxy_description", "subscriber_id", "ip"]
+BlockCategory = Literal["country", "asn", "referer", "host", "proxy_type", "proxy_description", "subscriber_id", "ip"]
 
 
 class ContentSecuritySettings(BaseModel):
@@ -179,7 +182,7 @@ class ContentSecurityBlockCondition(BaseModel):
 class ContentSecurityBlockRequest(BaseModel):
     # All conditions must match (AND). One per category — two values for the
     # same category could never both match.
-    conditions: Annotated[list[ContentSecurityBlockCondition], Field(min_length=1, max_length=7)]
+    conditions: Annotated[list[ContentSecurityBlockCondition], Field(min_length=1, max_length=8)]
     # 0 blocks matching traffic outright; > 0 throttles it to that many kbps.
     kbps: Annotated[int, Field(ge=0, le=10_000_000)] = 0
 

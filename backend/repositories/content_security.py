@@ -12,6 +12,7 @@ this module's response cache (which is shared across roles).
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import time as _time
 from typing import Any
 
@@ -30,6 +31,8 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.utils.bounded_cache import BoundedTTLCache
 
+logger = logging.getLogger(__name__)
+
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 128
 _response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
@@ -37,6 +40,7 @@ _response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSI
 # Leaderboard column → response section.
 _TOP_N_SECTIONS = {
     "country": "top_countries",
+    "asn": "top_asns",
     "referer": "top_referers",
     "host": "top_hosts",
 }
@@ -45,10 +49,12 @@ _TOP_N_SECTIONS = {
 # Referer is reduced to its host (scheme, userinfo, port, path and query dropped).
 _TOP_N_VALUE_EXPRS = {
     "referer": (
-        "LOWER(NULLIF(regexp_extract(\"referer\", "
-        "'^(?:[a-zA-Z][a-zA-Z0-9+.-]*://)?(?:[^/@?#]*@)?([^/:?#]+)', 1), ''))"
+        "LOWER(NULLIF(regexp_extract(\"referer\", '^(?:[a-zA-Z][a-zA-Z0-9+.-]*://)?(?:[^/@?#]*@)?([^/:?#]+)', 1), ''))"
     ),
 }
+
+# Leaderboard columns that are numeric: reported as text, and "present" means > 0 (no empty-string check).
+_NUMERIC_TOP_N_COLS = {"asn"}
 
 # Uncapped breakdown column → response section. client.geo.proxy_type and
 # client.geo.proxy_description each have ~10 possible values, so listing every
@@ -61,6 +67,7 @@ _ALL_VALUES_SECTIONS = {
 # Columns the tab can use; each is optional and its section degrades to empty.
 _OPTIONAL_COLS = (
     "country",
+    "asn",
     "referer",
     "host",
     "resp_bytes",
@@ -76,6 +83,21 @@ _OPTIONAL_COLS = (
 
 # Cap on the content-id picker's option list.
 _CONTENT_ID_OPTIONS_LIMIT = 100
+
+
+def _label_asns(rows: list[dict[str, Any]], service_id: str) -> None:
+    """Attach the owner name ("Comcast Cable (7922)") to each ASN row, in place.
+
+    Name resolution is cached and best-effort: a failed lookup leaves the bare ``AS<number>``.
+    """
+    if not rows:
+        return
+    from backend.core.duckdb import enrich_asn_labels
+
+    try:
+        enrich_asn_labels(rows, service_id)
+    except Exception:
+        logger.warning("ASN name enrichment failed", exc_info=True)
 
 
 def _enforced_expr(fields: dict[str, bool]) -> str:
@@ -213,12 +235,17 @@ def get_content_security(
             if not fields[col]:
                 continue
             _t = _time.perf_counter()
-            value_expr = _TOP_N_VALUE_EXPRS.get(col, f'"{col}"')
+            if col in _NUMERIC_TOP_N_COLS:
+                value_expr = f'CAST("{col}" AS VARCHAR)'
+                present = f'"{col}" IS NOT NULL AND "{col}" > 0'
+            else:
+                value_expr = _TOP_N_VALUE_EXPRS.get(col, f'"{col}"')
+                present = f'"{col}" IS NOT NULL AND "{col}" != \'\' AND {value_expr} IS NOT NULL'
             rows = runner.execute(
                 f"""
                 SELECT {value_expr} AS value, {users_agg} AS users, COUNT(*) AS requests, {bytes_agg} AS bytes
                 FROM {t}
-                WHERE {edge_where} AND "{col}" IS NOT NULL AND "{col}" != '' AND {value_expr} IS NOT NULL
+                WHERE {edge_where} AND {present}
                 GROUP BY 1
                 ORDER BY requests DESC, value
                 LIMIT {int(top_n)}
@@ -228,6 +255,8 @@ def get_content_security(
                 {"value": r[0], "users": r[1], "requests": r[2], "bytes": int(r[3]) if r[3] is not None else None}
                 for r in rows
             ]
+            if col == "asn":
+                _label_asns(results[section], src["name"])
             timer.mark(section, _t)
 
         # ── Every proxy type / description (no top-N cap) ───────────────

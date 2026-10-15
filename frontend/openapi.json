@@ -46513,6 +46513,7 @@
             "type": "string",
             "enum": [
               "country",
+              "asn",
               "referer",
               "host",
               "proxy_type",
@@ -46543,7 +46544,7 @@
               "$ref": "#/components/schemas/ContentSecurityBlockCondition"
             },
             "type": "array",
-            "maxItems": 7,
+            "maxItems": 8,
             "minItems": 1,
             "title": "Conditions"
           },
@@ -46848,6 +46849,14 @@
             "title": "Top Countries",
             "default": []
           },
+          "top_asns": {
+            "items": {
+              "$ref": "#/components/schemas/ContentSecurityTopRow"
+            },
+            "type": "array",
+            "title": "Top Asns",
+            "default": []
+          },
           "top_referers": {
             "items": {
               "$ref": "#/components/schemas/ContentSecurityTopRow"
@@ -47033,6 +47042,17 @@
           "value": {
             "type": "string",
             "title": "Value"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
           },
           "users": {
             "anyOf": [

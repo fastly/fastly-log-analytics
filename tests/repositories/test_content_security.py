@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -25,7 +26,7 @@ _ALL_COLS = {
     "cs_content_id": "VARCHAR",
 }
 # Opt-in columns (the tests above add/remove their own on _ALL_COLS).
-_ENF_TYPES = {"cs_status": "VARCHAR", "cs_mode": "VARCHAR", "cs_rl_mode": "VARCHAR"}
+_ENF_TYPES = {"cs_status": "VARCHAR", "cs_mode": "VARCHAR", "cs_rl_mode": "VARCHAR", "asn": "UINTEGER"}
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +95,43 @@ def test_leaderboards_count_edge_lines_only(in_memory_duckdb, test_service_sourc
     ]
     # Empty referers are excluded rather than reported as a blank row.
     assert res["top_referers"] == [{"value": "pirate.example", "users": 1, "requests": 3, "bytes": 3000}]
+
+
+def test_top_asns_are_labelled_and_skip_unknown(in_memory_duckdb, test_service_source):
+    cols = [*_ALL_COLS, "asn"]
+    rows = [
+        {**_row(10), "asn": 7922},
+        {**_row(10), "asn": 7922},
+        {**_row(10), "asn": 64496},
+        {**_row(10, edge=False), "asn": 64496},  # shield line, not counted
+        {**_row(10), "asn": 0},  # unknown ASN
+        {**_row(10), "asn": None},
+    ]
+    _make_table(in_memory_duckdb, test_service_source, rows, cols)
+    with patch("backend.core.duckdb.get_asn_names", return_value={7922: "Comcast Cable"}):
+        res = _call(in_memory_duckdb, test_service_source)
+
+    assert res["fields"]["asn"] is True
+    assert [(r["value"], r["requests"]) for r in res["top_asns"]] == [("7922", 2), ("64496", 1)]
+    # A resolved owner gets "Name (number)"; an unresolved one falls back to the bare AS number.
+    assert [r["label"] for r in res["top_asns"]] == ["Comcast Cable (7922)", "AS64496"]
+
+
+def test_top_asns_survive_name_lookup_failure(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, [{**_row(10), "asn": 7922}], [*_ALL_COLS, "asn"])
+    with patch("backend.core.duckdb.get_asn_names", side_effect=RuntimeError("dns down")):
+        res = _call(in_memory_duckdb, test_service_source)
+
+    assert [(r["value"], r["requests"]) for r in res["top_asns"]] == [("7922", 1)]
+    assert "label" not in res["top_asns"][0]
+
+
+def test_top_asns_empty_without_asn_column(in_memory_duckdb, test_service_source):
+    _make_table(in_memory_duckdb, test_service_source, _fixture_rows())
+    res = _call(in_memory_duckdb, test_service_source)
+
+    assert res["fields"]["asn"] is False
+    assert res["top_asns"] == []
 
 
 def test_bandwidth_splits_edge_and_shield(in_memory_duckdb, test_service_source):

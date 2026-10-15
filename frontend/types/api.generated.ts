@@ -7099,7 +7099,7 @@ export interface components {
              * Category
              * @enum {string}
              */
-            category: "country" | "referer" | "host" | "proxy_type" | "proxy_description" | "subscriber_id" | "ip";
+            category: "country" | "asn" | "referer" | "host" | "proxy_type" | "proxy_description" | "subscriber_id" | "ip";
             /** Value */
             value: string;
         };
@@ -7231,6 +7231,11 @@ export interface components {
              */
             top_countries: components["schemas"]["ContentSecurityTopRow"][];
             /**
+             * Top Asns
+             * @default []
+             */
+            top_asns: components["schemas"]["ContentSecurityTopRow"][];
+            /**
              * Top Referers
              * @default []
              */
@@ -7317,6 +7322,8 @@ export interface components {
         ContentSecurityTopRow: {
             /** Value */
             value: string;
+            /** Label */
+            label?: string | null;
             /** Users */
             users?: number | null;
             /** Requests */

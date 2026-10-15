@@ -164,6 +164,12 @@ def _normalize_conditions(conditions: list[ContentSecurityBlockCondition]) -> li
                 value = str(ip_address(value))
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=make_error("invalid_ip", "Not a valid IP address")) from exc
+        if c.category == "asn":
+            # Accept "AS7922" / "7922"; the receiver always gets the bare number.
+            digits = value.upper().removeprefix("AS")
+            if not digits.isascii() or not digits.isdigit() or not 0 < int(digits) < 2**32:
+                raise HTTPException(status_code=422, detail=make_error("invalid_asn", "Not a valid ASN"))
+            value = str(int(digits))
         out.append({"category": c.category, "value": value})
     return blocks_db.canonical_conditions(out)
 
