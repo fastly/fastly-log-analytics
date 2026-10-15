@@ -58,6 +58,7 @@ const ALLOWED_GAPS = new Set<string>([
   'PATCH /api/services/:service_id/custom-fields/:field_name',
   'DELETE /api/cron-runs/:log_id',
   'POST /api/assets/aggregates',
+  'GET /api/assets/aggregates',
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
 
