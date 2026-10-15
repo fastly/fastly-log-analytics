@@ -302,7 +302,7 @@ export default function NetworkPage() {
 
   const asnOptions = React.useMemo(() => {
     if (!data?.leaderboard) return []
-    return data.leaderboard.map((a: any) => ({ value: String(a.asn), label: a.label }))
+    return data.leaderboard.map((a: Record<string, unknown>) => ({ value: String(a.asn), label: String(a.label) }))
   }, [data?.leaderboard])
 
   // Pre-memoise the ASN leaderboard rows so toggling the metric / mapAsn

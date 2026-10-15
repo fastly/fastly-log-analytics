@@ -445,7 +445,11 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
     import duckdb
 
     cache_dir = tmp_path / "cache"
-    part_dir = cache_dir / "data_client_vitals" / "timestamp_hour=2026-10-11-10"
+    # Use the current UTC hour so the daily-tier rollup (cutoff = today - 1 day)
+    # does not also migrate the merged file and double-count files_merged. With
+    # compact_active_hour=True the hourly pass still compacts this partition.
+    now = datetime.now(UTC)
+    part_dir = cache_dir / "data_client_vitals" / now.strftime("timestamp_hour=%Y-%m-%d-%H")
     part_dir.mkdir(parents=True)
 
     src = {
@@ -454,7 +458,7 @@ def test_contract_rum_local_compaction_natural_key_deduplication(tmp_path):
         "_cache_dir_override": str(cache_dir),
     }
 
-    ts = datetime(2026, 10, 11, 10, 15, tzinfo=UTC)
+    ts = now.replace(minute=15, second=0, microsecond=0)
 
     # File 1 has Beacon A
     t1 = pa.Table.from_pylist(
