@@ -112,7 +112,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
+  { name: 'Raw Logs', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: true },
 ]
 
 const SYSTEM_NAVIGATION = [
@@ -151,7 +151,7 @@ const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/query': 'Query',
   '/charts': 'Charts',
   '/alerts': 'Alerts',
-  '/logs': 'Data Management',
+  '/logs': 'Raw Logs',
   '/usage': 'Usage and Cost',
   '/admin': 'Admin',
   '/share-login': 'Sign in',
@@ -471,8 +471,7 @@ export function AppLayout({
     // history correctly.
     const analystBlocked =
       isAnalyst && (pathname.startsWith('/admin') || pathname.startsWith('/usage') || pathname.startsWith('/alerts') || pathname.startsWith('/high-scale'))
-    const logsBlocked = (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs')
-    if (analystBlocked || logsBlocked) {
+    if (analystBlocked) {
       const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
       setRedirectAnnouncement('This page is not available for your account. Redirecting to the dashboard.')
       if (typeof window !== 'undefined') {
@@ -557,7 +556,7 @@ export function AppLayout({
   // own editor + filters and the global bar would only confuse the
   // SQL the user is hand-writing.
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar = pathname.startsWith('/admin') || pathname.startsWith('/logs') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
+  const hideFilterBar = pathname.startsWith('/admin') || isQueryRawMode || pathname.startsWith('/insights') || pathname.startsWith('/alerts') || pathname.startsWith('/control-room') || !hasServices
 
   if (isInitializing) {
     return (

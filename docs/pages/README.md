@@ -68,7 +68,7 @@ docs/pages/
 | `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Live-certified** |
 | `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Scaffolded (Pending AI Verification)** |
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Scaffolded (Pending AI Verification)** |
-| `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Scaffolded (Pending AI Verification)** |
+| `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Live-certified** |
 | `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Live-certified** |
 | `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer (High-Scale only) | **Scaffolded (Pending AI Verification)** |
 | `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Scaffolded (Pending AI Verification)** |

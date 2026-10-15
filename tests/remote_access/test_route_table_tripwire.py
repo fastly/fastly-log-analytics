@@ -200,6 +200,8 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     ("GET", "/api/network/pop-health"),
     ("GET", "/api/security/bundle"),
     ("GET", "/api/security/threat-intel"),
+    ("GET", "/api/logs"),
+    ("GET", "/api/logs/{service_id}"),
     ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
     ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
     # ── FLAGGED FOR TRIAGE ───────────────────────────────────────────────
@@ -264,6 +266,8 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/high-scale/services/{service_id}/queries/{job_id}/cancel"),
     ("POST", "/api/high-scale/services/{service_id}/exports"),
     ("POST", "/api/high-scale/services/{service_id}/exports/{export_id}/cancel"),
+    ("POST", "/api/logs"),
+    ("POST", "/api/logs/query"),
 }
 
 _ALL_INVENTORIED = _READ_ALLOWLIST | _WRITE_VERB_GATE_ROUTES

@@ -28,10 +28,11 @@ export const dynamic = 'force-dynamic'
 export default async function LogsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ service?: string | string[] }>
+  searchParams: Promise<{ service?: string | string[]; tab?: string | string[] }>
 }) {
   const params = await searchParams
   const serviceId = firstParam(params.service)
+  const tab = firstParam(params.tab)
 
   const cronRunsData = await fetchCronRunsServerSide(serviceId)
 
@@ -47,7 +48,7 @@ export default async function LogsPage({
 
   return (
     <HydrationBoundary state={dehydratedState}>
-      <LogsClient />
+      <LogsClient initialTab={tab} />
     </HydrationBoundary>
   )
 }

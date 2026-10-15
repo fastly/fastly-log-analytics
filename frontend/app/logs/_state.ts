@@ -24,7 +24,7 @@ export type BackgroundCronToast = {
  * Logs / Data Management page. Returns the entire bag of values
  * needed by the rendering shell + its section components.
  */
-export function useLogsPageState() {
+export function useLogsPageState(initialTab?: string) {
   // Read activeServiceId via the bootstrap-aware fallback so a cold
   // load (empty localStorage, bootstrap still in flight or just
   // hydrated into the React Query cache) doesn't flash through the
@@ -36,7 +36,7 @@ export function useLogsPageState() {
   const activeService = services.find(s => s.id === activeServiceId)
   const isAnalyst = activeService?.accessLevel === 'read_only'
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState('cron')
+  const [activeTab, setActiveTab] = useState(initialTab || 'explorer')
   const [isPurgeOpen, setIsPurgeOpen] = useState(false)
   const [taskFilter, setTaskFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')

@@ -231,6 +231,7 @@ _ANALYST_ALLOWED_WRITE_PREFIXES = (
     "/api/web-vitals",  # POST /api/web-vitals — client perf telemetry
     "/api/ux-events",  # POST /api/ux-events — DataTable column reorders + sibling UX signals
     "/api/assets/",  # POST /api/assets/aggregates — assets/shield read-only query
+    "/api/logs",  # POST /api/logs and /api/logs/query — raw logs read-only paginated query
     "/api/high-scale/",  # POST high-scale request-fact queries are read-only
 )
 

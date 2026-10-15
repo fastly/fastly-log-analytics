@@ -751,6 +751,24 @@ role boundaries, telemetry completeness, and documented performance budgets.
   backend tests (`tests/routers/test_assets.py`, 5 passed), route tripwire tests (`tests/remote_access/test_route_table_tripwire.py`),
   frontend unit tests (`frontend/__tests__/app/assets-shield.test.tsx`, 5 passed), and Playwright E2E
   integration spec (`frontend/e2e/pages/assets-shield.spec.ts`, 8 contract tests).
+- **`/logs` — Live-certified (`docs/pages/logs.md`).** Audited and
+  verified across Standard and High-Scale deployment modes. Confirmed full Raw
+  Logs Explorer suite: high-throughput paginated access to individual Fastly CDN
+  edge access log records, multi-field search and drill-downs, dynamic column selector,
+  and zero-shift JSON row detail inspection modal with formatted table and raw JSON
+  views. Hardened backend validation with typed Pydantic models in `backend/models/logs.py`
+  (`LogsQueryRequest`, `LogsQueryResponse`, `ColumnMeta`), `RequestContext` tenancy,
+  buffer self-heal (`execute_with_stale_view_retry`), telemetry attribution
+  (`process_context_scope("logs:query")`), High-Scale Elevation ClickHouse support
+  (`backend/high_scale/logs.py`), and remote analyst IP masking (`mask_ips_for`) /
+  session ID redaction. Allowed remote analyst access for `/api/logs` in `_ANALYST_ALLOWED_WRITE_PREFIXES`,
+  `_WRITE_VERB_GATE_ROUTES`, and `_READ_ALLOWLIST`. Enforced zero-CLS layout reservations
+  (`[contain-intrinsic-size:600px]` and `[content-visibility:auto]`), tabular loading
+  skeletons (`Querying edge log records...`), and refetch dimming. Comprehensive backend
+  unit tests (`tests/routers/test_logs_router.py`, 6 passed), route tripwire tests
+  (`tests/remote_access/test_route_table_tripwire.py`), frontend unit tests
+  (`frontend/__tests__/app/logs.test.tsx`), and Playwright E2E integration spec
+  (`frontend/e2e/pages/logs.spec.ts`, 8 contract tests).
 
 
 Known page-parity investigation after the environment rebuild:
