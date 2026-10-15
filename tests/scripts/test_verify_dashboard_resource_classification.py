@@ -72,3 +72,12 @@ def test_woff2_substring_filter_removed_in_favor_of_url_classification() -> None
         "static-asset vs. API classification happens via isCriticalResourceUrl "
         "on the real request URL, not by guessing from console text"
     )
+
+
+def test_telemetry_beacons_are_exempt_from_critical_resource_urls() -> None:
+    # Client-side observational telemetry beacons (/api/web-vitals, /api/ux-events)
+    # are non-critical: dropped beacons under load do not compromise data correctness.
+    src = _src()
+    assert "/api/web-vitals" in src and "/api/ux-events" in src, (
+        "isCriticalResourceUrl in verify_dashboard.js must exempt /api/web-vitals and /api/ux-events"
+    )

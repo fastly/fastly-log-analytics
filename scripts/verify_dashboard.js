@@ -124,6 +124,12 @@ function ts() {
 // page's data is correct. Both the response and requestfailed listeners below
 // key fatality off of this, not off of guessing from console text.
 function isCriticalResourceUrl(url) {
+  // Client telemetry beacons and UX telemetry pings are observational and non-critical;
+  // a dropped beacon or transient connection reset on an analytics ping proves nothing
+  // about whether the page's analytical data is correct or complete.
+  if (url.includes('/api/web-vitals') || url.includes('/api/ux-events')) {
+    return false;
+  }
   return url.includes('/api/') || url.includes('/_next/data/');
 }
 
