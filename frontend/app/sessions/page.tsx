@@ -167,7 +167,7 @@ function SessionsBody({
   const isLoadingInitial = isLoading || (isFetching && !data)
 
   return (
-    <>
+    <div data-testid="user-sessions-explorer" className="space-y-4">
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
         <UpdatingBadge />
       </div>
@@ -229,9 +229,10 @@ function SessionsBody({
         labelBySid={labelBySid}
         onFlagged={onFlagged}
       />
-    </>
+    </div>
   )
 }
+
 
 export default function SessionsPage() {
   const [selectedSession, setSelectedSession] = useState<SessionRow | null>(null)

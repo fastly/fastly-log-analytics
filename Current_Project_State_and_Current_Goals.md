@@ -769,6 +769,22 @@ role boundaries, telemetry completeness, and documented performance budgets.
   (`tests/remote_access/test_route_table_tripwire.py`), frontend unit tests
   (`frontend/__tests__/app/logs.test.tsx`), and Playwright E2E integration spec
   (`frontend/e2e/pages/logs.spec.ts`, 8 contract tests).
+- **`/sessions` & `/sessions/stream` — Live-certified (`docs/pages/sessions.md`, `docs/pages/sessions-stream.md`).**
+  Audited and verified across Standard and High-Scale deployment modes. Confirmed full User Sessions
+  Explorer and Stream Session Detail / QoE inspector suite: session-level aggregations (`ip`, `ja4`,
+  `req_count`, `duration_s`, `status_4xx`, `status_5xx`, `offense_count`, `flagged`), scoring controls
+  (flagged-only, streaming-only, min requests, min 4xx), and individual session drill-down with opaque
+  Fernet `session_token` sealing preserving remote analyst IP redaction (`mask_ips_for`). Handled
+  single-request zero-width window clamping with ±1s safety expansion. Hardened backend validation with
+  `range_token`/`anchor` support on `SessionsRequest` in `backend/models/dashboard.py`, `RequestContext` tenancy,
+  buffer self-heal (`execute_with_stale_view_retry`), and telemetry attribution (`process_context_scope("sessions:list")`,
+  `process_context_scope("sessions:detail")`). Enforced zero-CLS layout reservations (`min-h-[500px] [contain-intrinsic-size:500px]`,
+  `min-h-[400px] [contain-intrinsic-size:400px]`), contextual loading skeletons, refetch dimming, and full
+  inspection dialogs. Comprehensive backend unit tests (`tests/routers/test_sessions_token.py`, 17 passed),
+  route tripwire tests (`tests/remote_access/test_route_table_tripwire.py`, 4 passed), frontend unit tests
+  (`frontend/__tests__/app/sessions.test.tsx`), and Playwright E2E integration spec
+  (`frontend/e2e/pages/sessions.spec.ts`, 8 contract tests).
+
 
 
 Known page-parity investigation after the environment rebuild:

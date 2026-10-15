@@ -202,7 +202,13 @@ export function SessionsTable({
   }, [data, relative, full, abbr, labels, labelBySid, idBySid, activeServiceId, onFlagged, onRowClick])
 
   return (
-    <div className={cn("border rounded-lg transition-opacity duration-100", isFetching && !isLoadingInitial && "opacity-40 pointer-events-none")}>
+    <div
+      data-testid="sessions-table-container"
+      className={cn(
+        "border rounded-lg transition-opacity duration-100 min-h-[500px] [contain-intrinsic-size:500px]",
+        isFetching && !isLoadingInitial && "opacity-40 pointer-events-none"
+      )}
+    >
       <DataTable
         columns={columns}
         data={data?.sessions || []}

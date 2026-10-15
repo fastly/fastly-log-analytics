@@ -144,7 +144,7 @@ export function SessionDetail({
 
   return (
     <Dialog open={!!selectedSession} onOpenChange={(open) => !open && setSelectedSession(null)}>
-      <DialogContent className="max-w-6xl max-h-[85vh] flex flex-col p-4 md:p-6 overflow-hidden">
+      <DialogContent data-testid="session-detail-dialog" className="max-w-6xl max-h-[85vh] flex flex-col p-4 md:p-6 overflow-hidden">
         <DialogHeader className="shrink-0 mb-2">            <DialogTitle className="flex items-center gap-2 text-base">
             <Users className="h-4 w-4" />
             Session: {selectedSession?.ip}

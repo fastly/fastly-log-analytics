@@ -175,6 +175,10 @@ class SessionsRequest(FilteredRequest, PaginationMixin):
     streaming_only: bool = False
     min_reqs_flag: int | None = None
     min_4xx_pct_flag: float | None = None
+    # Relative-range wire contract (optional). When ``range_token`` is recognized
+    # the server resolves the window from (range_token, anchor) deterministically.
+    range_token: str | None = None
+    anchor: str | None = None
 
 
 class Session(BaseModel):

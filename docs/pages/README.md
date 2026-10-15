@@ -63,8 +63,8 @@ docs/pages/
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
 | `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Scaffolded (Pending AI Verification)** |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
-| `/sessions` | [Sessions](sessions.md) | Session graph, threat scoring, suspicious session inspection | **Scaffolded (Pending AI Verification)** |
-| `/sessions/stream` | [Sessions Stream](sessions-stream.md) | Real-time session transitions, score escalation alerts | **Scaffolded (Pending AI Verification)** |
+| `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
+| `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |
 | `/usage` | [Usage & Cost](usage-and-cost.md) | FOS storage, Class A/B API calls, interactive cost estimator | **Live-certified** |
 | `/query` | [SQL Query Pad](query.md) | Direct DuckDB SQL runner, schema explorer, CSV download | **Scaffolded (Pending AI Verification)** |
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Scaffolded (Pending AI Verification)** |

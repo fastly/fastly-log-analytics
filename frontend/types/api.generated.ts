@@ -13987,6 +13987,10 @@ export interface components {
             min_reqs_flag?: number | null;
             /** Min 4Xx Pct Flag */
             min_4xx_pct_flag?: number | null;
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
         };
         /** SessionsResponse */
         SessionsResponse: {
