@@ -108,7 +108,7 @@ test.describe('Raw Logs Explorer Page Contract (/logs)', () => {
     const colSelector = page.locator('[data-testid="raw-logs-column-selector"]')
     await expect(colSelector).toBeVisible({ timeout: 10_000 })
     await colSelector.click()
-    await expect(page.getByRole('menuitemcheckbox', { name: 'timestamp' })).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByRole('menuitemcheckbox', { name: 'timestamp', exact: true })).toBeVisible({ timeout: 5_000 })
     // Close dropdown
     await page.keyboard.press('Escape')
 

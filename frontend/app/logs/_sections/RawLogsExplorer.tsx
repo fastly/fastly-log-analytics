@@ -25,6 +25,7 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -281,18 +282,20 @@ export function RawLogsExplorer({
               <span>Columns ({selectedColumns.length})</span>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
-              <DropdownMenuLabel className="text-xs">Display Columns</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {availableColumns.map((col) => (
-                <DropdownMenuCheckboxItem
-                  key={col}
-                  checked={selectedColumns.includes(col)}
-                  onCheckedChange={() => toggleColumn(col)}
-                  className="text-xs cursor-pointer"
-                >
-                  {col}
-                </DropdownMenuCheckboxItem>
-              ))}
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="text-xs">Display Columns</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {availableColumns.map((col) => (
+                  <DropdownMenuCheckboxItem
+                    key={col}
+                    checked={selectedColumns.includes(col)}
+                    onCheckedChange={() => toggleColumn(col)}
+                    className="text-xs cursor-pointer"
+                  >
+                    {col}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
 
