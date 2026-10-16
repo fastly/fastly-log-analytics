@@ -6,6 +6,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
+from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
+from backend.models.log_fields_catalog import LogFieldsCatalogResponse
+
 # ── Annotated clamping types (replaces repeated @field_validator boilerplate) ──
 
 
@@ -261,7 +264,7 @@ class BootstrapResponse(BaseResponse):
     # ['log-fields-catalog', service_id] React Query cache and skip the
     # 35-KB round-trip on every cold page load (perf audit Phase D).
     # None when no active service.
-    log_fields_catalog: dict | None = None
+    log_fields_catalog: LogFieldsCatalogResponse | None = None
     # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
     # returns). Folded in so SyncStatusBadge / logs page hit cache on
     # first mount. ADMIN ONLY — None for analyst sessions (matches the

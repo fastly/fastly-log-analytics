@@ -6933,10 +6933,7 @@ export interface components {
             views?: {
                 [key: string]: unknown;
             }[];
-            /** Log Fields Catalog */
-            log_fields_catalog?: {
-                [key: string]: unknown;
-            } | null;
+            log_fields_catalog?: components["schemas"]["LogFieldsCatalogResponse"] | null;
             /** Sync Status */
             sync_status?: {
                 [key: string]: unknown;
@@ -9646,6 +9643,117 @@ export interface components {
              * @default true
              */
             configured: boolean;
+        };
+        /** LogFieldCatalogEntry */
+        LogFieldCatalogEntry: {
+            /** Id */
+            id: string;
+            /** Group */
+            group?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Duckdb Type */
+            duckdb_type?: string | null;
+            /** Typical Bytes */
+            typical_bytes?: number | null;
+            /** Required By */
+            required_by?: string[] | null;
+            /** Formatter */
+            formatter?: string | null;
+            /** Unit */
+            unit?: string | null;
+            /** Precision */
+            precision?: number | null;
+            /** Individually Toggleable */
+            individually_toggleable?: boolean | null;
+            /** Default Off */
+            default_off?: boolean | null;
+            /** Note */
+            note?: string | null;
+            /** Limit */
+            limit?: number | null;
+            /** Has Limit */
+            has_limit?: boolean | null;
+            /** Show In Dashboard */
+            show_in_dashboard?: boolean | null;
+            /** Show In Logs */
+            show_in_logs?: boolean | null;
+            /** Filterable */
+            filterable?: boolean | null;
+            /** Value Type */
+            value_type?: string | null;
+            /** Is Custom */
+            is_custom?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldCatalogGroup */
+        LogFieldCatalogGroup: {
+            /** Id */
+            id?: string | null;
+            /** Label */
+            label?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Locked */
+            locked?: boolean | null;
+            /** Requires */
+            requires?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Recommended With */
+            recommended_with?: string[] | null;
+            /** Total Bytes */
+            total_bytes?: number | null;
+            /** Fields */
+            fields?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldInsightDefinition */
+        LogFieldInsightDefinition: {
+            /** Id */
+            id: string;
+            /** Category */
+            category?: string | null;
+            /** Title */
+            title?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Required Fields */
+            required_fields?: string[] | null;
+            /** Required Groups */
+            required_groups?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldPreset */
+        LogFieldPreset: {
+            /** Label */
+            label?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Groups */
+            groups?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldsCatalogResponse */
+        LogFieldsCatalogResponse: {
+            /** Groups */
+            groups?: components["schemas"]["LogFieldCatalogGroup"][] | null;
+            /** Fields */
+            fields?: components["schemas"]["LogFieldCatalogEntry"][] | null;
+            /** Insights */
+            insights?: components["schemas"]["LogFieldInsightDefinition"][] | null;
+            /** Presets */
+            presets?: {
+                [key: string]: components["schemas"]["LogFieldPreset"];
+            } | null;
+        } & {
+            [key: string]: unknown;
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
@@ -24945,7 +25053,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LogFieldsCatalogResponse"];
                 };
             };
             /** @description Bad request */

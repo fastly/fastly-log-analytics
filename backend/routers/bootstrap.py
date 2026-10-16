@@ -13,6 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
@@ -904,7 +905,7 @@ def _compute_log_fields_catalog(service_id: str | None) -> dict:
     }
 
 
-@router.get("/log-fields/catalog")
+@router.get("/log-fields/catalog", response_model=LogFieldsCatalogResponse, response_model_exclude_unset=True)
 @query_errors(status_code=500)
 def log_fields_catalog(
     request: Request,
