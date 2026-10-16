@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // No direct test file existed for _transport.ts before this — its trust-gate
 // behavior was only exercised indirectly through each fetcher's own tests
-// (__tests__/ssr/dashboard.test.ts etc). This file adds direct coverage for
+// (__tests__/ssr/origin.test.ts etc). This file adds direct coverage for
 // the debug-responses cookie → x-debug-responses header propagation added
 // for the DiagnosticsPanel/Query-debugging-panel SSR fix — see
 // lib/debug-cookie.ts and DiagnosticsPanel.tsx.

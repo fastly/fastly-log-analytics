@@ -3,8 +3,7 @@
  * /api/dashboard/bundle that returns aggregates + top_bots together in
  * a single response. The dashboard page reads BOTH directly off
  * bundleQuery.data (no separate cache keys), and the bundle is keyed on
- * the server-reproducible (rangeToken, anchor) pair so the SSR seed
- * (lib/ssr/dashboard.ts) byte-matches the first-paint key.
+ * the server-reproducible (rangeToken, anchor) pair.
  *
  * Tests assert (1) the bundle's queryKey shape (keyed on rangeToken/
  * anchor), (2) the enabled flag wires through, (3) it does NOT fan out

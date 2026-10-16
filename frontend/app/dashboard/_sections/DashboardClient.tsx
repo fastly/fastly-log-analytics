@@ -37,10 +37,6 @@ import type { DashboardBodyProps } from './types'
 // is constant — declaring it explicitly is what lets the backend know to
 // keep emitting every block (and what positions us to drop sections per
 // feature flag without an API change).
-//
-// MUST stay in lockstep with DASHBOARD_SSR_SECTIONS in lib/ssr/dashboard.ts —
-// the section list is part of the SSR-seed bundle key, so a divergence here
-// would miss the dehydrated cache and double-fetch on first paint.
 const DASHBOARD_SECTIONS: DashboardSection[] = ['core', 'topten', 'bots']
 
 // ── DashboardBody ──────────────────────────────────────────────────────────────
@@ -142,12 +138,10 @@ function DashboardBody({
   // staleTime gotcha that would otherwise make a second useQuery
   // refetch on mount despite the cache being warm — turning what
   // should be a one-request page back into a two-request page. It is
-  // also what makes the SSR seed (lib/ssr/dashboard.ts) paint the whole
-  // page from cache: the seeded bundle key carries top_bots too, so the
-  // bots cards no longer fire their own request on cold load.
-  //
-  // Keyed on (rangeToken, anchor) — server-reproducible — so the SSR seed
-  // key byte-matches this query's first-paint key.
+  // also what lets the whole page paint from one cached bundle: the bundle
+  // carries top_bots too, so the bots cards don't fire their own request.
+  // The dashboard is NOT SSR-seeded (app/dashboard/page.tsx is a plain
+  // client wrapper); the bundle is fetched client-side on mount.
   //
   // Compare-mode keeps its own dedicated /api/dashboard/aggregates
   // call below — it only fires when the user explicitly enables
@@ -201,10 +195,9 @@ function DashboardBody({
 
   // top_bots rides in the composite bundle response (one round-trip) and is
   // read directly off bundleQuery.data — same pattern as aggregates above — so
-  // the SSR-seeded bundle paints the bots cards from cache with NO separate
-  // fetch. (/api/security/top-bots has no keyed path, so a dedicated query keyed
+  // the cached bundle paints the bots cards with NO separate fetch. (/api/security/top-bots has no keyed path, so a dedicated query keyed
   // on the server-reproducible token isn't available; reading off the bundle is
-  // both the single-fetch win and the SSR-seed-compatible path. Error/retry fall
+  // the single-fetch win. Error/retry fall
   // back to the bundle's own state, identical to how aggregates errors surface.)
   const topBotsData = bundleQuery.data?.top_bots
   const topBotsError = bundleQuery.error
