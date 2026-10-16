@@ -2674,8 +2674,9 @@ def sweep_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | No
     dead_letter_count = 0
     try:
         dead_letter_row = con.execute(
-            "SELECT COUNT(*) FROM ingest_ledger WHERE service_id=? AND status IN ('quarantined', 'dead_letter')",
-            (service_id,),
+            "SELECT COUNT(*) FROM ingest_ledger WHERE service_id=? AND status IN ('quarantined', 'dead_letter') "
+            "AND object_key NOT LIKE ?",
+            (service_id, rum_like_pattern),
         ).fetchone()
         dead_letter_count = int(dead_letter_row[0]) if dead_letter_row else 0
     except Exception:

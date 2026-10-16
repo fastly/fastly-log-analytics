@@ -725,3 +725,29 @@ def test_merge_lake_files_flushes_inlined_rows_to_parquet(tmp_path):
         except duckdb.Error:
             pass
         check.close()
+
+
+def test_sweep_dead_letter_count_excludes_rum_objects():
+    service_id = "test-celery-svc"
+    con, cur = _clear_ledger(service_id)
+    now = time.time()
+    for key, status in (
+        ("raw/request/2026/08/27/10/a.gz", "dead_letter"),
+        ("raw/rum/2026/08/27/10/b.gz", "dead_letter"),
+        ("raw/rum/2026/08/27/10/c.gz", "quarantined"),
+    ):
+        cur.execute(
+            "INSERT INTO ingest_ledger (service_id, object_key, status, discovered_at) VALUES (?, ?, ?, ?)",
+            (service_id, key, status, now),
+        )
+    con.commit()
+
+    with (
+        patch("backend.config.load_config", return_value={"service_id": service_id}),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "test", "bucket": "test-bucket"}),
+        patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos),
+        patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
+    ):
+        summary = sweep_ledger_once(service_id)
+
+    assert summary["dead_letter"] == 1
