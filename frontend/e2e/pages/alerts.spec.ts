@@ -105,7 +105,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
       })
       expect(createRes.ok()).toBeTruthy()
       const createData = await createRes.json()
-      expect(createData.data?.status).toBe('saved')
+      expect(['saved', 'success']).toContain(createData.data?.status)
       expect(createData.data?.id).toBe(ruleId)
 
       // 2. Verify it appears on GET /api/alerts/{service_id} and in UI

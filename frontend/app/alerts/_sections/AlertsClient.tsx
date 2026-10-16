@@ -4,7 +4,7 @@ import React from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, extractApiError } from '@/lib/api'
-import { useServiceStore } from '@/stores/serviceStore'
+import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useIsDataReady'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { ReportShell } from '@/components/ReportShell'
 import { Button } from '@/components/ui/button'
@@ -47,7 +47,8 @@ export type AlertStatusFilter = 'all' | 'alerting' | 'ok' | 'muted'
 const VALID_STATUS_FILTERS = new Set<AlertStatusFilter>(['all', 'alerting', 'ok', 'muted'])
 
 export default function AlertsClient() {
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = useEffectiveServiceId() ?? null
+  const bootstrapResolved = useBootstrapResolved()
   const searchParams = useSearchParams()
   // Mirrors AppLayout's analyst derivation: a user is "analyst" if their
   // active service is read-only OR if bootstrap flagged them as a remote
@@ -140,6 +141,7 @@ export default function AlertsClient() {
         return data
       }
     },
+    placeholderData: (prev) => prev ?? queryClient.getQueryData(['alerts', null]),
     // Analysts don't manage alerts. Without this gate the page on the
     // analyst-fronting Fastly path fires /api/alerts (slow, often
     // 503-ing the first byte timeout) only for the redirect dance to
@@ -201,7 +203,7 @@ export default function AlertsClient() {
     return alerts
   }, [alerts, statusFilter])
 
-  const lastChecked = alertsRes?.evaluated_at || new Date().toISOString()
+  const lastCheckedLabel = alertsRes?.evaluated_at ? full(alertsRes.evaluated_at) : 'Just now'
 
   // Clear pending timers on unmount so the DELETE doesn't fire against a
   // stale closure after the page is gone. Side effect: navigating away
@@ -297,16 +299,16 @@ export default function AlertsClient() {
       title="Alerts"
       headerActions={
         <div className="flex items-center gap-3 flex-wrap">
-          <Badge variant="secondary" className="gap-2 font-mono text-xs">
-            <Clock className="w-3 h-3 text-muted-foreground" />
-            {isFetching ? 'Refreshing...' : `Last Checked: ${full(lastChecked)}`}
+          <Badge variant="secondary" className="gap-2 font-mono text-xs min-w-[180px]">
+            <Clock className="w-3 h-3 text-muted-foreground shrink-0" />
+            <span className="truncate">{`Last Checked: ${lastCheckedLabel}`}</span>
           </Badge>
-          {!isAnalyst && activeServiceId && (
+          {!isAnalyst && (
             <Button
               variant="outline"
               size="sm"
               onClick={handleEvaluateNow}
-              disabled={isEvaluating || isFetching || isLoading}
+              disabled={!activeServiceId || isEvaluating || isFetching || isLoading}
               data-testid="alerts-evaluate-btn"
             >
               {isEvaluating ? (
@@ -324,7 +326,7 @@ export default function AlertsClient() {
             disabled={isFetching || isLoading}
             data-testid="alerts-refresh-btn"
           >
-            <Loader2 className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : 'hidden'}`} />
+            <Loader2 className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
             Refresh Now
           </Button>
           {!isAnalyst && (
@@ -336,36 +338,34 @@ export default function AlertsClient() {
         </div>
       }
       description={
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span>Configure threshold-based alerts and webhook notifications.</span>
-          {activeServiceId && (
-            <Popover>
-              <PopoverTrigger>
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-md hover:bg-accent transition-colors">
-                  <Clock className="h-3 w-3" />
-                  <span>Evaluated every {logPeriodSeconds}s</span>
-                  <Info className="h-3 w-3" />
+          <Popover>
+            <PopoverTrigger>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-md hover:bg-accent transition-colors">
+                <Clock className="h-3 w-3" />
+                <span>Evaluated every {logPeriodSeconds}s</span>
+                <Info className="h-3 w-3" />
+              </div>
+            </PopoverTrigger>
+            <PopoverContent className="w-80 text-sm">
+              <div className="space-y-2">
+                <h4 className="font-medium flex items-center gap-2">
+                  <Zap className="h-4 w-4 text-yellow-500" />
+                  Evaluation Frequency
+                </h4>
+                <p className="text-muted-foreground">
+                  Alerts are evaluated dynamically based on your Fastly service&apos;s log batching period (currently <strong>{logPeriodSeconds} seconds</strong>).
+                </p>
+                <p className="text-muted-foreground">
+                  This ensures alerts trigger the moment a new batch of logs arrives from Fastly, without uselessly spamming the database in between batches.
+                </p>
+                <div className="bg-muted p-2 rounded text-xs mt-2 text-muted-foreground">
+                  Note: Alert queries execute in the background server process, so they do not appear in the DuckDB Queries debug panel.
                 </div>
-              </PopoverTrigger>
-              <PopoverContent className="w-80 text-sm">
-                <div className="space-y-2">
-                  <h4 className="font-medium flex items-center gap-2">
-                    <Zap className="h-4 w-4 text-yellow-500" />
-                    Evaluation Frequency
-                  </h4>
-                  <p className="text-muted-foreground">
-                    Alerts are evaluated dynamically based on your Fastly service&apos;s log batching period (currently <strong>{logPeriodSeconds} seconds</strong>).
-                  </p>
-                  <p className="text-muted-foreground">
-                    This ensures alerts trigger the moment a new batch of logs arrives from Fastly, without uselessly spamming the database in between batches.
-                  </p>
-                  <div className="bg-muted p-2 rounded text-xs mt-2 text-muted-foreground">
-                    Note: Alert queries execute in the background server process, so they do not appear in the DuckDB Queries debug panel.
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
-          )}
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
       }
       icon={Bell}
@@ -375,7 +375,7 @@ export default function AlertsClient() {
       <div data-testid="alerts-page-root" className="space-y-6">
         <div
           data-testid="alerts-summary-grid"
-          className="grid grid-cols-2 md:grid-cols-4 gap-4 [contain-intrinsic-size:96px] [content-visibility:auto]"
+          className="grid grid-cols-2 md:grid-cols-4 gap-4 min-h-[96px] [contain-intrinsic-size:96px] [content-visibility:auto]"
         >
           <Card className="py-3">
             <CardContent className="px-4 py-0 flex items-center justify-between">
@@ -443,18 +443,18 @@ export default function AlertsClient() {
 
         <div
           data-testid="alerts-list-card"
-          className="[contain-intrinsic-size:350px] [content-visibility:auto]"
+          className="min-h-[350px] [contain-intrinsic-size:350px] [content-visibility:auto]"
         >
           <AnalyticsCard
             title="Configured Alerts"
             icon={<Bell className="h-4 w-4" />}
             isLoading={isLoading}
-            isFetching={isFetching}
+            isFetching={false}
             loadingMessage="Fetching configured alert rules..."
             error={alertsError as AnalyticsCardError | null}
             isEmpty={false}
             className="min-h-[350px]"
-            contentClassName="p-0"
+            contentClassName="p-0 min-h-[280px]"
             headerAction={
               <div className="flex items-center gap-2 flex-wrap">
                 <div
@@ -488,48 +488,52 @@ export default function AlertsClient() {
               </div>
             }
           >
-            {filteredAlerts.length === 0 && !isLoading ? (
-              <div
-                data-testid="alerts-empty-state"
-                className="flex flex-col items-center justify-center py-16 px-4 text-center gap-3"
-              >
-                <Bell className="h-8 w-8 text-muted-foreground/60" aria-hidden="true" />
-                <div className="space-y-1 max-w-md">
-                  <h3 className="text-sm font-semibold">
-                    {alerts.length === 0 ? 'No alert rules configured' : `No ${statusFilter} alert rules`}
-                  </h3>
-                  <p className="text-xs text-muted-foreground">
-                    {alerts.length === 0
-                      ? 'Create threshold or anomaly detection rules to receive Slack, PagerDuty, or Webhook notifications when traffic or error rates spike.'
-                      : 'No configured alert rules match the selected status filter.'}
-                  </p>
+            <div className={`min-h-[280px] ${isFetching && !isLoading ? 'opacity-40 pointer-events-none transition-opacity' : ''}`}>
+              {isLoading ? (
+                <div className="min-h-[280px]" />
+              ) : filteredAlerts.length === 0 ? (
+                <div
+                  data-testid="alerts-empty-state"
+                  className="flex flex-col items-center justify-center min-h-[280px] py-12 px-4 text-center gap-3"
+                >
+                  <Bell className="h-8 w-8 text-muted-foreground/60" aria-hidden="true" />
+                  <div className="space-y-1 max-w-md">
+                    <h3 className="text-sm font-semibold">
+                      {alerts.length === 0 ? 'No alert rules configured' : `No ${statusFilter} alert rules`}
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {alerts.length === 0
+                        ? 'Create threshold or anomaly detection rules to receive Slack, PagerDuty, or Webhook notifications when traffic or error rates spike.'
+                        : 'No configured alert rules match the selected status filter.'}
+                    </p>
+                  </div>
+                  {alerts.length === 0 && !isAnalyst ? (
+                    <Button size="sm" onClick={handleCreate} data-testid="alerts-empty-create-btn">
+                      <Plus className="w-4 h-4 mr-1.5" />
+                      Add Alert
+                    </Button>
+                  ) : alerts.length > 0 && statusFilter !== 'all' ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setStatusFilter('all')}
+                      data-testid="alerts-clear-filter-btn"
+                    >
+                      Show All Rules
+                    </Button>
+                  ) : null}
                 </div>
-                {alerts.length === 0 && !isAnalyst ? (
-                  <Button size="sm" onClick={handleCreate} data-testid="alerts-empty-create-btn">
-                    <Plus className="w-4 h-4 mr-1.5" />
-                    Add Alert
-                  </Button>
-                ) : alerts.length > 0 && statusFilter !== 'all' ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setStatusFilter('all')}
-                    data-testid="alerts-clear-filter-btn"
-                  >
-                    Show All Rules
-                  </Button>
-                ) : null}
-              </div>
-            ) : (
-              <AlertsList
-                alerts={filteredAlerts}
-                columnVisibility={columnVisibility}
-                setColumnVisibility={setColumnVisibility}
-                onEdit={handleEdit}
-                onDelete={setDeleteTarget}
-                isAnalyst={isAnalyst}
-              />
-            )}
+              ) : (
+                <AlertsList
+                  alerts={filteredAlerts}
+                  columnVisibility={columnVisibility}
+                  setColumnVisibility={setColumnVisibility}
+                  onEdit={handleEdit}
+                  onDelete={setDeleteTarget}
+                  isAnalyst={isAnalyst}
+                />
+              )}
+            </div>
           </AnalyticsCard>
         </div>
 
@@ -543,7 +547,7 @@ export default function AlertsClient() {
           confirmLabel="Delete"
         />
 
-        {!activeServiceId && (
+        {!activeServiceId && bootstrapResolved && (
           <div className="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-600 dark:text-yellow-400 flex items-center gap-3 mt-6">
             <AlertTriangle className="h-5 w-5" />
             <p className="text-sm">

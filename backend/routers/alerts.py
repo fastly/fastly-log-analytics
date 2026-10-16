@@ -151,6 +151,7 @@ def _status_cache_has_data(src: dict) -> bool:
 
 
 @router.get("/", response_model=AlertListResponse)
+@router.get("", response_model=AlertListResponse, include_in_schema=False)
 def list_all_alerts(
     request: Request,
     limit: int = Query(default=500, ge=1, le=2000, description="Max alerts to return; oldest dropped."),
@@ -200,6 +201,7 @@ def list_service_alerts(
 
 
 @router.post("/", response_model=AlertResponse, status_code=201)
+@router.post("", response_model=AlertResponse, status_code=201, include_in_schema=False)
 def create_alert(alert: Alert, request: Request):
     """Create an alert. Analyst can only create alerts for services in
     their invite scope (security). The Phase-1 analyst middleware
