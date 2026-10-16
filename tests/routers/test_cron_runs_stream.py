@@ -9,24 +9,12 @@ out of "Loading logs..." — not hang on keepalives for 30 seconds.
 
 from __future__ import annotations
 
-import json
 import time
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
-
-
-def _parse_sse_events(text: str) -> list[dict]:
-    out: list[dict] = []
-    for chunk in text.replace("\r\n", "\n").split("\n\n"):
-        chunk = chunk.strip()
-        if chunk.startswith("data:"):
-            try:
-                out.append(json.loads(chunk[len("data:") :].strip()))
-            except json.JSONDecodeError:
-                pass
-    return out
+from tests._helpers.sse import parse_sse_events as _parse_sse_events
 
 
 def test_orphan_run_emits_error_within_window():

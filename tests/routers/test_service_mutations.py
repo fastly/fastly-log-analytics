@@ -11,12 +11,12 @@ real credentials, a database file, or network access.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from tests._helpers.sse import parse_sse_events as _parse_sse_events
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -132,17 +132,6 @@ def test_credentials_fos_validation_failure_returns_400():
 # ---------------------------------------------------------------------------
 # POST /api/services/{service_id}/cron-settings (SSE)
 # ---------------------------------------------------------------------------
-
-
-def _parse_sse_events(text: str) -> list[dict]:
-    events = []
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            try:
-                events.append(json.loads(line[6:]))
-            except json.JSONDecodeError:
-                pass
-    return events
 
 
 def test_cron_settings_saves_enabled_flag():

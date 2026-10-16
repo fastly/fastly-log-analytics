@@ -11,12 +11,13 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from tests._helpers.locks import noop_lock as _noop_lock
 
 
 def _write_per_field_day(cache_root: str, field: str, day: str, rows: list[tuple[str, int]]) -> str:
@@ -33,11 +34,6 @@ def _write_per_field_day(cache_root: str, field: str, day: str, rows: list[tuple
     p = os.path.join(d, f"compacted_{uuid.uuid4().hex[:8]}.parquet")
     pq.write_table(table, p)
     return p
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
 
 
 def _past_day(days_ago: int) -> str:

@@ -26,20 +26,14 @@ from unittest.mock import MagicMock, patch
 import duckdb
 
 from backend.core.ingest import convert_batch_objects
-from backend.core.metadata.base import get_con
 from backend.core.metadata.quarantine import list_quarantine_evidence
+from tests._helpers.ledger import clear_ledger
 
 BUCKET = "test-bucket"
 
 
 def _clear_ledger(service_id: str):
-    con = get_con(service_id)
-    cur = con.cursor()
-    cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (service_id,))
-    con.execute("DELETE FROM quarantine_evidence WHERE service_id=?", (service_id,))
-    con.execute("DELETE FROM quarantined_files")
-    con.commit()
-    return con, cur
+    return clear_ledger(service_id, quarantine=True)
 
 
 def _seed(con, cur, service_id: str, keys: list[str], status: str = "discovered") -> None:

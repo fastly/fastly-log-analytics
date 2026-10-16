@@ -33,6 +33,7 @@ from backend.core.ingest import (
     get_ingest_columns_sql,
 )
 from backend.core.metadata.base import get_con
+from tests._helpers.ledger import clear_ledger
 
 SERVICE_ID = "test-convert-object-edges"
 BUCKET = "test-bucket"
@@ -40,11 +41,7 @@ SRC = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix":
 
 
 def _clear_ledger():
-    con = get_con(SERVICE_ID)
-    cur = con.cursor()
-    cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (SERVICE_ID,))
-    con.commit()
-    return con, cur
+    return clear_ledger(SERVICE_ID)
 
 
 def _seed_discovered(con, object_key: str) -> None:

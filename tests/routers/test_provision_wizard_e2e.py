@@ -36,18 +36,7 @@ from fastapi.testclient import TestClient
 
 from backend import config as svcconfig
 from backend.main import app
-
-
-def _parse_sse_events(text: str) -> list[dict]:
-    out: list[dict] = []
-    for chunk in text.replace("\r\n", "\n").split("\n\n"):
-        chunk = chunk.strip()
-        if chunk.startswith("data:"):
-            try:
-                out.append(json.loads(chunk[len("data:") :].strip()))
-            except json.JSONDecodeError:
-                pass
-    return out
+from tests._helpers.sse import parse_sse_events as _parse_sse_events
 
 
 @pytest.fixture

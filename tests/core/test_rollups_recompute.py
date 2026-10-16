@@ -10,21 +10,16 @@ from __future__ import annotations
 
 import json
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
+import pytest
 
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
 
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _make_table_with_rows(table: str, hour_dt: datetime, rows: list[tuple[str, str]]) -> duckdb.DuckDBPyConnection:

@@ -15,13 +15,20 @@ statement. Math is EXACT (integer SUM); no ``_approx`` flag.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
+from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
+from tests._helpers.dates import yesterday_iso as _yesterday_iso
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def _write_hour_vbts(cache_root: str, hour: str, rows: list[dict]) -> str:
@@ -46,23 +53,6 @@ def _write_hour_all_fields(cache_root: str, hour: str) -> None:
         pa.table({"field": pa.array(["x"]), "value": pa.array(["y"]), "count": pa.array([1], type=pa.int64())}),
         os.path.join(d, "all_fields.parquet"),
     )
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _yesterday_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-
-def _three_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=3)).strftime("%Y-%m-%d")
-
-
-def _two_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=2)).strftime("%Y-%m-%d")
 
 
 def _hour_dt(day: str, h: int) -> datetime:
