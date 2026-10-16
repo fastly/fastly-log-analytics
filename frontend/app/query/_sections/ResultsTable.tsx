@@ -12,7 +12,7 @@ interface ResultsTableProps {
   data: any
   isPending: boolean
   isStructured: boolean
-  columns: ColumnDef<any>[]
+  columns: ColumnDef<Record<string, unknown>>[]
   structuredSorting: SortingState
   onStructuredSortingChange: (sorting: SortingState) => void
 }

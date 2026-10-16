@@ -297,7 +297,7 @@ function QueryPageInner() {
     queryKey: ['query', 'presets', activeServiceId],
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/presets', { signal })
-      return data as any
+      return data ?? []
     },
     enabled: !!activeServiceId,
     // Same rationale as schema above — presets list only changes when
@@ -420,11 +420,11 @@ function QueryPageInner() {
     router.replace(qs ? `/query?${qs}` : '/query')
   }, [router, structuredSql])
 
-  const columns: ColumnDef<any>[] = useMemo(() => {
+  const columns: ColumnDef<Record<string, unknown>>[] = useMemo(() => {
     if (!queryMutation.data?.columns) return []
-    return queryMutation.data.columns.map((col: any) => ({
+    return queryMutation.data.columns.map((col: string) => ({
       id: col,
-      accessorFn: (row: any) => row[col],
+      accessorFn: (row: Record<string, unknown>) => row[col],
       meta: { label: getFieldLabel(col) },
       // Plain-label header — the DataTable header supplies the sort
       // button + arrow. Returning a <Button> here nested a button inside
@@ -432,7 +432,7 @@ function QueryPageInner() {
       // breaking hydration (React #418). A <span> keeps the monospace
       // field-name styling without the interactive nesting.
       header: () => <span className="font-mono text-xs">{getFieldLabel(col)}</span>,
-      cell: ({ row }: { row: any }) => {
+      cell: ({ row }: { row: { original: Record<string, unknown> } }) => {
         const value = row.original[col]
         if ((col === 'timestamp' || col.endsWith('_at')) && value && typeof value === 'string' && value.includes('T')) {
           try {
@@ -630,14 +630,16 @@ function QueryPageInner() {
   )
 }
 
+type ToggleDataset = 'logs' | 'client_vitals' | 'client_errors'
+
 interface DatasetToggleProps {
-  dataset: 'logs' | 'client_vitals' | 'client_errors'
-  onDatasetChange: (next: 'logs' | 'client_vitals' | 'client_errors') => void
+  dataset: ToggleDataset
+  onDatasetChange: (next: ToggleDataset) => void
 }
 
 export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
   return (
-    <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as any)}>
+    <Tabs value={dataset} onValueChange={(v) => onDatasetChange(v as ToggleDataset)}>
       <TabsList className="grid w-full grid-cols-3 max-w-[480px]">
         <TabsTrigger value="logs" className="flex items-center gap-1.5">
           <Terminal className="h-3.5 w-3.5" />

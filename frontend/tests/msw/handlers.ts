@@ -61,6 +61,9 @@ export const handlers = [
   ),
 
   http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.get(`${API_BASE}/api/query/schema/:service_id`, () =>
+    HttpResponse.json({ source: 'svc-default', table_name: 'logs', schema: [], columns: [] }),
+  ),
   http.post(`${API_BASE}/api/logs/query`, () =>
     HttpResponse.json({
       rows: [],

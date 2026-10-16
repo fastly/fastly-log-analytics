@@ -142,3 +142,6 @@ configs-hs/
 /.ignore
 /.github/copilot-instructions.md
 /Current_Project_State_and_Current_Goals.md
+
+# Playwright output when e2e is run from the repo root
+/test-results/

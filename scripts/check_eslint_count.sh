@@ -69,12 +69,13 @@ cd "$REPO_ROOT/frontend"
 # 824 -> 804: dropped `as any` path casts on typed client calls (share dashboard,
 # scoring labels, ngwaf, network) plus the raw-logs explorer lint fixes (baseline
 # had drifted to 830 above the 824 ceiling).
+# 804 -> 792: typed the /query page (presets, result columns), plus later DRY work.
 # 804 -> 802: adopt useCopyToClipboard/downloadBlob (hook-in-cell extraction in CronColumns).
 # 802 -> 800: shared createBaseMap for the four MapLibre maps; dropped window.map debug global.
 # 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
 # 799 -> 794: moved buildTrafficData out of app/ into lib/traffic-chart (lint-clean in its new home).
 # Drive toward zero.
-CEILING=794
+CEILING=792
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

@@ -23,7 +23,7 @@ export function StructuredMode({ structuredSql }: StructuredModeProps) {
   return (
     <div className="p-4 bg-muted/10">
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 font-semibold">
-        Generated SQL (sync'd with filter bar)
+        Generated SQL (sync&apos;d with filter bar)
       </div>
       <pre className="text-xs font-mono whitespace-pre-wrap break-words text-foreground/90 bg-background border rounded p-3 overflow-x-auto min-h-[106px]">
         {mounted

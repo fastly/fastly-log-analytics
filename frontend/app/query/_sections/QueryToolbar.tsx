@@ -23,6 +23,9 @@ import {
 import { History, Bookmark, Download, X } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import type { QueryMode } from '../_sql_builder'
+import type { components } from '@/types/api.generated'
+
+type PresetQuery = components['schemas']['PresetQuery']
 
 interface HistoryEntry {
   sql: string
@@ -30,7 +33,7 @@ interface HistoryEntry {
 }
 
 interface QueryToolbarProps {
-  presets: any
+  presets: PresetQuery[] | undefined
   history: HistoryEntry[]
   mode: QueryMode
   onModeChange: (next: QueryMode) => void
@@ -79,7 +82,7 @@ export function QueryToolbar({
             <DropdownMenuGroup>
               <DropdownMenuLabel>Recommended Queries</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              {presets?.length ? presets.map((p: any) => (
+              {presets?.length ? presets.map((p) => (
                 <DropdownMenuItem
                   key={p.name}
                   className="flex-col items-start cursor-pointer py-2"
