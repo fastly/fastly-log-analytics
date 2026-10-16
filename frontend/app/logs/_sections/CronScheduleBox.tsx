@@ -10,24 +10,20 @@ import {
 } from "@/components/ui/tooltip"
 import { useNowMs } from '@/hooks/useNowSeconds'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { useElapsedTime } from '@/hooks/useElapsedTime'
+import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
 import { formatCompactDuration, toUTCDate } from '@/lib/date'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 
 export function LiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium">{fmt}</span>
+  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium" />
 }
 
 // Tile-sized variant: inline-styled for the cron schedule pill so the
 // 9px tile typography isn't blown out by LiveTimer's text-xs (12px).
 // Same tabular-nums so widths stay stable across digit counts.
 function TileLiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium">{fmt}</span>
+  return <LiveElapsed startedAt={startedAt} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-[9px] font-medium" />
 }
 
 function NextRunCountdown({ when }: { when: string | null | undefined }) {

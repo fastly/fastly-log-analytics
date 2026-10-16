@@ -13,7 +13,7 @@ import { useLastSync, type LastSyncInfo } from '@/hooks/useLastSync'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useDateFormat'
-import { useElapsedTime } from '@/hooks/useElapsedTime'
+import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
 import type { StreamMetrics } from '@/types/api'
@@ -22,17 +22,6 @@ import type { StreamMetrics } from '@/types/api'
 // (text-only leaf so the surrounding header chrome stays stable between
 // cron pushes — putting useNowMs() on SyncStatusBadge itself would
 // re-render the whole badge every second). Imported above.
-
-// Mirrors the LiveTimer pattern from CronScheduleBox but sized for
-// the header badge (font-size inherited from the badge instead of
-// hardcoded text-xs / text-[9px]). Used while a sync is mid-flight
-// so the header surfaces the live elapsed time instead of the static
-// "running" label that doesn't change between SSE pushes.
-function HeaderLiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-500 tabular-nums font-medium animate-pulse">{fmt}</span>
-}
 
 export function SyncStatusBadge() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -226,7 +215,7 @@ function SyncStatusBadgeInner() {
             {isRunning && startedAt ? (
               <span className="inline-flex items-center gap-1 font-semibold text-blue-500 animate-pulse" aria-label="Sync in progress">
                 <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
-                <HeaderLiveTimer startedAt={startedAt} />
+                <LiveElapsed startedAt={startedAt} className="font-mono text-blue-500 tabular-nums font-medium animate-pulse" />
               </span>
             ) : (
               <TimeAgo timestamp={lastSyncTs} />
