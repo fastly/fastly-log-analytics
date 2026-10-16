@@ -68,24 +68,6 @@ export function DashboardSkeleton({ title, description }: PageSkeletonHeaderProp
   )
 }
 
-/** Grid of equally-sized chart panels — matches /charts. */
-export function ChartsGridSkeleton({ title, description }: PageSkeletonHeaderProps = {}) {
-  return (
-    <div className="space-y-4">
-      {title ? (
-        <PageHeader title={title} description={description} />
-      ) : (
-        <Skeleton className="h-7 w-32" />
-      )}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {Array.from({ length: 9 }).map((_, i) => (
-          <Skeleton key={i} className="h-64 w-full" />
-        ))}
-      </div>
-    </div>
-  )
-}
-
 /** Tall table with header row + N body rows — matches /logs, /sessions, /alerts. */
 export function TableSkeleton({ rows = 12, title, description }: PageSkeletonHeaderProps & { rows?: number } = {}) {
   return (

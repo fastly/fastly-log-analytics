@@ -71,8 +71,9 @@ cd "$REPO_ROOT/frontend"
 # had drifted to 830 above the 824 ceiling).
 # 804 -> 802: adopt useCopyToClipboard/downloadBlob (hook-in-cell extraction in CronColumns).
 # 802 -> 800: shared createBaseMap for the four MapLibre maps; dropped window.map debug global.
+# 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
 # Drive toward zero.
-CEILING=800
+CEILING=799
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make
