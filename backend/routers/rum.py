@@ -575,9 +575,7 @@ async def rum_beacon_health(
     """Check if RUM beacons are arriving (validation endpoint for setup).
     Queries DuckDB views using execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_beacon_health as hs_rum_health
 
@@ -676,9 +674,7 @@ async def rum_analytics(
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_analytics as hs_rum_analytics
 
@@ -1497,9 +1493,7 @@ async def rum_live_events(
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_live_events as hs_rum_live
 

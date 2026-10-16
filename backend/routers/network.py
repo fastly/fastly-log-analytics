@@ -79,9 +79,7 @@ def network_health(
     else:
         start_time, end_time = ctx.clamp(req.start_time, req.end_time)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.network import network_health as hs_network_health
 
@@ -156,9 +154,7 @@ def network_quality(
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.network import network_quality as hs_network_quality
 
@@ -263,9 +259,7 @@ def get_pop_health(
     end_time: datetime | None = Query(default=None),
 ):
     """Aggregate edge-routing and cache metrics across Fastly POP locations."""
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.network import get_pop_health as hs_get_pop_health
 
@@ -295,9 +289,7 @@ def _network_bundle_impl(
             keyed_anchor = None
             invite_fp = None
 
-        from backend.high_scale.registry import get_high_scale_service_registry
-
-        high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+        high_scale_service = ctx.high_scale
         if high_scale_service is not None:
             from backend.high_scale.network import network_bundle as hs_network_bundle
 

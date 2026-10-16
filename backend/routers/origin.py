@@ -128,9 +128,7 @@ async def origin_aggregates(
     # first-paint key server-reproducible (the origin SSR-seed contract).
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_sections(req.sections)
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.origin import aggregates as high_scale_aggregates
 

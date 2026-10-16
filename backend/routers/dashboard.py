@@ -67,9 +67,7 @@ def dashboard_aggregates(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.resolve_window(req)
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.dashboard import aggregates as high_scale_aggregates
 
@@ -126,7 +124,6 @@ async def dashboard_bundle(
     every prod response.
     """
     from backend.core.duckdb_pool import _PoolBusy, checkout_connection
-    from backend.high_scale.registry import get_high_scale_service_registry
     from backend.repositories import security as security_repo
     from backend.repositories._base import SectionTimer
 
@@ -137,7 +134,7 @@ async def dashboard_bundle(
     # _run_top_bots) close over the same clamped window — neither can scan
     # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
     start_time, end_time = ctx.resolve_window(req)
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.dashboard import bundle as high_scale_bundle
 

@@ -86,9 +86,7 @@ def security_aggregates(
     # ceiling is enforced regardless of token. Mirrors routers/origin.py.
     start_time, end_time = ctx.resolve_window(req)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.security import security_aggregates as hs_aggregates
 
@@ -143,9 +141,7 @@ def export_proxies_csv(
     format: str = "fastly-acl",
     ctx: RequestContext = Depends(build_request_context),
 ):
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         raise ValueError("Exporting proxies is not yet supported in high-scale mode")
 
@@ -237,9 +233,7 @@ def get_security_threat_intel(
     end_time: str | None = Query(default=None),
 ):
     """Correlate client TLS fingerprints with active WAF triggers and proxy flags."""
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.security import get_security_threat_intel as hs_threat_intel
 

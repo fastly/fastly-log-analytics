@@ -78,9 +78,7 @@ def query_endpoint(
     # — the repo masks any cell that parses as an IP.
     mask_ips = mask_ips_for(analyst_session)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.query import query_endpoint as hs_query
 

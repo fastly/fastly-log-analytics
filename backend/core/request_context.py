@@ -45,6 +45,7 @@ from backend.deps import _ConnectionHolder, _resolve_source_or_400, get_service_
 if TYPE_CHECKING:
     import duckdb
 
+    from backend.high_scale.registry import HighScaleService
     from backend.utils.remote_access import TimeBounds
 
 
@@ -106,6 +107,17 @@ class RequestContext:
         except asyncio.CancelledError:
             await task
             raise
+
+    @property
+    def high_scale(self) -> HighScaleService | None:
+        """The high-scale (ClickHouse) service registered for this request's service, if any.
+
+        The registry import is deferred so handlers on the standard DuckDB path never load
+        the ClickHouse stack; each handler still lazily imports its own ``hs_*`` function.
+        """
+        from backend.high_scale.registry import get_high_scale_service_registry
+
+        return get_high_scale_service_registry().resolve(self.service_id)
 
     def resolve_window(self, req: RangeWindowRequest) -> tuple[str | None, str | None]:
         """Resolve a request's scan window, then clamp it to the invite ceiling.

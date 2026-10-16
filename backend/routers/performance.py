@@ -55,9 +55,7 @@ def performance_aggregates(
     # FE-supplied bounds, clamp AFTER resolve. Mirrors routers/origin.py.
     start_time, end_time = ctx.resolve_window(req)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.performance import performance_aggregates as hs_performance
 

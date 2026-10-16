@@ -31,9 +31,7 @@ def cmcd_aggregates(
     sections = _expand_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
 

@@ -46,9 +46,7 @@ def sessions_endpoint(
             if not start_time:
                 start_time = (_now - timedelta(days=7)).isoformat()
 
-        from backend.high_scale.registry import get_high_scale_service_registry
-
-        high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+        high_scale_service = ctx.high_scale
         if high_scale_service is not None:
             from backend.high_scale.sessions import sessions_endpoint as hs_sessions
 
@@ -141,9 +139,7 @@ def sessions_detail(
         # so the clamp always returns concrete ISO strings here.
         assert start_time is not None and end_time is not None
 
-        from backend.high_scale.registry import get_high_scale_service_registry
-
-        high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+        high_scale_service = ctx.high_scale
         if high_scale_service is not None:
             from backend.high_scale.sessions import sessions_detail as hs_detail
 
