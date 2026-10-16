@@ -626,7 +626,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_success(monkeypatch):
     _mock_rollups(monkeypatch)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 4242)
-    monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", lambda sid, src: 7)
+    monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", lambda sid, src, lookback_days=30: 7)
     log_calls: list = []
     monkeypatch.setattr(
         "backend.core.duckdb.log_cron_run",
@@ -657,7 +657,7 @@ def test_run_rollup_compact_daily_passes_run_id_on_error(monkeypatch):
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": sid})
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 9999)
 
-    def _boom(sid, src):
+    def _boom(sid, src, lookback_days=30):
         raise RuntimeError("simulated DB lock")
 
     monkeypatch.setattr("backend.core.rollups.compact_closed_days_to_daily", _boom)
