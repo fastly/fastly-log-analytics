@@ -2,7 +2,7 @@ shards: 1
 replicas: 1
 
 image:
-  repository: artifacts.secretcdn.net/fastly-docker/clickhouse/clickhouse-server
+  repository: clickhouse/clickhouse-server
   tag: "26.9.1"
   pullPolicy: IfNotPresent
 
@@ -16,7 +16,7 @@ keeper:
   enabled: false
   replicas: 3
   image:
-    repository: artifacts.secretcdn.net/fastly-docker/clickhouse/clickhouse-keeper
+    repository: clickhouse/clickhouse-keeper
     tag: "26.9.1"
     pullPolicy: IfNotPresent
   persistence:

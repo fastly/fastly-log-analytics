@@ -126,8 +126,8 @@ def auto_resolve_remote_admin_token() -> str | None:
         # Build standard fallback command if gcloud is present
         if shutil.which("gcloud"):
             gce_project = os.getenv("GCE_PROJECT", "")
-            gce_zone = os.getenv("GCE_ZONE", "us-central1-a")
-            gce_vm_name = os.getenv("GCE_VM_NAME", "fastly-log-analysis")
+            gce_zone = os.getenv("GCE_ZONE", "")
+            gce_vm_name = os.getenv("GCE_VM_NAME", "")
             if gce_project and gce_zone and gce_vm_name:
                 resolve_cmd = (
                     f"gcloud compute ssh {gce_vm_name} --project={gce_project} --zone={gce_zone} "
