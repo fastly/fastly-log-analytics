@@ -119,10 +119,6 @@ def test_reader_returns_none_when_filtered(tmp_path):
     assert result is None
 
 
-def test_reader_returns_none_for_short_window(tmp_path):
-    pass
-
-
 def test_reader_serves_rows_with_prune_to_top_asns(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
