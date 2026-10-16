@@ -19,13 +19,11 @@ from backend.repositories._base import (
 from backend.repositories._sql import origin as SQL
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
+    ResponseMemo,
     bucket_time_to_minute,
-    cache_get,
-    cache_put,
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import BoundedTTLCache
 
 # ── Response memo cache ───────────────────────────────────────────────────────
 # Frontend Origin page fires 6 endpoints in parallel; on cold load each one
@@ -41,7 +39,8 @@ from backend.utils.bounded_cache import BoundedTTLCache
 # for an interactive analytics view.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 256
-_response_cache: BoundedTTLCache = BoundedTTLCache(maxsize=_RESPONSE_CACHE_MAXSIZE, ttl_seconds=_RESPONSE_CACHE_TTL)
+_memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE)
+_response_cache = _memo.cache
 
 
 def _response_cache_key(
@@ -86,10 +85,7 @@ def _check_response_cache(
     payload, telemetry is per-request") un-skippable.
     """
     cache_key = _response_cache_key(endpoint, src, start_time, end_time, filters, **extras)
-    cached = cache_get(_response_cache, cache_key)
-    if cached is not None:
-        return cache_key, {**cached, **runner.telemetry()}
-    return cache_key, None
+    return cache_key, _memo.check(cache_key, runner)
 
 
 def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) -> dict:
@@ -101,8 +97,7 @@ def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) ->
     onto the returned response, so the cache stays per-request-clean while
     callers see the full shape.
     """
-    cache_put(_response_cache, cache_key, payload)
-    return {**payload, **runner.telemetry()}
+    return _memo.store(cache_key, payload, runner)
 
 
 # ── POP location helpers ──────────────────────────────────────────────────────
