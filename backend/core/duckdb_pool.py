@@ -1028,12 +1028,6 @@ def get_all_stats() -> list[dict]:
         return [pool.stats() for pool in _pools.values()]
 
 
-def _existing_pools(service_keys) -> list[_Pool]:
-    """Resolve the subset of ``service_keys`` that have a live pool (no create)."""
-    with _pools_lock:
-        return [p for k in service_keys if (p := _pools.get(k)) is not None]
-
-
 def begin_drain_pools(service_keys) -> dict[str, _Pool]:
     """Put every existing pool for ``service_keys`` into draining mode and swap them.
 

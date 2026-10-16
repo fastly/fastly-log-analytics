@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field
 
 from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, LogExtentsMixin
@@ -73,21 +73,6 @@ class HealthInFlightRun(BaseModel):
     service_id: str | None = None
     task: str | None = None
     started_at: str | None = None
-
-
-class HealthPoolWaitStat(BaseModel):
-    """One per-pool snapshot from the DuckDB-pool wait sampler.
-
-    Shape is open — different pool types report slightly different
-    fields (the Phase 6 sampler returns a dict-of-dicts keyed by pool
-    name). The Any escape hatch matches what callers read.
-    """
-
-    name: str
-    samples: int = 0
-    wait_p95_ms: float | None = None
-    wait_p99_ms: float | None = None
-    extras: dict[str, Any] = {}
 
 
 class HealthCronFailure(BaseModel):
@@ -382,10 +367,6 @@ class ProvisionService(BaseModel):
     id: str
     name: str
     provisioned: bool
-
-
-class ProvisionServicesResponse(RootModel[list[ProvisionService]]):
-    pass
 
 
 class LogAccountingBucket(BaseModel):

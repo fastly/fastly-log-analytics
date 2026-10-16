@@ -84,30 +84,6 @@ _UA_RE = re.compile(r"(Chrome|Firefox|Safari|Edge|OPR)")
 _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)")
 
 
-def parse_ua_simple(ua: str) -> tuple[str, str, str]:
-    b_match = _UA_RE.search(ua)
-    browser = b_match.group(1) if b_match else "Chrome"
-    if browser == "OPR":
-        browser = "Opera"
-    elif browser == "Mac OS X" or browser == "Macintosh":
-        browser = "Safari"
-
-    os_match = _OS_RE.search(ua)
-    os_name = os_match.group(1) if os_match else "macOS"
-    if "Mac" in os_name or "Mac OS X" in os_name or "Macintosh" in os_name:
-        os_name = "macOS"
-    elif "Windows" in os_name:
-        os_name = "Windows"
-    elif "Linux" in os_name or "X11" in os_name:
-        os_name = "Linux"
-
-    device = "Desktop"
-    if any(m in ua for m in ["iPhone", "iPad", "Android", "Mobile"]):
-        device = "Mobile"
-
-    return browser, os_name, device
-
-
 @asset_router.get("/js/rum.js")
 async def get_rum_tracker(request: Request, service_id: str | None = None):
     # Resolve active service ID

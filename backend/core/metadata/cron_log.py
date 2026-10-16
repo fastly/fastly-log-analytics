@@ -1017,18 +1017,6 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("log_disco
     }
 
 
-def heartbeat_cron_run(service_id: str, task: str) -> None:
-    import time
-
-    con = get_con(service_id)
-    now = time.time()
-    con.execute(
-        "UPDATE job_runs SET heartbeat_at = ? WHERE service_id = ? AND job_name = ? AND status = 'running'",
-        (now, service_id, task),
-    )
-    con.commit()
-
-
 def reap_stale_jobs(service_id: str) -> None:
     import time
 

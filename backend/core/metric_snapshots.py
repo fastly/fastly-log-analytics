@@ -59,10 +59,6 @@ def _db_path() -> str:
     return os.path.join(_DATA_DIR, _DB_NAME)
 
 
-def get_db_path() -> str:
-    return _db_path()
-
-
 # ── Write path ───────────────────────────────────────────────────────────────
 
 

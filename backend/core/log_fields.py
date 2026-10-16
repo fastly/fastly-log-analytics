@@ -482,21 +482,6 @@ def check_log_line_budget(log_fields_config: dict) -> dict | None:
     return None
 
 
-def estimate_daily_bytes(log_fields_config: dict, req_per_day: int = 1_000_000) -> dict:
-    """Return storage estimates for the given config and daily request volume."""
-    line_bytes = estimate_log_line_bytes(log_fields_config)
-    raw_bytes_day = line_bytes * req_per_day
-    # Parquet compressed is roughly 10% of raw JSON (DuckDB ZSTD + dictionary encoding)
-    parquet_bytes_day = int(raw_bytes_day * 0.10)
-    parquet_bytes_30d = parquet_bytes_day * 30
-    return {
-        "line_bytes": line_bytes,
-        "raw_mb_day": round(raw_bytes_day / (1024 * 1024), 1),
-        "parquet_mb_day": round(parquet_bytes_day / (1024 * 1024), 1),
-        "parquet_gb_30d": round(parquet_bytes_30d / (1024**3), 2),
-    }
-
-
 def format_hash(log_fields_config: dict) -> str:
     """Return a SHA256 fingerprint of the generated log format for drift detection."""
     fmt = generate_log_format(log_fields_config)

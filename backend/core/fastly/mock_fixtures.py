@@ -192,8 +192,3 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
 
 
 # ── NGWAF ─────────────────────────────────────────────────────────────
-
-
-def mock_ngwaf_verified_bots_page() -> dict:
-    """Single empty page that satisfies the pagination loop's exit condition."""
-    return {"data": [], "meta": {"next_cursor": ""}}
