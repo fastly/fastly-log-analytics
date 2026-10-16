@@ -21,7 +21,16 @@ export interface SSELine {
   [key: string]: unknown
 }
 
-export function useSSE() {
+export interface UseSSEOptions {
+  /**
+   * Keep only the newest N frames. Unset = unbounded (finite wizard/log
+   * streams). Set it for permanent streams (Control Room) so memory and
+   * per-frame array copies stay bounded.
+   */
+  maxLines?: number
+}
+
+export function useSSE({ maxLines }: UseSSEOptions = {}) {
   const [lines, setLines] = useState<SSELine[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -139,7 +148,10 @@ export function useSSE() {
 
           if (mountedRef.current) {
             const stamped = { ...data, _id: ++lineSeqRef.current }
-            setLines((prev) => [...prev, stamped])
+            setLines((prev) => {
+              const next = [...prev, stamped]
+              return maxLines && next.length > maxLines ? next.slice(next.length - maxLines) : next
+            })
             if (finalStatus) {
               setStatus(finalStatus)
               if (finalError) setError(finalError)
@@ -175,7 +187,7 @@ export function useSSE() {
         abortRef.current = null
       }
     }
-  }, [stop])
+  }, [stop, maxLines])
 
   // Cleanup on unmount
   useEffect(() => {

@@ -88,8 +88,13 @@ function parseErrorEvent(line: SSELine): ErrorEvent | null {
   }
 }
 
+// Permanent streams keep a bounded tail: the consumers only render the last 20
+// error events / last 60 tick-history entries (useTickHistory MAX_ENTRIES).
+const ERROR_STREAM_MAX_LINES = 500
+const REALTIME_STREAM_MAX_LINES = 600
+
 function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
-  const { lines, status, start, reset } = useSSE()
+  const { lines, status, start, reset } = useSSE({ maxLines: ERROR_STREAM_MAX_LINES })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
 
   useEffect(() => {
@@ -145,7 +150,7 @@ function isTick(t: unknown): t is MetricsTick {
 }
 
 function useRealtimeStream(): RealtimeStreamState {
-  const { lines, status, start, reset } = useSSE()
+  const { lines, status, start, reset } = useSSE({ maxLines: REALTIME_STREAM_MAX_LINES })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({
     ticks: [],

@@ -71,6 +71,23 @@ describe('useSSE', () => {
     expect(result.current.isDone).toBe(true)
   })
 
+  it('keeps only the newest maxLines frames when a cap is given', async () => {
+    const messages = [1, 2, 3, 4, 5].map((n) => `data: {"type":"tick","n":${n}}\n\n`)
+    messages.push('data: {"type":"done"}\n\n')
+    vi.mocked(fetch).mockResolvedValue(makeStreamResponse(messages))
+
+    const { useSSE } = await import('@/hooks/useSSE')
+    const { result } = renderHook(() => useSSE({ maxLines: 3 }))
+
+    await act(async () => {
+      await result.current.start('/api/some-stream')
+    })
+
+    expect(result.current.lines).toHaveLength(3)
+    expect(result.current.lines.map((l) => l.n ?? l.type)).toEqual([4, 5, 'done'])
+    expect(result.current.status).toBe('done')
+  })
+
   it('merges caller-provided headers into the SSE request', async () => {
     vi.mocked(fetch).mockResolvedValue(makeStreamResponse(['data: {"type":"done"}\n\n']))
 
