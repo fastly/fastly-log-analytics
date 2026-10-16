@@ -126,13 +126,26 @@ describe('middleware /admin gate (security)', () => {
     expect(res.status).toBe(200)
   })
 
-  // Audit 2026-06-11 H8: /alerts, /usage, /logs are analyst-blocked at the
+  // /logs (Raw Logs) is analyst-visible since the raw logs explorer shipped
+  // (backend allows POST /api/logs/query for analysts), so Caddy-proxied
+  // requests must NOT be redirected or blocked.
+  it('does not block /logs for analysts behind Caddy', () => {
+    const page: any = middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' }))
+    expect(page.status).toBe(200)
+    expect(page.headers.get('location')).toBeNull()
+    const data: any = middleware(
+      makeReq('http://localhost/_next/data/build-id/logs.json', { 'x-proxied-by-caddy': 'true' }),
+    )
+    expect(data.status).toBe(200)
+  })
+
+  // Audit 2026-06-11 H8: /alerts and /usage are analyst-blocked at the
   // backend (see backend/utils/remote_access.py:_ANALYST_BLOCKED_PREFIXES).
   // Previously the FE served them with 200 → page hydrated → client-side
   // redirected to /dashboard. The URL flash made the wrong page title get
   // announced to screen readers. The middleware now mirrors the /admin gate
   // for these prefixes so the redirect is server-side.
-  describe.each(['/alerts', '/usage', '/logs'])('analyst-blocked prefix %s', (prefix) => {
+  describe.each(['/alerts', '/usage'])('analyst-blocked prefix %s', (prefix) => {
     it(`redirects ${prefix} to / when request came through Caddy`, () => {
       const req = makeReq(`http://localhost${prefix}`, { 'x-proxied-by-caddy': 'true' })
       const res: any = middleware(req)

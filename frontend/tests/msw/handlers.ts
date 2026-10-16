@@ -61,6 +61,18 @@ export const handlers = [
   ),
 
   http.get(`${API_BASE}/api/health`, ok({ status: 'ok' })),
+  http.post(`${API_BASE}/api/logs/query`, () =>
+    HttpResponse.json({
+      rows: [],
+      total_count: 0,
+      has_more: false,
+      limit: 100,
+      offset: 0,
+      columns: [],
+      schema_columns: [],
+      missing_fields: [],
+    }),
+  ),
   http.post(`${API_BASE}/api/high-scale/services/:service_id/request-facts`, () =>
     HttpResponse.json({
       rows: [],

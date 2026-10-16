@@ -62,6 +62,12 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
 
+  // Raw Logs aliases of POST /api/logs/query (which has a handler); the
+  // explorer only calls /query. Covered by backend router tests.
+  'POST /api/logs',
+  'GET /api/logs',
+  'GET /api/logs/:service_id',
+
   // Newly introduced endpoints covered by Playwright E2E
   'GET /api/network/pop-health',
   'GET /api/security/threat-intel',
