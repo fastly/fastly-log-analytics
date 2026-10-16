@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi, beforeEach, afterEach } from 'vitest'
-import AssetsClient from '@/app/assets-shield/_sections/AssetsClient'
+import AssetsClient, { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createTestQueryClient } from '../helpers/query'
 import React from 'react'
@@ -231,4 +231,30 @@ test('assets-shield renders empty state when asset breakdown has no data', async
     screen.getByText(/No static assets or dynamic pages were requested in this time window/i),
   ).toBeInTheDocument()
   expect(errorSpy).not.toHaveBeenCalled()
+})
+
+test('assets-shield refetches when only the custom range start changes', async () => {
+  mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
+  const base = {
+    endTime: '2026-08-19T13:00:00Z',
+    timezone: 'UTC',
+    activeServiceId: 'test-service-id',
+    filterPayload: {},
+    config: {},
+    relativeRange: null,
+    isAutoRange: false,
+    anchor: '2026-08-19T13:00:00Z',
+  }
+  const ui = (startTime: string) => (
+    <QueryClientProvider client={queryClient}>
+      <AssetsReportContent {...base} startTime={startTime} />
+    </QueryClientProvider>
+  )
+
+  const { rerender } = render(ui('2026-08-19T12:00:00Z'))
+  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
+
+  rerender(ui('2026-08-19T11:00:00Z'))
+  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2))
+  expect(mockPost.mock.calls[1][1].body.start_time).toBe('2026-08-19T11:00:00Z')
 })

@@ -26,10 +26,10 @@ export function AssetsReportContent({
   isAutoRange,
   anchor,
 }: any) {
+  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
   const bundle = useServiceQuery(
-    ['assets', 'aggregates', activeServiceId, relativeRange || '24h', anchor, filterPayload],
+    ['assets', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
     async ({ signal }) => {
-      const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
       const { data } = await client.POST('/api/assets/aggregates', {
         signal,
         body: {
