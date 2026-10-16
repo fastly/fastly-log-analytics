@@ -25,6 +25,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/DataTable/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
+import { useRumStatus } from '@/hooks/useRumStatus';
 
 interface RumClientProps {
   serviceId: string | null;
@@ -265,18 +266,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
   ], [timezone]);
 
   // Fetch status
-  const { data: status, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null;
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
-      if (res.status === 403) {
-        return { enabled: false, unauthorized: true };
-      }
-      return res.ok ? res.json() : null;
-    },
-    enabled: !!serviceId,
-  });
+  const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId);
 
   // Fetch analytics
   const { data: analytics, isLoading } = useQuery({

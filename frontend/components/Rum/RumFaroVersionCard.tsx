@@ -7,10 +7,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
-import { adminFetch, client } from '@/lib/api';
+import { client } from '@/lib/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { components } from '@/types/api.generated';
 import { RumSettingsDialog } from './RumSettingsDialog';
+import { useRumStatus } from '@/hooks/useRumStatus';
+import { queryKeys } from '@/lib/query-keys';
 
 type RumVersionsResponse = components['schemas']['RumVersionsResponse'];
 
@@ -24,15 +26,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
   const isAnalyst = useIsAnalyst();
 
   // Fetch status first
-  const { data: status, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null;
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
-      return res.ok ? res.json() : null;
-    },
-    enabled: !!serviceId,
-  });
+  const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId);
 
   const rumEnabled = !!status?.enabled;
 
@@ -96,7 +90,7 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
 
   const handleComplete = () => {
     queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] });
-    queryClient.invalidateQueries({ queryKey: ['rum-status', serviceId] });
+    queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) });
   };
 
   return (

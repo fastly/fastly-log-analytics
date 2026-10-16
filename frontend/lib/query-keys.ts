@@ -13,6 +13,8 @@ import type { FiltersPayload } from '@/types/filters'
 export const queryKeys = {
   bootstrap: () => ['bootstrap'] as const,
 
+  rumStatus: (serviceId: string | null | undefined) => ['rum-status', serviceId] as const,
+
   logFieldsCatalog: (serviceId?: string) => (serviceId ? ['log-fields-catalog', serviceId] as const : ['log-fields-catalog'] as const),
 
   filtered: (

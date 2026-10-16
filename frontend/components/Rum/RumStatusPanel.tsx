@@ -12,16 +12,8 @@ import { adminFetch } from '@/lib/api';
 import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
+import { useRumStatus } from '@/hooks/useRumStatus';
 
-
-interface RumStatus {
-  enabled: boolean;
-  enabled_at?: string | null;
-  deployed_vcl_sha?: string | null;
-  current_vcl_sha?: string;
-  vcl_drift?: boolean;
-  unauthorized?: boolean;
-}
 
 export function RumStatusPanel() {
   const searchParams = useSearchParams();
@@ -40,20 +32,7 @@ export function RumStatusPanel() {
   const [isEnableOpen, setIsEnableOpen] = useState(false);
   const [isDisableOpen, setIsDisableOpen] = useState(false);
 
-  const { data: status, refetch: refetchStatus } = useQuery<RumStatus | null>({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null;
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`);
-      if (res.status === 403) {
-        return { enabled: false, unauthorized: true };
-      }
-      if (!res.ok) return null;
-      return res.json() as Promise<RumStatus>;
-    },
-    enabled: !!serviceId,
-    refetchInterval: 30_000, // Poll every 30s
-  });
+  const { data: status, refetch: refetchStatus } = useRumStatus(serviceId, { refetchInterval: 30_000 }); // Poll every 30s
 
   const { data: services } = useQuery({
     queryKey: ['services'],
