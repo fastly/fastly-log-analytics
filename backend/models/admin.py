@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, Field
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, LogExtentsMixin
 
 # ── Metric snapshots history ───────────────────────────────────────────────
@@ -72,21 +73,6 @@ class HealthInFlightRun(BaseModel):
     service_id: str | None = None
     task: str | None = None
     started_at: str | None = None
-
-
-class HealthPoolWaitStat(BaseModel):
-    """One per-pool snapshot from the DuckDB-pool wait sampler.
-
-    Shape is open — different pool types report slightly different
-    fields (the Phase 6 sampler returns a dict-of-dicts keyed by pool
-    name). The Any escape hatch matches what callers read.
-    """
-
-    name: str
-    samples: int = 0
-    wait_p95_ms: float | None = None
-    wait_p99_ms: float | None = None
-    extras: dict[str, Any] = {}
 
 
 class HealthCronFailure(BaseModel):
@@ -383,10 +369,6 @@ class ProvisionService(BaseModel):
     provisioned: bool
 
 
-class ProvisionServicesResponse(RootModel[list[ProvisionService]]):
-    pass
-
-
 class LogAccountingBucket(BaseModel):
     ts: str
     fastly_requests: int
@@ -492,11 +474,9 @@ class UsageLoggingUpdateBody(BaseModel):
 # Field lists derive from the producers, not from any frontend consumer.
 
 
-class _AdminMaintRead(BaseModel):
+class _AdminMaintRead(PassthroughModel):
     """Base for the maintenance read responses — passes undeclared keys
     through instead of stripping them."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class UsageLoggingConfigResponse(_AdminMaintRead):

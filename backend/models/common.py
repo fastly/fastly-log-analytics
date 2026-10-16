@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel
+
+from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
+from backend.models.log_fields_catalog import LogFieldsCatalogResponse
 
 # ── Annotated clamping types (replaces repeated @field_validator boilerplate) ──
 
@@ -87,6 +90,23 @@ class FilteredRequest(DateRangeMixin):
     """Base for POST bodies that carry both a date range and column filters."""
 
     filters: FiltersDict = {}
+
+
+class RangeKeyedRequest(FilteredRequest):
+    """``FilteredRequest`` plus the relative-range wire contract (additive, optional).
+
+    When ``range_token`` is a recognized token the SERVER resolves the scan
+    window from (token, ``anchor``) and ignores FE-supplied ``start_time`` /
+    ``end_time`` (see ``RequestContext.resolve_window``), then clamps to the
+    invite ceiling, so an analyst can't widen past their invite by picking
+    ``"30d"``. The token also makes the FE first-paint key server-reproducible
+    (the origin SSR-seed contract) and, on network-health, stabilizes the
+    response-memo key. Absent/unknown token falls back to the legacy absolute
+    bounds path. See ``backend/utils/time_window.py``.
+    """
+
+    range_token: str | None = None
+    anchor: str | None = None
 
 
 class PaginationMixin(BaseModel):
@@ -219,8 +239,7 @@ class BaseResponse(BaseModel):
         return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds, debug_postgres=ds)
 
 
-class BootstrapService(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class BootstrapService(PassthroughModel):
     service_id: str
     name: str | None = None
     access_level: str | None = None
@@ -261,7 +280,7 @@ class BootstrapResponse(BaseResponse):
     # ['log-fields-catalog', service_id] React Query cache and skip the
     # 35-KB round-trip on every cold page load (perf audit Phase D).
     # None when no active service.
-    log_fields_catalog: dict | None = None
+    log_fields_catalog: LogFieldsCatalogResponse | None = None
     # Cached sync-status (same fast-path payload /api/sync-status?skip_fos=true
     # returns). Folded in so SyncStatusBadge / logs page hit cache on
     # first mount. ADMIN ONLY — None for analyst sessions (matches the

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
 class SavedView(BaseModel):
@@ -17,15 +19,13 @@ class SavedView(BaseModel):
     created_at: str | None = None
 
 
-class SavedViewRecord(BaseModel):
+class SavedViewRecord(PassthroughModel):
     """Wire-safe read shape for ``GET /api/views/{service_id}`` rows.
 
     Distinct from the strict ``SavedView`` request body: all-Optional +
     ``extra="allow"`` so a partial row (or a future column) can never 500
     the read path; ``response_model_exclude_unset`` keeps the emitted key
     set byte-identical to the producer's."""
-
-    model_config = ConfigDict(extra="allow")
 
     id: str | None = None
     service_id: str | None = None

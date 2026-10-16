@@ -17,22 +17,6 @@ IDENTITY_FIELDS = (
 )
 
 
-def _identity_payload(row: Mapping[str, Any], *, domain: str | None = None) -> tuple[Any, ...]:
-    values = dict(row)
-    if domain is not None:
-        values["domain"] = domain
-    missing = [field for field in IDENTITY_FIELDS if field not in values]
-    if missing:
-        raise ValueError(f"event identity missing fields: {', '.join(missing)}")
-    if not isinstance(values["line_ordinal"], int) or values["line_ordinal"] < 0:
-        raise ValueError("line_ordinal must be a non-negative integer")
-    if not all(
-        isinstance(values[field], str) and values[field] for field in IDENTITY_FIELDS if field != "line_ordinal"
-    ):
-        raise ValueError("event identity string fields must be non-empty strings")
-    return tuple(values[field] for field in IDENTITY_FIELDS)
-
-
 def build_event_id(row: Mapping[str, Any], *, domain: str | None = None) -> str:
     values = dict(row)
     if domain is not None:

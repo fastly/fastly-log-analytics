@@ -187,13 +187,13 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
         raise HTTPException(status_code=400, detail={"error": "Prefix is required"})
     if is_custom:
         domain = prefix.strip() if prefix else ""
-        if not domain or "." not in domain or not re.match(r"^[a-zA-Z0-9.-]+$", domain):
+        if not domain or "." not in domain or not re.fullmatch(r"^[a-zA-Z0-9.-]+$", domain):
             return {
                 "available": False,
                 "reason": "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
             }
     else:
-        if not re.match(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
+        if not re.fullmatch(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
             return {
                 "available": False,
                 "reason": "Prefix must be alphanumeric and may contain hyphens (cannot start/end with hyphen)",
@@ -694,7 +694,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     bucket = cfg["fos_bucket_name"]
-    if not re.match(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
+    if not re.fullmatch(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
         raise HTTPException(
             status_code=400,
             detail=make_error(
@@ -704,7 +704,7 @@ def provision_execute(req: ProvisionExecuteRequest):
         )
 
     prefix = cfg.get("fos_prefix", "")
-    if prefix and not re.match(r"^[A-Za-z0-9/_-]*$", prefix):
+    if prefix and not re.fullmatch(r"^[A-Za-z0-9/_-]*$", prefix):
         raise HTTPException(
             status_code=400,
             detail=make_error("invalid_prefix", "Invalid prefix. Use alphanumerics, /, _, -."),

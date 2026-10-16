@@ -6,6 +6,7 @@ import logging
 
 from fastapi import HTTPException, Query
 
+from backend.models.admin_status import NgwafStatusResponse
 from backend.utils.router_utils import bad_request, not_found, raise_internal
 
 from ._router import router
@@ -35,7 +36,7 @@ def trigger_ngwaf_sync_endpoint(service_id: str):
         raise_internal(logger, e, code="ngwaf_sync_failed", status=502)
 
 
-@router.get("/admin/ngwaf/status")
+@router.get("/admin/ngwaf/status", response_model=NgwafStatusResponse, response_model_exclude_unset=True)
 def get_ngwaf_status_endpoint(service_id: str | None = Query(None, description="Optional service ID")):
     """Return NGWAF cache statistics and workspace sync watermarks."""
     from backend import config as svcconfig

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.models.common import BaseResponse, RangeKeyedRequest
 
 
 class ActiveClientItem(BaseResponse):
@@ -58,9 +58,8 @@ class SecurityTopBotsResponse(BaseResponse):
     ngwaf_bots: list[dict[str, Any]] = []
 
 
-class SecurityProxiesRequest(FilteredRequest):
-    range_token: str | None = None
-    anchor: str | None = None
+class SecurityProxiesRequest(RangeKeyedRequest):
+    pass
 
 
 class SecurityProxiesResponse(BaseResponse):

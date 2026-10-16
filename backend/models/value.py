@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.models.common import BaseResponse, RangeKeyedRequest
 
 ValueSectionName = Literal[
     "overview",
@@ -19,11 +19,9 @@ ValueSectionName = Literal[
 ]
 
 
-class ValueSummaryRequest(FilteredRequest):
+class ValueSummaryRequest(RangeKeyedRequest):
     sections: list[ValueSectionName] | None = None
     chart_interval: str = "1 day"
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class TimeSeriesPoint(BaseModel):

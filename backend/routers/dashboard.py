@@ -10,7 +10,6 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.dashboard import (
     AggregatesRequest,
@@ -26,29 +25,6 @@ from backend.repositories import dashboard as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import get_sqlite_queries
-from backend.utils.time_window import is_valid_range_token, resolve_window
-
-
-def _clamp_window(req: AggregatesRequest, ctx: RequestContext) -> tuple[str | None, str | None]:
-    """Resolve the scan window once for the dashboard aggregates/bundle paths.
-
-    Keyed path: when ``range_token`` is recognized the SERVER resolves the
-    window from (token, anchor) — ignoring FE-supplied absolute start/end so a
-    crafted body can't widen the scan — then clamps to the invite ceiling. The
-    clamp runs AFTER resolve, so it is the single enforcement point (an analyst
-    can't widen past their invite by picking "30d"). Legacy path clamps the
-    FE-supplied bounds unchanged. Mirrors routers/origin.py.
-
-    Returning a single pair is load-bearing for /dashboard/bundle: BOTH the
-    aggregates branch and the top_bots branch close over the one clamped result,
-    so neither sub-query can ever scan unclamped bounds.
-    """
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        return ctx.clamp(resolved_start, resolved_end)
-    return ctx.clamp(req.start_time, req.end_time)
-
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -90,10 +66,8 @@ def dashboard_aggregates(
     req: AggregatesRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time = _clamp_window(req, ctx)
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    start_time, end_time = ctx.resolve_window(req)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.dashboard import aggregates as high_scale_aggregates
 
@@ -150,7 +124,6 @@ async def dashboard_bundle(
     every prod response.
     """
     from backend.core.duckdb_pool import _PoolBusy, checkout_connection
-    from backend.high_scale.registry import get_high_scale_service_registry
     from backend.repositories import security as security_repo
     from backend.repositories._base import SectionTimer
 
@@ -160,8 +133,8 @@ async def dashboard_bundle(
     # Resolve+clamp ONCE here so BOTH sub-queries (_run_aggregates and
     # _run_top_bots) close over the same clamped window — neither can scan
     # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
-    start_time, end_time = _clamp_window(req, ctx)
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    start_time, end_time = ctx.resolve_window(req)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.dashboard import bundle as high_scale_bundle
 

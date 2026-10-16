@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from backend.models._base import JsonRows, WireSafeModel
 from backend.models.common import BaseResponse
 
 QueryDataset = Literal["logs", "client_vitals", "client_errors"]
@@ -24,9 +25,16 @@ class QueryRequest(BaseModel):
     explain: bool = False
 
 
-class QueryResponse(BaseResponse):
+class QueryResponse(WireSafeModel):
+    """``POST /api/query`` result.
+
+    Rows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that
+    pydantic's JSON mode would encode differently from ``jsonable_encoder``
+    (the pre-typing wire path), so ``data`` is pre-encoded the same way.
+    """
+
     columns: list[str]
-    data: list[dict[str, Any]]
+    data: JsonRows
     row_count: int
     total_rows: int
     truncated: bool
@@ -34,7 +42,7 @@ class QueryResponse(BaseResponse):
     explain_plan: str | None = None
 
 
-class PresetQuery(BaseModel):
+class PresetQuery(WireSafeModel):
     name: str
     description: str
     sql: str

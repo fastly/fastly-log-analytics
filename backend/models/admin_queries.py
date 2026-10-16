@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
-class _QueryRow(BaseModel):
+class _QueryRow(PassthroughModel):
     """Base for registry row payloads — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class QueryAttribution(_QueryRow):

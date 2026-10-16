@@ -7,6 +7,7 @@ import logging
 from fastapi import HTTPException, Query
 
 from backend.models.admin import BotSourcesResponse
+from backend.models.admin_status import RdnsStatsResponse
 from backend.utils.router_utils import not_found, raise_internal
 
 from ._router import router
@@ -68,7 +69,7 @@ def trigger_rdns_enrich_endpoint(
     return {"ok": True, "summary": summary}
 
 
-@router.get("/admin/rdns/stats")
+@router.get("/admin/rdns/stats", response_model=RdnsStatsResponse, response_model_exclude_unset=True)
 def get_rdns_stats_endpoint():
     """Return rDNS cache stats."""
     from backend.utils.rdns_cache import get_stats as rdns_stats

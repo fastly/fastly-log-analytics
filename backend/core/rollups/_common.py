@@ -72,7 +72,7 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _is_safe_ident(name: str) -> bool:
-    return bool(name) and bool(_SAFE_IDENT_RE.match(name))
+    return bool(name) and bool(_SAFE_IDENT_RE.fullmatch(name))
 
 
 def _safe_table_for(source: dict) -> str | None:
@@ -275,18 +275,6 @@ def _ip_spread_root(source: dict) -> str:
     from backend.core.duckdb import _cache_dir
 
     return os.path.join(_cache_dir(source), "rollups", IP_SPREAD_DIR_NAME)
-
-
-def _ip_spread_day_root(source: dict) -> str:
-    """Per-(field, day) IP-spread rollup root.
-
-    Day-compacted counterpart to :func:`_ip_spread_root`. Produced by
-    the daily compaction cron the same way the count-side
-    ``rollups/day`` tree is — one parquet per (field, closed-day),
-    consumed by the reader's closed-day fast path."""
-    from backend.core.duckdb import _cache_dir
-
-    return os.path.join(_cache_dir(source), "rollups", IP_SPREAD_DAY_DIR_NAME)
 
 
 def _build_ip_spread_select_query(table_ident: str, field: str, where_sql: str) -> str:
@@ -772,10 +760,6 @@ def _origin_path_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_PATH_BUNDLE_FILENAME)
 
 
-def _pop_health_bundle_path(source: dict, hour: str) -> str:
-    return os.path.join(_hour_bundled_root(source), f"hour={hour}", POP_HEALTH_BUNDLE_FILENAME)
-
-
 def _origin_latency_ts_bundle_path(source: dict, hour: str) -> str:
     return os.path.join(_hour_bundled_root(source), f"hour={hour}", ORIGIN_LATENCY_TS_BUNDLE_FILENAME)
 
@@ -826,40 +810,6 @@ def parse_hour_token(h: str) -> datetime | None:
         return datetime.strptime(h, "%Y-%m-%d-%H").replace(tzinfo=UTC)
     except ValueError:
         return None
-
-
-def discover_closed_hours(source: dict) -> set[str]:
-    """Return every ``"YYYY-MM-DD-HH"`` partition that exists under
-    ``_rollups_root(source)`` and is strictly before the active hour.
-
-    Skips field directories that don't begin with ``"field="``; tolerates
-    missing roots and unreadable sub-directories by treating them as
-    empty (the rollups jobs already handle the "no data yet" case).
-    """
-    hour_root = _rollups_root(source)
-    if not os.path.isdir(hour_root):
-        return set()
-
-    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
-    all_hours: set[str] = set()
-    try:
-        for field_entry in os.listdir(hour_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(hour_root, field_entry)
-            try:
-                for hour_entry in os.listdir(field_dir):
-                    if not hour_entry.startswith("hour="):
-                        continue
-                    hour = hour_entry[len("hour=") :]
-                    if hour >= active_hour:
-                        continue
-                    all_hours.add(hour)
-            except OSError:
-                continue
-    except OSError:
-        return set()
-    return all_hours
 
 
 def backfill_missing_bundles(

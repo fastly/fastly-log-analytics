@@ -139,7 +139,7 @@ _SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 def _validate_service_id_or_raise(service_id: str) -> None:
     if not isinstance(service_id, str):
         raise TypeError(f"service_id must be a string, got {type(service_id).__name__}: {service_id!r}")
-    if not _SERVICE_ID_RE.match(service_id):
+    if not _SERVICE_ID_RE.fullmatch(service_id):
         raise InvalidServiceIdError(f"service_id must match {_SERVICE_ID_RE.pattern!r}; got {service_id!r}")
 
 

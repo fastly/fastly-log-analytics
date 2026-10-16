@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from backend.models.common import BaseResponse, FilteredRequest, FilterSpec, Limit500, SortDir
+from backend.models.common import BaseResponse, FilterSpec, Limit500, RangeKeyedRequest, SortDir
 
 
 class ColumnMeta(BaseModel):
@@ -14,11 +14,9 @@ class ColumnMeta(BaseModel):
     type: str
 
 
-class LogsQueryRequest(FilteredRequest):
+class LogsQueryRequest(RangeKeyedRequest):
     """Request schema for querying paginated raw access logs."""
 
-    range_token: str | None = None
-    anchor: str | None = None
     limit: Limit500 = 100
     offset: int = Field(default=0, ge=0)
     sort_dir: SortDir = "desc"

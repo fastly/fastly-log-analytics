@@ -1324,13 +1324,6 @@ def _is_legacy_snippet(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in legacy_prefixes)
 
 
-def _is_strict_logging_legacy_snippet(name: str) -> bool:
-    """Check if snippet is one of our strict old capture logging snippets."""
-    return (name.startswith("Fastly Log Analytics") or name.startswith("Fastly Log Analysis")) and not name.startswith(
-        "Fastly Log Analytics - "
-    )
-
-
 def _detect_and_queue_legacy_cleanup(
     current_snippets: list[VCLSnippet],
     diff: DiffResult,

@@ -21,7 +21,6 @@ FINGERPRINT_COVERAGE_BULK) over the SAME closed-hour data.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -50,16 +49,6 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
                 r.get("tls_ciphers_sha"),
             ],
         )
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _past_hour(hours_ago: int) -> tuple[str, datetime]:
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
 
 
 def _build_patches(cache_root, table: str, con_factory):
@@ -606,7 +595,13 @@ def test_rollup_readers_match_live_sql(tmp_path):
 
 # The dashboard's live histogram SQL — imported via the module so a template
 # edit flags the parity test below.
+import pytest
+
 from backend.repositories._sql.dashboard import CONN_REQUESTS_BUCKET  # noqa: E402
+from tests._helpers.dates import past_hour as _past_hour
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 
 def test_conn_requests_hist_reader_parity_and_fold(tmp_path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.models.common import BaseResponse, RangeKeyedRequest
 
 
 class AssetTypeBreakdownRow(BaseModel):
@@ -53,8 +53,5 @@ class AssetsAggregatesResponse(BaseResponse):
     missing_fields: list[str] = Field(default_factory=list)
 
 
-class AssetsRequest(FilteredRequest):
+class AssetsRequest(RangeKeyedRequest):
     """Assets analytics request schema supporting relative-range resolving."""
-
-    range_token: str | None = None
-    anchor: str | None = None

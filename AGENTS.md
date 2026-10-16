@@ -297,6 +297,9 @@ The route uses `RequestContext` tenancy and analyst time clamping, masks
 `client_ip` under the existing invite PII policy, and returns signed keyset
 pagination plus `QueryResponseMetadata`.
 
+### Intentionally unwired `backend/high_scale` modules
+`disk_guard.py`, `fairness.py`, `projections.py`, `recovery_capacity.py`, `retention.py` and `topology.py` have no production importer; only their tests under `tests/high_scale/` reference them. They are kept on purpose pending a designed capacity-guard feature, so do not delete them as dead code and do not wire them in ad hoc.
+
 ### Certificate-authenticated administrator connection
 
 The optional mTLS gateway is a separate administrator access surface for Compose

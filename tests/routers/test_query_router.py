@@ -320,7 +320,7 @@ def test_presets_returns_repo_output_when_source_resolves(client):
     """Source resolves → router calls ``repo.get_presets`` and returns
     whatever it produces. The router itself doesn't shape the payload
     — that's the repo's job."""
-    fake_presets = [{"id": "p1", "name": "Top 5xx", "sql": "SELECT 1"}]
+    fake_presets = [{"id": "p1", "name": "Top 5xx", "description": "Top 5xx URLs", "sql": "SELECT 1"}]
     with (
         patch(
             "backend.core.duckdb.get_source_for_service",

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from pydantic import BaseModel, model_serializer
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
+from backend.models._base import PassthroughModel
+from backend.models.common import BaseResponse, FilteredRequest, Limit100, RangeKeyedRequest, Seconds14400
 
 
 class NetworkWorstEntry(BaseModel):
@@ -46,7 +47,7 @@ class ShieldingRow(BaseModel):
     shield_lon: float | None = None
 
 
-class ShieldingAnalysis(BaseModel):
+class ShieldingAnalysis(PassthroughModel):
     """Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``.
 
     Deliberately a plain ``BaseModel`` (NOT ``BaseResponse``): nesting a
@@ -62,8 +63,6 @@ class ShieldingAnalysis(BaseModel):
     None so the emitted bytes match the pre-typing dict exactly (the repo
     only sets the keys relevant to each branch).
     """
-
-    model_config = ConfigDict(extra="allow")
 
     has_data: bool = False
     rows: list[ShieldingRow] = []
@@ -195,28 +194,24 @@ NetworkSectionName = Literal[
 SectionName = NetworkSectionName
 
 
-class NetworkHealthRequest(FilteredRequest):
+class NetworkHealthRequest(RangeKeyedRequest):
     metric: str = "health_score"
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     map_asn: str = "all"
     sections: list[SectionName] | None = None
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class NetworkQualityRequest(FilteredRequest):
     region_country: str = "US"
 
 
-class NetworkBundleRequest(FilteredRequest):
+class NetworkBundleRequest(RangeKeyedRequest):
     metric: str = "health_score"
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     map_asn: str = "all"
     sections: list[SectionName] | None = None
-    range_token: str | None = None
-    anchor: str | None = None
     region_country: str = "US"
 
 

@@ -106,11 +106,7 @@ def _sources_by_db_path() -> dict[str, list[dict]]:
 
         rum_cfg = cfg.get("rum")
         rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-        rum_enabled = (
-            bool(rum_cfg["enabled"])
-            if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
-            else bool(cfg.get("rum_enabled", False))
-        )
+        rum_enabled = svcconfig.is_rum_enabled(cfg)
         if rum_enabled:
             try:
                 from backend.core.duckdb import rum_source_for

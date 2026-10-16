@@ -3584,7 +3584,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
               }
             }
           },
@@ -3947,7 +3949,13 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PresetQuery"
+                  },
+                  "title": "Response Presets Endpoint Api Presets Get"
+                }
               }
             }
           },
@@ -9677,7 +9685,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ControlRoomTabResponse"
+                }
               }
             }
           },
@@ -10843,7 +10853,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeSeedResponse"
+                }
               }
             }
           },
@@ -11401,7 +11413,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LogFieldAuditResponse"
+                }
               }
             }
           },
@@ -11597,7 +11611,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CorrelateResponse"
+                }
               }
             }
           },
@@ -11783,7 +11799,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WizardStateResponse"
+                }
               }
             }
           },
@@ -11979,7 +11997,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WizardStepResponse"
+                }
               }
             }
           },
@@ -12751,9 +12771,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Rum Status Api Services  Service Id  Rum Status Get"
+                  "$ref": "#/components/schemas/RumStatusResponse"
                 }
               }
             }
@@ -13140,9 +13158,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Update Rum Settings Api Services  Service Id  Rum Settings Post"
+                  "$ref": "#/components/schemas/RumSettingsUpdateResponse"
                 }
               }
             }
@@ -13320,9 +13336,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Rum Beacon Health Api Services  Service Id  Rum Beacon Health Get"
+                  "$ref": "#/components/schemas/RumBeaconHealthResponse"
                 }
               }
             }
@@ -13548,9 +13562,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Rum Analytics Api Services  Service Id  Rum Analytics Get"
+                  "$ref": "#/components/schemas/RumAnalyticsResponse"
                 }
               }
             }
@@ -16510,7 +16522,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaResponse"
+                }
               }
             }
           },
@@ -16686,7 +16700,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/LogFieldsCatalogResponse"
+                }
               }
             }
           },
@@ -19979,7 +19995,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogsResponse"
+                }
               }
             }
           },
@@ -22710,7 +22728,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RdnsStatsResponse"
+                }
               }
             }
           },
@@ -22820,7 +22840,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CeleryStatusResponse"
+                }
               }
             }
           },
@@ -28967,9 +28989,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Get Duckdb Status Endpoint Api Admin Duckdb Status Get"
+                  "$ref": "#/components/schemas/DuckdbStatusResponse"
                 }
               }
             }
@@ -33425,7 +33445,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NgwafStatusResponse"
+                }
               }
             }
           },
@@ -40082,9 +40104,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Config Composite Api Services  Service Id  Scoring Config Get"
+                  "$ref": "#/components/schemas/ScoringConfigCompositeResponse"
                 }
               }
             }
@@ -40209,9 +40229,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Status Api Services  Service Id  Scoring Status Get"
+                  "$ref": "#/components/schemas/ScoringStatusResponse"
                 }
               }
             }
@@ -40481,9 +40499,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Labels Create Api Services  Service Id  Scoring Labels Post"
+                  "$ref": "#/components/schemas/ScoringLabelRow"
                 }
               }
             }
@@ -40624,9 +40640,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Labels Update Api Services  Service Id  Scoring Labels  Label Id  Patch"
+                  "$ref": "#/components/schemas/ScoringLabelRow"
                 }
               }
             }
@@ -40756,9 +40770,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Scoring Labels Delete Api Services  Service Id  Scoring Labels  Label Id  Delete"
+                  "$ref": "#/components/schemas/ScoringLabelDeleteResponse"
                 }
               }
             }
@@ -44622,9 +44634,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Cmcd Status Api Services  Service Id  Cmcd Status Get"
+                  "$ref": "#/components/schemas/CmcdStatusResponse"
                 }
               }
             }
@@ -45511,7 +45521,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DebugStateResponse"
+                }
               }
             }
           },
@@ -50419,6 +50431,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "chart_interval": {
             "type": "string",
             "title": "Chart Interval",
@@ -50506,28 +50540,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -51406,6 +51418,40 @@
         "title": "AssetsRequest",
         "description": "Assets analytics request schema supporting relative-range resolving."
       },
+      "AuditLogsResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "per_page",
+          "entries"
+        ],
+        "title": "AuditLogsResponse",
+        "description": "``GET /api/audit-logs``. ``_debug_calls`` rides along as an extra."
+      },
       "AuthConfigProvider": {
         "properties": {
           "id": {
@@ -52021,14 +52067,12 @@
           "log_fields_catalog": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/LogFieldsCatalogResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Log Fields Catalog"
+            ]
           },
           "sync_status": {
             "anyOf": [
@@ -52869,6 +52913,79 @@
         "title": "CancelResponse",
         "description": "Outcome of ``POST /api/admin/queries/{qid}/cancel``."
       },
+      "CeleryStatusResponse": {
+        "properties": {
+          "broker_reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Reachable"
+          },
+          "workers": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workers"
+          },
+          "queues": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queues"
+          },
+          "schedules": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedules"
+          },
+          "ledger": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CeleryStatusResponse"
+      },
       "CheckFosRequest": {
         "properties": {
           "bucket": {
@@ -53599,6 +53716,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_seconds": {
             "type": "integer",
             "title": "Bucket Seconds",
@@ -53636,28 +53775,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -53696,6 +53813,54 @@
         "type": "object",
         "title": "CmcdSettingsResponse",
         "description": "CMCD feature settings."
+      },
+      "CmcdStatusResponse": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "enabled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "CmcdStatusResponse",
+        "description": "``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off."
       },
       "ColumnMeta": {
         "properties": {
@@ -54053,6 +54218,32 @@
         "title": "ConsolidateRollupsResponse",
         "description": "Result from POST /admin/consolidate-rollups."
       },
+      "ControlRoomTabResponse": {
+        "properties": {
+          "tab": {
+            "type": "string",
+            "title": "Tab"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "tab"
+        ],
+        "title": "ControlRoomTabResponse",
+        "description": "Canned per-tab payload (``TAB_STUBS``); the metric keys differ per tab."
+      },
       "CorrelateRequest": {
         "properties": {
           "dimension": {
@@ -54079,6 +54270,89 @@
           "dimension"
         ],
         "title": "CorrelateRequest"
+      },
+      "CorrelateResponse": {
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "title": "Dimension"
+          },
+          "top": {
+            "items": {
+              "$ref": "#/components/schemas/CorrelatorTopRow"
+            },
+            "type": "array",
+            "title": "Top"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/CorrelatorFreshness"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "dimension",
+          "top",
+          "freshness"
+        ],
+        "title": "CorrelateResponse"
+      },
+      "CorrelatorFreshness": {
+        "properties": {
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "lag_seconds": {
+            "type": "integer",
+            "title": "Lag Seconds"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "lag_seconds"
+        ],
+        "title": "CorrelatorFreshness"
+      },
+      "CorrelatorTopRow": {
+        "properties": {
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "value",
+          "count"
+        ],
+        "title": "CorrelatorTopRow"
       },
       "CredentialsUpdateResponse": {
         "properties": {
@@ -55401,6 +55675,65 @@
         },
         "type": "object",
         "title": "DebugSettingsUpdateBody"
+      },
+      "DebugStateResponse": {
+        "properties": {
+          "debug_responses_enabled": {
+            "type": "boolean",
+            "title": "Debug Responses Enabled"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "debug_responses_enabled"
+        ],
+        "title": "DebugStateResponse",
+        "description": "``GET /api/debug/state``."
+      },
+      "DuckdbStatusResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory"
+          },
+          "barrier": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Barrier"
+          },
+          "pools": {
+            "title": "Pools"
+          },
+          "retired_pools": {
+            "title": "Retired Pools"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "DuckdbStatusResponse"
       },
       "ErrorDetail": {
         "properties": {
@@ -59066,6 +59399,590 @@
         "title": "LogExtentsResponse",
         "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nDuckDB size, no storage mode. Just the two timestamps the\nFilterBar needs to snap its range, plus a ``configured`` flag so\nthe frontend can short-circuit when a service has no source."
       },
+      "LogFieldAuditFeature": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "required_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Required Fields"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "missing_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Fields"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "required_fields",
+          "status",
+          "missing_fields"
+        ],
+        "title": "LogFieldAuditFeature"
+      },
+      "LogFieldAuditResponse": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "enabled_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Enabled Fields"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/LogFieldAuditFeature"
+            },
+            "type": "array",
+            "title": "Features"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "service_id",
+          "enabled_fields",
+          "features"
+        ],
+        "title": "LogFieldAuditResponse"
+      },
+      "LogFieldCatalogEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "duckdb_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duckdb Type"
+          },
+          "typical_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Typical Bytes"
+          },
+          "required_by": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required By"
+          },
+          "formatter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Formatter"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Precision"
+          },
+          "individually_toggleable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Individually Toggleable"
+          },
+          "default_off": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Off"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "has_limit": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Limit"
+          },
+          "show_in_dashboard": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Show In Dashboard"
+          },
+          "show_in_logs": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Show In Logs"
+          },
+          "filterable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filterable"
+          },
+          "value_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Type"
+          },
+          "is_custom": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Custom"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "LogFieldCatalogEntry"
+      },
+      "LogFieldCatalogGroup": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "locked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locked"
+          },
+          "requires": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requires"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "recommended_with": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended With"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Bytes"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LogFieldCatalogGroup"
+      },
+      "LogFieldInsightDefinition": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "required_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Fields"
+          },
+          "required_groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Groups"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "LogFieldInsightDefinition"
+      },
+      "LogFieldPreset": {
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LogFieldPreset"
+      },
+      "LogFieldsCatalogResponse": {
+        "properties": {
+          "groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LogFieldCatalogGroup"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LogFieldCatalogEntry"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "insights": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LogFieldInsightDefinition"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insights"
+          },
+          "presets": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/LogFieldPreset"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presets"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "LogFieldsCatalogResponse"
+      },
       "LogFieldsConfig": {
         "properties": {
           "groups": {
@@ -59862,6 +60779,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "metric": {
             "type": "string",
             "title": "Metric",
@@ -59909,28 +60848,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           },
           "region_country": {
             "type": "string",
@@ -60117,6 +61034,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "metric": {
             "type": "string",
             "title": "Metric",
@@ -60164,28 +61103,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -60667,6 +61584,89 @@
         ],
         "title": "NetworkWorstEntry"
       },
+      "NgwafStatusResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "total_cached_bots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cached Bots"
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces"
+          },
+          "top_bots": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top Bots"
+          },
+          "service_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Workspace Id"
+          },
+          "service_configured": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Configured"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "NgwafStatusResponse",
+        "description": "``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;\n``service_workspace_id`` / ``service_configured`` only when ``service_id`` was passed."
+      },
       "NgwafWorkspace": {
         "properties": {
           "id": {
@@ -60957,6 +61957,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_minutes": {
             "type": "number",
             "title": "Bucket Minutes",
@@ -61028,28 +62050,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -62729,6 +63729,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "sort_by": {
             "type": "string",
             "enum": [
@@ -62760,28 +63782,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -63477,6 +64477,30 @@
         },
         "type": "object",
         "title": "PrefillResponse"
+      },
+      "PresetQuery": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "sql": {
+            "type": "string",
+            "title": "Sql"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "sql"
+        ],
+        "title": "PresetQuery"
       },
       "ProvisionCheckConfigItem": {
         "properties": {
@@ -64890,6 +65914,64 @@
         ],
         "title": "QueryRequest"
       },
+      "QueryResponse": {
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Columns"
+          },
+          "data": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          },
+          "total_rows": {
+            "type": "integer",
+            "title": "Total Rows"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "title": "Elapsed Ms"
+          },
+          "explain_plan": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explain Plan"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "columns",
+          "data",
+          "row_count",
+          "total_rows",
+          "truncated",
+          "elapsed_ms"
+        ],
+        "title": "QueryResponse",
+        "description": "``POST /api/query`` result.\n\nRows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that\npydantic's JSON mode would encode differently from ``jsonable_encoder``\n(the pre-typing wire path), so ``data`` is pre-encoded the same way."
+      },
       "QueryResponseMetadataResponse": {
         "properties": {
           "status": {
@@ -65141,6 +66223,50 @@
           "pending"
         ],
         "title": "RdnsStats"
+      },
+      "RdnsStatsResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stats"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "RdnsStatsResponse"
+      },
+      "RealtimeSeedResponse": {
+        "properties": {
+          "ticks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Ticks"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ticks"
+        ],
+        "title": "RealtimeSeedResponse"
       },
       "RecentSqliteResponse": {
         "properties": {
@@ -65522,6 +66648,241 @@
         "title": "RollupStatusResponse",
         "description": "Rollup status from GET /admin/rollups/status."
       },
+      "RumAnalyticsResponse": {
+        "properties": {
+          "is_mock": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Mock"
+          },
+          "no_data": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "No Data"
+          },
+          "beacon_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beacon Count"
+          },
+          "pageview_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pageview Count"
+          },
+          "interaction_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Count"
+          },
+          "error_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Count"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "vitals": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vitals"
+          },
+          "worst_pages": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worst Pages"
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors"
+          },
+          "trends": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trends"
+          },
+          "environments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environments"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "RumAnalyticsResponse",
+        "description": "``GET /{service_id}/rum/analytics`` (data, no-data and failure branches)."
+      },
+      "RumBeaconHealthResponse": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "beacon_fire_rate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beacon Fire Rate"
+          },
+          "recent_beacons": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent Beacons"
+          },
+          "last_beacon_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Beacon Time"
+          },
+          "setup_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setup Complete"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "RumBeaconHealthResponse"
+      },
       "RumBreakdownPoint": {
         "properties": {
           "date": {
@@ -65692,6 +67053,160 @@
         "type": "object",
         "title": "RumSettingsUpdateRequest",
         "description": "Body for ``POST /api/services/{service_id}/rum/settings`` \u2014 update RUM capture toggles."
+      },
+      "RumSettingsUpdateResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "skipped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skipped"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "RumSettingsUpdateResponse"
+      },
+      "RumStatusResponse": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "enabled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled At"
+          },
+          "deployed_vcl_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployed Vcl Sha"
+          },
+          "current_vcl_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Vcl Sha"
+          },
+          "vcl_drift": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vcl Drift"
+          },
+          "capture_vitals": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Vitals"
+          },
+          "capture_performance": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Performance"
+          },
+          "capture_errors": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Errors"
+          },
+          "capture_events": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Events"
+          },
+          "custom_condition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Custom Condition"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "RumStatusResponse",
+        "description": "``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys."
       },
       "RumUpgradeRequest": {
         "properties": {
@@ -66034,6 +67549,30 @@
         ],
         "title": "SchemaColumn"
       },
+      "SchemaResponse": {
+        "properties": {
+          "schema": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Schema"
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "schema",
+          "table_name"
+        ],
+        "title": "SchemaResponse",
+        "description": "``GET /api/schema``: cached or live column list plus the safe table name."
+      },
       "ScoringAnalyticsResponse": {
         "properties": {
           "top_flagged": {
@@ -66323,6 +67862,54 @@
         "additionalProperties": true,
         "type": "object",
         "title": "ScoringComplianceRow"
+      },
+      "ScoringConfigCompositeResponse": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringThresholdState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exclude_regex": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringExcludeRegexState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforce_status_code": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoringEnforceStatusCodeState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringConfigCompositeResponse",
+        "description": "``GET /scoring/config``: the four token-free config reads in one body."
       },
       "ScoringCurvePoint": {
         "properties": {
@@ -67709,6 +69296,35 @@
         "title": "ScoringLabelCreate",
         "description": "Body for ``POST /scoring/labels``.\n\n``sid`` and ``label`` are validated downstream by ``save_label``\n(raises ValueError \u2192 ``invalid_label`` 400) so we keep this model\npermissive on field content."
       },
+      "ScoringLabelDeleteResponse": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringLabelDeleteResponse"
+      },
       "ScoringLabelRow": {
         "properties": {
           "id": {
@@ -68932,6 +70548,91 @@
         "type": "object",
         "title": "ScoringSessionEventsResponse"
       },
+      "ScoringStatusResponse": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "scoring_service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Service Id"
+          },
+          "scoring_active_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Active Version"
+          },
+          "scoring_activated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Activated At"
+          },
+          "scorer_drift": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scorer Drift"
+          },
+          "drift_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Detail"
+          },
+          "drift_known": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drift Known"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoringStatusResponse",
+        "description": "``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus\nlive-version and drift keys. Config-derived keys beyond these ride as extras."
+      },
       "ScoringThresholdBody": {
         "properties": {
           "threshold": {
@@ -69333,6 +71034,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_seconds": {
             "type": "integer",
             "title": "Bucket Seconds",
@@ -69366,28 +71089,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -70806,6 +72507,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "limit": {
             "type": "integer",
             "title": "Limit",
@@ -70847,28 +72570,6 @@
               }
             ],
             "title": "Min 4Xx Pct Flag"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -74048,6 +75749,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "sections": {
             "anyOf": [
               {
@@ -74075,28 +75798,6 @@
             "type": "string",
             "title": "Chart Interval",
             "default": "1 day"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -74398,6 +76099,33 @@
         "title": "WebVitalsPayload",
         "description": "Mirrors the web-vitals SDK metric shape (v5 API).\n\nField names match the JS Metric object so the frontend can pass it\nthrough without reshape. ``rating`` is computed by the SDK against\nGoogle's good/needs-improvement/poor thresholds."
       },
+      "WizardStateResponse": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "completed_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Completed Steps"
+          },
+          "is_complete": {
+            "type": "boolean",
+            "title": "Is Complete"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "service_id",
+          "completed_steps",
+          "is_complete"
+        ],
+        "title": "WizardStateResponse"
+      },
       "WizardStepRequest": {
         "properties": {
           "step": {
@@ -74417,6 +76145,25 @@
         ],
         "title": "WizardStepRequest",
         "description": "Request body for recording a wizard step completion."
+      },
+      "WizardStepResponse": {
+        "properties": {
+          "recorded": {
+            "type": "boolean",
+            "title": "Recorded"
+          },
+          "step": {
+            "type": "string",
+            "title": "Step"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "recorded",
+          "step"
+        ],
+        "title": "WizardStepResponse"
       },
       "WordphraseResponse": {
         "properties": {

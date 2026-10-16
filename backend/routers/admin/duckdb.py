@@ -10,6 +10,7 @@ from fastapi import Query
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
+from backend.models.admin_status import DuckdbStatusResponse
 
 from ._router import router
 
@@ -49,7 +50,7 @@ def trigger_duckdb_recycle_endpoint(
     }
 
 
-@router.get("/admin/duckdb/status")
+@router.get("/admin/duckdb/status", response_model=DuckdbStatusResponse, response_model_exclude_unset=True)
 def get_duckdb_status_endpoint() -> dict[str, Any]:
     """Return memory metrics, recycle configuration, and active connection pool states."""
     rss = _db.current_rss_bytes()

@@ -24,7 +24,7 @@ import duckdb
 import pytest
 
 from backend.core.ingest import RAW_DELETE_GRACE_S, finalize_committed_raw, merge_lake_files
-from backend.core.metadata.base import get_con
+from tests._helpers.ledger import clear_ledger
 
 SERVICE_ID = "test-finalize-raw"
 BUCKET = "test-bucket"
@@ -32,11 +32,7 @@ SRC = {"service_id": SERVICE_ID, "name": SERVICE_ID, "bucket": BUCKET, "prefix":
 
 
 def _clear_ledger():
-    con = get_con(SERVICE_ID)
-    cur = con.cursor()
-    cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (SERVICE_ID,))
-    con.commit()
-    return con, cur
+    return clear_ledger(SERVICE_ID)
 
 
 def _seed_committed(con, keys: list[str], *, age_s: float, raw_deleted_at: float | None = None) -> None:

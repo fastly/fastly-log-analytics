@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
 class CheckFosRequest(BaseModel):
@@ -151,7 +153,7 @@ class RumSettingsUpdateRequest(BaseModel):
     token: str = ""
 
 
-class ProvisionConfigRequest(BaseModel):
+class ProvisionConfigRequest(PassthroughModel):
     """Body shape shared by ``/provision/terraform/preview``,
     ``/provision/terraform/export``, and ``/provision/ingest``.
 
@@ -164,8 +166,6 @@ class ProvisionConfigRequest(BaseModel):
     every UI tweak. Required-field checks (token / fos_bucket_name on
     the ingest path) stay in the handlers so the existing 400 envelopes
     are preserved."""
-
-    model_config = ConfigDict(extra="allow")
 
     token: str | None = None
     service_id: str | None = None
@@ -217,10 +217,8 @@ class CustomFieldsImportBody(BaseModel):
 # telemetry envelope pass through byte-identically.
 
 
-class _ProvisionRead(BaseModel):
+class _ProvisionRead(PassthroughModel):
     """Base for provision responses — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ProvisionTokenInfo(_ProvisionRead):

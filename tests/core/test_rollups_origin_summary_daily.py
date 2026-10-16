@@ -21,13 +21,20 @@ Pinned here:
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
+
+from tests._helpers.dates import three_days_ago_iso as _three_days_ago_iso
+from tests._helpers.dates import two_days_ago_iso as _two_days_ago_iso
+from tests._helpers.dates import yesterday_iso as _yesterday_iso
+from tests._helpers.locks import noop_lock as _noop_lock
+
+pytestmark = pytest.mark.usefixtures("frozen_clock")
 
 # ── Fixture helpers ─────────────────────────────────────────────────────
 
@@ -87,23 +94,6 @@ def _uniform_row(req: int, lat_us: float) -> dict:
         "obytes_count": req,
         "obytes_p50": 1024.0,
     }
-
-
-@contextmanager
-def _noop_lock(_key):
-    yield
-
-
-def _yesterday_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-
-def _two_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=2)).strftime("%Y-%m-%d")
-
-
-def _three_days_ago_iso() -> str:
-    return (datetime.now(UTC).date() - timedelta(days=3)).strftime("%Y-%m-%d")
 
 
 # ── compact_origin_summary_closed_days_to_daily ─────────────────────────

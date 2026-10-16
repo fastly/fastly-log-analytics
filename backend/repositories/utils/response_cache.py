@@ -20,6 +20,7 @@ from backend.utils.bounded_cache import BoundedTTLCache
 
 if TYPE_CHECKING:
     from backend.models.common import FiltersDict
+    from backend.repositories._base import QueryRunner
 
 # Keys never persisted in the memo cache: per-request telemetry would leak
 # across requests if kept, and the cache-hit marker is stamped fresh on read.
@@ -90,3 +91,35 @@ def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str
     """
     drop = set(_NEVER_CACHE) | set(strip)
     cache[key] = {k: v for k, v in value.items() if k not in drop}
+
+
+class ResponseMemo:
+    """Short-TTL memo for one repository's full-response payloads.
+
+    Owns the ``BoundedTTLCache`` and the invariant that the stored copy is
+    request-clean (no telemetry, no cache-hit marker) while callers get fresh
+    telemetry merged onto every return. Each repository keeps its own key
+    builder (key shapes differ and partition by authorization, e.g. ``mi`` /
+    ``icf``), and passes the resulting key in.
+    """
+
+    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256) -> None:
+        self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+
+    def get(self, key: str) -> dict | None:
+        return cache_get(self.cache, key)
+
+    def put(self, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
+        cache_put(self.cache, key, value, strip=strip)
+
+    def check(self, key: str, runner: QueryRunner) -> dict | None:
+        """Cached payload with this request's telemetry merged in, or ``None`` on a miss."""
+        cached = self.get(key)
+        if cached is None:
+            return None
+        return {**cached, **runner.telemetry()}
+
+    def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
+        """Persist ``payload`` and return it with this request's telemetry merged in."""
+        self.put(key, payload)
+        return {**payload, **runner.telemetry()}

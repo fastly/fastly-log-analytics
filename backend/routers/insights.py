@@ -81,9 +81,7 @@ async def insights_endpoint(
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.insights import insights_endpoint as hs_insights
 
@@ -119,9 +117,7 @@ def cache_collapse_detail_endpoint(
 ):
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
 
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.insights import cache_collapse_detail_endpoint as hs_detail
 

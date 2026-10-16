@@ -37,20 +37,16 @@ from backend.core.ingest import (
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
-from backend.core.metadata.base import get_con
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from backend.core.quarantine import read_evidence
+from tests._helpers.ledger import clear_ledger
 
 SERVICE_ID = "test-rum-ledger-edges"
 BUCKET = "test-bucket"
 
 
 def _clear_ledger(service_id: str = SERVICE_ID):
-    con = get_con(service_id)
-    cur = con.cursor()
-    cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (service_id,))
-    con.commit()
-    return con, cur
+    return clear_ledger(service_id)
 
 
 def _seed_discovered(con, object_key: str) -> None:

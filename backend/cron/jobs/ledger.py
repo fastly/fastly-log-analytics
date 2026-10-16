@@ -9,9 +9,9 @@ objects as dead_letter/quarantined, and diffs FOS to catch up on unrecorded keys
 from __future__ import annotations
 
 import logging
-import time
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 
 logger = logging.getLogger("backend.scheduler")
 
@@ -28,7 +28,7 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
         return
 
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
     from backend.core.ingest import sweep_ledger_once
 
     cfg = svcconfig.load_config(service_id)
@@ -40,29 +40,20 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
     if src.get("access_level") == "read_only":
         return
 
-    if run_id is None:
-        try:
-            run_id = start_cron_run(src, "ledger_sweep")
-        except RuntimeError as e:
-            logger.info("[ledger_sweep] %s: skipping — %s", service_id, str(e))
-            return
-
-    from backend.cron.jobs._common import finalize_cron_duration
-    from backend.cron.jobs.metadata import _log_and_add_progress
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="ledger_sweep")
-    _log_and_add_progress(
-        run_id,
+    with cron_run(
         service_id,
-        job_name="ledger_sweep",
-        event={"type": "status", "message": f"Starting ledger sweep for {service_id}..."},
-    )
+        "ledger_sweep",
+        source=src,
+        run_id=run_id,
+        error_summary="Ledger sweep failed",
+        finalize_duration=True,
+        include_log_output=False,
+    ) as run:
+        if not run.ok:
+            return
+        run.log_progress({"type": "status", "message": f"Starting ledger sweep for {service_id}..."})
 
-    started = time.time()
-    try:
-        summary = sweep_ledger_once(service_id, run_id=run_id)
+        summary = sweep_ledger_once(service_id, run_id=run.run_id)
         run_status = "success"
         warnings = []
         if not summary.get("broker_ok", True):
@@ -79,38 +70,5 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
         if warnings:
             summary_msg += f" ({'; '.join(warnings)})"
 
-        log_cron_run(
-            src,
-            "ledger_sweep",
-            time.time() - started,
-            run_status,
-            run_id=run_id,
-            files_downloaded=summary.get("discovered", 0),
-            summary=summary_msg,
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="ledger_sweep",
-            event={"type": "done", "message": summary_msg},
-        )
-    except Exception as e:
-        log_cron_run(
-            src,
-            "ledger_sweep",
-            time.time() - started,
-            "error",
-            run_id=run_id,
-            error_message=str(e),
-            summary="Ledger sweep failed",
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="ledger_sweep",
-            event={"type": "error", "message": str(e)},
-        )
-        logger.exception("[ledger_sweep] %s: sweep failed", service_id)
-    finally:
-        end_progress(run_id)
-        finalize_cron_duration(src, run_id, started)
+        run.record(run_status, summary=summary_msg, files_downloaded=summary.get("discovered", 0))
+        run.log_progress({"type": "done", "message": summary_msg})

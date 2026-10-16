@@ -6,6 +6,9 @@ import concurrent.futures
 from datetime import datetime
 from typing import Any
 
+from backend.high_scale._projection_utils import (
+    range_value as _range_value,
+)
 from backend.high_scale.aggregate_query import query_clickhouse_aggregate
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleService
@@ -67,12 +70,6 @@ _HEADER_TABLES = {
     "rum_vitals": "rum_vitals_facts",
     "rum_errors": "rum_error_facts",
 }
-
-
-def _range_value(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _watermark_extent(value: datetime | None) -> str | None:

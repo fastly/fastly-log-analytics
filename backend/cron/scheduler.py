@@ -564,25 +564,16 @@ class Scheduler:
             return
         alert_job_id = f"alerts_evaluation_{service_id}"
         seen_ids.add(alert_job_id)
-        if alert_job_id in self._job_ids:
-            try:
-                job = self._sched.get_job(alert_job_id)
-                if job:
-                    job.reschedule("interval", seconds=seconds)
-            except Exception:
-                pass
-        else:
-            self._add_job(
-                _run_service_alerts_evaluation,
-                "interval",
-                seconds=seconds,
-                id=alert_job_id,
-                args=[service_id],
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=60,
-            )
-            self._job_ids[alert_job_id] = alert_job_id
+        if self._reschedule_or_add_job(
+            _run_service_alerts_evaluation,
+            "interval",
+            seconds=seconds,
+            id=alert_job_id,
+            args=[service_id],
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        ):
             logger.info(
                 "🔔 [scheduler] Registered alerts evaluation job %s (every %ds).",
                 alert_job_id,
@@ -602,26 +593,18 @@ class Scheduler:
         interval_seconds = int(cron_ip.get("interval_seconds", 240))
         ip_job_id = f"insights_prewarmer_{service_id}"
         seen_ids.add(ip_job_id)
-        if ip_job_id in self._job_ids:
-            try:
-                job = self._sched.get_job(ip_job_id)
-                if job:
-                    job.reschedule("interval", seconds=interval_seconds, jitter=15)
-            except Exception:
-                pass
-        else:
-            self._add_job(
-                _run_insights_prewarmer,
-                "interval",
-                seconds=interval_seconds,
-                jitter=15,
-                args=[service_id],
-                id=ip_job_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=360,
-            )
-            self._job_ids[ip_job_id] = ip_job_id
+        if self._reschedule_or_add_job(
+            _run_insights_prewarmer,
+            "interval",
+            seconds=interval_seconds,
+            jitter=15,
+            reschedule_kwargs={"seconds": interval_seconds, "jitter": 15},
+            args=[service_id],
+            id=ip_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=360,
+        ):
             logger.info(
                 "🔥 [scheduler] Registered insights_prewarmer job %s (every %ds).",
                 ip_job_id,
@@ -908,27 +891,18 @@ class Scheduler:
                     meta_interval = int(meta_cfg.get("interval_seconds") or interval_seconds)
                     seen_ids.add(sync_metadata_id)
 
-                    if sync_metadata_id in self._job_ids:
-                        try:
-                            job = self._sched.get_job(sync_metadata_id)
-                            if job:
-                                job.reschedule("interval", seconds=meta_interval)
-                        except Exception:
-                            pass
-                    else:
-                        # Start immediately so the dashboard isn't slow/empty
-                        self._add_job(
-                            _run_metadata_sync,
-                            "interval",
-                            seconds=meta_interval,
-                            id=sync_metadata_id,
-                            replace_existing=True,
-                            start_date=None,
-                            args=[service_id],
-                            coalesce=True,
-                            misfire_grace_time=60,
-                        )
-                        self._job_ids[sync_metadata_id] = sync_metadata_id
+                    # Start immediately so the dashboard isn't slow/empty
+                    if self._reschedule_or_add_job(
+                        _run_metadata_sync,
+                        "interval",
+                        seconds=meta_interval,
+                        id=sync_metadata_id,
+                        replace_existing=True,
+                        start_date=None,
+                        args=[service_id],
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    ):
                         logger.info(
                             "[scheduler] Registered metadata sync job %s (every %ds).", sync_metadata_id, meta_interval
                         )
@@ -989,26 +963,17 @@ class Scheduler:
             commit_job_id = f"commit_{service_id}"
             seen_ids.add(commit_job_id)
 
-            if commit_job_id in self._job_ids:
-                try:
-                    job = self._sched.get_job(commit_job_id)
-                    if job:
-                        job.reschedule("interval", minutes=commit_interval_mins)
-                except Exception:
-                    pass
-            else:
-                self._add_job(
-                    _run_commit,
-                    "interval",
-                    minutes=commit_interval_mins,
-                    jitter=30,
-                    args=[service_id],
-                    id=commit_job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=commit_interval_mins * 60,
-                )
-                self._job_ids[commit_job_id] = commit_job_id
+            if self._reschedule_or_add_job(
+                _run_commit,
+                "interval",
+                minutes=commit_interval_mins,
+                jitter=30,
+                args=[service_id],
+                id=commit_job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=commit_interval_mins * 60,
+            ):
                 logger.info(
                     "📦 [scheduler] Registered commit job %s (every %dm).",
                     commit_job_id,
@@ -1027,25 +992,16 @@ class Scheduler:
                     sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
                     sweep_job_id = f"ledger_sweep_{service_id}"
                     seen_ids.add(sweep_job_id)
-                    if sweep_job_id in self._job_ids:
-                        try:
-                            job = self._sched.get_job(sweep_job_id)
-                            if job:
-                                job.reschedule("interval", minutes=sweep_interval_mins)
-                        except Exception:
-                            pass
-                    else:
-                        self._add_job(
-                            _run_ledger_sweep,
-                            "interval",
-                            minutes=sweep_interval_mins,
-                            args=[service_id],
-                            id=sweep_job_id,
-                            max_instances=1,
-                            coalesce=True,
-                            misfire_grace_time=300,
-                        )
-                        self._job_ids[sweep_job_id] = sweep_job_id
+                    if self._reschedule_or_add_job(
+                        _run_ledger_sweep,
+                        "interval",
+                        minutes=sweep_interval_mins,
+                        args=[service_id],
+                        id=sweep_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=300,
+                    ):
                         logger.info(
                             "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
                             sweep_job_id,
@@ -1063,36 +1019,23 @@ class Scheduler:
             # independent dedup registries that don't know about each other.
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-            rum_enabled = (
-                bool(rum_cfg["enabled"])
-                if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
-                else bool(cfg.get("rum_enabled", False))
-            )
+            rum_enabled = svcconfig.is_rum_enabled(cfg)
             if rum_enabled and svcconfig.is_high_scale_mode(src):
                 from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"
                 seen_ids.add(rum_disc_job_id)
-                if rum_disc_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(rum_disc_job_id)
-                        if job:
-                            job.reschedule("interval", seconds=rum_disc_interval_secs)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_rum_discovery_cron,
-                        "interval",
-                        seconds=rum_disc_interval_secs,
-                        args=[service_id],
-                        id=rum_disc_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[rum_disc_job_id] = rum_disc_job_id
+                if self._reschedule_or_add_job(
+                    _run_rum_discovery_cron,
+                    "interval",
+                    seconds=rum_disc_interval_secs,
+                    args=[service_id],
+                    id=rum_disc_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
                     logger.info(
                         "[scheduler] Registered RUM discovery job %s (every %ds).",
                         rum_disc_job_id,
@@ -1104,25 +1047,16 @@ class Scheduler:
                     rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
                     rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
                     seen_ids.add(rum_sweep_job_id)
-                    if rum_sweep_job_id in self._job_ids:
-                        try:
-                            job = self._sched.get_job(rum_sweep_job_id)
-                            if job:
-                                job.reschedule("interval", minutes=rum_sweep_interval_mins)
-                        except Exception:
-                            pass
-                    else:
-                        self._add_job(
-                            _run_rum_ledger_sweep,
-                            "interval",
-                            minutes=rum_sweep_interval_mins,
-                            args=[service_id],
-                            id=rum_sweep_job_id,
-                            max_instances=1,
-                            coalesce=True,
-                            misfire_grace_time=300,
-                        )
-                        self._job_ids[rum_sweep_job_id] = rum_sweep_job_id
+                    if self._reschedule_or_add_job(
+                        _run_rum_ledger_sweep,
+                        "interval",
+                        minutes=rum_sweep_interval_mins,
+                        args=[service_id],
+                        id=rum_sweep_job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=300,
+                    ):
                         logger.info(
                             "🧹 [scheduler] Registered ledger_rum_sweep job %s (every %dm).",
                             rum_sweep_job_id,
@@ -1133,25 +1067,16 @@ class Scheduler:
                 rum_sync_job_id = f"rum_sync_{service_id}"
                 seen_ids.add(rum_sync_job_id)
 
-                if rum_sync_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(rum_sync_job_id)
-                        if job:
-                            job.reschedule("interval", seconds=rum_sync_interval_secs)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_rum_sync,
-                        "interval",
-                        seconds=rum_sync_interval_secs,
-                        args=[service_id],
-                        id=rum_sync_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[rum_sync_job_id] = rum_sync_job_id
+                if self._reschedule_or_add_job(
+                    _run_rum_sync,
+                    "interval",
+                    seconds=rum_sync_interval_secs,
+                    args=[service_id],
+                    id=rum_sync_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
                     logger.info(
                         "[scheduler] Registered RUM sync job %s (every %ds).", rum_sync_job_id, rum_sync_interval_secs
                     )
@@ -1161,25 +1086,16 @@ class Scheduler:
                 rum_commit_job_id = f"rum_commit_{service_id}"
                 seen_ids.add(rum_commit_job_id)
 
-                if rum_commit_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(rum_commit_job_id)
-                        if job:
-                            job.reschedule("interval", minutes=rum_commit_interval_mins)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_rum_commit,
-                        "interval",
-                        minutes=rum_commit_interval_mins,
-                        args=[service_id],
-                        id=rum_commit_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=60,
-                    )
-                    self._job_ids[rum_commit_job_id] = rum_commit_job_id
+                if self._reschedule_or_add_job(
+                    _run_rum_commit,
+                    "interval",
+                    minutes=rum_commit_interval_mins,
+                    args=[service_id],
+                    id=rum_commit_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=60,
+                ):
                     logger.info(
                         "[scheduler] Registered RUM commit job %s (every %dm).",
                         rum_commit_job_id,
@@ -1200,26 +1116,17 @@ class Scheduler:
                 seen_ids.add(full_job_id)
                 cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
                 cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
-                if full_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(full_job_id)
-                        if job:
-                            job.reschedule("cron", hour=cron_hours, minute=cron_minute)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_full_sweep,
-                        "cron",
-                        hour=cron_hours,
-                        minute=cron_minute,  # 03:30, 09:30, 15:30, 21:30 UTC
-                        args=[service_id],
-                        id=full_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
-                    )
-                    self._job_ids[full_job_id] = full_job_id
+                if self._reschedule_or_add_job(
+                    _run_full_sweep,
+                    "cron",
+                    hour=cron_hours,
+                    minute=cron_minute,  # 03:30, 09:30, 15:30, 21:30 UTC
+                    args=[service_id],
+                    id=full_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                ):
                     logger.info(
                         "🔍 [scheduler] Registered full-sweep job %s (hours: %s at :%02d UTC).",
                         full_job_id,
@@ -1243,25 +1150,16 @@ class Scheduler:
                 heal_job_id = f"gap_heal_{service_id}"
                 seen_ids.add(heal_job_id)
                 interval_mins = int(heal_cfg.get("interval_minutes", 30))
-                if heal_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(heal_job_id)
-                        if job:
-                            job.reschedule("interval", minutes=interval_mins)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_gap_heal,
-                        "interval",
-                        minutes=interval_mins,
-                        args=[service_id],
-                        id=heal_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=600,
-                    )
-                    self._job_ids[heal_job_id] = heal_job_id
+                if self._reschedule_or_add_job(
+                    _run_gap_heal,
+                    "interval",
+                    minutes=interval_mins,
+                    args=[service_id],
+                    id=heal_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=600,
+                ):
                     logger.info(
                         "🩹 [scheduler] Registered gap-heal job %s (every %d min).",
                         heal_job_id,
@@ -1467,27 +1365,18 @@ class Scheduler:
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
                 ngwaf_job_id = f"ngwaf_sync_{service_id}"
                 seen_ids.add(ngwaf_job_id)
-                if ngwaf_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(ngwaf_job_id)
-                        if job:
-                            job.reschedule("interval", minutes=ngwaf_interval_mins)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_ngwaf_bot_sync,
-                        "interval",
-                        minutes=ngwaf_interval_mins,
-                        jitter=15,
-                        args=[service_id],
-                        id=ngwaf_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=300,
-                        executor="maintenance",
-                    )
-                    self._job_ids[ngwaf_job_id] = ngwaf_job_id
+                if self._reschedule_or_add_job(
+                    _run_ngwaf_bot_sync,
+                    "interval",
+                    minutes=ngwaf_interval_mins,
+                    jitter=15,
+                    args=[service_id],
+                    id=ngwaf_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=300,
+                    executor="maintenance",
+                ):
                     logger.info(
                         "👾 \x1b[36m[ngwaf_sync]\x1b[0m Registered NGWAF bot sync job %s (every %dm, executor=maintenance).",
                         ngwaf_job_id,
@@ -1507,26 +1396,17 @@ class Scheduler:
                 seen_ids.add(cleanup_job_id)
                 cron_hour = int(cleanup_cfg.get("cron_hour", 3))
                 cron_minute = int(cleanup_cfg.get("cron_minute", 15))
-                if cleanup_job_id in self._job_ids:
-                    try:
-                        job = self._sched.get_job(cleanup_job_id)
-                        if job:
-                            job.reschedule("cron", hour=cron_hour, minute=cron_minute)
-                    except Exception:
-                        pass
-                else:
-                    self._add_job(
-                        _run_metadata_cleanup,
-                        "cron",
-                        hour=cron_hour,
-                        minute=cron_minute,
-                        args=[service_id],
-                        id=cleanup_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
-                    )
-                    self._job_ids[cleanup_job_id] = cleanup_job_id
+                if self._reschedule_or_add_job(
+                    _run_metadata_cleanup,
+                    "cron",
+                    hour=cron_hour,
+                    minute=cron_minute,
+                    args=[service_id],
+                    id=cleanup_job_id,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                ):
                     logger.info(
                         "🧹 \x1b[35m[metadata_cleanup]\x1b[0m Registered metadata cleanup job %s (daily %02d:%02d UTC).",
                         cleanup_job_id,
@@ -1639,6 +1519,33 @@ class Scheduler:
                 pass
             logger.info("[scheduler] Removed stale job %s.", jid)
             del self._job_ids[jid]
+
+    def _reschedule_or_add_job(self, func, trigger=None, *, reschedule_kwargs: dict | None = None, **kwargs) -> bool:
+        """Reschedule ``kwargs["id"]`` when it is already tracked, else add it.
+
+        Returns True when the job was newly added (so the caller logs its
+        "Registered ..." line), False when an existing job was rescheduled.
+        A missing/failed reschedule is swallowed: the next ``reload()`` retries.
+        By default only the trigger's own timing kwargs are re-applied
+        (``seconds``/``minutes``/``hours`` for interval, ``hour``/``minute`` for
+        cron); pass ``reschedule_kwargs`` to re-apply a different set. ``jitter``,
+        ``misfire_grace_time`` etc. only take effect when the job is first added.
+        """
+        job_id = kwargs["id"]
+        if job_id in self._job_ids:
+            if reschedule_kwargs is None:
+                keys = ("seconds", "minutes", "hours") if trigger == "interval" else ("hour", "minute")
+                reschedule_kwargs = {k: kwargs[k] for k in keys if k in kwargs}
+            try:
+                job = self._sched.get_job(job_id)
+                if job:
+                    job.reschedule(trigger, **reschedule_kwargs)
+            except Exception:
+                pass
+            return False
+        self._add_job(func, trigger, **kwargs)
+        self._job_ids[job_id] = job_id
+        return True
 
     def _add_job(self, func, trigger=None, **kwargs):
         job_id = kwargs.pop("id", None)

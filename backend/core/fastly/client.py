@@ -27,6 +27,13 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout)
     construction (JSON sets Content-Type only when a body is present; raw
     always sets the caller-supplied type), and default timeout — they build
     ``headers`` + ``data`` themselves and delegate the wire call here.
+
+    Retry policy is method-blind by design: POST/PUT/DELETE are retried on
+    429/5xx and on timeouts/connection errors just like GET. Known risk: if
+    Fastly accepted a non-idempotent POST (create service/version/domain/backend)
+    but the response was lost, the retry can create a duplicate or surface a
+    spurious 409 after the first attempt actually succeeded. Kept as-is
+    deliberately; callers that create resources must tolerate that.
     """
     try:
         from backend.utils.telemetry import tracked_call

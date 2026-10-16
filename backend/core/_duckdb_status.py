@@ -700,7 +700,7 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         # transiently stalled (GCE Remote-Standard freeze; AGENTS.md Trap #39).
         # RUM data only becomes queryable after a rum_commit, so a value
         # persisted at commit time is as fresh as the data itself.
-        rum_enabled = bool(source.get("rum_enabled", False) or (source.get("rum") or {}).get("enabled", False))
+        rum_enabled = svcconfig.is_rum_enabled(source)
         if rum_enabled:
             try:
                 persisted_rum = (src.get("status") or {}).get("rum") or {}

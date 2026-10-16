@@ -32,14 +32,18 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.session_scoring import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
+    ScoringConfigCompositeResponse,
     ScoringCurvesResponse,
     ScoringEvaluationResponse,
     ScoringHealthResponse,
     ScoringLabelCreate,
+    ScoringLabelDeleteResponse,
+    ScoringLabelRow,
     ScoringLabelsListResponse,
     ScoringLabelUpdate,
     ScoringLatencyTimeseriesResponse,
     ScoringScoreDistributionResponse,
+    ScoringStatusResponse,
     ScoringThresholdPreviewResponse,
     ScoringTokenBody,
     ScoringTopFlaggedResponse,
@@ -108,16 +112,11 @@ def _finalize_cached(value, *, is_cached: bool) -> object:
     that return Pydantic responses. `_is_cached` is always included — it
     isn't sensitive and downstream verification depends on it.
     """
-    from backend.models.common import _debug_responses_enabled
+    from backend.utils.telemetry import debug_envelope
 
     if not isinstance(value, dict):
         return value
-    out = dict(value)
-    out["_is_cached"] = is_cached
-    if not _debug_responses_enabled():
-        out.pop("_debug_queries", None)
-        out.pop("_debug_calls", None)
-    return out
+    return debug_envelope(value, gated=True, is_cached=is_cached)
 
 
 def _cached(key: tuple, producer):
@@ -613,7 +612,9 @@ def scoring_analytics_composite(
     return result
 
 
-@router.get("/{service_id}/scoring/config")
+@router.get(
+    "/{service_id}/scoring/config", response_model=ScoringConfigCompositeResponse, response_model_exclude_unset=True
+)
 def scoring_config_composite(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -645,7 +646,7 @@ def scoring_config_composite(
     }
 
 
-@router.get("/{service_id}/scoring/status")
+@router.get("/{service_id}/scoring/status", response_model=ScoringStatusResponse, response_model_exclude_unset=True)
 def scoring_status(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
@@ -805,7 +806,7 @@ def scoring_labels_list(
     return {"labels": rows, "counts": counts}
 
 
-@router.post("/{service_id}/scoring/labels")
+@router.post("/{service_id}/scoring/labels", response_model=ScoringLabelRow, response_model_exclude_unset=True)
 def scoring_labels_create(
     body: ScoringLabelCreate,
     request: Request,
@@ -845,7 +846,9 @@ def scoring_labels_create(
     return row
 
 
-@router.patch("/{service_id}/scoring/labels/{label_id}")
+@router.patch(
+    "/{service_id}/scoring/labels/{label_id}", response_model=ScoringLabelRow, response_model_exclude_unset=True
+)
 def scoring_labels_update(
     body: ScoringLabelUpdate,
     request: Request,
@@ -872,7 +875,11 @@ def scoring_labels_update(
     return row
 
 
-@router.delete("/{service_id}/scoring/labels/{label_id}")
+@router.delete(
+    "/{service_id}/scoring/labels/{label_id}",
+    response_model=ScoringLabelDeleteResponse,
+    response_model_exclude_unset=True,
+)
 def scoring_labels_delete(
     request: Request,
     service_id: str = Path(...),

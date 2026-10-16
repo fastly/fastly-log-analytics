@@ -22,14 +22,7 @@ from backend.core.ingest import (
     sweep_rum_ledger_once,
 )
 from backend.core.metadata.base import get_con
-
-
-def _clear_ledger(service_id: str):
-    con = get_con(service_id)
-    cur = con.cursor()
-    cur.execute("DELETE FROM ingest_ledger WHERE service_id=?", (service_id,))
-    con.commit()
-    return con, cur
+from tests._helpers.ledger import clear_ledger as _clear_ledger
 
 
 def _empty_list_fos(*args, **kwargs):

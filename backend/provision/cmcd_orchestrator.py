@@ -29,6 +29,7 @@ from backend.provision.cmcd_vcl import (
     cmcd_snippet_names,
     generate_cmcd_vcl,
 )
+from backend.provision.draft_version import draft_version
 
 logger = logging.getLogger(__name__)
 
@@ -90,76 +91,55 @@ def enable_cmcd(
 
     if status_cb:
         status_cb(f"Cloning active version {active_ver}...")
-    clone = fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{active_ver}/clone",
-        token=token,
-    )
-    new_ver = int(clone["number"])
     ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    fastly(
-        "PUT",
-        f"/service/{logging_service_id}/version/{new_ver}",
-        {"comment": f"Enable CMCD v{version} collection (mode={mode}) {ts}"},
-        token=token,
-    )
 
     try:
-        if status_cb:
-            status_cb("Installing CMCD extraction VCL snippet...")
-        vcl_snippets = generate_cmcd_vcl(mode=mode, version=version)
-        ensure_vcl_snippet(
-            CMCD_SNIPPET_NAME,
-            "recv",
-            vcl_snippets[CMCD_SNIPPET_NAME],
-            CMCD_SNIPPET_PRIORITY,
+        with draft_version(
             logging_service_id,
-            new_ver,
             token,
-        )
-
-        if status_cb:
-            status_cb("Updating log format to include CMCD fields...")
-        from backend.provision.fastly_api import install_capture_snippets, load_log_format
-
-        scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
-        install_capture_snippets(
-            logging_service_id,
-            new_ver,
-            cfg.get("log_fields"),
-            token,
-            scoring_enabled=scoring_enabled,
-        )
-
-        endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-        existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
-        if endpoint_name in existing_endpoints:
-            new_format = load_log_format(cfg.get("log_fields"))
-            encoded = urllib.parse.quote(endpoint_name, safe="")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
-                {"format": new_format, "format_version": 2},
-                token=token,
+            base_version=active_ver,
+            call=fastly,
+            comment=f"Enable CMCD v{version} collection (mode={mode}) {ts}",
+            status_cb=status_cb,
+        ) as new_ver:
+            if status_cb:
+                status_cb("Installing CMCD extraction VCL snippet...")
+            vcl_snippets = generate_cmcd_vcl(mode=mode, version=version)
+            ensure_vcl_snippet(
+                CMCD_SNIPPET_NAME,
+                "recv",
+                vcl_snippets[CMCD_SNIPPET_NAME],
+                CMCD_SNIPPET_PRIORITY,
+                logging_service_id,
+                new_ver,
+                token,
             )
 
-        if status_cb:
-            status_cb(f"Validating draft version {new_ver}...")
-        result = fastly(
-            "GET",
-            f"/service/{logging_service_id}/version/{new_ver}/validate",
-            token=token,
-        )
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
+            if status_cb:
+                status_cb("Updating log format to include CMCD fields...")
+            from backend.provision.fastly_api import install_capture_snippets, load_log_format
 
-        if status_cb:
-            status_cb(f"Activating version {new_ver}...")
-        fastly(
-            "PUT",
-            f"/service/{logging_service_id}/version/{new_ver}/activate",
-            token=token,
-        )
+            scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
+            install_capture_snippets(
+                logging_service_id,
+                new_ver,
+                cfg.get("log_fields"),
+                token,
+                scoring_enabled=scoring_enabled,
+            )
+
+            endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
+            existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
+            if endpoint_name in existing_endpoints:
+                new_format = load_log_format(cfg.get("log_fields"))
+                encoded = urllib.parse.quote(endpoint_name, safe="")
+                fastly(
+                    "PUT",
+                    f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
+                    {"format": new_format, "format_version": 2},
+                    token=token,
+                )
+
         if status_cb:
             status_cb(f"CMCD v{version} collection enabled — version {new_ver} active.")
 
@@ -179,14 +159,6 @@ def enable_cmcd(
 
     except Exception:
         logger.exception("enable_cmcd failed for %s", logging_service_id)
-        try:
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/activate",
-                token=token,
-            )
-        except RuntimeError:
-            pass
         try:
             fresh = svcconfig.load_config(logging_service_id) or cfg
         except Exception:

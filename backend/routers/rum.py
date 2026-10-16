@@ -40,6 +40,12 @@ from backend.models.provision import (
     RumUpgradeRequest,
     RumVersionsResponse,
 )
+from backend.models.rum import (
+    RumAnalyticsResponse,
+    RumBeaconHealthResponse,
+    RumSettingsUpdateResponse,
+    RumStatusResponse,
+)
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator_v2 import (
     disable_rum,
@@ -48,6 +54,7 @@ from backend.provision.rum_orchestrator_v2 import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
+from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
@@ -76,30 +83,6 @@ _FARO_BUNDLE_CACHE: dict[str, bytes] = {}
 
 _UA_RE = re.compile(r"(Chrome|Firefox|Safari|Edge|OPR)")
 _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)")
-
-
-def parse_ua_simple(ua: str) -> tuple[str, str, str]:
-    b_match = _UA_RE.search(ua)
-    browser = b_match.group(1) if b_match else "Chrome"
-    if browser == "OPR":
-        browser = "Opera"
-    elif browser == "Mac OS X" or browser == "Macintosh":
-        browser = "Safari"
-
-    os_match = _OS_RE.search(ua)
-    os_name = os_match.group(1) if os_match else "macOS"
-    if "Mac" in os_name or "Mac OS X" in os_name or "Macintosh" in os_name:
-        os_name = "macOS"
-    elif "Windows" in os_name:
-        os_name = "Windows"
-    elif "Linux" in os_name or "X11" in os_name:
-        os_name = "Linux"
-
-    device = "Desktop"
-    if any(m in ua for m in ["iPhone", "iPad", "Android", "Mobile"]):
-        device = "Mobile"
-
-    return browser, os_name, device
 
 
 @asset_router.get("/js/rum.js")
@@ -337,13 +320,13 @@ async def disable_rum_handler(
     return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.get("/{service_id}/rum/status")
+@router.get("/{service_id}/rum/status", response_model=RumStatusResponse, response_model_exclude_unset=True)
 async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str, Any]:
     """Get RUM enable/disable status and VCL drift detection."""
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
-    enabled = cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False)
+    enabled = svcconfig.is_rum_enabled(cfg)
     enabled_at = cfg.get("rum_enabled_at") or rum_cfg.get("enabled_at")
 
     analyst_session = getattr(request.state, "analyst_session", None)
@@ -462,7 +445,7 @@ async def upgrade_rum_handler(
     return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.post("/{service_id}/rum/settings")
+@router.post("/{service_id}/rum/settings", response_model=RumSettingsUpdateResponse, response_model_exclude_unset=True)
 def update_rum_settings(
     service_id: str = Path(...),
     body: RumSettingsUpdateRequest = Body(...),
@@ -509,7 +492,7 @@ def update_rum_settings(
     # already correct, and the client-side settings are fully deployed via the
     # updated and uploaded rum-tracker.js on FOS.
     orig_rum = original_cfg.get("rum") or {}
-    rum_was_enabled = bool(original_cfg.get("rum_enabled", False) or orig_rum.get("enabled", False))
+    rum_was_enabled = svcconfig.is_rum_enabled(original_cfg)
     condition_changed = orig_rum.get("custom_condition") != body.custom_condition
 
     needs_reconciliation = not rum_was_enabled or condition_changed
@@ -550,16 +533,14 @@ def _inject_telemetry(res: dict) -> dict:
     The response middleware automatically strips these fields if opt-in headers
     are absent, making inline injection completely safe.
     """
-    from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
-    res["_debug_queries"] = get_queries()
-    res["_debug_sqlite"] = list(get_sqlite_queries())
-    res["_debug_calls"] = get_tracked_calls()
-    res["_is_cached"] = False
-    return res
+    return debug_envelope(res, gated=False)
 
 
-@router.get("/{service_id}/rum/beacon-health")
+@router.get(
+    "/{service_id}/rum/beacon-health", response_model=RumBeaconHealthResponse, response_model_exclude_unset=True
+)
 async def rum_beacon_health(
     request: Request,
     ctx: RequestContext = Depends(build_request_context),
@@ -567,9 +548,7 @@ async def rum_beacon_health(
     """Check if RUM beacons are arriving (validation endpoint for setup).
     Queries DuckDB views using execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_beacon_health as hs_rum_health
 
@@ -579,7 +558,7 @@ async def rum_beacon_health(
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
-    if not cfg.get("rum_enabled", False) and not rum_cfg.get("enabled", False):
+    if not svcconfig.is_rum_enabled(cfg):
         return _inject_telemetry(
             {
                 "enabled": False,
@@ -594,32 +573,8 @@ async def rum_beacon_health(
     try:
         rum_source = rum_source_for(ctx.source)
 
-        def _get_health(con):
-            one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
-            from backend.utils.telemetry import track_query
-
-            # Count recent beacons in the last 1 hour
-            with track_query(
-                con,
-                "SELECT COUNT(*) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors) WHERE timestamp > ?",
-                [one_hour_ago],
-                "rum_health_recent",
-            ) as cur_recent:
-                recent_count = cur_recent.fetchone()[0] or 0
-
-            # Get max timestamp overall
-            with track_query(
-                con,
-                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)",
-                [],
-                "rum_health_last",
-            ) as cur_last:
-                last_dt = cur_last.fetchone()[0]
-
-            return recent_count, last_dt
-
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-            recent_count, last_dt = execute_with_stale_view_retry(rum_con, rum_source, _get_health)
+            recent_count, last_dt = execute_with_stale_view_retry(rum_con, rum_source, rum_repo.get_beacon_health)
 
         last_beacon_time = None
         if last_dt:
@@ -657,7 +612,7 @@ async def rum_beacon_health(
         )
 
 
-@router.get("/{service_id}/rum/analytics")
+@router.get("/{service_id}/rum/analytics", response_model=RumAnalyticsResponse, response_model_exclude_unset=True)
 async def rum_analytics(
     request: Request,
     start_time: str | None = Query(None),
@@ -668,9 +623,7 @@ async def rum_analytics(
     """Retrieve parsed RUM analytics from DuckDB views with high-fidelity deterministic mock fallback.
     Wraps execution with execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_analytics as hs_rum_analytics
 
@@ -1489,9 +1442,7 @@ async def rum_live_events(
     """Fetch recent live beacons stream to feed frontend ticker.
     Queries unified view records in DuckDB using execute_with_stale_view_retry.
     """
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.rum import rum_live_events as hs_rum_live
 

@@ -7,9 +7,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
+from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
     OriginAggregatesResponse,
@@ -25,7 +24,6 @@ from backend.models.origin import (
 )
 from backend.repositories import origin as repo
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror OriginAggregatesResponse fields one-to-one so
@@ -88,7 +86,7 @@ class OriginDrilldownRequest(FilteredRequest):
     limit: Limit100 = 30
 
 
-class OriginAggregatesRequest(FilteredRequest):
+class OriginAggregatesRequest(RangeKeyedRequest):
     bucket_minutes: Limit1440 = 5
     split_by_leg: bool = False
     timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
@@ -98,20 +96,6 @@ class OriginAggregatesRequest(FilteredRequest):
     ip_health_limit: Limit100 = 30
     pop_latency_limit: Limit100 = 30
     sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional). When ``range_token`` is
-    # a recognized token, the SERVER resolves the scan window itself from
-    # (token, anchor) and ignores FE-supplied ``start_time``/``end_time`` on this
-    # path — so a crafted body can't widen the scan. The resolved bounds are
-    # still passed through ``ctx.clamp`` so the invite ceiling is enforced
-    # regardless of token (an analyst can't widen past their invite by picking
-    # "30d"). Unlike network-health this endpoint has no response memo to
-    # stabilize — the token exists purely so the FE first-paint React Query key
-    # is server-reproducible (it keys on the token + a quantized anchor instead
-    # of a client-now()-anchored absolute window), which is what makes the
-    # origin page SSR-seedable. Absent/unknown token → legacy absolute-bounds
-    # path unchanged. See backend/utils/time_window.py + the spec.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
@@ -142,19 +126,9 @@ async def origin_aggregates(
     # network-health, get_aggregates has no response memo to stabilize, so the
     # token is NOT threaded into the repo — it exists purely to make the FE's
     # first-paint key server-reproducible (the origin SSR-seed contract).
-    if is_valid_range_token(req.range_token):
-        # earliest_log_at drives the "auto" adaptive default; sourced from the
-        # persisted status snapshot (same field the bootstrap + /api/log-extents
-        # read — no DuckDB connection, no cron contention).
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
     sections = _expand_sections(req.sections)
-    from backend.high_scale.registry import get_high_scale_service_registry
-
-    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    high_scale_service = ctx.high_scale
     if high_scale_service is not None:
         from backend.high_scale.origin import aggregates as high_scale_aggregates
 

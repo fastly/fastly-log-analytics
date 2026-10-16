@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
 class ScoringThresholdBody(BaseModel):
@@ -116,11 +118,9 @@ class ScoringLabelUpdate(BaseModel):
 # ``+00:00`` to ``Z`` on UTC-configured hosts — a silent wire change.
 
 
-class _ScoringRead(BaseModel):
+class _ScoringRead(PassthroughModel):
     """Base for the scoring read responses — passes the telemetry envelope
     (and any undeclared key) through instead of stripping it."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ScoringTopFlaggedRow(_ScoringRead):
@@ -575,3 +575,30 @@ class ScoringDashboardResponse(_ScoringRead):
     config_threshold: ScoringThresholdState | None = None
     exclude_regex: ScoringExcludeRegexState | None = None
     enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringStatusResponse(_ScoringRead):
+    """``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
+    live-version and drift keys. Config-derived keys beyond these ride as extras."""
+
+    enabled: bool | None = None
+    scoring_service_id: str | None = None
+    scoring_active_version: int | None = None
+    scoring_activated_at: str | None = None
+    scorer_drift: bool | None = None
+    drift_detail: str | None = None
+    drift_known: bool | None = None
+
+
+class ScoringConfigCompositeResponse(_ScoringRead):
+    """``GET /scoring/config``: the four token-free config reads in one body."""
+
+    status: ScoringStatusResponse | None = None
+    threshold: ScoringThresholdState | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringLabelDeleteResponse(_ScoringRead):
+    status: str | None = None
+    id: str | None = None

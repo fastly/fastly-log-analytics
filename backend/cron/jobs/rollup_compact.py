@@ -127,135 +127,29 @@ def _run_rollup_compact_daily(
             logger.warning("[rollup-compact] %s: day-bundle backfill failed: %s", _display, e)
             bundled = 0
 
-        # 5. origin_summary
-        try:
-            origin_summary_compacted = _call_with_lookback(
-                compact_origin_summary_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"origin_summary: {e}")
-            logger.warning("[rollup-compact] %s: origin_summary failed: %s", _display, e)
-            origin_summary_compacted = 0
-
-        # 6. network_rtt
-        try:
-            network_rtt_compacted = _call_with_lookback(
-                compact_network_rtt_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"network_rtt: {e}")
-            logger.warning("[rollup-compact] %s: network_rtt failed: %s", _display, e)
-            network_rtt_compacted = 0
-
-        # 7. network_speed
-        try:
-            network_speed_compacted = _call_with_lookback(
-                compact_network_speed_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"network_speed: {e}")
-            logger.warning("[rollup-compact] %s: network_speed failed: %s", _display, e)
-            network_speed_compacted = 0
-
-        # 8. network_quality
-        try:
-            network_quality_compacted = _call_with_lookback(
-                compact_network_quality_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"network_quality: {e}")
-            logger.warning("[rollup-compact] %s: network_quality failed: %s", _display, e)
-            network_quality_compacted = 0
-
-        # 9. verified_bots_ts
-        try:
-            vbts_compacted = _call_with_lookback(
-                compact_verified_bots_ts_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"verified_bots_ts: {e}")
-            logger.warning("[rollup-compact] %s: verified_bots_ts failed: %s", _display, e)
-            vbts_compacted = 0
-
-        # 10. perf_latency
-        try:
-            perf_compacted = _call_with_lookback(
-                compact_perf_latency_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"perf_latency: {e}")
-            logger.warning("[rollup-compact] %s: perf_latency failed: %s", _display, e)
-            perf_compacted = 0
-
-        # 11. origin_dims
-        try:
-            origin_dims_compacted = _call_with_lookback(
-                compact_origin_dims_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"origin_dims: {e}")
-            logger.warning("[rollup-compact] %s: origin_dims failed: %s", _display, e)
-            origin_dims_compacted = 0
-
-        # 12. origin_latency_ts
-        try:
-            origin_latency_ts_compacted = _call_with_lookback(
-                compact_origin_latency_ts_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"origin_latency_ts: {e}")
-            logger.warning("[rollup-compact] %s: origin_latency_ts failed: %s", _display, e)
-            origin_latency_ts_compacted = 0
-
-        # 13. security_dims
-        try:
-            security_dims_compacted = _call_with_lookback(
-                compact_security_dims_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"security_dims: {e}")
-            logger.warning("[rollup-compact] %s: security_dims failed: %s", _display, e)
-            security_dims_compacted = 0
-
-        # 14. perf_dims
-        try:
-            perf_dims_compacted = _call_with_lookback(
-                compact_perf_dims_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"perf_dims: {e}")
-            logger.warning("[rollup-compact] %s: perf_dims failed: %s", _display, e)
-            perf_dims_compacted = 0
-
-        # 15. ngwaf_bots
-        try:
-            ngwaf_bots_compacted = _call_with_lookback(
-                compact_ngwaf_bots_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"ngwaf_bots: {e}")
-            logger.warning("[rollup-compact] %s: ngwaf_bots failed: %s", _display, e)
-            ngwaf_bots_compacted = 0
-
-        # 16. overview
-        try:
-            overview_compacted = _call_with_lookback(
-                compact_overview_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"overview: {e}")
-            logger.warning("[rollup-compact] %s: overview failed: %s", _display, e)
-            overview_compacted = 0
-
-        # 17. pop_health
-        try:
-            pop_health_compacted = _call_with_lookback(
-                compact_pop_health_closed_days_to_daily, service_id, src, lookback_days=30
-            )
-        except Exception as e:
-            subsystem_errors.append(f"pop_health: {e}")
-            logger.warning("[rollup-compact] %s: pop_health failed: %s", _display, e)
-            pop_health_compacted = 0
+        # 5-17. Per-rollup daily compaction. Each subsystem is isolated so one failure is
+        # recorded as a warning without stopping the rest; the results are not used.
+        daily_compactors = (
+            ("origin_summary", compact_origin_summary_closed_days_to_daily),
+            ("network_rtt", compact_network_rtt_closed_days_to_daily),
+            ("network_speed", compact_network_speed_closed_days_to_daily),
+            ("network_quality", compact_network_quality_closed_days_to_daily),
+            ("verified_bots_ts", compact_verified_bots_ts_closed_days_to_daily),
+            ("perf_latency", compact_perf_latency_closed_days_to_daily),
+            ("origin_dims", compact_origin_dims_closed_days_to_daily),
+            ("origin_latency_ts", compact_origin_latency_ts_closed_days_to_daily),
+            ("security_dims", compact_security_dims_closed_days_to_daily),
+            ("perf_dims", compact_perf_dims_closed_days_to_daily),
+            ("ngwaf_bots", compact_ngwaf_bots_closed_days_to_daily),
+            ("overview", compact_overview_closed_days_to_daily),
+            ("pop_health", compact_pop_health_closed_days_to_daily),
+        )
+        for name, compactor in daily_compactors:
+            try:
+                _call_with_lookback(compactor, service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{name}: {e}")
+                logger.warning("[rollup-compact] %s: %s failed: %s", _display, name, e)
 
         # Retirement pass: unlink constituent hourly bundles once day bundle verified
         retired_files, retired_bytes = 0, 0

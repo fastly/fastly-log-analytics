@@ -237,18 +237,6 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _RUM_FIELD_NAMES = {cf["name"] for cf in _RUM_CUSTOM_FIELDS}
 
 
-def merge_rum_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
-    """Return ``custom_fields`` with the canonical RUM fields re-applied.
-
-    Drops any existing entries whose name collides with a RUM field, then
-    appends fresh copies of ``_RUM_CUSTOM_FIELDS`` (code is the source of truth).
-    """
-    if not isinstance(custom_fields, list):
-        custom_fields = []
-    kept = [cf for cf in custom_fields if isinstance(cf, dict) and cf.get("name") not in _RUM_FIELD_NAMES]
-    return kept + [dict(cf) for cf in _RUM_CUSTOM_FIELDS]
-
-
 def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = None) -> str:
     """Content hash of the RUM VCL the current generator produces for this service.
 
@@ -867,38 +855,4 @@ def disable_rum(
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
         "deactivated": result.activated_version is not None,
-    }
-
-
-def get_rum_status(logging_service_id: str, token: str) -> dict[str, Any]:
-    """Get RUM status for a logging service.
-
-    Checks if RUM is enabled in config and detects any drift from Fastly.
-
-    Args:
-        logging_service_id: Fastly service ID.
-        token: Fastly API token.
-
-    Returns:
-        {
-            "enabled": bool (in config),
-            "enabled_at": str (ISO timestamp, or empty),
-            "last_activated_version": int,
-            "drift_detected": bool (config != Fastly),
-        }
-    """
-    cfg = svcconfig.load_config(logging_service_id)
-    if not cfg:
-        return {
-            "enabled": False,
-            "enabled_at": "",
-            "last_activated_version": None,
-            "drift_detected": False,
-        }
-
-    return {
-        "enabled": cfg.get("rum_enabled", False),
-        "enabled_at": cfg.get("rum_enabled_at", ""),
-        "last_activated_version": cfg.get("last_activated_version"),
-        "drift_detected": False,  # TODO: Implement drift detection
     }

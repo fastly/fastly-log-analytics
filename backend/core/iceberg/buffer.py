@@ -895,7 +895,7 @@ _RUM_BEACON_TABLES = ("client_vitals", "client_errors")
 
 def _lake_ident(name: str) -> str:
     """Validate a DuckLake table name before interpolating it into SQL."""
-    if not _LAKE_IDENT_RE.match(name or ""):
+    if not _LAKE_IDENT_RE.fullmatch(name or ""):
         raise ValueError(f"unsafe ducklake table name: {name!r}")
     return name
 

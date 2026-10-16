@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
+from backend.core.duckdb import ensure_cid_salt
 from backend.deps import get_service_id, get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.provision import CustomFieldsImportBody, ProvisionLakeInfoResponse
@@ -177,10 +178,7 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
                 if "log_period" in sent_rum and "sync_interval_seconds" not in sent_rum:
                     rum_config.pop("sync_interval_seconds", None)
                 rum_config.update(sent_rum)
-                if not rum_config.get("cid_salt"):
-                    import secrets
-
-                    rum_config["cid_salt"] = secrets.token_hex(32)
+                ensure_cid_salt(rum_config)
                 cfg["rum"] = rum_config
                 if "log_period" in sent_rum:
                     cfg["rum_log_period"] = sent_rum["log_period"]

@@ -1,7 +1,7 @@
 """Tests for the Faro bundle reconcile step in ``backend.cron.jobs.rum_sync``.
 
 Two seams to mock: FOS access (SigV4 HEAD over ``httpx.MockTransport``, same
-shape as ``tests/backend/provision/test_rum_assets.py``) and the Task 2
+shape as ``tests/provision/test_rum_assets.py``) and the Task 2
 functions (``download_and_upload_faro`` / ``detect_faro_version_change``,
 monkeypatched directly at their source module, ``backend.provision.rum_assets``
 — that is where the reconcile step's late ``from … import …`` resolves the
@@ -754,7 +754,7 @@ def test_restore_and_resync_pass_expected_current_version_for_compare_and_set(
     as ``expected_current_version`` to ``download_and_upload_faro`` — the
     compare-and-set guard that stops a slow cron re-sync from reverting a
     concurrent operator upgrade (see that function's docstring and
-    tests/backend/provision/test_rum_assets.py's dedicated race test)."""
+    tests/provision/test_rum_assets.py's dedicated race test)."""
     seen_kwargs: list[dict] = []
 
     async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
+from backend.models.common import BaseResponse, Limit100, RangeKeyedRequest, Seconds14400
 
 CmcdSectionName = Literal[
     "overview",
@@ -20,12 +20,10 @@ CmcdSectionName = Literal[
 ]
 
 
-class CmcdRequest(FilteredRequest):
+class CmcdRequest(RangeKeyedRequest):
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     sections: list[CmcdSectionName] | None = None
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class CmcdAggregatesResponse(BaseResponse):
