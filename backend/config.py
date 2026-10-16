@@ -531,7 +531,7 @@ def config_to_source(cfg: dict) -> dict:
         "log_period": int(cfg.get("log_period", 60)),
         "log_fields": log_fields,
         "provisioning": prov,
-        "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
+        "rum_enabled": is_rum_enabled(cfg),
         "rum": cfg.get("rum", {}),
     }
 
@@ -701,6 +701,21 @@ def _get_cfg_field(field: str, service_id: str | None, default):
         if cfg:
             return cfg.get(field, default)
     return default
+
+
+def is_rum_enabled(cfg: dict | None) -> bool:
+    """Whether RUM is enabled for a service config.
+
+    ``cfg["rum"]["enabled"]`` wins whenever it is present and not ``None``; the legacy root
+    ``cfg["rum_enabled"]`` is only consulted otherwise. This is the precedence the scheduler
+    and the RUM cron jobs use, so every status/health surface must use it too.
+    """
+    cfg = cfg or {}
+    rum = cfg.get("rum")
+    enabled = rum.get("enabled") if isinstance(rum, dict) else None
+    if enabled is not None:
+        return bool(enabled)
+    return bool(cfg.get("rum_enabled", False))
 
 
 def get_fastly_api_key(service_id: str | None = None) -> str:

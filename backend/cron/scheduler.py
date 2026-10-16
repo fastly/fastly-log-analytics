@@ -1019,11 +1019,7 @@ class Scheduler:
             # independent dedup registries that don't know about each other.
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-            rum_enabled = (
-                bool(rum_cfg["enabled"])
-                if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
-                else bool(cfg.get("rum_enabled", False))
-            )
+            rum_enabled = svcconfig.is_rum_enabled(cfg)
             if rum_enabled and svcconfig.is_high_scale_mode(src):
                 from backend.cron.jobs.rum_ledger import _run_rum_discovery_cron, _run_rum_ledger_sweep
 

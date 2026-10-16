@@ -447,11 +447,15 @@ def test_config_to_source_defaults_access_level_to_read_write():
 
 def test_config_to_source_includes_rum_fields():
     """Verify config_to_source maps rum_enabled and rum config blocks."""
-    # Test with rum_enabled on root
+    # rum.enabled wins over the legacy root flag (the scheduler's precedence; see is_rum_enabled)
     cfg = _cfg(rum_enabled=True, rum={"enabled": False})
     src = svcconfig.config_to_source(cfg)
-    assert src["rum_enabled"] is True
+    assert src["rum_enabled"] is False
     assert src["rum"] == {"enabled": False}
+
+    # Root flag applies when the sub-dictionary has no opinion
+    cfg_root = _cfg(rum_enabled=True)
+    assert svcconfig.config_to_source(cfg_root)["rum_enabled"] is True
 
     # Test with rum enabled on sub-dictionary
     cfg2 = _cfg(rum_enabled=False, rum={"enabled": True})

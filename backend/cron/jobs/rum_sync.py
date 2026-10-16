@@ -103,11 +103,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
             return True
         rum_cfg = cfg.get("rum")
         rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-        rum_enabled = (
-            bool(rum_cfg["enabled"])
-            if "enabled" in rum_cfg and rum_cfg["enabled"] is not None
-            else bool(cfg.get("rum_enabled", False))
-        )
+        rum_enabled = svcconfig.is_rum_enabled(cfg)
         if not rum_enabled:
             return True
         token = cfg.get("fastly_api_key", "")

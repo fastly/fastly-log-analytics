@@ -325,7 +325,7 @@ async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str,
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
-    enabled = cfg.get("rum_enabled", False) or rum_cfg.get("enabled", False)
+    enabled = svcconfig.is_rum_enabled(cfg)
     enabled_at = cfg.get("rum_enabled_at") or rum_cfg.get("enabled_at")
 
     analyst_session = getattr(request.state, "analyst_session", None)
@@ -491,7 +491,7 @@ def update_rum_settings(
     # already correct, and the client-side settings are fully deployed via the
     # updated and uploaded rum-tracker.js on FOS.
     orig_rum = original_cfg.get("rum") or {}
-    rum_was_enabled = bool(original_cfg.get("rum_enabled", False) or orig_rum.get("enabled", False))
+    rum_was_enabled = svcconfig.is_rum_enabled(original_cfg)
     condition_changed = orig_rum.get("custom_condition") != body.custom_condition
 
     needs_reconciliation = not rum_was_enabled or condition_changed
@@ -557,7 +557,7 @@ async def rum_beacon_health(
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
-    if not cfg.get("rum_enabled", False) and not rum_cfg.get("enabled", False):
+    if not svcconfig.is_rum_enabled(cfg):
         return _inject_telemetry(
             {
                 "enabled": False,

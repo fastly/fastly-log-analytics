@@ -233,13 +233,7 @@ def rum_ledger_sweep_service(
             detail=make_error("service_not_found", "Service configuration not found."),
         )
 
-    raw_rum = cfg.get("rum")
-    rum_dict: dict[str, object] = raw_rum if isinstance(raw_rum, dict) else {}
-    rum_enabled = (
-        bool(rum_dict.get("enabled"))
-        if "enabled" in rum_dict and rum_dict.get("enabled") is not None
-        else bool(cfg.get("rum_enabled", False))
-    )
+    rum_enabled = svcconfig.is_rum_enabled(cfg)
     if not rum_enabled:
         raise HTTPException(
             status_code=400,
