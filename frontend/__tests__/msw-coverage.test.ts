@@ -62,6 +62,11 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
 
+  // Live Log Streaming SSE endpoints — MSW does not model SSE; the page test
+  // injects its own EventSource shim.
+  'GET /api/stream/:service_id',
+  'GET /api/services/:service_id/stream',
+
   // Raw Logs aliases of POST /api/logs/query (which has a handler); the
   // explorer only calls /query. Covered by backend router tests.
   'POST /api/logs',

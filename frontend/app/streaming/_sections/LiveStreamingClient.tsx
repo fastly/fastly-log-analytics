@@ -503,7 +503,15 @@ function LiveStreamingBody({ activeServiceId }: LiveStreamingBodyProps) {
             <div
               key={log.event_id}
               data-testid="stream-log-row"
+              role="button"
+              tabIndex={0}
               onClick={() => setSelectedLog(log)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setSelectedLog(log)
+                }
+              }}
               className="grid grid-cols-12 gap-2 px-2 py-1 rounded cursor-pointer hover:bg-zinc-800/70 border border-transparent hover:border-zinc-700/50 transition-colors items-center text-[12px]"
             >
               {/* Timestamp */}
