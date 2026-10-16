@@ -61,7 +61,7 @@ docs/pages/
 | `/security` | [Security](security.md) | WAF detections, Verified Bots, NGWAF signals, TLS JA3/JA4 | **Live-certified** |
 | `/insights` | [Insights](insights.md) | 51 automated anomaly detectors across 5 category tabs | **Live-certified** |
 | `/network` | [Network Path](network.md) | TCP RTT, packet loss, retransmits, ASN health heatmap | **Live-certified** |
-| `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Scaffolded (Pending AI Verification)** |
+| `/streaming` | [Streaming](streaming.md) | Live SSE log tailing, regex search, inspect modal | **Live-certified** |
 | `/rum` | [RUM](rum.md) | Real user telemetry, LCP, INP, CLS, client errors | **Live-certified** |
 | `/sessions` | [Sessions](sessions.md) | Client sessions clustering, duration, 4xx ratios, RTT, token drill-down | **Live-certified** |
 | `/sessions/stream` | [Sessions Stream](sessions-stream.md) | CMCD streaming QoE, rendition switches, buffer health, starvation | **Live-certified** |

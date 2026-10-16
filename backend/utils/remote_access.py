@@ -268,6 +268,9 @@ _ANALYST_SSE_ALLOWLIST: set[str] = {
     # Control Room's bounded recent 4xx/5xx request-event feed. Payloads are
     # analyst-safe because client IPs are masked in the router.
     "/control-room/error-stream",
+    # Live log streaming feed (/api/stream/{service_id}).
+    "/stream",
+    "/api/stream",
 }
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
@@ -682,7 +685,7 @@ def _path_service_ids(request: Request) -> list[str]:
 
 
 def _is_sse_route(path: str) -> bool:
-    if "/sse" in path:
+    if "/sse" in path or path.startswith("/api/stream"):
         return True
     # Match the final path segment being exactly "stream" (the original
     # `endswith("/stream")` case) OR hyphen-suffixed with "-stream" (e.g.
@@ -1354,7 +1357,10 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # parameterized by service_id, e.g. "/realtime-stream" matching
         # "/api/services/{service_id}/realtime-stream").
         if _is_sse_route(path) and not any(
-            path == allowed or path.endswith(allowed) for allowed in _ANALYST_SSE_ALLOWLIST
+            path == allowed
+            or path.endswith(allowed)
+            or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
+            for allowed in _ANALYST_SSE_ALLOWLIST
         ):
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 

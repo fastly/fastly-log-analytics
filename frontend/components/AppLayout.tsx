@@ -97,7 +97,17 @@ import { SIDEBAR_COLLAPSED_COOKIE } from '@/lib/sidebar-cookie'
 //
 // Data Management exposes ingestion logs / cron health — useful for an
 // analyst who runs their own ingestion, leak-y for an invited viewer.
-const SERVICE_NAVIGATION = [
+interface ServiceNavItem {
+  name: string
+  href: string
+  icon: React.ComponentType<{ className?: string }>
+  analystVisible: boolean
+  shareAnalystVisible?: boolean
+  requiresCmcd?: boolean
+  requiresRum?: boolean
+}
+
+const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, analystVisible: true },
   { name: 'Control Room', href: '/control-room', icon: Radio, analystVisible: true },
   { name: 'Service Summary', href: '/fastly-value', icon: TrendingUp, analystVisible: true },
@@ -106,7 +116,7 @@ const SERVICE_NAVIGATION = [
   { name: 'Security', href: '/security', icon: Shield, analystVisible: true },
   { name: 'Insights', href: '/insights', icon: Sparkles, analystVisible: true },
   { name: 'Network', href: '/network', icon: Network, analystVisible: true },
-  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
+  { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true },
   { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
