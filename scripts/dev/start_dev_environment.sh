@@ -27,6 +27,28 @@ fi
 REMOTE_STANDARD_FORWARD_CMD="${REMOTE_STANDARD_FORWARD_CMD:-}"
 REMOTE_HIGH_SCALE_FORWARD_CMD="${REMOTE_HIGH_SCALE_FORWARD_CMD:-}"
 
+# Launch each forwarder in the background without eval. The env value is split
+# on whitespace (no shell quoting) and a bare `&` token separates multiple
+# commands.
+launch_forwarders() {
+    local -a words cmd=()
+    local w
+    read -r -a words <<< "$1"
+    for w in "${words[@]}"; do
+        if [ "$w" = "&" ]; then
+            if [ "${#cmd[@]}" -gt 0 ]; then
+                "${cmd[@]}" &
+            fi
+            cmd=()
+        else
+            cmd+=("$w")
+        fi
+    done
+    if [ "${#cmd[@]}" -gt 0 ]; then
+        "${cmd[@]}" &
+    fi
+}
+
 # 1. Verify and start Colima (Docker Daemon)
 echo -e "\n${BOLD}1. Checking Colima status...${RESET}"
 if ! colima status &>/dev/null; then
@@ -53,7 +75,7 @@ if [ -z "${REMOTE_STANDARD_FORWARD_CMD}" ]; then
     echo -e "${YELLOW}⚠️ REMOTE_STANDARD_FORWARD_CMD is unset; skipping remote Standard forwarding.${RESET}"
 elif ! lsof -i :3001 &>/dev/null && ! lsof -i :8001 &>/dev/null; then
     echo -e "${YELLOW}⚠️ Remote Standard ports 3001/8001 are not bound. Launching forwarder...${RESET}"
-    eval "${REMOTE_STANDARD_FORWARD_CMD}" &
+    launch_forwarders "${REMOTE_STANDARD_FORWARD_CMD}"
     sleep 3
     if lsof -i :3001 &>/dev/null || lsof -i :8001 &>/dev/null; then
         echo -e "${GREEN}✅ Remote Standard connection established.${RESET}"
@@ -71,12 +93,7 @@ if [ -z "${REMOTE_HIGH_SCALE_FORWARD_CMD}" ]; then
 elif ! lsof -i :3002 &>/dev/null || ! lsof -i :8002 &>/dev/null; then
     echo -e "${YELLOW}⚠️ Remote High-Scale ports 3002/8002 are not bound. Launching forwarder...${RESET}"
 
-    # Extract commands and run them in background if multiple forwards are combined with '&'
-    if [[ "${REMOTE_HIGH_SCALE_FORWARD_CMD}" == *"&"* ]]; then
-        eval "${REMOTE_HIGH_SCALE_FORWARD_CMD}" &
-    else
-        eval "${REMOTE_HIGH_SCALE_FORWARD_CMD}" &
-    fi
+    launch_forwarders "${REMOTE_HIGH_SCALE_FORWARD_CMD}"
 
     sleep 3
     if lsof -i :3002 &>/dev/null && lsof -i :8002 &>/dev/null; then
