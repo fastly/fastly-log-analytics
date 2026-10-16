@@ -729,21 +729,10 @@ Run it from the repo root:
 uv run python scripts/check_environment_health.py
 ```
 
-### Parallel Multi-Environment Deployment ([scripts/dev/deploy_test_all.sh](scripts/dev/deploy_test_all.sh))
+### Parallel Multi-Environment Deployment
 
-For rapid, parallelized deployment of local and remote environments, use the local-only `deploy_test_all.sh` script in the `scripts/dev/` folder of the project (which is gitignored to secure environment credentials).
+`scripts/dev/deploy_test_all.sh` is a **local-only** script: it is gitignored (it embeds environment credentials) and is not in the public repo, so a fresh clone will not have it. The rules for using it, and what each run does, live in one place: [Canonical Multi-Tier Deployment Mandate](#canonical-multi-tier-deployment-mandate-never-deploy-or-test-by-hand).
 
-This script performs the following steps in parallel:
-1. **Pre-flight Pushed-Commit Verification:** Verifies that your active HEAD commit has already been intentionally committed and pushed to upstream origin (`git push origin HEAD`). It does NOT blindly commit or push pending code; any other work-in-progress files in your working directory are left untouched.
-2. **Prompts for Image Tags:** Prompts you for the latest frontend/backend Jenkins image tags so it can deploy to Elevation.
-3. **Deploys Parallel Groups:**
-   - **Local Standard:** Rebuilds and launches local standard containerized services (`docker compose up -d --build`).
-   - **GCE Standard:** Connects over SSH, pulls the latest commit, runs `~/restart.sh --no-wait`, and automatically establishes port forwards for ports `3001` and `8001`.
-   - **Elevation High-Scale:** Deploys the frontend, backend, and worker images to GKE with the provided Jenkins tags, injects the current `COMMIT_HASH` environment variable into the frontend pods, waits for rolling rollouts to succeed, and establishes port forwards for ports `3002` and `8002`.
-4. **Validates Commit Footer on Dashboards:** Executes `scripts/verify_dashboard.js` against all 3 active forwarded URLs to assert that the active dashboards successfully loaded and display the exact expected commit hash.
-5. **Post-Deployment Real-Time System & Pipeline Monitoring:** Invokes `scripts/dev/audit_environments.py` across the 3 active environments in watch mode (`--watch --duration 5 --interval 10`) for 5 minutes by default to guarantee stability and catch resource or scheduler anomalies post-rollout. Can be customized with `MONITOR_MINUTES=N`, or skipped for rapid iterations via `--no-monitor` / `MONITOR_MINUTES=0`.
-
-Run the parallel flow from the project root:
 ```bash
 bash scripts/dev/deploy_test_all.sh
 # Or skip the 5-minute audit watch for fast iterations:
@@ -1230,10 +1219,10 @@ Before beginning implementation, testing, or refactoring on any page, background
 ### Canonical Multi-Tier Deployment Mandate (Never Deploy or Test by Hand)
 
 1. **Always use `scripts/dev/deploy_test_all.sh` after committing and pushing**: NEVER deploy, restart, refresh port-forwards, or test environments manually by hand (e.g. running ad-hoc `docker compose up`, `kubectl set image`, or manual background port-forwards). The project provides `scripts/dev/deploy_test_all.sh` as the single canonical, robust, and repeatable deployment script. You MUST craft an intentional commit for your change and push it to upstream origin (`git push origin HEAD`) BEFORE invoking `deploy_test_all.sh`. The script will NEVER auto-commit or auto-push, and will leave any other uncommitted work-in-progress files in the working directory untouched.
-2. **Three-Tier Parallelism & Drift Prevention**: The script concurrently builds, updates, establishes tunnels/port-forwards, and verifiably tests across the 3 active environments:
-   - **Local Standard** (Docker Compose, `http://localhost:3000` / `http://127.0.0.1/dashboard`)
-   - **GCE Standard** (Remote VM via SSH tunnel, `http://localhost:3001`)
-   - **Remote High-Scale** (Kubernetes cluster via port-forward, `http://localhost:3002` / operator-configured analyst URL)
+2. **Three-Tier Parallelism & Drift Prevention**: The script first verifies that HEAD is already pushed to upstream origin, then concurrently builds, updates, establishes tunnels/port-forwards, and verifiably tests across the 3 active environments:
+   - **Local Standard** (Docker Compose, `http://localhost:3000` / `http://127.0.0.1/dashboard`): rebuilds and relaunches via `docker compose up -d --build`.
+   - **GCE Standard** (Remote VM via SSH tunnel, `http://localhost:3001`): pulls the latest commit over SSH, runs `~/restart.sh --no-wait`, and forwards ports `3001`/`8001`.
+   - **Remote High-Scale** (Kubernetes cluster via port-forward, `http://localhost:3002` / operator-configured analyst URL): deploys the frontend, backend, and worker images with the Jenkins tags, injects the current `COMMIT_HASH` into the frontend pods, waits for rollouts, and forwards ports `3002`/`8002`.
 3. **No Interactive Blocking in Automation**: The script automatically defaults Jenkins tags to the short 12-char commit hash (`$COMMIT_HASH`) and bypasses interactive `read` prompts when running in non-interactive/automated agent shells (`! -t 0`) or when `BACKEND_TAG` / `FRONTEND_TAG` are pre-set in the environment.
 4. **Mandatory Post-Deploy Verification**: Every run executes `scripts/verify_dashboard.js` against all 3 active endpoints to guarantee commit parity and live rendering before work is deemed complete.
 5. **Mandatory 5-Minute Stability Monitoring**: Following successful dashboard verification, `deploy_test_all.sh` invokes `scripts/dev/audit_environments.py` to continuously monitor CPU, memory, scheduler tick rate, DuckDB connection pool latency, and ingestion health across the 3 active environments in real time for 5 minutes (`--watch --duration 5 --interval 10`) to confirm zero post-rollout regressions (customizable via `MONITOR_MINUTES=N`, skippable for rapid iterations via `--no-monitor` / `MONITOR_MINUTES=0`).

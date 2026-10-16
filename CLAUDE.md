@@ -95,8 +95,7 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 
 
 ### Deployment
-- **Deployment & Verification Script:** `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`
-- **Strict Pre-Commit Requirement:** `deploy_test_all.sh` must be invoked AFTER you have intentionally committed and pushed your change to upstream origin (`git add <files> && git commit -m "..." && git push origin HEAD`). It does NOT auto-commit or auto-push pending code. Any other uncommitted work-in-progress files in the working directory are left untouched and do not block deployment.
+- **Deployment & Verification Script:** `export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh`, run only AFTER you have committed and pushed (`git push origin HEAD`). It never auto-commits or auto-pushes. This is a **local-only script that is not in the public repo** (gitignored); a fresh clone will not have it. Full rules: [AGENTS.md, Canonical Multi-Tier Deployment Mandate](AGENTS.md#canonical-multi-tier-deployment-mandate-never-deploy-or-test-by-hand).
 - **Supported path:** single GCE VM, Docker Compose + Caddy reverse proxy
 - Prod binds 127.0.0.1; Caddy:80 is sole ingress (stamps X-Proxied-By-Caddy)
 - Admin access via SSH tunnel to :3001; analyst access via `/share-login`
