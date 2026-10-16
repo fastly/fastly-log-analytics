@@ -3,6 +3,7 @@
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import { analystFetch } from '@/lib/analystFetch'
+import { msSinceLastInteraction } from '@/lib/userActivity'
 
 interface Options {
   enabled: boolean
@@ -29,19 +30,14 @@ export function useAnalystHeartbeat({
     if (!enabled || isTerminated) return
     if (typeof window === 'undefined') return
 
-    let lastActivity = Date.now()
     let timer: ReturnType<typeof setInterval> | null = null
     let cancelled = false
     let consecutiveFailures = 0
 
-    const bump = () => {
-      lastActivity = Date.now()
-    }
-
     const tick = async () => {
       if (cancelled || isTerminated) return
       if (document.hidden) return
-      if (Date.now() - lastActivity < idleAfterMs) return
+      if (msSinceLastInteraction() < idleAfterMs) return
       try {
         // Raw fetch with a relative URL: in remote-analyst mode the request
         // flows through the Next.js proxy that the tunnel exposes. The typed
@@ -71,14 +67,10 @@ export function useAnalystHeartbeat({
     }
 
     timer = setInterval(tick, intervalMs)
-    window.addEventListener('mousemove', bump, { passive: true })
-    window.addEventListener('keydown', bump)
 
     return () => {
       cancelled = true
       if (timer) clearInterval(timer)
-      window.removeEventListener('mousemove', bump)
-      window.removeEventListener('keydown', bump)
     }
   }, [enabled, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
 
