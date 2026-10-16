@@ -66,3 +66,12 @@ HAVING COUNT(*) > 5  -- At least 5 metrics per session
 ORDER BY poor_metrics DESC, error_count DESC
 LIMIT ?
 """
+
+BEACON_HEALTH_RECENT = (
+    "SELECT COUNT(*) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors) "
+    "WHERE timestamp > ?"
+)
+
+BEACON_HEALTH_LAST = (
+    "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)"
+)

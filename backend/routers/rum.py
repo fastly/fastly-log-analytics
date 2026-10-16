@@ -54,6 +54,7 @@ from backend.provision.rum_orchestrator_v2 import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
+from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error
 
@@ -572,32 +573,8 @@ async def rum_beacon_health(
     try:
         rum_source = rum_source_for(ctx.source)
 
-        def _get_health(con):
-            one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
-            from backend.utils.telemetry import track_query
-
-            # Count recent beacons in the last 1 hour
-            with track_query(
-                con,
-                "SELECT COUNT(*) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors) WHERE timestamp > ?",
-                [one_hour_ago],
-                "rum_health_recent",
-            ) as cur_recent:
-                recent_count = cur_recent.fetchone()[0] or 0
-
-            # Get max timestamp overall
-            with track_query(
-                con,
-                "SELECT MAX(timestamp) FROM (SELECT timestamp FROM client_vitals UNION ALL SELECT timestamp FROM client_errors)",
-                [],
-                "rum_health_last",
-            ) as cur_last:
-                last_dt = cur_last.fetchone()[0]
-
-            return recent_count, last_dt
-
         with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-            recent_count, last_dt = execute_with_stale_view_retry(rum_con, rum_source, _get_health)
+            recent_count, last_dt = execute_with_stale_view_retry(rum_con, rum_source, rum_repo.get_beacon_health)
 
         last_beacon_time = None
         if last_dt:

@@ -6,7 +6,7 @@ All queries go through QueryRunner to centralize DuckDB access + caching.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from backend.repositories._base import QueryRunner
 from backend.repositories._sql import rum as sql_rum
@@ -64,3 +64,22 @@ def get_worst_sessions(
     Returns: [session_id, page_count, poor_metrics, error_count, last_seen]
     """
     return runner.execute(sql_rum.WORST_SESSIONS, [since, until, limit]).fetchall() or []
+
+
+def get_beacon_health(con) -> tuple[int, datetime | None]:
+    """``(beacons in the last hour, newest beacon timestamp)`` across vitals + errors.
+
+    Takes a raw connection (not a runner) because the caller wraps it in
+    ``execute_with_stale_view_retry``, which hands the retry closure the connection.
+    """
+    from backend.utils.telemetry import track_query
+
+    one_hour_ago = datetime.now(UTC) - timedelta(hours=1)
+
+    with track_query(con, sql_rum.BEACON_HEALTH_RECENT, [one_hour_ago], "rum_health_recent") as cur_recent:
+        recent_count = cur_recent.fetchone()[0] or 0
+
+    with track_query(con, sql_rum.BEACON_HEALTH_LAST, [], "rum_health_last") as cur_last:
+        last_dt = cur_last.fetchone()[0]
+
+    return recent_count, last_dt
