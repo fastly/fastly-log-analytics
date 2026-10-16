@@ -17,12 +17,7 @@ def _display_label(src: dict, service_id: str) -> str:
 
 
 def _call_with_lookback(fn, *args, lookback_days: int = 30):
-    try:
-        return fn(*args, lookback_days=lookback_days)
-    except TypeError as e:
-        if "lookback_days" in str(e):
-            return fn(*args)
-        raise
+    return fn(*args, lookback_days=lookback_days)
 
 
 @cron_task("rollup_compact_daily", job_name="rollup_compact_daily")

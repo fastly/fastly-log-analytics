@@ -349,3 +349,18 @@ def test_rollup_compact_admin_status_endpoint(contract_service_source, client, m
     assert data["days_bundled"] == 1
     assert data["hour_bundles"] == 2
     assert data["latest_day_bundle"] == "2026-06-01"
+
+
+def test_call_with_lookback_does_not_rerun_unbounded_on_inner_typeerror():
+    from backend.cron.jobs.rollup_compact import _call_with_lookback
+
+    calls: list[dict] = []
+
+    def _fn(*args, lookback_days=None):
+        calls.append({"lookback_days": lookback_days})
+        raise TypeError("bad value for lookback_days")
+
+    with pytest.raises(TypeError):
+        _call_with_lookback(_fn, "svc", {}, lookback_days=30)
+
+    assert calls == [{"lookback_days": 30}]  # no second, unbounded re-run
