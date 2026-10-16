@@ -396,6 +396,35 @@ def get_sqlite_queries() -> list[dict]:
     return res
 
 
+def debug_envelope(res: dict, *, gated: bool, is_cached: bool = False) -> dict:
+    """Attach the ``_debug_*`` / ``_is_cached`` envelope to a plain-dict response.
+
+    Two gating semantics exist on purpose (each caller keeps its own):
+
+    * ``gated=False`` (RUM): ALWAYS inject ``_debug_queries``, ``_debug_sqlite`` and
+      ``_debug_calls`` from the request's collectors, mutating ``res`` in place.
+    * ``gated=True`` (session scoring): never injects. Returns a copy with
+      ``_is_cached`` set and, unless ``DEBUG_RESPONSES`` is on, any ``_debug_queries`` /
+      ``_debug_calls`` already present dropped (mirrors
+      ``BaseResponse._strip_debug_when_disabled``).
+    """
+    if not gated:
+        res["_debug_queries"] = get_queries()
+        res["_debug_sqlite"] = list(get_sqlite_queries())
+        res["_debug_calls"] = get_tracked_calls()
+        res["_is_cached"] = is_cached
+        return res
+
+    from backend.models.common import _debug_responses_enabled
+
+    out = dict(res)
+    out["_is_cached"] = is_cached
+    if not _debug_responses_enabled():
+        out.pop("_debug_queries", None)
+        out.pop("_debug_calls", None)
+    return out
+
+
 def clear_queries():
     _QUERIES.set([])
 

@@ -556,13 +556,9 @@ def _inject_telemetry(res: dict) -> dict:
     The response middleware automatically strips these fields if opt-in headers
     are absent, making inline injection completely safe.
     """
-    from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
+    from backend.utils.telemetry import debug_envelope
 
-    res["_debug_queries"] = get_queries()
-    res["_debug_sqlite"] = list(get_sqlite_queries())
-    res["_debug_calls"] = get_tracked_calls()
-    res["_is_cached"] = False
-    return res
+    return debug_envelope(res, gated=False)
 
 
 @router.get(

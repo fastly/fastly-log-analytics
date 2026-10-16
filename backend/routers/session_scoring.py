@@ -112,16 +112,11 @@ def _finalize_cached(value, *, is_cached: bool) -> object:
     that return Pydantic responses. `_is_cached` is always included — it
     isn't sensitive and downstream verification depends on it.
     """
-    from backend.models.common import _debug_responses_enabled
+    from backend.utils.telemetry import debug_envelope
 
     if not isinstance(value, dict):
         return value
-    out = dict(value)
-    out["_is_cached"] = is_cached
-    if not _debug_responses_enabled():
-        out.pop("_debug_queries", None)
-        out.pop("_debug_calls", None)
-    return out
+    return debug_envelope(value, gated=True, is_cached=is_cached)
 
 
 def _cached(key: tuple, producer):
