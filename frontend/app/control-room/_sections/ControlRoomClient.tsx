@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings } from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportShell'
@@ -10,9 +10,9 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { getPageLoadId } from '@/lib/api'
+import { adminFetch, getPageLoadId } from '@/lib/api'
+import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
 import { useTimezone } from '@/hooks/useTimezone'
 import { formatDate } from '@/lib/date'
@@ -139,11 +139,6 @@ function parseMetricsTick(line: SSELine): MetricsTick | null {
   }
 }
 
-function authHeaders(): Record<string, string> {
-  const token = useAdminTokenStore.getState().token
-  return token ? { 'X-Admin-Token': token } : {}
-}
-
 function isTick(t: unknown): t is MetricsTick {
   if (!t || typeof t !== 'object') return false
   const obj = t as Record<string, unknown>
@@ -164,10 +159,7 @@ function useRealtimeStream(): RealtimeStreamState {
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
-        const headers = { ...authHeaders() }
-        const pageLoadId = getPageLoadId()
-        if (pageLoadId) headers['X-Page-Load-ID'] = pageLoadId
-        const res = await fetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal, headers })
+        const res = await adminFetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal })
         if (res.ok) {
           const json = await res.json()
           seedTicks = (json.ticks ?? []).filter(isTick)
@@ -299,7 +291,7 @@ interface CorrelatorResult {
   freshness: { latest_log_at: string | null; lag_seconds: number }
 }
 
-function CorrelatorLeaderboard({
+export function CorrelatorLeaderboard({
   dimension,
   serviceId,
   refreshInterval = 30_000,
@@ -310,42 +302,23 @@ function CorrelatorLeaderboard({
   refreshInterval?: number
   limit?: number
 }) {
-  const [data, setData] = useState<CorrelatorResult | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  const fetchData = useCallback(async () => {
-    if (!serviceId) return
-    setLoading(true)
-    try {
-      const pageLoadId = getPageLoadId()
-      const res = await fetch(`/api/services/${serviceId}/control-room/correlate`, {
+  const { data, isFetching: loading } = useQuery<CorrelatorResult | null>({
+    queryKey: ['control-room', 'correlate', serviceId, dimension, limit],
+    queryFn: async ({ signal }) => {
+      const res = await adminFetch(`/api/services/${serviceId}/control-room/correlate`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-          ...(pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : {}),
-        },
+        signal,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dimension, window_minutes: 60, limit }),
       })
-      if (res.ok) {
-        setData(await res.json())
-      }
-    } catch {
-      // best-effort
-    } finally {
-      setLoading(false)
-    }
-  }, [serviceId, dimension, limit])
-
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (!cancelled) await fetchData()
-    }
-    run()
-    const id = setInterval(fetchData, refreshInterval)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [fetchData, refreshInterval])
+      if (!res.ok) throw new Error(`status ${res.status}`)
+      return (await res.json()) as CorrelatorResult
+    },
+    enabled: !!serviceId,
+    refetchInterval: refreshInterval,
+    refetchIntervalInBackground: false,
+    retry: false,
+  })
 
   const maxCount = data?.top?.[0]?.count ?? 1
 

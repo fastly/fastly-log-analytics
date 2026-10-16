@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useAdminTokenStore } from '@/stores/adminTokenStore'
+import { adminFetch } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { useColumnVisibility } from '@/hooks/useColumnVisibility'
@@ -218,18 +218,9 @@ export function ProxyWatchdogSection({
       })
       const url = `/api/security/proxies/export?${params.toString()}`
 
-      const headers: Record<string, string> = {}
-      if (activeServiceId) {
-        headers['x-service-id'] = activeServiceId
-        headers['x-fastly-service-id'] = activeServiceId
-      }
-
-      const token = useAdminTokenStore.getState().token
-      if (token) {
-        headers['X-Admin-Token'] = token
-      }
-
-      const response = await fetch(url, { headers })
+      const response = await adminFetch(url, {
+        headers: activeServiceId ? { 'x-fastly-service-id': activeServiceId } : {},
+      })
       if (!response.ok) {
         throw new Error(`Export failed: ${response.statusText}`)
       }
