@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button';
 import { DataTable } from '@/components/DataTable/DataTable';
 import { ColumnDef } from '@tanstack/react-table';
 import { useRumStatus } from '@/hooks/useRumStatus';
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface RumClientProps {
   serviceId: string | null;
@@ -515,7 +516,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 name: 'LCP (s)',
                 type: 'scatter',
                 mode: 'lines+markers',
-                line: { color: '#10b981' },
+                line: { color: CHART_COLORS.success },
               },
               {
                 x: formattedTimestamps,
@@ -523,7 +524,7 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 name: 'CLS',
                 type: 'scatter',
                 mode: 'lines+markers',
-                line: { color: '#3b82f6' },
+                line: { color: CHART_COLORS.info },
               },
             ]}
             layout={{
@@ -687,14 +688,14 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
                 y: analytics.trends.pageviews || [],
                 name: 'Pageviews',
                 type: 'bar',
-                marker: { color: '#3b82f6' },
+                marker: { color: CHART_COLORS.info },
               },
               {
                 x: formattedTimestamps,
                 y: analytics.trends.interactions || [],
                 name: 'Interactions',
                 type: 'bar',
-                marker: { color: '#10b981' },
+                marker: { color: CHART_COLORS.success },
               },
               {
                 x: formattedTimestamps,

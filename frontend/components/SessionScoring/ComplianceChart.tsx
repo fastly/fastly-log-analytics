@@ -7,6 +7,7 @@ import { StackedHourlyBarChart } from './StackedHourlyBarChart'
 import { useScoringQuery } from './useScoringQuery'
 import type { Expect, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface ComplianceChartProps {
   serviceId: string
@@ -24,10 +25,10 @@ interface CompRow {
 export type _CompRowParity = Expect<WireParity<CompRow, components['schemas']['ScoringComplianceRow']>>
 
 const COMPLIANCE_COLORS: Record<string, string> = {
-  ok: '#10b981',
-  missing: '#94a3b8',
+  ok: CHART_COLORS.success,
+  missing: CHART_COLORS.neutral,
   tampered: '#e11d48',
-  expired: '#f59e0b',
+  expired: CHART_COLORS.warning,
   unknown: '#7c3aed',
 }
 

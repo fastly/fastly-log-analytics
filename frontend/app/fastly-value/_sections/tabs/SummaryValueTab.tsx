@@ -16,6 +16,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatBytes, formatCompactCount } from '@/lib/format'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type ValueData = components['schemas']['ValueSummaryResponse']
 
@@ -46,7 +47,7 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
       mode: 'lines',
       fill: 'tozeroy',
       name: 'Offload %',
-      line: { color: '#10b981' },
+      line: { color: CHART_COLORS.success },
     }]
   }, [caching])
 
@@ -59,7 +60,7 @@ export default function SummaryValueTab({ data, loading }: { data?: ValueData; l
       grouped[cat].x.push(p.time ?? '')
       grouped[cat].y.push(p.value)
     }
-    const colors: Record<string, string> = { HIT: '#10b981', MISS: '#ef4444', PASS: '#f59e0b', OTHER: '#6b7280' }
+    const colors: Record<string, string> = { HIT: CHART_COLORS.success, MISS: CHART_COLORS.danger, PASS: CHART_COLORS.warning, OTHER: '#6b7280' }
     return Object.entries(grouped).map(([cat, d]) => ({
       x: d.x,
       y: d.y,

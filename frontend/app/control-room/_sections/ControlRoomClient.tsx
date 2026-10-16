@@ -20,6 +20,7 @@ import { buildServiceHref } from '@/lib/navigation'
 import dynamic from 'next/dynamic'
 import { useTickHistory, type MetricsData, type MetricsTick } from './useTickHistory'
 import { RealtimeMetricCard } from './RealtimeMetricCard'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const RealtimeChart = dynamic(() => import('./RealtimeChart').then((m) => m.RealtimeChart), {
   ssr: false,
@@ -465,7 +466,7 @@ function OverviewTab({
             {
               y: series((d) => d.total_requests ?? d.requests_per_second),
               name: 'Requests',
-              color: '#3b82f6',
+              color: CHART_COLORS.info,
             },
           ]}
         />
@@ -475,11 +476,11 @@ function OverviewTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.status_breakdown?.status_1xx ?? 0), name: '1xx', color: '#94a3b8' },
+            { y: series((d) => d.status_breakdown?.status_1xx ?? 0), name: '1xx', color: CHART_COLORS.neutral },
             { y: series((d) => d.status_breakdown?.status_2xx ?? 0), name: '2xx', color: '#22c55e' },
-            { y: series((d) => d.status_breakdown?.status_3xx ?? 0), name: '3xx', color: '#3b82f6' },
+            { y: series((d) => d.status_breakdown?.status_3xx ?? 0), name: '3xx', color: CHART_COLORS.info },
             { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: '#ef4444' },
+            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
           ]}
         />
       </div>
@@ -493,7 +494,7 @@ function OverviewTab({
           traces={[
             { y: series((d) => d.total_hits ?? 0), name: 'Hit', color: '#22c55e' },
             { y: series((d) => d.total_miss ?? 0), name: 'Miss', color: '#f97316' },
-            { y: series((d) => d.total_pass ?? 0), name: 'Pass', color: '#94a3b8' },
+            { y: series((d) => d.total_pass ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
           ]}
         />
         <RealtimeChart
@@ -506,7 +507,7 @@ function OverviewTab({
             {
               y: series((d) => d.origin_requests_per_second ?? 0),
               name: 'Origin req/s',
-              color: '#3b82f6',
+              color: CHART_COLORS.info,
             },
             {
               y: series((d) => (d.cache_hit_ratio ?? 0) * 100),
@@ -526,7 +527,7 @@ function OverviewTab({
           traces={[
             { y: series((d) => d.status_detail?.["200"] ?? 0), name: '200', color: '#22c55e' },
             { y: series((d) => d.status_detail?.["204"] ?? 0), name: '204', color: '#86efac' },
-            { y: series((d) => d.status_detail?.["301"] ?? 0), name: '301', color: '#3b82f6' },
+            { y: series((d) => d.status_detail?.["301"] ?? 0), name: '301', color: CHART_COLORS.info },
             { y: series((d) => d.status_detail?.["302"] ?? 0), name: '302', color: '#93c5fd' },
             { y: series((d) => d.status_detail?.["304"] ?? 0), name: '304', color: '#6366f1' },
           ]}
@@ -537,10 +538,10 @@ function OverviewTab({
           stacked
           traces={[
             { y: series((d) => d.status_detail?.["400"] ?? 0), name: '400', color: '#eab308' },
-            { y: series((d) => d.status_detail?.["401"] ?? 0), name: '401', color: '#f59e0b' },
+            { y: series((d) => d.status_detail?.["401"] ?? 0), name: '401', color: CHART_COLORS.warning },
             { y: series((d) => d.status_detail?.["403"] ?? 0), name: '403', color: '#f97316' },
             { y: series((d) => d.status_detail?.["404"] ?? 0), name: '404', color: '#fb923c' },
-            { y: series((d) => d.status_detail?.["429"] ?? 0), name: '429', color: '#ef4444' },
+            { y: series((d) => d.status_detail?.["429"] ?? 0), name: '429', color: CHART_COLORS.danger },
             { y: series((d) => d.status_detail?.["500"] ?? 0), name: '500', color: '#dc2626' },
             { y: series((d) => d.status_detail?.["502"] ?? 0), name: '502', color: '#b91c1c' },
             { y: series((d) => d.status_detail?.["503"] ?? 0), name: '503', color: '#991b1b' },
@@ -785,7 +786,7 @@ function PerformanceTab({
           title="Origin Latency Breakdown"
           yAxisSuffix=" req/s"
           traces={[
-            { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: '#3b82f6' },
+            { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
             { y: series((d) => d.pass_requests ?? 0), name: 'Pass', color: '#f97316' },
           ]}
         />
@@ -797,7 +798,7 @@ function PerformanceTab({
         traces={[
           { y: series((d) => d.hit_latency_ms ?? 0), name: 'Hit', color: '#22c55e' },
           { y: series((d) => d.miss_latency_ms ?? 0), name: 'Miss', color: '#f97316' },
-          { y: series((d) => d.pass_latency_ms ?? 0), name: 'Pass', color: '#94a3b8' },
+          { y: series((d) => d.pass_latency_ms ?? 0), name: 'Pass', color: CHART_COLORS.neutral },
         ]}
       />
       <div className="grid gap-6 md:grid-cols-2">
@@ -807,12 +808,12 @@ function PerformanceTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.object_size_distribution?.["1k"] ?? 0), name: '<1KB', color: '#94a3b8' },
-            { y: series((d) => d.object_size_distribution?.["10k"] ?? 0), name: '1-10KB', color: '#3b82f6' },
+            { y: series((d) => d.object_size_distribution?.["1k"] ?? 0), name: '<1KB', color: CHART_COLORS.neutral },
+            { y: series((d) => d.object_size_distribution?.["10k"] ?? 0), name: '1-10KB', color: CHART_COLORS.info },
             { y: series((d) => d.object_size_distribution?.["100k"] ?? 0), name: '10-100KB', color: '#22c55e' },
             { y: series((d) => d.object_size_distribution?.["1m"] ?? 0), name: '100KB-1MB', color: '#eab308' },
             { y: series((d) => d.object_size_distribution?.["10m"] ?? 0), name: '1-10MB', color: '#f97316' },
-            { y: series((d) => d.object_size_distribution?.["100m"] ?? 0), name: '10-100MB', color: '#ef4444' },
+            { y: series((d) => d.object_size_distribution?.["100m"] ?? 0), name: '10-100MB', color: CHART_COLORS.danger },
             { y: series((d) => d.object_size_distribution?.["1g"] ?? 0), name: '100MB-1GB', color: '#8b5cf6' },
             { y: series((d) => d.object_size_distribution?.["other"] ?? 0), name: 'Other', color: '#6b7280' },
           ]}
@@ -825,11 +826,11 @@ function PerformanceTab({
           traces={[
             { y: series((d) => d.miss_histogram?.["10"] ?? 0), name: '<10ms', color: '#22c55e' },
             { y: series((d) => d.miss_histogram?.["20"] ?? 0), name: '10-20ms', color: '#86efac' },
-            { y: series((d) => d.miss_histogram?.["30"] ?? 0), name: '20-30ms', color: '#3b82f6' },
+            { y: series((d) => d.miss_histogram?.["30"] ?? 0), name: '20-30ms', color: CHART_COLORS.info },
             { y: series((d) => d.miss_histogram?.["60"] ?? 0), name: '30-60ms', color: '#93c5fd' },
             { y: series((d) => d.miss_histogram?.["120"] ?? 0), name: '60-120ms', color: '#eab308' },
             { y: series((d) => d.miss_histogram?.["250"] ?? 0), name: '120-250ms', color: '#f97316' },
-            { y: series((d) => d.miss_histogram?.["500"] ?? 0), name: '250-500ms', color: '#ef4444' },
+            { y: series((d) => d.miss_histogram?.["500"] ?? 0), name: '250-500ms', color: CHART_COLORS.danger },
             { y: series((d) => d.miss_histogram?.["1000"] ?? 0), name: '500ms-1s', color: '#dc2626' },
             { y: series((d) => {
               const h = d.miss_histogram ?? {}
@@ -940,7 +941,7 @@ function OriginTab({
         yAxisSuffix=" req/s"
         y2AxisSuffix="%"
         traces={[
-          { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: '#3b82f6' },
+          { y: series((d) => d.origin_requests_per_second ?? 0), name: 'Origin req/s', color: CHART_COLORS.info },
           { y: series((d) => (d.shield_hit_ratio ?? 0) * 100), name: 'Shield Hit %', color: '#22c55e', yaxis: 'y2' },
         ]}
       />
@@ -950,7 +951,7 @@ function OriginTab({
         yAxisSuffix=" req/s"
         stacked
         traces={[
-          { y: series((d) => d.origin_fetches ?? 0), name: 'Fetches', color: '#3b82f6' },
+          { y: series((d) => d.origin_fetches ?? 0), name: 'Fetches', color: CHART_COLORS.info },
           { y: series((d) => d.origin_revalidations ?? 0), name: 'Revalidations', color: '#22c55e' },
           { y: series((d) => d.origin_cache_fetches ?? 0), name: 'Cache Fetches', color: '#eab308' },
         ]}
@@ -996,7 +997,7 @@ function OriginTab({
         traces={[
           { y: series((d) => d.shield_hit_requests ?? 0), name: 'Hits', color: '#22c55e' },
           { y: series((d) => d.shield_miss_requests ?? 0), name: 'Misses', color: '#f97316' },
-          { y: series((d) => d.shield_revalidations ?? 0), name: 'Revalidations', color: '#3b82f6' },
+          { y: series((d) => d.shield_revalidations ?? 0), name: 'Revalidations', color: CHART_COLORS.info },
         ]}
       />
       <HistoricalLink href={historicalHref} label="origin" />
@@ -1078,7 +1079,7 @@ function SecurityTab({
           yAxisSuffix=" req/s"
           stacked
           traces={[
-            { y: series((d) => d.waf_blocked ?? 0), name: 'Blocked', color: '#ef4444' },
+            { y: series((d) => d.waf_blocked ?? 0), name: 'Blocked', color: CHART_COLORS.danger },
             { y: series((d) => d.waf_logged ?? 0), name: 'Logged', color: '#eab308' },
             { y: series((d) => d.waf_passed ?? 0), name: 'Passed', color: '#22c55e' },
           ]}
@@ -1089,7 +1090,7 @@ function SecurityTab({
           yAxisSuffix=" req/s"
           traces={[
             { y: series((d) => d.status_breakdown?.status_4xx ?? 0), name: '4xx', color: '#eab308' },
-            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: '#ef4444' },
+            { y: series((d) => d.status_breakdown?.status_5xx ?? 0), name: '5xx', color: CHART_COLORS.danger },
           ]}
         />
       </div>
@@ -1113,7 +1114,7 @@ function SecurityTab({
         stacked
         traces={[
           { y: series((d) => d.bot_challenges_succeeded ?? 0), name: 'Passed', color: '#22c55e' },
-          { y: series((d) => d.bot_challenges_failed ?? 0), name: 'Failed', color: '#ef4444' },
+          { y: series((d) => d.bot_challenges_failed ?? 0), name: 'Failed', color: CHART_COLORS.danger },
           { y: series((d) => d.bot_detected ?? 0), name: 'Detected', color: '#eab308' },
           { y: series((d) => d.bot_ai_crawlers ?? 0), name: 'AI Crawlers', color: '#8b5cf6' },
         ]}
@@ -1132,7 +1133,7 @@ function SecurityTab({
         traces={[
           { y: series((d) => d.ddos_action_blackhole ?? 0), name: 'Blackhole', color: '#1e293b' },
           { y: series((d) => d.ddos_action_tarpit ?? 0), name: 'Tarpit', color: '#7c3aed' },
-          { y: series((d) => d.ddos_action_close ?? 0), name: 'Close', color: '#ef4444' },
+          { y: series((d) => d.ddos_action_close ?? 0), name: 'Close', color: CHART_COLORS.danger },
           { y: series((d) => d.ddos_action_downgrade ?? 0), name: 'Downgrade', color: '#eab308' },
         ]}
       />
@@ -1212,8 +1213,8 @@ function NetworkTab({
         title="PoP Count"
         yAxisSuffix=" PoPs"
         traces={[
-          { y: series((d) => d.pop_count ?? 0), name: 'Active PoPs', color: '#3b82f6' },
-          { y: series((d) => d.degraded_pops?.length ?? 0), name: 'Degraded', color: '#ef4444' },
+          { y: series((d) => d.pop_count ?? 0), name: 'Active PoPs', color: CHART_COLORS.info },
+          { y: series((d) => d.degraded_pops?.length ?? 0), name: 'Degraded', color: CHART_COLORS.danger },
         ]}
       />
 
@@ -1263,9 +1264,9 @@ function NetworkTab({
         yAxisSuffix=" req/s"
         stacked
         traces={[
-          { y: series((d) => d.http2 ?? 0), name: 'HTTP/2', color: '#3b82f6' },
+          { y: series((d) => d.http2 ?? 0), name: 'HTTP/2', color: CHART_COLORS.info },
           { y: series((d) => d.http3 ?? 0), name: 'HTTP/3', color: '#22c55e' },
-          { y: series((d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))), name: 'Other', color: '#94a3b8' },
+          { y: series((d) => Math.max(0, (d.total_requests ?? 0) - (d.http2 ?? 0) - (d.http3 ?? 0))), name: 'Other', color: CHART_COLORS.neutral },
         ]}
       />
 
@@ -1386,7 +1387,7 @@ function AdminHealthTab({
           helpText="Execution = Wasm CPU time only. Request = total time including I/O waits. The gap between them is I/O wait (backend fetches, KV lookups). Watch for execution time creep after scorer code changes."
           yAxisSuffix=" ms"
           traces={[
-            { y: series((d) => d.compute_exec_time_ms ?? 0), name: 'Execution', color: '#3b82f6' },
+            { y: series((d) => d.compute_exec_time_ms ?? 0), name: 'Execution', color: CHART_COLORS.info },
             { y: series((d) => d.compute_req_time_ms ?? 0), name: 'Request', color: '#f97316' },
           ]}
         />
@@ -1396,7 +1397,7 @@ function AdminHealthTab({
           yAxisSuffix=" err/s"
           stacked
           traces={[
-            { y: series((d) => d.compute_bereq_errors ?? 0), name: 'Backend', color: '#ef4444' },
+            { y: series((d) => d.compute_bereq_errors ?? 0), name: 'Backend', color: CHART_COLORS.danger },
             { y: series((d) => d.compute_guest_errors ?? 0), name: 'Guest', color: '#eab308' },
             { y: series((d) => d.compute_resource_exceeded ?? 0), name: 'Resource Limit', color: '#8b5cf6' },
           ]}
@@ -1418,10 +1419,10 @@ function AdminHealthTab({
           yAxisSuffix=" ms"
           stacked
           traces={[
-            { y: series((d) => d.vcl_recv_time_ms ?? 0), name: 'recv', color: '#3b82f6' },
+            { y: series((d) => d.vcl_recv_time_ms ?? 0), name: 'recv', color: CHART_COLORS.info },
             { y: series((d) => d.vcl_fetch_time_ms ?? 0), name: 'fetch', color: '#f97316' },
             { y: series((d) => d.vcl_deliver_time_ms ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_time_ms ?? 0), name: 'error', color: '#ef4444' },
+            { y: series((d) => d.vcl_error_time_ms ?? 0), name: 'error', color: CHART_COLORS.danger },
           ]}
         />
         <RealtimeChart
@@ -1430,10 +1431,10 @@ function AdminHealthTab({
           yAxisSuffix=" calls/s"
           stacked
           traces={[
-            { y: series((d) => d.vcl_recv_count ?? 0), name: 'recv', color: '#3b82f6' },
+            { y: series((d) => d.vcl_recv_count ?? 0), name: 'recv', color: CHART_COLORS.info },
             { y: series((d) => d.vcl_fetch_count ?? 0), name: 'fetch', color: '#f97316' },
             { y: series((d) => d.vcl_deliver_count ?? 0), name: 'deliver', color: '#22c55e' },
-            { y: series((d) => d.vcl_error_count ?? 0), name: 'error', color: '#ef4444' },
+            { y: series((d) => d.vcl_error_count ?? 0), name: 'error', color: CHART_COLORS.danger },
           ]}
         />
       </div>

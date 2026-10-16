@@ -26,6 +26,7 @@ import { useStreamAggregates } from './useStreamAggregates'
 import { StreamTimeline } from './StreamTimeline'
 
 import { formatDuration } from '@/lib/date'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const NETWORK_LAYOUT = {
   yaxis: { title: { text: 'Throughput (kbps)' } },
@@ -246,7 +247,7 @@ function BitrateAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
       x: aggregates.bitrateTiers.map(t => `${t.bitrate} kbps`),
       y: aggregates.bitrateTiers.map(t => t.count),
       type: 'bar' as const,
-      marker: { color: '#10b981' },
+      marker: { color: CHART_COLORS.success },
       text: aggregates.bitrateTiers.map(t => `${t.pct.toFixed(0)}%`),
       textposition: 'auto' as const,
     }]
@@ -287,8 +288,8 @@ function BufferAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Ret
       type: 'bar' as const,
       marker: {
         color: aggregates.bufferBuckets.map(b =>
-          b.label === '0 (empty)' ? '#ef4444' :
-          b.label === '< 2s' ? '#f59e0b' :
+          b.label === '0 (empty)' ? CHART_COLORS.danger :
+          b.label === '< 2s' ? CHART_COLORS.warning :
           '#6366f1'
         ),
       },
@@ -322,7 +323,7 @@ function NetworkAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
         y: nt.map(p => p.throughput),
         name: 'Throughput',
         type: 'scatter' as const,
-        line: { color: '#f59e0b' },
+        line: { color: CHART_COLORS.warning },
       })
     }
     if (nt.some(p => p.rtt != null)) {
@@ -332,7 +333,7 @@ function NetworkAnalysis({ aggregates, isLoading }: { aggregates: NonNullable<Re
         name: 'RTT',
         type: 'scatter' as const,
         yaxis: 'y2',
-        line: { color: '#ef4444', dash: 'dot' },
+        line: { color: CHART_COLORS.danger, dash: 'dot' },
       })
     }
     return traces

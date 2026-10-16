@@ -16,6 +16,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface ShieldingMapProps {
   rows: any[]
@@ -111,7 +112,7 @@ export function efficiencyColor(ratio: number | null): string {
   if (ratio == null || ratio < 0) return '#6366f1'
   if (ratio < 1.5) return '#22c55e'
   if (ratio < 3.0) return '#eab308'
-  return '#ef4444'
+  return CHART_COLORS.danger
 }
 
 export function lineWidth(requests: number): number {
@@ -181,7 +182,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
               className="text-[11px] font-semibold tabular-nums"
               // Low-sample routes don't get an efficiency colour — the ratio is
               // noise below the flag floor, so render it neutral. (low-sample gating)
-              style={{ color: lowSample ? '#94a3b8' : efficiencyColor(Number(props.efficiency_ratio)) }}
+              style={{ color: lowSample ? CHART_COLORS.neutral : efficiencyColor(Number(props.efficiency_ratio)) }}
             >
               {Number(props.efficiency_ratio).toFixed(1)}× light speed
             </span>
@@ -246,7 +247,7 @@ export function buildArcFeatures(rows: any[]): GeoJSON.FeatureCollection {
         // grey arc instead of an efficiency colour so a quiet route can't read
         // as a red "problem". The route stays on the map for visibility; it
         // just isn't colour-graded or anomaly-flagged. (low-sample gating)
-        color: row.low_sample ? '#94a3b8' : efficiencyColor(row.efficiency_ratio),
+        color: row.low_sample ? CHART_COLORS.neutral : efficiencyColor(row.efficiency_ratio),
         line_width: lineWidth(row.requests),
       },
     })
@@ -393,7 +394,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           source: 'arcs',
           filter: ['==', ['get', 'anomaly_static'], true],
           paint: {
-            'line-color': '#ef4444',
+            'line-color': CHART_COLORS.danger,
             'line-width': ['+', ['get', 'line_width'], 1.5],
             'line-opacity': 0.95,
             'line-dasharray': [2, 2],
@@ -408,7 +409,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
           filter: ['==', ['get', 'role'], 'edge'],
           paint: {
             'circle-radius': 5,
-            'circle-color': '#3b82f6',
+            'circle-color': CHART_COLORS.info,
             'circle-stroke-width': 1.5,
             'circle-stroke-color': isDarkRef.current ? '#18181b' : '#ffffff',
           }

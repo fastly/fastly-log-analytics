@@ -16,6 +16,7 @@ import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { AlertCircle, Loader2, Clock, Activity, ShieldAlert, FileText, CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface CacheCollapseModalProps {
   isOpen: boolean
@@ -82,7 +83,7 @@ export function CacheCollapseModal({
         type: 'scatter',
         mode: 'lines',
         name: 'Expected HITs',
-        line: { color: '#3b82f6', width: 2, dash: 'dash' },
+        line: { color: CHART_COLORS.info, width: 2, dash: 'dash' },
       },
       {
         x: data.timeline.map((p) => p.bucket),
@@ -90,7 +91,7 @@ export function CacheCollapseModal({
         type: 'scatter',
         mode: 'lines',
         name: 'Real HITs',
-        line: { color: '#ef4444', width: 2 },
+        line: { color: CHART_COLORS.danger, width: 2 },
       },
     ]
   }, [data])

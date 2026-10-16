@@ -10,6 +10,7 @@ import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type CoordTree = number | CoordTree[]
 
@@ -117,7 +118,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
             errors: e.errors,
             errorRate: e.errorRate,
             radius: active ? 4 + Math.log10(e.requests) * 3 : 3,
-            color: active ? (e.errorRate > 0.05 ? '#ef4444' : '#3b82f6') : '#9ca3af',
+            color: active ? (e.errorRate > 0.05 ? CHART_COLORS.danger : CHART_COLORS.info) : '#9ca3af',
             opacity: active ? 0.3 + (e.requests / maxReq) * 0.6 : 0.3,
           },
         }

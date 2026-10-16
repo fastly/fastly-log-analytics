@@ -17,6 +17,7 @@ import { Info, Zap, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ImpossibleDistanceData } from './types'
 import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: boolean }) {
   const mapContainer = useRef<HTMLDivElement>(null)
@@ -91,7 +92,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
           source: 'points',
           filter: ['==', ['get', 'type'], 'path'],
           paint: {
-            'line-color': '#ef4444',
+            'line-color': CHART_COLORS.danger,
             'line-width': 2,
             'line-dasharray': [2, 2]
           }
@@ -107,7 +108,7 @@ function PhysicsMap({ data, isDark }: { data: ImpossibleDistanceData; isDark: bo
             'circle-color': [
               'match',
               ['get', 'type'],
-              'client', '#3b82f6',
+              'client', CHART_COLORS.info,
               'pop', '#22c55e',
               '#000000'
             ],

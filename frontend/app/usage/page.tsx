@@ -55,6 +55,7 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 export default function UsagePage() {
   return (
@@ -247,8 +248,8 @@ function UsagePageContent({
   const isLoadingInitial = loadingStorage || loadingOps || loadingBw || loadingActivity
 
   // ── Chart colours ──────────────────────────────────────────────────────────
-  const accent = isDark ? '#60a5fa' : '#3b82f6'
-  const accentB = isDark ? '#34d399' : '#10b981'
+  const accent = isDark ? '#60a5fa' : CHART_COLORS.info
+  const accentB = isDark ? '#34d399' : CHART_COLORS.success
   const gridColor = isDark ? '#27272a' : '#e4e4e7'
 
   const baseLayout = useMemo(() => ({
@@ -301,8 +302,8 @@ function UsagePageContent({
       name: 'Fastly Requests',
       x: genTimes,
       y: apiCounts,
-      line: { color: '#f59e0b', width: 2 },
-      marker: { color: '#f59e0b', size: 6 },
+      line: { color: CHART_COLORS.warning, width: 2 },
+      marker: { color: CHART_COLORS.warning, size: 6 },
       hovertemplate: 'Requests: %{y:,}<extra></extra>',
     })
   }
@@ -334,7 +335,7 @@ function UsagePageContent({
 
   const costChartData = useMemo(() => [
     { type: 'bar', name: 'Operations', x: opsDates, y: costOpsY, marker: { color: accent }, hovertemplate: '$%{y:.2f}<extra></extra>' },
-    { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: '#f59e0b' }, hovertemplate: '$%{y:.2f}<extra></extra>' },
+    { type: 'bar', name: 'CDN Egress', x: opsDates, y: costEgressY, marker: { color: CHART_COLORS.warning }, hovertemplate: '$%{y:.2f}<extra></extra>' },
   ], [opsDates, costOpsY, costEgressY, accent])
   const costLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const, yaxis: { tickprefix: '$', tickformat: '.2f', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false } }), [baseLayout, gridColor])
 

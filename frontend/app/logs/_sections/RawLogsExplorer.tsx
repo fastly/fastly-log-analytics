@@ -49,6 +49,7 @@ import { resolveRangeWire } from '@/lib/range-wire'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { cn } from '@/lib/utils'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { statusBadgeClass } from '@/lib/status-style'
 
 // Wire rows are flat scalar records (backend `rows: list[dict[str, Any]]`).
 type LogRow = Record<string, string | number | null | undefined>
@@ -76,16 +77,6 @@ const COMMON_OPTIONAL_COLUMNS = [
   'fastly_service_id',
   'server_datacenter',
 ]
-
-function getStatusBadgeVariant(status: number | string | null | undefined): string {
-  const code = typeof status === 'number' ? status : parseInt(String(status), 10)
-  if (isNaN(code)) return 'bg-muted text-muted-foreground'
-  if (code >= 200 && code < 300) return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'
-  if (code >= 300 && code < 400) return 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'
-  if (code >= 400 && code < 500) return 'bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/20'
-  if (code >= 500) return 'bg-destructive/15 text-destructive border-destructive/20 font-bold'
-  return 'bg-muted text-muted-foreground'
-}
 
 function getMethodBadgeVariant(method: string | number | null | undefined): string {
   const m = String(method || '').toUpperCase()
@@ -430,7 +421,7 @@ export function RawLogsExplorer({
                             <span
                               className={cn(
                                 'px-2 py-0.5 rounded text-[11px] font-semibold border',
-                                getStatusBadgeVariant(val),
+                                statusBadgeClass(val),
                               )}
                             >
                               {val ?? '—'}
@@ -574,7 +565,7 @@ export function RawLogsExplorer({
                       <span
                         className={cn(
                           'px-2 py-0.5 rounded text-xs font-semibold border',
-                          getStatusBadgeVariant(selectedRow.status),
+                          statusBadgeClass(selectedRow.status),
                         )}
                       >
                         {selectedRow.status || '—'}

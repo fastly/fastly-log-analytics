@@ -7,6 +7,7 @@ import { ChartEmptyState } from '@/components/ChartEmptyState'
 import { SECURITY_INFO } from './securityInfo'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type SecurityData = components['schemas']['SecurityAggregatesResponse']
 
@@ -46,7 +47,7 @@ export function NetworkSection({
       labels: proxy_dist.map((d: any) => d.type),
       type: 'pie',
       hole: 0.4,
-      marker: { colors: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'] }
+      marker: { colors: [CHART_COLORS.info, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, '#8b5cf6'] }
     }]
   }, [data])
 

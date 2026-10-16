@@ -18,6 +18,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import { makeLatencyColumns } from '@/lib/table-utils'
 import { useFieldLabel } from '@/hooks/useFieldLabel';
+import { CHART_COLORS } from '@/lib/chart-colors'
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
@@ -149,7 +150,7 @@ function PerformanceBody({
         mode: 'markers',
         type: 'scatter',
         name: 'HIT',
-        marker: { color: '#10b981', size: 4, opacity: 0.6 }
+        marker: { color: CHART_COLORS.success, size: 4, opacity: 0.6 }
       },
       {
         x: miss.map(d => d.origin),
@@ -157,7 +158,7 @@ function PerformanceBody({
         mode: 'markers',
         type: 'scatter',
         name: 'MISS',
-        marker: { color: '#f59e0b', size: 4, opacity: 0.6 }
+        marker: { color: CHART_COLORS.warning, size: 4, opacity: 0.6 }
       }
     ]
   }, [coreData?.scatter])
@@ -171,9 +172,9 @@ function PerformanceBody({
     if (!avg) return []
     return [
       { x: [avg.edge_processing || 0], y: ['Edge Processing'],  type: 'bar', orientation: 'h', marker: { color: '#8b5cf6' }, showlegend: false },
-      { x: [avg.origin_wait || 0],     y: ['Origin TTFB Wait'], type: 'bar', orientation: 'h', marker: { color: '#f59e0b' }, showlegend: false },
+      { x: [avg.origin_wait || 0],     y: ['Origin TTFB Wait'], type: 'bar', orientation: 'h', marker: { color: CHART_COLORS.warning }, showlegend: false },
       { x: [avg.origin_download || 0], y: ['Origin Download'],  type: 'bar', orientation: 'h', marker: { color: '#ec4899' }, showlegend: false },
-      { x: [avg.client_download || 0], y: ['Client Download'],  type: 'bar', orientation: 'h', marker: { color: '#10b981' }, showlegend: false },
+      { x: [avg.client_download || 0], y: ['Client Download'],  type: 'bar', orientation: 'h', marker: { color: CHART_COLORS.success }, showlegend: false },
     ]
   }, [coreData?.waterfall])
 

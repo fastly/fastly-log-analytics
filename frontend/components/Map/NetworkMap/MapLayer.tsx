@@ -30,36 +30,36 @@ export function getScoreColor(val: number | null, metric: string): string {
     if (val >= 90) return '#22c55e'
     if (val >= 70) return '#eab308'
     if (val >= 50) return '#f97316'
-    return '#ef4444'
+    return CHART_COLORS.danger
   }
 
   if (metric === 'throughput_bps') {
     if (val >= 100_000_000) return '#22c55e'
     if (val >= 10_000_000) return '#eab308'
     if (val >= 1_000_000) return '#f97316'
-    return '#ef4444'
+    return CHART_COLORS.danger
   }
 
   if (metric === 'rtt_med_us') {
     if (val <= 50_000) return '#22c55e'
     if (val <= 150_000) return '#eab308'
     if (val <= 300_000) return '#f97316'
-    return '#ef4444'
+    return CHART_COLORS.danger
   }
   if (metric === 'avg_ploss') {
     if (val <= 0.01) return '#22c55e'
     if (val <= 0.05) return '#eab308'
     if (val <= 0.10) return '#f97316'
-    return '#ef4444'
+    return CHART_COLORS.danger
   }
   if (metric === 'error_pct') {
     if (val <= 1) return '#22c55e'
     if (val <= 5) return '#eab308'
     if (val <= 10) return '#f97316'
-    return '#ef4444'
+    return CHART_COLORS.danger
   }
 
-  return '#3b82f6'
+  return CHART_COLORS.info
 }
 
 interface UseMapInitArgs {
@@ -91,6 +91,7 @@ interface UseMapInitArgs {
 import { rafThrottle } from '@/components/Map/ShieldingMap'
 import { countryFill } from '@/components/Map/colors'
 import { addCountryBaseLayer, createBaseMap } from '@/components/Map/baseLayers'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 export function useMapInit({
   mapContainer,

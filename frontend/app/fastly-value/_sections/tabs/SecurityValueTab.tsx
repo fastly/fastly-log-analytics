@@ -7,6 +7,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount } from '@/lib/format'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type SecurityData = components['schemas']['SecurityMetrics']
 
@@ -33,7 +34,7 @@ export default function SecurityValueTab({ data }: { data?: SecurityData | null 
       grouped[cat].x.push(p.time ?? '')
       grouped[cat].y.push(p.value)
     }
-    const colors: Record<string, string> = { blocked: '#ef4444', logged: '#f59e0b' }
+    const colors: Record<string, string> = { blocked: CHART_COLORS.danger, logged: CHART_COLORS.warning }
     return Object.entries(grouped).map(([cat, d]) => ({
       x: d.x,
       y: d.y,

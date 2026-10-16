@@ -1,6 +1,7 @@
 import { formatDate, toUTCDate } from '@/lib/date'
 import { INTERVAL_SECONDS } from '@/lib/constants'
 import { makeTimeXAxis, TIME_HOVER_LAYOUT, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 // densifyBarSeries now lives in lib/chart-helpers (shared with the scoring
 // charts). Re-exported so existing importers (and chartHelpers.test.ts) keep
@@ -114,8 +115,8 @@ export function buildTrafficData({
 
     // Standardize colors for common error statuses to keep them consistent
     const colorMap: Record<string, string> = {
-      '400': '#fbbf24', '401': '#f59e0b', '403': '#d97706', '404': '#b45309',
-      '500': '#ef4444', '502': '#dc2626', '503': '#b91c1c', '504': '#991b1b'
+      '400': '#fbbf24', '401': CHART_COLORS.warning, '403': '#d97706', '404': '#b45309',
+      '500': CHART_COLORS.danger, '502': '#dc2626', '503': '#b91c1c', '504': '#991b1b'
     }
 
     traces = Object.entries(catMap).map(([cat, data], i) => ({
@@ -140,7 +141,7 @@ export function buildTrafficData({
       name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
       showlegend: compareMode,
       hovertemplate: getHoverTemplate(actualMetric, compareMode ? 'Primary' : undefined),
-      marker: { color: '#3b82f6' }
+      marker: { color: CHART_COLORS.info }
     }]
   }
 

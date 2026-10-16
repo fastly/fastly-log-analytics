@@ -18,6 +18,7 @@ import { formatDate } from '@/lib/date'
 import { Aggregates } from './Aggregates'
 import { Timeseries } from './Timeseries'
 import { LatencyHeatmap } from './LatencyHeatmap'
+import { CHART_COLORS, statusHex } from '@/lib/chart-colors'
 
 // P-4 slice 4: section-selector mirroring /security, /network, /dashboard,
 // /performance. The origin page renders every section, so the list is the
@@ -148,7 +149,7 @@ function OriginReportContent({
   const ipHealth = React.useMemo(() => ({ data: bundle.data?.ip_health, isLoading, isFetching, error }), [bundle.data?.ip_health, isLoading, isFetching, error])
 
   const baseOriginTraces = useTimeseriesToTraces(originTs.data?.series, React.useMemo(() => [
-    { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: '#ef4444', fill: 'tozeroy' }
+    { key: 'value', name: originMetric === 'ttfb' ? 'Origin TTFB' : 'Origin TTLB', color: CHART_COLORS.danger, fill: 'tozeroy' }
   ], [originMetric]), timezone)
 
   const originTsChartData = React.useMemo(() => {
@@ -211,10 +212,7 @@ function OriginReportContent({
       hole: 0.4,
       marker: {
         colors: statusCodes.data.rows.map((r: any) =>
-          r.status === -1 ? '#94a3b8' :
-          r.status >= 500 ? '#ef4444' :
-          r.status >= 400 ? '#f59e0b' :
-          r.status >= 300 ? '#3b82f6' : '#10b981'
+          r.status === -1 ? CHART_COLORS.neutral : statusHex(r.status)
         )
       }
     }]

@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/select'
 import { Database, AlertTriangle, Loader2 } from 'lucide-react'
 import { useMounted } from '@/hooks/useMounted'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },
@@ -90,7 +91,7 @@ export function LogAccountingPanel() {
       type: 'scatter',
       mode: 'lines',
       name: 'Fastly requests',
-      line: { color: '#3b82f6', width: 2 },
+      line: { color: CHART_COLORS.info, width: 2 },
     },
     {
       x: buckets.map((b: any) => b.ts),
@@ -98,7 +99,7 @@ export function LogAccountingPanel() {
       type: 'scatter',
       mode: 'lines',
       name: 'We ingested (rows)',
-      line: { color: '#10b981', width: 2, dash: 'dot' },
+      line: { color: CHART_COLORS.success, width: 2, dash: 'dot' },
     },
     {
       x: buckets.map((b: any) => b.ts),

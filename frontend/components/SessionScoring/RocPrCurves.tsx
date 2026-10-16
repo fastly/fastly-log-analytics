@@ -11,6 +11,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 // Generated from the /scoring/curves response_model — single source of truth.
 type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
@@ -125,7 +126,7 @@ function RocChart({ points, auc }: { points: CurvePoint[]; ap?: number; auc: num
       type: 'scatter',
       mode: 'lines',
       name: 'random',
-      line: { color: '#94a3b8', width: 1, dash: 'dash' },
+      line: { color: CHART_COLORS.neutral, width: 1, dash: 'dash' },
       hoverinfo: 'skip',
     },
   ]
@@ -156,7 +157,7 @@ function PrChart({ points, ap }: { points: CurvePoint[]; ap: number }) {
       type: 'scatter',
       mode: 'lines+markers',
       name: 'PR',
-      line: { color: '#10b981', width: 2 },
+      line: { color: CHART_COLORS.success, width: 2 },
       marker: { size: 4 },
       hovertemplate: 'threshold=%{customdata}<br>recall=%{x:.3f}<br>precision=%{y:.3f}<extra></extra>',
       customdata: points.map((p) => p.threshold),

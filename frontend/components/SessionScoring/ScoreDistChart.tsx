@@ -8,6 +8,7 @@ import { ScoreDistHelp } from '@/components/SessionScoring/help-content'
 
 import { StackedHourlyBarChart } from './StackedHourlyBarChart'
 import { useScoringQuery } from './useScoringQuery'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 interface ScoreDistChartProps {
   serviceId: string
@@ -24,7 +25,7 @@ interface DistRow {
 // via categoryOrder so the stack always reads low→high bottom-to-top.
 const BUCKETS = ['0-25', '25-50', '50-75', '75-100'] as const
 const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = {
-  '0-25': '#94a3b8',
+  '0-25': CHART_COLORS.neutral,
   '25-50': '#facc15',
   '50-75': '#fb923c',
   '75-100': '#e11d48',

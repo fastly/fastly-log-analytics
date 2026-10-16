@@ -9,6 +9,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatCompactCount, formatBytes, formatCurrency } from '@/lib/format'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import type { components } from '@/types/api.generated'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 type IOData = components['schemas']['IOMetrics']
 
@@ -47,10 +48,10 @@ const DONUT_LAYOUT = {
 const FORMAT_COLORS: Record<string, string> = {
   webp: '#8b5cf6',
   avif: '#06b6d4',
-  jpeg: '#f59e0b',
-  png: '#10b981',
-  gif: '#ef4444',
-  jpegxl: '#3b82f6',
+  jpeg: CHART_COLORS.warning,
+  png: CHART_COLORS.success,
+  gif: CHART_COLORS.danger,
+  jpegxl: CHART_COLORS.info,
   svg: '#6366f1',
   mp4: '#ec4899',
 }
@@ -182,7 +183,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         mode: 'lines',
         fill: 'tozeroy',
         name: 'Bandwidth Saved (bytes)',
-        line: { color: '#10b981' },
+        line: { color: CHART_COLORS.success },
       }]
     }
     return []
@@ -196,7 +197,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         values: dist.map(d => d.count),
         type: 'pie',
         hole: 0.5,
-        marker: { colors: dist.map(d => FORMAT_COLORS[d.format] ?? '#94a3b8') },
+        marker: { colors: dist.map(d => FORMAT_COLORS[d.format] ?? CHART_COLORS.neutral) },
         textinfo: 'label+percent',
         hovertemplate: '%{label}: %{value:,} transforms (%{percent})<extra></extra>',
       }]
@@ -214,7 +215,7 @@ function IOEnabledView({ data }: { data: IOData }) {
         values: labels.map(f => counts[f]),
         type: 'pie',
         hole: 0.5,
-        marker: { colors: labels.map(f => FORMAT_COLORS[f] ?? '#94a3b8') },
+        marker: { colors: labels.map(f => FORMAT_COLORS[f] ?? CHART_COLORS.neutral) },
         textinfo: 'label+percent',
         hovertemplate: '%{label}: %{value:,} conversions (%{percent})<extra></extra>',
       }]
@@ -232,7 +233,7 @@ function IOEnabledView({ data }: { data: IOData }) {
       mode: 'lines',
       fill: 'tozeroy',
       name: 'Bandwidth Saved',
-      line: { color: '#10b981' },
+      line: { color: CHART_COLORS.success },
     }]
   }, [data])
 

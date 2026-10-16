@@ -17,6 +17,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { StatCard } from '@/components/ui/stat-card'
 import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
+import { CHART_COLORS } from '@/lib/chart-colors'
 
 const SESSIONS_LAYOUT = {
   yaxis: { title: { text: 'Active Viewers' } },
@@ -152,7 +153,7 @@ function StreamingBody({
         name: 'Starvation Rate',
         type: 'bar' as const,
         yaxis: 'y2',
-        marker: { color: '#ef4444', opacity: 0.4 },
+        marker: { color: CHART_COLORS.danger, opacity: 0.4 },
       },
     ]
   }, [data?.buffer_health_ts, timezone])
@@ -166,7 +167,7 @@ function StreamingBody({
         y: ts.map((d) => d.avg_bitrate),
         name: 'Avg Bitrate',
         type: 'scatter' as const,
-        line: { color: '#10b981' },
+        line: { color: CHART_COLORS.success },
       },
     ]
     if (ts.some((d) => d.utilization_ratio != null)) {
@@ -176,7 +177,7 @@ function StreamingBody({
         name: 'Utilization',
         type: 'scatter' as const,
         yaxis: 'y2',
-        line: { color: '#f59e0b', dash: 'dot' },
+        line: { color: CHART_COLORS.warning, dash: 'dot' },
       })
     }
     return traces
@@ -226,7 +227,7 @@ function StreamingBody({
         name: 'Rebuffer Rate',
         type: 'scatter' as const,
         yaxis: 'y2',
-        line: { color: '#ef4444', dash: 'dot' },
+        line: { color: CHART_COLORS.danger, dash: 'dot' },
       })
     }
     return traces
@@ -241,7 +242,7 @@ function StreamingBody({
         y: ts.map((d) => d.new_sessions),
         name: 'New Sessions',
         type: 'bar' as const,
-        marker: { color: '#10b981' },
+        marker: { color: CHART_COLORS.success },
       },
     ]
   }, [data?.sessions_ts, timezone])
