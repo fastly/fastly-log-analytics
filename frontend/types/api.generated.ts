@@ -6748,6 +6748,22 @@ export interface components {
             anchor?: string | null;
         };
         /**
+         * AuditLogsResponse
+         * @description ``GET /api/audit-logs``. ``_debug_calls`` rides along as an extra.
+         */
+        AuditLogsResponse: {
+            /** Total */
+            total: number;
+            /** Page */
+            page: number;
+            /** Per Page */
+            per_page: number;
+            /** Entries */
+            entries: unknown;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * AuthConfigProvider
          * @description One enabled OIDC provider as seen by the unauthenticated login page.
          *
@@ -7659,6 +7675,22 @@ export interface components {
             /** Version */
             version?: number | null;
         };
+        /**
+         * CmcdStatusResponse
+         * @description ``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off.
+         */
+        CmcdStatusResponse: {
+            /** Enabled */
+            enabled: boolean;
+            /** Mode */
+            mode?: string | null;
+            /** Version */
+            version?: number | null;
+            /** Enabled At */
+            enabled_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ColumnMeta */
         ColumnMeta: {
             /** Name */
@@ -7783,6 +7815,18 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * ControlRoomTabResponse
+         * @description Canned per-tab payload (``TAB_STUBS``); the metric keys differ per tab.
+         */
+        ControlRoomTabResponse: {
+            /** Tab */
+            tab: string;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** CorrelateRequest */
         CorrelateRequest: {
             /** Dimension */
@@ -7797,6 +7841,34 @@ export interface components {
              * @default 10
              */
             limit: number;
+        };
+        /** CorrelateResponse */
+        CorrelateResponse: {
+            /** Dimension */
+            dimension: string;
+            /** Top */
+            top: components["schemas"]["CorrelatorTopRow"][];
+            freshness: components["schemas"]["CorrelatorFreshness"];
+        } & {
+            [key: string]: unknown;
+        };
+        /** CorrelatorFreshness */
+        CorrelatorFreshness: {
+            /** Latest Log At */
+            latest_log_at?: string | null;
+            /** Lag Seconds */
+            lag_seconds: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CorrelatorTopRow */
+        CorrelatorTopRow: {
+            /** Value */
+            value: string | number | null;
+            /** Count */
+            count: number;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * CredentialsUpdateResponse
@@ -8306,6 +8378,16 @@ export interface components {
             query_debug_visibility?: string | null;
             /** Api Call Debug Visibility */
             api_call_debug_visibility?: string | null;
+        };
+        /**
+         * DebugStateResponse
+         * @description ``GET /api/debug/state``.
+         */
+        DebugStateResponse: {
+            /** Debug Responses Enabled */
+            debug_responses_enabled: boolean;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * ErrorDetail
@@ -9643,6 +9725,30 @@ export interface components {
              * @default true
              */
             configured: boolean;
+        };
+        /** LogFieldAuditFeature */
+        LogFieldAuditFeature: {
+            /** Name */
+            name: string;
+            /** Required Fields */
+            required_fields: string[];
+            /** Status */
+            status: string;
+            /** Missing Fields */
+            missing_fields: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** LogFieldAuditResponse */
+        LogFieldAuditResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Enabled Fields */
+            enabled_fields: string[];
+            /** Features */
+            features: components["schemas"]["LogFieldAuditFeature"][];
+        } & {
+            [key: string]: unknown;
         };
         /** LogFieldCatalogEntry */
         LogFieldCatalogEntry: {
@@ -11707,6 +11813,17 @@ export interface components {
             /** Rum Beacons Per Day */
             rum_beacons_per_day?: number | null;
         };
+        /** PresetQuery */
+        PresetQuery: {
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Sql */
+            sql: string;
+        } & {
+            [key: string]: unknown;
+        };
         /** ProvisionCheckConfigItem */
         ProvisionCheckConfigItem: {
             /** Ok */
@@ -12259,6 +12376,32 @@ export interface components {
              */
             explain: boolean;
         };
+        /**
+         * QueryResponse
+         * @description ``POST /api/query`` result.
+         *
+         *     Rows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that
+         *     pydantic's JSON mode would encode differently from ``jsonable_encoder``
+         *     (the pre-typing wire path), so ``data`` is pre-encoded the same way.
+         */
+        QueryResponse: {
+            /** Columns */
+            columns: string[];
+            /** Data */
+            data: unknown;
+            /** Row Count */
+            row_count: number;
+            /** Total Rows */
+            total_rows: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /** Explain Plan */
+            explain_plan?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** QueryResponseMetadataResponse */
         QueryResponseMetadataResponse: {
             /**
@@ -12322,6 +12465,15 @@ export interface components {
             pending: number;
             /** Last Enrichment At */
             last_enrichment_at?: string | null;
+        };
+        /** RealtimeSeedResponse */
+        RealtimeSeedResponse: {
+            /** Ticks */
+            ticks: {
+                [key: string]: unknown;
+            }[];
+        } & {
+            [key: string]: unknown;
         };
         /** RecentSqliteResponse */
         RecentSqliteResponse: {
@@ -12450,6 +12602,67 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * RumAnalyticsResponse
+         * @description ``GET /{service_id}/rum/analytics`` (data, no-data and failure branches).
+         */
+        RumAnalyticsResponse: {
+            /** Is Mock */
+            is_mock?: boolean | null;
+            /** No Data */
+            no_data?: boolean | null;
+            /** Beacon Count */
+            beacon_count?: number | null;
+            /** Pageview Count */
+            pageview_count?: number | null;
+            /** Interaction Count */
+            interaction_count?: number | null;
+            /** Error Count */
+            error_count?: number | null;
+            /** Message */
+            message?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Vitals */
+            vitals?: {
+                [key: string]: unknown;
+            } | null;
+            /** Worst Pages */
+            worst_pages?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Errors */
+            errors?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Trends */
+            trends?: {
+                [key: string]: unknown;
+            } | null;
+            /** Environments */
+            environments?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumBeaconHealthResponse */
+        RumBeaconHealthResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Beacon Fire Rate */
+            beacon_fire_rate?: number | null;
+            /** Recent Beacons */
+            recent_beacons?: number | null;
+            /** Last Beacon Time */
+            last_beacon_time?: string | null;
+            /** Setup Complete */
+            setup_complete?: boolean | null;
+            /** Message */
+            message?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** RumBreakdownPoint */
         RumBreakdownPoint: {
             /** Date */
@@ -12557,6 +12770,45 @@ export interface components {
              */
             token: string;
         };
+        /** RumSettingsUpdateResponse */
+        RumSettingsUpdateResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Message */
+            message?: string | null;
+            /** Skipped */
+            skipped?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RumStatusResponse
+         * @description ``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys.
+         */
+        RumStatusResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Enabled At */
+            enabled_at?: string | null;
+            /** Deployed Vcl Sha */
+            deployed_vcl_sha?: string | null;
+            /** Current Vcl Sha */
+            current_vcl_sha?: string | null;
+            /** Vcl Drift */
+            vcl_drift?: boolean | null;
+            /** Capture Vitals */
+            capture_vitals?: boolean | null;
+            /** Capture Performance */
+            capture_performance?: boolean | null;
+            /** Capture Errors */
+            capture_errors?: boolean | null;
+            /** Capture Events */
+            capture_events?: boolean | null;
+            /** Custom Condition */
+            custom_condition?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * RumUpgradeRequest
          * @description Body for ``POST /api/services/{service_id}/rum/upgrade`` — pin a new
@@ -12654,6 +12906,20 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * SchemaResponse
+         * @description ``GET /api/schema``: cached or live column list plus the safe table name.
+         */
+        SchemaResponse: {
+            /** Schema */
+            schema: {
+                [key: string]: unknown;
+            }[];
+            /** Table Name */
+            table_name: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * ScoringAnalyticsResponse
          * @description Composite of the analyst-safe sub-reads (plus the two admin-only
          *     evaluation blocks, present only on the admin path).
@@ -12737,6 +13003,18 @@ export interface components {
             compliance?: string | null;
             /** Count */
             count?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ScoringConfigCompositeResponse
+         * @description ``GET /scoring/config``: the four token-free config reads in one body.
+         */
+        ScoringConfigCompositeResponse: {
+            status?: components["schemas"]["ScoringStatusResponse"] | null;
+            threshold?: components["schemas"]["ScoringThresholdState"] | null;
+            exclude_regex?: components["schemas"]["ScoringExcludeRegexState"] | null;
+            enforce_status_code?: components["schemas"]["ScoringEnforceStatusCodeState"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -13127,6 +13405,15 @@ export interface components {
              */
             sample_url: string;
         };
+        /** ScoringLabelDeleteResponse */
+        ScoringLabelDeleteResponse: {
+            /** Status */
+            status?: string | null;
+            /** Id */
+            id?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** ScoringLabelRow */
         ScoringLabelRow: {
             /** Id */
@@ -13454,6 +13741,29 @@ export interface components {
              * @default []
              */
             events: components["schemas"]["ScoringSessionEvent"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ScoringStatusResponse
+         * @description ``GET /scoring/status``: the secret-filtered ``cfg.scoring`` block plus
+         *     live-version and drift keys. Config-derived keys beyond these ride as extras.
+         */
+        ScoringStatusResponse: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Scoring Service Id */
+            scoring_service_id?: string | null;
+            /** Scoring Active Version */
+            scoring_active_version?: number | null;
+            /** Scoring Activated At */
+            scoring_activated_at?: string | null;
+            /** Scorer Drift */
+            scorer_drift?: boolean | null;
+            /** Drift Detail */
+            drift_detail?: string | null;
+            /** Drift Known */
+            drift_known?: boolean | null;
         } & {
             [key: string]: unknown;
         };
@@ -15456,6 +15766,17 @@ export interface components {
             /** Delta */
             delta?: number | null;
         };
+        /** WizardStateResponse */
+        WizardStateResponse: {
+            /** Service Id */
+            service_id: string;
+            /** Completed Steps */
+            completed_steps: string[];
+            /** Is Complete */
+            is_complete: boolean;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * WizardStepRequest
          * @description Request body for recording a wizard step completion.
@@ -15470,6 +15791,15 @@ export interface components {
             details: {
                 [key: string]: unknown;
             };
+        };
+        /** WizardStepResponse */
+        WizardStepResponse: {
+            /** Recorded */
+            recorded: boolean;
+            /** Step */
+            step: string;
+        } & {
+            [key: string]: unknown;
         };
         /** WordphraseResponse */
         WordphraseResponse: {
@@ -17571,7 +17901,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["QueryResponse"];
                 };
             };
             /** @description Bad request */
@@ -17678,7 +18008,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["PresetQuery"][];
                 };
             };
             /** @description Bad request */
@@ -21081,7 +21411,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ControlRoomTabResponse"];
                 };
             };
             /** @description Bad request */
@@ -21755,7 +22085,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RealtimeSeedResponse"];
                 };
             };
             /** @description Bad request */
@@ -22082,7 +22412,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["LogFieldAuditResponse"];
                 };
             };
             /** @description Bad request */
@@ -22195,7 +22525,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CorrelateResponse"];
                 };
             };
             /** @description Bad request */
@@ -22304,7 +22634,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WizardStateResponse"];
                 };
             };
             /** @description Bad request */
@@ -22417,7 +22747,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WizardStepResponse"];
                 };
             };
             /** @description Bad request */
@@ -22956,9 +23286,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -23275,9 +23603,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumSettingsUpdateResponse"];
                 };
             };
             /** @description Bad request */
@@ -23384,9 +23710,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumBeaconHealthResponse"];
                 };
             };
             /** @description Bad request */
@@ -23496,9 +23820,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RumAnalyticsResponse"];
                 };
             };
             /** @description Bad request */
@@ -24946,7 +25268,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SchemaResponse"];
                 };
             };
             /** @description Bad request */
@@ -27390,7 +27712,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AuditLogsResponse"];
                 };
             };
             /** @description Bad request */
@@ -40343,9 +40665,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringConfigCompositeResponse"];
                 };
             };
             /** @description Bad request */
@@ -40449,9 +40769,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -40665,9 +40983,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelRow"];
                 };
             };
             /** @description Bad request */
@@ -40771,9 +41087,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelDeleteResponse"];
                 };
             };
             /** @description Bad request */
@@ -40881,9 +41195,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScoringLabelRow"];
                 };
             };
             /** @description Bad request */
@@ -43854,9 +44166,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CmcdStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -44583,7 +44893,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DebugStateResponse"];
                 };
             };
             /** @description Bad request */

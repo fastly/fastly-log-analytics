@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field, field_serializer
 
+from backend.models._base import WireSafeModel
 from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
 from backend.models.security import SecurityTopBotsResponse
 
@@ -270,7 +272,14 @@ class QueryRequest(BaseModel):
     explain: bool = False
 
 
-class QueryResponse(BaseResponse):
+class QueryResponse(WireSafeModel):
+    """``POST /api/query`` result.
+
+    Rows hold DuckDB-native values (Decimal, tz-aware datetimes, bytes) that
+    pydantic's JSON mode would encode differently from ``jsonable_encoder``
+    (the pre-typing wire path), so ``data`` is pre-encoded the same way.
+    """
+
     columns: list[str]
     data: list[dict[str, Any]]
     row_count: int
@@ -279,8 +288,12 @@ class QueryResponse(BaseResponse):
     elapsed_ms: int
     explain_plan: str | None = None
 
+    @field_serializer("data")
+    def _encode_rows(self, rows: list[dict[str, Any]]) -> Any:
+        return jsonable_encoder(rows)
 
-class PresetQuery(BaseModel):
+
+class PresetQuery(WireSafeModel):
     name: str
     description: str
     sql: str

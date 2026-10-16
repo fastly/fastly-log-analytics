@@ -24,6 +24,14 @@ from backend.deps import ServiceId, require_admin, require_service_access
 from backend.high_scale.aggregate_query import query_clickhouse_aggregate
 from backend.high_scale.aggregates import AggregateRequest
 from backend.high_scale.registry import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
+from backend.models.control_room import (
+    ControlRoomTabResponse,
+    CorrelateResponse,
+    LogFieldAuditResponse,
+    RealtimeSeedResponse,
+    WizardStateResponse,
+    WizardStepResponse,
+)
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, query_errors
@@ -98,7 +106,11 @@ TAB_STUBS: dict[str, dict] = {
 # ── Tab data endpoints (read) ────────────────────────────────────────────────
 
 
-@router.get("/services/{service_id}/control-room/{tab}")
+@router.get(
+    "/services/{service_id}/control-room/{tab}",
+    response_model=ControlRoomTabResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def control_room_tab(
     tab: str,
@@ -244,7 +256,9 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
     return ticks[-count:]
 
 
-@router.get("/services/{service_id}/realtime-seed")
+@router.get(
+    "/services/{service_id}/realtime-seed", response_model=RealtimeSeedResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def realtime_seed(
     service_id: ServiceId,
@@ -432,7 +446,9 @@ FEATURE_REQUIRED_FIELDS: dict[str, list[str]] = {
 }
 
 
-@router.get("/services/{service_id}/log-field-audit")
+@router.get(
+    "/services/{service_id}/log-field-audit", response_model=LogFieldAuditResponse, response_model_exclude_unset=True
+)
 @query_errors()
 def log_field_audit(
     service_id: ServiceId,
@@ -475,7 +491,9 @@ class CorrelateRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
 
 
-@router.post("/services/{service_id}/control-room/correlate")
+@router.post(
+    "/services/{service_id}/control-room/correlate", response_model=CorrelateResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def control_room_correlate(
     body: CorrelateRequest,
@@ -589,7 +607,11 @@ class WizardStepRequest(BaseModel):
     details: dict = {}
 
 
-@router.get("/services/{service_id}/control-room/wizard/state")
+@router.get(
+    "/services/{service_id}/control-room/wizard/state",
+    response_model=WizardStateResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def wizard_state(
     service_id: ServiceId,
@@ -610,7 +632,11 @@ def wizard_state(
     }
 
 
-@router.post("/services/{service_id}/control-room/wizard/step")
+@router.post(
+    "/services/{service_id}/control-room/wizard/step",
+    response_model=WizardStepResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
 def wizard_step(
     body: WizardStepRequest,

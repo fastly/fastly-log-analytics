@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.deps import get_service_id
-from backend.models.dashboard import QueryRequest
+from backend.models.dashboard import PresetQuery, QueryRequest, QueryResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import query as repo
 from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
@@ -46,7 +46,7 @@ def _redact_paths(msg: str) -> str:
 router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.post("/query")
+@router.post("/query", response_model=QueryResponse, response_model_exclude_unset=True)
 def query_endpoint(
     req: QueryRequest,
     ctx: RequestContext = Depends(build_request_context),
@@ -186,7 +186,7 @@ def query_endpoint(
                 )
 
 
-@router.get("/presets")
+@router.get("/presets", response_model=list[PresetQuery], response_model_exclude_unset=True)
 def presets_endpoint(service_id: str | None = Depends(get_service_id)):
     from backend.core import duckdb as _db
 

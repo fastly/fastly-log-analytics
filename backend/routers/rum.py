@@ -40,6 +40,12 @@ from backend.models.provision import (
     RumUpgradeRequest,
     RumVersionsResponse,
 )
+from backend.models.rum import (
+    RumAnalyticsResponse,
+    RumBeaconHealthResponse,
+    RumSettingsUpdateResponse,
+    RumStatusResponse,
+)
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator_v2 import (
     disable_rum,
@@ -337,7 +343,7 @@ async def disable_rum_handler(
     return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.get("/{service_id}/rum/status")
+@router.get("/{service_id}/rum/status", response_model=RumStatusResponse, response_model_exclude_unset=True)
 async def rum_status(request: Request, service_id: str = Path(...)) -> dict[str, Any]:
     """Get RUM enable/disable status and VCL drift detection."""
     cfg = svcconfig.load_config(service_id) or {}
@@ -462,7 +468,7 @@ async def upgrade_rum_handler(
     return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
 
 
-@router.post("/{service_id}/rum/settings")
+@router.post("/{service_id}/rum/settings", response_model=RumSettingsUpdateResponse, response_model_exclude_unset=True)
 def update_rum_settings(
     service_id: str = Path(...),
     body: RumSettingsUpdateRequest = Body(...),
@@ -559,7 +565,9 @@ def _inject_telemetry(res: dict) -> dict:
     return res
 
 
-@router.get("/{service_id}/rum/beacon-health")
+@router.get(
+    "/{service_id}/rum/beacon-health", response_model=RumBeaconHealthResponse, response_model_exclude_unset=True
+)
 async def rum_beacon_health(
     request: Request,
     ctx: RequestContext = Depends(build_request_context),
@@ -657,7 +665,7 @@ async def rum_beacon_health(
         )
 
 
-@router.get("/{service_id}/rum/analytics")
+@router.get("/{service_id}/rum/analytics", response_model=RumAnalyticsResponse, response_model_exclude_unset=True)
 async def rum_analytics(
     request: Request,
     start_time: str | None = Query(None),

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.status_reads import CmcdStatusResponse
 from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def _resolve_token(service_id: str, override_token: str = "") -> str:
     return ""
 
 
-@router.get("/{service_id}/cmcd/status")
+@router.get("/{service_id}/cmcd/status", response_model=CmcdStatusResponse, response_model_exclude_unset=True)
 def cmcd_status(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:

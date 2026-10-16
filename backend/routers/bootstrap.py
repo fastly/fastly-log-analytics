@@ -14,6 +14,7 @@ from backend.deps import get_con, get_service_id, get_source
 from backend.models.common import BootstrapResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
+from backend.models.status_reads import SchemaResponse
 from backend.repositories._base import SectionTimer
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import query_errors
@@ -845,7 +846,7 @@ def _bootstrap_sync(
     )
 
 
-@router.get("/schema")
+@router.get("/schema", response_model=SchemaResponse, response_model_exclude_unset=True)
 @query_errors(status_code=500)
 def schema_endpoint(
     request: Request,

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from backend.core import metadata as metadata_db
 from backend.deps import get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.status_reads import AuditLogsResponse
 from backend.utils.router_utils import raise_internal
 
 logger = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"], responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.get("")
+@router.get("", response_model=AuditLogsResponse, response_model_exclude_unset=True)
 def api_audit_logs(
     source: dict = Depends(get_source),
     event_type: str | None = Query(default=None),

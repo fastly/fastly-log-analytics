@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from backend.models.debug import ClearSqliteResponse, RecentSqliteResponse
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.status_reads import DebugStateResponse
 from backend.utils import sqlite_profiler
 
 router = APIRouter(prefix="/api/debug", tags=["debug"], responses=DEFAULT_ERROR_RESPONSES)
@@ -59,7 +60,7 @@ def clear_sqlite(request: Request):
     return {"ok": True, **sqlite_profiler.buffer_stats()}
 
 
-@router.get("/state")
+@router.get("/state", response_model=DebugStateResponse, response_model_exclude_unset=True)
 def debug_state():
     """Report whether the backend will include ``_debug_queries`` /
     ``_debug_calls`` arrays in API responses.
