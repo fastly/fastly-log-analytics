@@ -348,3 +348,63 @@ def test_real_exception_discards_connection(monkeypatch):
     assert pool._in_use == 0, "discard frees the slot"
     assert pool._idle.qsize() == 0
     mock_con.close.assert_called_once()
+
+
+def test_prewarm_con_acquires_connection_off_the_event_loop():
+    import asyncio
+    import threading
+
+    seen: dict[str, int] = {}
+
+    class _Holder:
+        con = None
+
+        def __enter__(self):
+            seen["thread"] = threading.get_ident()
+            self.con = object()
+            return self.con
+
+    ctx = RequestContext(service_id="svc", source={}, telemetry=MagicMock(), _holder=_Holder())
+
+    async def _run():
+        loop_thread = threading.get_ident()
+        await ctx.prewarm_con()
+        return loop_thread
+
+    loop_thread = asyncio.run(_run())
+
+    assert seen["thread"] != loop_thread
+    assert ctx.con is ctx._holder.con
+
+
+def test_prewarm_con_cancellation_still_completes_checkout():
+    import asyncio
+    import threading
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _Holder:
+        con = None
+
+        def __enter__(self):
+            entered.set()
+            release.wait(5)
+            self.con = object()
+            return self.con
+
+    ctx = RequestContext(service_id="svc", source={}, telemetry=MagicMock(), _holder=_Holder())
+
+    async def _run():
+        task = asyncio.create_task(ctx.prewarm_con())
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, release.set)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    assert ctx._holder.con is not None

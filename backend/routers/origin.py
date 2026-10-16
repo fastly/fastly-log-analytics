@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends
@@ -157,9 +158,12 @@ async def origin_aggregates(
     if high_scale_service is not None:
         from backend.high_scale.origin import aggregates as high_scale_aggregates
 
-        res = high_scale_aggregates(high_scale_service, req, start_time, end_time, sections=sections)
+        res = await asyncio.to_thread(
+            high_scale_aggregates, high_scale_service, req, start_time, end_time, sections=sections
+        )
         return OriginAggregatesResponse.with_telemetry(**res)
 
+    await ctx.prewarm_con()
     res = await repo.get_aggregates(
         con=ctx.con,
         src=ctx.source,

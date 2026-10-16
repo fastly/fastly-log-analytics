@@ -87,8 +87,9 @@ async def insights_endpoint(
     if high_scale_service is not None:
         from backend.high_scale.insights import insights_endpoint as hs_insights
 
-        return hs_insights(high_scale_service, req, clamp_start, clamp_end)
+        return await asyncio.to_thread(hs_insights, high_scale_service, req, clamp_start, clamp_end)
 
+    await ctx.prewarm_con()
     force_refresh = req.force_refresh if ctx.analyst_session is None else False
     sem = _get_insights_sem(ctx.service_id)
     async with sem:

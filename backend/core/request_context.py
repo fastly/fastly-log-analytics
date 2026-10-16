@@ -33,6 +33,7 @@ insights/views/bootstrap, then defer admin/provision/share to Phase 5.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,22 @@ class RequestContext:
                 return self._holder.__enter__()
             return self._holder.con
         raise RuntimeError("RequestContext has no connection")
+
+    async def prewarm_con(self) -> None:
+        """Acquire ``self.con`` in a worker thread so the loop never blocks.
+
+        The first ``con`` access does a BLOCKING pool checkout; evaluating it
+        as an argument inside an ``async def`` handler runs it ON the event
+        loop (GCE 2026-10-02 wedge). The await is cancellation-guarded: a
+        bare cancelled ``to_thread`` leaves the checkout running detached, so
+        the request-context ``finally`` races it and strands a pool slot.
+        """
+        task = asyncio.create_task(asyncio.to_thread(lambda: self.con))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def clamp(self, start: str | None, end: str | None) -> tuple[str | None, str | None]:
         """Clamp a request's start/end against this request's analyst window.
