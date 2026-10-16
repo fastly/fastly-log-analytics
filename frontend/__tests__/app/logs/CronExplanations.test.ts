@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '../CronExplanations';
+import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronExplanations';
 
 describe('partial_hour_merge cron registry entry', () => {
   it('has a label', () => {

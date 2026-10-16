@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { tracesToTable } from '../tracesToTable'
+import { tracesToTable } from '@/components/PlotlyChart/tracesToTable'
 
 describe('tracesToTable', () => {
   it('returns an empty shape when data is not an array', () => {
