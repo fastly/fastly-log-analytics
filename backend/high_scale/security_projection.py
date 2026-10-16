@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+
+from backend.high_scale._projection_utils import (
+    bucket as _bucket,
+)
+from backend.high_scale._projection_utils import (
+    text as _text,
+)
 
 
 @dataclass(frozen=True)
@@ -76,20 +83,3 @@ def _dimension_row(
         "impersonator_count": acc.impersonator_count,
         "unverified_count": acc.unverified_count,
     }
-
-
-def _bucket(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        timestamp = value.astimezone(UTC)
-    elif isinstance(value, str):
-        try:
-            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-        except ValueError:
-            return None
-    else:
-        return None
-    return timestamp.replace(second=0, microsecond=0)
-
-
-def _text(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""

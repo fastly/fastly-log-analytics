@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
+from backend.high_scale._projection_utils import (
+    range_value as _range_value,
+)
 from backend.high_scale.registry import HighScaleService
 from backend.utils.date_utils import safe_iso
 
@@ -17,12 +19,6 @@ _EMPTY = {
     "pop_latency": {"has_data": False, "requires_group_c": False, "rows": []},
     "ip_health": {"has_data": False, "rows": []},
 }
-
-
-def _range_value(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _where(

@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.high_scale._projection_utils import (
+    range_value as _range_value,
+)
 from backend.high_scale.registry import HighScaleService
 from backend.models.network import (
     NetworkBundleRequest,
@@ -16,12 +19,6 @@ from backend.models.network import (
     TransportProtocolShare,
 )
 from backend.utils.geo import format_city_label
-
-
-def _range_value(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _health_score(
