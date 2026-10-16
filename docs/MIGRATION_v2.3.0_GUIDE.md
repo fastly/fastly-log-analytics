@@ -153,7 +153,7 @@ This prevents accidents during rollback scenarios where both sets might momentar
 # 3. Update local config to v2.3
 # 4. Run reconciliation dry-run
 
-uv run pytest tests/backend/provision/declarative/test_reconciler_integration.py::TestMigrationFromLegacyToConsolidated -v
+uv run pytest tests/provision/declarative/test_reconciler_integration.py::TestMigrationFromLegacyToConsolidated -v
 ```
 
 ### Staging/Production

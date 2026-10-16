@@ -226,7 +226,7 @@ class TestRUMIntegration:
 # ── persistence, or the tracker JS's external hostname would fail these. ──
 
 # Shape-accurate stand-in for a real Faro IIFE bundle — same fixture data
-# used by tests/backend/provision/test_rum_assets.py.
+# used by tests/provision/test_rum_assets.py.
 _SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
 _OTHER_BUNDLE = b"!function(e){/* a different, upgraded build */}(window);"
 
@@ -434,7 +434,7 @@ class TestFaroSelfHostingEndToEnd:
         with patch("backend.provision.rum_orchestrator_v2.reconcile_vcl_state") as mock_reconcile:
             mock_reconcile.return_value = MagicMock(activated_version=3, draft_version=None, changes_applied={})
             # Cleanup of stale bundle versions is a best-effort, orthogonal
-            # concern covered by tests/backend/provision/test_rum_assets.py;
+            # concern covered by tests/provision/test_rum_assets.py;
             # stub it here so this test stays focused on the upload+config+
             # reconcile chain this task cares about.
             with patch(

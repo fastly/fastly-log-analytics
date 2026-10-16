@@ -1,6 +1,6 @@
 """Tests for backend.routers.rum — POST /rum/enable and POST /rum/disable.
 
-Mirrors tests/backend/routers/test_rum_versions_upgrade.py: mocks
+Mirrors tests/routers/test_rum_versions_upgrade.py: mocks
 ``run_with_events`` at the module-attribute level (no real orchestration /
 Fastly API / FOS calls) and drives the SSE stream through TestClient.
 """
