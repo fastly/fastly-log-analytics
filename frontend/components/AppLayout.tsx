@@ -362,14 +362,6 @@ export function AppLayout({
   const bootstrapSettings = bootstrapData?.settings as Record<string, unknown> | undefined
   const isInitializing = bootstrapSettings?.initializing === true
 
-  React.useEffect(() => {
-    if (isInitializing) {
-      const interval = setInterval(() => {
-        void refetchBootstrap()
-      }, 2000)
-      return () => clearInterval(interval)
-    }
-  }, [isInitializing, refetchBootstrap])
   const isAnalyst = useIsAnalyst()
   // Strip any IP-family filter for masking analysts (e.g. a bookmarked
   // ?filters={ip:...} URL) so it never reaches the backend's IP-filter lock.

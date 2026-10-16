@@ -147,8 +147,15 @@ export function useBootstrap() {
     // and it stops the instant a fetch succeeds. Jittered so a fleet of tabs
     // orphaned by the same restart doesn't rendezvous into a thundering herd.
     // refetchIntervalInBackground stays default-false: hidden tabs don't poll.
-    refetchInterval: query =>
-      query.state.status === 'error' ? 5000 + Math.floor(Math.random() * 2000) : false,
+    //
+    // Also poll every 2s while the backend reports it is still initializing
+    // (first-run warmup) so AppLayout leaves its "Initializing" state as soon
+    // as it is ready.
+    refetchInterval: query => {
+      if (query.state.status === 'error') return 5000 + Math.floor(Math.random() * 2000)
+      const settings = (query.state.data as { settings?: { initializing?: boolean } } | undefined)?.settings
+      return settings?.initializing === true ? 2000 : false
+    },
   })
 
   const activeServiceId = useServiceStore(state => state.activeServiceId)

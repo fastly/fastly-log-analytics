@@ -42,14 +42,17 @@ export function useShareStatusBanner({ enabled }: Options) {
   React.useEffect(() => {
     if (!enabled) return
     let cancelled = false
+    const ac = new AbortController()
     const tick = async () => {
+      // Background tabs don't poll (AGENTS.md: refetchIntervalInBackground=false).
+      if (document.hidden) return
       try {
         // Use the lean /api/admin/share/banner endpoint (~80B) instead of
         // /status (~11KB). The banner only needs sharing_active +
         // public_url; the full status response carries services / invites
         // / sessions / audit_logs / telemetry that the banner never reads
         // and the poll runs every 15s on every page with AppLayout.
-        const { data, response } = await client.GET('/api/admin/share/banner', {})
+        const { data, response } = await client.GET('/api/admin/share/banner', { signal: ac.signal })
         if (cancelled) return
         if (!response.ok) return
         const body = data as any
@@ -87,6 +90,7 @@ export function useShareStatusBanner({ enabled }: Options) {
     const id = setInterval(tick, POLL_MS)
     return () => {
       cancelled = true
+      ac.abort()
       clearInterval(id)
     }
   }, [enabled])
