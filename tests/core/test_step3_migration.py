@@ -421,3 +421,27 @@ def test_adopt_handles_schema_evolution_missing_and_extra_columns(migration_sour
     assert res2["adopted_files"] == 1
     assert res2["rows_adopted"] == 1
     assert _lake_count(src) == 3
+
+
+def test_adopt_skips_missing_or_unreadable_legacy_file(migration_source, monkeypatch):
+    """When a legacy manifest lists a file that has been pruned from storage,
+    adopt_iceberg_to_ducklake falls back to per-file adoption, registers
+    the surviving files, and skips the missing file without failing."""
+    from backend.core.iceberg import _ducklake_migration as mig
+
+    src = migration_source
+    p1 = _write_legacy_parquet(src, "timestamp_hour=2026-08-30-12/file1.parquet", 3)
+    missing_p = os.path.join(src["_cache_dir_override"], "data", "timestamp_hour=2026-08-30-11", "deleted.parquet")
+
+    monkeypatch.setattr(mig, "_legacy_metadata_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        mig,
+        "_legacy_iceberg_data_files_with_counts",
+        lambda *a, **k: {p1: 3, missing_p: 5},
+    )
+
+    res = adopt_iceberg_to_ducklake(src["name"])
+    assert res["adopted_files"] == 1
+    assert res["skipped_files"] == 1
+    assert res["rows_adopted"] == 3
+    assert _lake_count(src) == 3

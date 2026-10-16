@@ -337,11 +337,20 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
             ).fetchone()
         )
         if not table_exists:
-            # Create the per-service table from the FIRST parquet's schema
+            # Create the per-service table from the first readable parquet's schema
             # (LIMIT 0 — schema only, no rows). Avoid reading the source on
             # repeat adoption runs where all files are already registered.
-            first_lit = escape_sql_literal(data_files[0])
-            con.execute(f"CREATE TABLE {table_ident} AS SELECT * FROM read_parquet('{first_lit}') LIMIT 0")
+            created = False
+            for cand in data_files:
+                try:
+                    cand_lit = escape_sql_literal(cand)
+                    con.execute(f"CREATE TABLE {table_ident} AS SELECT * FROM read_parquet('{cand_lit}') LIMIT 0")
+                    created = True
+                    break
+                except Exception:
+                    continue
+            if not created:
+                raise RuntimeError(f"failed to create {table_ident}: no readable parquet found among candidate files")
 
         # Skip files DuckLake already tracks — re-adding duplicates rows.
         already = {
@@ -363,11 +372,31 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
             }
 
         adopted = 0
-        expected_rows = sum(legacy_file_counts.get(p, 0) for p in to_adopt)
+        failed_files: set[str] = set()
         for i in range(0, len(to_adopt), _ADOPT_BATCH_SIZE):
             batch = to_adopt[i : i + _ADOPT_BATCH_SIZE]
-            _ducklake_add_data_files(con, batch, alias="lake", table=table)
-            adopted += len(batch)
+            try:
+                _ducklake_add_data_files(con, batch, alias="lake", table=table)
+                adopted += len(batch)
+            except Exception as e:
+                logger.warning(
+                    "[ducklake] %s: batch adoption failed (%s), falling back to file-by-file for %d files",
+                    service_id,
+                    e,
+                    len(batch),
+                )
+                for p in batch:
+                    try:
+                        _ducklake_add_data_files(con, [p], alias="lake", table=table)
+                        adopted += 1
+                    except Exception as fe:
+                        logger.warning(
+                            "[ducklake] %s: skipping unreadable or missing legacy parquet file %s: %s",
+                            service_id,
+                            p,
+                            fe,
+                        )
+                        failed_files.add(p)
 
         # Validate that all adopted files are registered in DuckLake's catalog.
         # This checks the catalog metadata table in milliseconds, avoiding
@@ -378,24 +407,26 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
                 f"SELECT data_file FROM ducklake_list_files('lake', '{escape_sql_literal(table)}')"
             ).fetchall()
         }
-        missing = [p for p in to_adopt if p not in new_already]
+        missing = [p for p in to_adopt if p not in new_already and p not in failed_files]
         if missing:
             raise ValueError(
                 f"Migration validation failed for {service_id}: {len(missing)} files "
                 f"failed to register in DuckLake catalog"
             )
 
+        expected_rows = sum(legacy_file_counts.get(p, 0) for p in to_adopt if p not in failed_files)
         logger.info(
-            "[ducklake] %s: adopted %d legacy parquet files from %s (%d rows, %d already present)",
+            "[ducklake] %s: adopted %d legacy parquet files from %s (%d rows, %d already present, %d skipped/missing)",
             service_id,
             adopted,
             origin,
             expected_rows,
             skipped,
+            len(failed_files),
         )
         return {
             "adopted_files": adopted,
-            "skipped_files": skipped,
+            "skipped_files": skipped + len(failed_files),
             "rows_adopted": expected_rows,
             "source": origin,
             "candidate_files": len(data_files),
