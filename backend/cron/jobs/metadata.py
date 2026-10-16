@@ -52,30 +52,17 @@ def _is_retryable_webhook_error(exc: BaseException) -> bool:
     wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
 )
-def _post_alert_webhook(url: str, payload: dict) -> None:
+def _post_json(url: str, payload: dict) -> None:
     response = httpx.post(url, json=payload, timeout=5)
     if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
         response.raise_for_status()
 
 
-@tenacity.retry(
-    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
-    stop=tenacity.stop_after_attempt(3),
-    wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
-    reraise=True,
-)
-def _post_slack_notification(url: str, payload: dict) -> None:
-    response = httpx.post(url, json=payload, timeout=5)
-    if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
-        response.raise_for_status()
+# Old names kept as aliases: the alerts job and tests patch/import them by name.
+_post_alert_webhook = _post_json
+_post_slack_notification = _post_json
 
 
-@tenacity.retry(
-    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
-    stop=tenacity.stop_after_attempt(3),
-    wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
-    reraise=True,
-)
 def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val: str, service_name: str) -> None:
     payload = {
         "event_action": "trigger",
@@ -88,9 +75,7 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
             "component": metric,
         },
     }
-    response = httpx.post(url, json=payload, timeout=5)
-    if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
-        response.raise_for_status()
+    _post_json(url, payload)
 
 
 # ── _run_metadata_sync (no @cron_task — also called as a bootstrap helper) ────
