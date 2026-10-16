@@ -202,6 +202,7 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     ("GET", "/api/security/threat-intel"),
     ("GET", "/api/logs"),
     ("GET", "/api/logs/{service_id}"),
+    ("GET", "/api/query/schema/{service_id}"),
     # Live log streaming feed (analyst-safe masked client IPs).
     ("GET", "/api/stream/{service_id}"),
     ("GET", "/api/services/{service_id}/stream"),

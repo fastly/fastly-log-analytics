@@ -354,6 +354,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/query/schema/{service_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Query Schema Endpoint
+         * @description Reflect schema columns and types for the active service.
+         */
+        get: operations["query_schema_endpoint_api_query_schema__service_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/presets": {
         parameters: {
             query?: never;
@@ -12170,6 +12190,43 @@ export interface components {
             /** Error */
             error: string | null;
         };
+        /** QuerySchemaResponse */
+        QuerySchemaResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            /** Source */
+            source?: string | null;
+            /**
+             * Table Name
+             * @default logs
+             */
+            table_name: string;
+            /** Service Id */
+            service_id?: string | null;
+            /** Schema */
+            schema?: components["schemas"]["SchemaColumn"][];
+            /** Columns */
+            columns?: components["schemas"]["SchemaColumn"][];
+        };
         /** RawRequest */
         RawRequest: {
             /**
@@ -12544,6 +12601,28 @@ export interface components {
             created_at?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** SchemaColumn */
+        SchemaColumn: {
+            /** Column */
+            column: string;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /** Type */
+            type: string;
+            /** Min */
+            min?: string | null;
+            /** Max */
+            max?: string | null;
+            /** Approx Unique */
+            approx_unique?: number | null;
+            /** Null Percentage */
+            null_percentage?: number | null;
+            /** Count */
+            count?: number | null;
         };
         /**
          * ScoringAnalyticsResponse
@@ -17464,6 +17543,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    query_schema_endpoint_api_query_schema__service_id__get: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuerySchemaResponse"];
                 };
             };
             /** @description Bad request */

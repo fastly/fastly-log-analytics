@@ -159,12 +159,17 @@ export function QueryToolbar({
             <SelectItem value="1000">Fetch 1,000 rows</SelectItem>
             <SelectItem value="5000">Fetch 5,000 rows</SelectItem>
             <SelectItem value="10000">Fetch 10,000 rows</SelectItem>
-            <SelectItem value="50000">Fetch 50,000 rows</SelectItem>
           </SelectContent>
         </Select>
 
         {canExport && (
-          <Button variant="outline" size="sm" className="h-8" onClick={onExportCsv}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8"
+            onClick={onExportCsv}
+            data-testid="query-csv-export-btn"
+          >
             <Download className="w-3.5 h-3.5 mr-2" />
             Export
           </Button>

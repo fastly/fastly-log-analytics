@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
 from backend.models.security import SecurityTopBotsResponse
@@ -254,33 +254,13 @@ class SessionDetailResponse(BaseResponse):
     data: list[dict[str, Any]]
 
 
-# ── Query ─────────────────────────────────────────────────────────────────────
+# ── Query (re-exported from backend.models.query for back-compat) ─────────────
 
-
-class QueryRequest(BaseModel):
-    sql: str
-    dataset: Literal["logs", "client_vitals", "client_errors"] = "logs"
-    # M1: bound max_rows so an analyst can't request tens of millions of rows
-    # and OOM the worker (it's interpolated into ``LIMIT max_rows+1`` and the
-    # result is fully materialized via ``to_arrow_table().to_pylist()`` before
-    # truncation). The Pydantic clamp is the first line of defense; the repo's
-    # ``execute_query`` re-clamps against ``MAX_QUERY_ROWS`` so internal callers
-    # that bypass the model can't exceed it either.
-    max_rows: int = Field(default=500, ge=1, le=10_000)
-    explain: bool = False
-
-
-class QueryResponse(BaseResponse):
-    columns: list[str]
-    data: list[dict[str, Any]]
-    row_count: int
-    total_rows: int
-    truncated: bool
-    elapsed_ms: int
-    explain_plan: str | None = None
-
-
-class PresetQuery(BaseModel):
-    name: str
-    description: str
-    sql: str
+from backend.models.query import (  # noqa: E402, F401
+    PresetQuery,
+    QueryDataset,
+    QueryRequest,
+    QueryResponse,
+    QuerySchemaResponse,
+    SchemaColumn,
+)

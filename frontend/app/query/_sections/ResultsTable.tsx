@@ -6,6 +6,8 @@ import { DataTable } from '@/components/DataTable'
 import { Clock, Database } from 'lucide-react'
 
 import { formatCount } from '@/lib/format'
+import { cn } from '@/lib/utils'
+
 interface ResultsTableProps {
   data: any
   isPending: boolean
@@ -33,7 +35,10 @@ export function ResultsTable({
   onStructuredSortingChange,
 }: ResultsTableProps) {
   return (
-    <div className="space-y-4">
+    <div
+      className={cn('space-y-4 transition-opacity duration-150', isPending && 'opacity-60')}
+      data-testid="query-results-table"
+    >
       <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
         <span className="flex items-center gap-1">
           <Database className="h-3 w-3" />

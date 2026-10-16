@@ -181,3 +181,126 @@ test('/query keeps ?filters= in the URL after a filter mutation', async () => {
     })
   })
 })
+
+test('renders engine initializing skeleton when service is not yet initialized', () => {
+  useServiceStore.setState({ activeServiceId: null, isInitialized: false })
+  vi.mocked(client.GET).mockImplementation(() => new Promise(() => {}) as any)
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  expect(screen.getByTestId('query-engine-initializing')).toBeInTheDocument()
+  expect(screen.getByText(/Initializing DuckDB analytical engine/i)).toBeInTheDocument()
+})
+
+test('enforces zero-CLS layout reservations and renders schema sidebar in Raw SQL mode', async () => {
+  const user = userEvent.setup()
+  vi.mocked(client.GET).mockImplementation(async (url: any) => {
+    if (url.includes('/api/schema')) {
+      return {
+        data: {
+          schema: [
+            { column: 'timestamp', type: 'TIMESTAMP' },
+            { column: 'client_ip', type: 'VARCHAR' },
+          ],
+        },
+      } as any
+    }
+    return { data: { fields: [] } } as any
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  const pageRoot = screen.getByTestId('query-page-root')
+  expect(pageRoot.className).toContain('contain-intrinsic-size')
+
+  const editorContainer = screen.getByTestId('query-editor-container')
+  expect(editorContainer.className).toContain('contain-intrinsic-size')
+
+  await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
+
+  const sidebar = await screen.findByTestId('query-schema-sidebar')
+  expect(sidebar).toBeInTheDocument()
+  expect(screen.getByText('timestamp')).toBeInTheDocument()
+  expect(screen.getByText('client_ip')).toBeInTheDocument()
+})
+
+test('displays user-friendly error alert when mutating SQL is rejected by AST validator', async () => {
+  const user = userEvent.setup()
+  vi.mocked(client.GET).mockResolvedValue({ data: { fields: [], schema: [] } } as any)
+  vi.mocked(client.POST).mockResolvedValue({
+    error: JSON.stringify({
+      detail: {
+        error: 'sql_not_permitted',
+        message: 'only SELECT / WITH / UNION statements allowed (got DROP)',
+      },
+    }),
+  } as any)
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  await user.click(screen.getByRole('tab', { name: /edit raw sql/i }))
+  const editor = screen.getByTestId('mock-editor')
+  await user.clear(editor)
+  await user.type(editor, 'DROP TABLE logs')
+  await user.click(screen.getByRole('button', { name: /run query/i }))
+
+  const alert = await screen.findByTestId('query-error-alert')
+  expect(alert).toBeInTheDocument()
+  expect(alert.textContent).toMatch(/only SELECT \/ WITH \/ UNION statements allowed/i)
+})
+
+test('renders CSV export button and virtualized results table after query execution', async () => {
+  const user = userEvent.setup()
+  vi.mocked(client.GET).mockResolvedValue({ data: { fields: [], schema: [] } } as any)
+  vi.mocked(client.POST).mockResolvedValue({
+    data: {
+      columns: ['url', 'requests'],
+      data: [
+        { url: '/index.html', requests: 42 },
+        { url: '/api/v1/items', requests: 19 },
+      ],
+      total_rows: 2,
+      elapsed_ms: 8,
+    },
+  } as any)
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  await user.click(screen.getByRole('button', { name: /run query/i }))
+
+  await waitFor(() => {
+    expect(screen.getByTestId('query-results-table')).toBeInTheDocument()
+  })
+  expect(screen.getByTestId('query-csv-export-btn')).toBeInTheDocument()
+  expect(screen.getByText('/index.html')).toBeInTheDocument()
+})
+
+test('hydrates Raw SQL mode when ?q= URL parameter is provided', async () => {
+  vi.mocked(client.GET).mockResolvedValue({ data: { fields: [], schema: [] } } as any)
+  window.history.replaceState({}, '', '/query?q=' + encodeURIComponent('SELECT count(*) FROM logs'))
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QueryPage />
+    </QueryClientProvider>,
+  )
+
+  const editor = await screen.findByTestId('mock-editor')
+  expect((editor as HTMLTextAreaElement).value).toBe('SELECT count(*) FROM logs')
+})

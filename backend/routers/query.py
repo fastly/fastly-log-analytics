@@ -8,9 +8,10 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.deps import get_service_id
+from backend.deps import ServiceId, get_service_id
 from backend.models.dashboard import QueryRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.query import QuerySchemaResponse
 from backend.repositories import query as repo
 from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
@@ -84,7 +85,22 @@ def query_endpoint(
     if high_scale_service is not None:
         from backend.high_scale.query import query_endpoint as hs_query
 
-        return hs_query(high_scale_service, req, start_time, end_time, mask_ips)
+        try:
+            return hs_query(
+                high_scale_service,
+                req,
+                start_time,
+                end_time,
+                mask_ips,
+                session_id=audit_session_id,
+            )
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("query_failed", _redact_paths(str(e))),
+            )
 
     # Two-layer retry. The PermissionError → 403 path stays inline (it
     # short-circuits both retry classes — there's no point rebinding the
@@ -184,6 +200,55 @@ def query_endpoint(
                     status_code=400,
                     detail=make_error("query_failed", _redact_paths(msg)),
                 )
+
+
+_FALLBACK_SCHEMA_COLUMNS: list[dict[str, str]] = [
+    {"column": "timestamp", "type": "TIMESTAMPTZ"},
+    {"column": "ip", "type": "VARCHAR"},
+    {"column": "url", "type": "VARCHAR"},
+    {"column": "host", "type": "VARCHAR"},
+    {"column": "method", "type": "VARCHAR"},
+    {"column": "status", "type": "INTEGER"},
+    {"column": "cache", "type": "VARCHAR"},
+    {"column": "country", "type": "VARCHAR"},
+    {"column": "pop", "type": "VARCHAR"},
+    {"column": "asn", "type": "INTEGER"},
+    {"column": "ua", "type": "VARCHAR"},
+]
+
+
+@router.get("/query/schema/{service_id}", response_model=QuerySchemaResponse)
+def query_schema_endpoint(
+    service_id: ServiceId,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    """Reflect schema columns and types for the active service."""
+    del service_id
+    from backend import config as svcconfig
+    from backend.core import duckdb as _db
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    name = ctx.source["name"]
+    status = svcconfig.get_status(name) or {}
+    schema = status.get("schema")
+
+    high_scale_service = get_high_scale_service_registry().resolve(ctx.service_id)
+    if not schema and high_scale_service is None:
+        try:
+            schema = _db.get_schema(ctx.con, ctx.source)
+        except Exception as exc:
+            logger.debug("[query_schema] live schema fetch failed for %s: %s", name, exc)
+            schema = []
+
+    if not schema:
+        schema = list(_FALLBACK_SCHEMA_COLUMNS)
+
+    return {
+        "source": name,
+        "schema": schema,
+        "debug_queries": [],
+        "debug_calls": [],
+    }
 
 
 @router.get("/presets")

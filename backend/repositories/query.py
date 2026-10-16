@@ -384,6 +384,7 @@ def _run_validated_query(
         "truncated": truncated,
         "elapsed_ms": int(elapsed_ms),
         "debug_queries": _debug_queries,
+        "_debug_queries": _debug_queries,
         "debug_calls": get_tracked_calls(),
         "section_timings": section_timings,
     }

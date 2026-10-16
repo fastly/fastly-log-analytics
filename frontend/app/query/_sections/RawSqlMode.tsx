@@ -7,7 +7,8 @@ import type { CodeEditorHandle } from '@/components/CodeEditor/CodeEditor'
 import { cn } from '@/lib/utils'
 
 interface SchemaColumn {
-  name: string
+  name?: string
+  column?: string
   type: string
 }
 
@@ -67,6 +68,15 @@ export function RawSqlMode({ rawSql, onRawSqlChange, schema, tableName }: RawSql
   const [browserOpen, setBrowserOpen] = React.useState(true)
   const resolvedTable = tableName || 'logs'
 
+  const normalizedSchema = React.useMemo(
+    () =>
+      (schema ?? []).map(col => ({
+        name: col.name || col.column || '',
+        type: col.type,
+      })).filter(col => Boolean(col.name)),
+    [schema],
+  )
+
   const handleInsert = React.useCallback((col: string) => {
     editorRef.current?.insertAtCursor(col)
   }, [])
@@ -77,13 +87,13 @@ export function RawSqlMode({ rawSql, onRawSqlChange, schema, tableName }: RawSql
         ref={editorRef}
         value={rawSql}
         onChange={onRawSqlChange}
-        schema={schema}
+        schema={normalizedSchema}
         tableName={tableName}
         height="400px"
       />
       <SchemaBrowser
         tableName={resolvedTable}
-        schema={schema}
+        schema={normalizedSchema}
         open={browserOpen}
         onOpenChange={setBrowserOpen}
         onInsert={handleInsert}
@@ -94,7 +104,7 @@ export function RawSqlMode({ rawSql, onRawSqlChange, schema, tableName }: RawSql
 
 interface SchemaBrowserProps {
   tableName: string
-  schema?: SchemaColumn[]
+  schema?: { name: string; type: string }[]
   open: boolean
   onOpenChange: (next: boolean) => void
   onInsert: (col: string) => void
@@ -105,6 +115,7 @@ function SchemaBrowser({ tableName, schema, open, onOpenChange, onInsert }: Sche
     <aside
       className="rounded-md border bg-muted/20 text-xs flex flex-col min-h-0"
       aria-label="Schema browser"
+      data-testid="query-schema-sidebar"
     >
       <button
         type="button"

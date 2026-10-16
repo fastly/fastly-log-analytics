@@ -44,9 +44,11 @@ function QueryPageInner() {
   const { full, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
 
-  // Mode comes from ?mode=raw; defaults to structured. AppLayout's
+  // Mode comes from ?mode=raw (or ?q=...); defaults to structured. AppLayout's
   // RawQueryModeProbe reads the same param to toggle the global FilterBar.
-  const urlMode: QueryMode = searchParams.get('mode') === 'raw' ? 'raw' : 'structured'
+  const urlQueryParam = searchParams.get('q')
+  const urlMode: QueryMode =
+    searchParams.get('mode') === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
   const [mode, setMode] = useState<QueryMode>(urlMode)
 
   // Keep local mode in sync if the URL changes underneath us (e.g. back/forward).
@@ -96,8 +98,14 @@ function QueryPageInner() {
     const qsStart = params.get('start_time')
     const qsEnd = params.get('end_time')
     const qsFilters = params.get('filters')
+    const qsRawQuery = params.get('q')
 
     let mutated = false
+
+    if (qsRawQuery) {
+      setRawSql(qsRawQuery)
+      setMode('raw')
+    }
 
     if (qsStart && qsEnd) {
       setRange(qsStart, qsEnd)
@@ -166,7 +174,21 @@ function QueryPageInner() {
     ],
   }), [])
 
-  const [rawSql, setRawSql] = useState('SELECT * FROM logs LIMIT 100')
+  const DEFAULT_LOG_SCHEMA = useMemo<{ name: string; type: string }[]>(() => [
+    { name: 'timestamp', type: 'TIMESTAMPTZ' },
+    { name: 'ip', type: 'VARCHAR' },
+    { name: 'url', type: 'VARCHAR' },
+    { name: 'host', type: 'VARCHAR' },
+    { name: 'method', type: 'VARCHAR' },
+    { name: 'status', type: 'INTEGER' },
+    { name: 'cache', type: 'VARCHAR' },
+    { name: 'country', type: 'VARCHAR' },
+    { name: 'pop', type: 'VARCHAR' },
+    { name: 'asn', type: 'INTEGER' },
+    { name: 'ua', type: 'VARCHAR' },
+  ], [])
+
+  const [rawSql, setRawSql] = useState(() => urlQueryParam || 'SELECT * FROM logs LIMIT 100')
 
   const handleDatasetChange = useCallback((nextDataset: Dataset) => {
     setDataset(nextDataset)
@@ -233,11 +255,28 @@ function QueryPageInner() {
     return out
   }, [dataset, catalog, RUM_SCHEMAS])
 
-  const activeSchema = useMemo(() => {
+  const activeSchema = useMemo<{ name: string; type: string }[]>(() => {
     if (dataset === 'client_vitals') return RUM_SCHEMAS.client_vitals
     if (dataset === 'client_errors') return RUM_SCHEMAS.client_errors
-    return schemaData?.schema
-  }, [dataset, schemaData, RUM_SCHEMAS])
+    const rawList: any[] = schemaData?.schema || schemaData?.columns || []
+    if (rawList.length > 0) {
+      return rawList
+        .map(item => ({
+          name: item.name || item.column || '',
+          type: item.type || 'VARCHAR',
+        }))
+        .filter(item => Boolean(item.name))
+    }
+    if (catalog?.fields?.length) {
+      return catalog.fields
+        .filter((f: any) => Boolean(f.id))
+        .map((f: any) => ({
+          name: f.id,
+          type: f.duckdb_type || 'VARCHAR',
+        }))
+    }
+    return DEFAULT_LOG_SCHEMA
+  }, [dataset, schemaData, catalog, RUM_SCHEMAS, DEFAULT_LOG_SCHEMA])
 
   const activeTableName = useMemo(() => {
     if (dataset === 'client_vitals') return 'client_vitals'
@@ -272,13 +311,29 @@ function QueryPageInner() {
       const { data, error } = await client.POST('/api/query', { body: params as any, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
+          let parsed: any = null
           try {
-            throw JSON.parse(error)
-          } catch (e) {
+            parsed = JSON.parse(error)
+          } catch {
             throw new Error(error)
           }
+          const msg =
+            parsed?.detail?.message ||
+            (typeof parsed?.detail === 'string' ? parsed.detail : null) ||
+            parsed?.detail?.error ||
+            parsed?.message ||
+            error
+          throw new Error(String(msg))
         }
-        throw error
+        if (error instanceof Error) throw error
+        const anyErr = error as any
+        const msg =
+          anyErr?.detail?.message ||
+          (typeof anyErr?.detail === 'string' ? anyErr.detail : null) ||
+          anyErr?.detail?.error ||
+          anyErr?.message ||
+          'Query execution failed'
+        throw new Error(String(msg))
       }
       if (!data) throw new Error('No data')
       if (typeof data !== 'string') return data as any
@@ -395,16 +450,30 @@ function QueryPageInner() {
     return <NoServiceSelected icon={Search} message="Please select a service from the header to run queries." />
   }
   if (!activeServiceId) {
-    // Bootstrap in flight on cold load — render nothing rather than
-    // flash the fallback. The page will re-render with real content
-    // as soon as bootstrap commits.
-    return null
+    // Bootstrap in flight on cold load — render a pre-allocated zero-CLS
+    // skeleton matching the editor + results layout footprint.
+    return (
+      <div
+        className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+        data-testid="query-engine-initializing"
+      >
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Database className="h-4 w-4 animate-spin" />
+          <span>Initializing DuckDB analytical engine...</span>
+        </div>
+        <Skeleton className="h-[420px] w-full rounded-lg" />
+        <Skeleton className="h-[380px] w-full rounded-lg" />
+      </div>
+    )
   }
 
   const isStructured = mode === 'structured'
 
   return (
-    <div className="space-y-6">
+    <div
+      className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+      data-testid="query-page-root"
+    >
       <PageHeader
         title="Query Explorer"
         description={
@@ -417,6 +486,7 @@ function QueryPageInner() {
           onClick={handleRun}
           disabled={queryMutation.isPending || !effectiveSql.trim()}
           size="lg"
+          data-testid="query-run-btn"
         >
           {queryMutation.isPending ? (
             <Database className="h-4 w-4 mr-2 animate-spin" />
@@ -432,7 +502,10 @@ function QueryPageInner() {
         <DatasetToggle dataset={dataset} onDatasetChange={handleDatasetChange} />
       </div>
 
-      <div className="border rounded-lg bg-card shadow-sm">
+      <div
+        className="border rounded-lg bg-card shadow-sm [contain-intrinsic-size:auto_420px] [content-visibility:auto]"
+        data-testid="query-editor-container"
+      >
         <QueryToolbar
           presets={presets}
           history={history}
@@ -461,7 +534,7 @@ function QueryPageInner() {
       </div>
 
       {queryMutation.error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" data-testid="query-error-alert">
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Query Error</AlertTitle>
           <AlertDescription className="font-mono text-xs whitespace-pre-wrap break-words mt-2">
@@ -483,7 +556,10 @@ function QueryPageInner() {
 
       {/* Empty results initial placeholder */}
       {!queryMutation.data && !queryMutation.isPending && (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10">
+        <div
+          className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10 [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-placeholder"
+        >
           <div className="mx-auto flex max-w-[420px] flex-col items-center justify-center text-center">
             <Terminal className="h-10 w-10 text-muted-foreground/60 mb-4" />
             <h3 className="text-lg font-semibold">No query results yet</h3>
@@ -500,7 +576,10 @@ function QueryPageInner() {
           results region is empty between the click and the table paint,
           and the only loading hint is the button's spinner. */}
       {queryMutation.isPending && !queryMutation.data && (
-        <div className="space-y-3 min-h-[380px]">
+        <div
+          className="space-y-3 min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-loading"
+        >
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Database className="h-3 w-3 animate-spin" />
             <span>Running query…</span>
@@ -513,7 +592,10 @@ function QueryPageInner() {
       )}
 
       {queryMutation.data && (
-        <div className="relative min-h-[380px]">
+        <div
+          className="relative min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+          data-testid="query-results-container"
+        >
           {/* Re-run overlay: keeps the prior data visible (preserves scroll
               + sort context) while indicating that fresh results are on
               the way. Pointer-events-none so the user can still scroll. */}
