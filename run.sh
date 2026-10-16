@@ -20,6 +20,9 @@ if [ -f ".env" ]; then
     set +a
 fi
 
+# Strict mode starts after .env so a sloppy .env line can't abort startup.
+set -euo pipefail
+
 DEV_MODE=false
 NO_RELOAD=false
 KILL_EXISTING=false
