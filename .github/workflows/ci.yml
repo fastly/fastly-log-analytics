@@ -67,13 +67,8 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
-      - name: Type check (mypy, filtered through mypy-baseline)
-        # Pre-existing errors accepted via mypy-baseline.txt; the filter
-        # exits non-zero only on NET-NEW errors. Refresh the baseline after
-        # a burndown PR with
-        #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
-        # and commit mypy-baseline.txt.
-        run: uv run mypy backend/ 2>&1 | uv run mypy-baseline filter
+      - name: Type check (mypy)
+        run: uv run mypy backend/
 
       - name: Architectural contracts (import-linter, R-9)
         # Enforces:

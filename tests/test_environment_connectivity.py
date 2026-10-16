@@ -1,6 +1,6 @@
 """Integration test verifying all 3 active environments are listening, healthy, and isolated.
 
-Enforces that every deployment topology in Current_Project_State_and_Current_Goals.md:
+Enforces that every deployment topology in the local deployment notes:
 1. Is operational and reachable via its assigned port forward.
 2. Returns HTTP 200 on /api/health with version 3.0.0-beta3.
 3. Resolves its exact designated Fastly service ID.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Multi-environment connectivity, health, and tenancy verification tool.
 
-Codified against Current_Project_State_and_Current_Goals.md:
+Codified against the deployment topology notes in local-docs/:
 1. Validates that all 3 target environments are listening on their designated ports.
 2. Asserts HTTP 200 health responses within latency budget (< 50ms).
 3. Asserts each environment resolves its authoritative Fastly service configuration.

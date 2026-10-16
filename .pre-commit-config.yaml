@@ -10,22 +10,16 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # mypy runs via the project's own uv env (matches what CI runs) and is
-  # piped through mypy-baseline so pre-existing errors stay accepted and
-  # only NET-NEW errors fail the commit. The baseline lives in
-  # mypy-baseline.txt at the repo root; refresh it after a burndown PR with
-  #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
-  # and commit the updated file.
+  # mypy runs via the project's own uv env (matches what CI runs).
   - repo: local
     hooks:
       - id: mypy
-        name: mypy (full backend/, filtered through mypy-baseline)
+        name: mypy (full backend/)
         language: system
         # Always check the whole backend/ tree, not just changed files —
-        # per-file mypy only visits a partial import graph, which makes
-        # mypy-baseline report unrelated baseline entries as "fixed" and
-        # exit non-zero. Cost: ~10s per commit; benefit: matches CI exactly.
-        entry: bash -c 'uv run mypy backend/ 2>&1 | uv run mypy-baseline filter'
+        # per-file mypy only visits a partial import graph.
+        # Cost: ~10s per commit; benefit: matches CI exactly.
+        entry: uv run mypy backend/
         files: '^backend/.*\.py$'
         pass_filenames: false
 

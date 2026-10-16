@@ -136,3 +136,9 @@ compute/scorer/pkg/*
 configs-hs/
 /scripts/dev/deploy_test_all.sh
 /reports/
+
+# Per-developer agent tooling (untracked; see AGENTS.md / CLAUDE.md for shared instructions)
+/.mcp.json
+/.ignore
+/.github/copilot-instructions.md
+/Current_Project_State_and_Current_Goals.md

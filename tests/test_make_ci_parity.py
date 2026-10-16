@@ -33,8 +33,6 @@ CI_YML = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
 #     no-op on CI's dedicated runner, and `-n auto` worker density is identical.
 #   - `make scorer-test` uses `--manifest-path compute/scorer/Cargo.toml` while
 #     the Scorer CI job sets working-directory and runs a bare `cargo test`.
-#   - `make typecheck` is a plain `uv run mypy backend/`; the CI step pipes
-#     through `mypy-baseline filter` to gate only on net-new errors.
 # These gates are therefore excluded from the byte-for-byte parity list below.
 
 
