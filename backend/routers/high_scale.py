@@ -240,6 +240,367 @@ def cancel_export(
     return _export_response(service_id, job, cancelled=cancelled)
 
 
+def _normalize_ts_iso(val: object) -> str:
+    if isinstance(val, datetime):
+        from backend.utils.date_utils import iso_z
+
+        return iso_z(val)
+    if val is None:
+        return ""
+    s = str(val)
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    return s
+
+
+def _emulate_standard_request_facts(
+    ctx: RequestContext,
+    req: HighScaleRequestFactRequest,
+    *,
+    start: datetime,
+    end: datetime,
+) -> HighScaleRequestFactResponse:
+    import os
+    import uuid
+    from datetime import UTC
+
+    from backend.core.iceberg import execute_with_stale_view_retry
+    from backend.high_scale.pagination import KeysetCursor
+    from backend.utils.telemetry import track_query
+
+    secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET", "").strip() or "standard-emulation-cursor-secret").encode("utf-8")
+    decoded = KeysetCursor.decode(req.cursor, secret) if req.cursor else None
+    if decoded and (decoded.service_id != ctx.service_id or decoded.domain != "request"):
+        raise ValueError("cursor does not belong to this service and domain")
+
+    table = "logs"
+
+    def _run_emulation(con):
+        try:
+            with track_query(con, f"DESCRIBE {table}", [], "high_scale.describe_emulation") as desc_cur:
+                col_names = {str(r[0]) for r in desc_cur.fetchall()}
+        except Exception:
+            col_names = set()
+
+        if "timestamp" not in col_names:
+            return [], None, None
+
+        country_col = (
+            "country" if "country" in col_names else ("geo_country_code" if "geo_country_code" in col_names else None)
+        )
+
+        select_exprs = [
+            "timestamp",
+            f"{country_col} AS country" if country_col else "'' AS country",
+            "client_ip" if "client_ip" in col_names else "'' AS client_ip",
+            "url" if "url" in col_names else "'' AS url",
+            "CAST(status AS VARCHAR) AS status" if "status" in col_names else "'' AS status",
+            "pop" if "pop" in col_names else "'' AS pop",
+            "host" if "host" in col_names else "'' AS host",
+        ]
+        where_parts = ["timestamp >= ?", "timestamp <= ?"]
+        params: list[object] = [start, end]
+
+        if decoded is not None:
+            where_parts.append("timestamp > ?")
+            params.append(decoded.timestamp)
+
+        if req.country is not None and str(req.country).strip():
+            if country_col:
+                where_parts.append(f"{country_col} = ?")
+                params.append(str(req.country).strip())
+            else:
+                return [], None, None
+
+        if req.status is not None and str(req.status).strip():
+            if "status" in col_names:
+                where_parts.append("CAST(status AS VARCHAR) = ?")
+                params.append(str(req.status).strip())
+            else:
+                return [], None, None
+
+        if req.pop is not None and str(req.pop).strip():
+            if "pop" in col_names:
+                where_parts.append("pop = ?")
+                params.append(str(req.pop).strip())
+            else:
+                return [], None, None
+
+        if req.domain is not None and str(req.domain).strip():
+            dom_val = str(req.domain).strip()
+            if "host" in col_names and "url" in col_names:
+                where_parts.append("(host = ? OR url ILIKE ?)")
+                params.extend([dom_val, f"%{dom_val}%"])
+            elif "host" in col_names:
+                where_parts.append("host = ?")
+                params.append(dom_val)
+            elif "url" in col_names:
+                where_parts.append("url ILIKE ?")
+                params.append(f"%{dom_val}%")
+            else:
+                return [], None, None
+
+        if req.batch_id is not None and str(req.batch_id).strip():
+            b_val = str(req.batch_id).strip()
+            if b_val != "duckdb-emulation":
+                return [], None, None
+
+        limit_plus_one = int(req.limit) + 1
+        sql = (
+            f"SELECT {', '.join(select_exprs)} "
+            f"FROM {table} "
+            f"WHERE {' AND '.join(where_parts)} "
+            f"ORDER BY timestamp ASC "
+            f"LIMIT {limit_plus_one}"
+        )
+        with track_query(con, sql, params, "high_scale.request_facts_emulation") as cur:
+            fetched = cur.fetchall()
+
+        ext_sql = f"SELECT MIN(timestamp), MAX(timestamp) FROM {table}"
+        with track_query(con, ext_sql, [], "high_scale.request_facts_extents") as ext_cur:
+            ext_row = ext_cur.fetchone()
+        cov_start = ext_row[0] if ext_row else None
+        cov_end = ext_row[1] if ext_row else None
+        return fetched, cov_start, cov_end
+
+    raw_rows, cov_start, cov_end = execute_with_stale_view_retry(ctx.con, ctx.source, _run_emulation)
+
+    page_tuples = raw_rows[: req.limit]
+    rows: list[dict[str, object]] = []
+    mask = mask_ips_for(ctx.analyst_session)
+
+    for idx, tup in enumerate(page_tuples):
+        ts_val, country_val, ip_val, url_val, status_val, pop_val, host_val = tup
+        ts_iso = _normalize_ts_iso(ts_val)
+        ev_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{ctx.service_id}|{ts_iso}|{idx}|{url_val or ''}"))
+        ip_str = str(ip_val or "")
+        if mask and ip_str:
+            ip_str = mask_ip(ip_str)
+        status_str = str(status_val or "")
+        status_out: int | str = int(status_str) if status_str.isdigit() else status_str
+        pop_str = str(pop_val or "")
+        host_str = str(host_val or "")
+        rows.append(
+            {
+                "event_id": ev_id,
+                "timestamp": ts_iso,
+                "service_id": ctx.service_id,
+                "source_object_key": "ducklake://local",
+                "source_object_version": "v1",
+                "line_ordinal": idx,
+                "batch_id": "duckdb-emulation",
+                "country": str(country_val or ""),
+                "client_ip": ip_str,
+                "url": str(url_val or ""),
+                "status": status_out,
+                "pop": pop_str,
+                "host": host_str,
+                "custom_fields": {
+                    "status": status_str,
+                    "pop": pop_str,
+                    "host": host_str,
+                },
+                "cmcd": {},
+            }
+        )
+
+    next_cursor: str | None = None
+    if len(raw_rows) > req.limit and rows:
+        last_row = rows[-1]
+        last_ts = parse_iso_utc(str(last_row["timestamp"])) or end
+        next_cursor = KeysetCursor(last_ts, str(last_row["event_id"]), ctx.service_id, "request").encode(secret)
+
+    cov_start_dt = parse_iso_utc(_normalize_ts_iso(cov_start)) if cov_start is not None else start
+    cov_end_dt = parse_iso_utc(_normalize_ts_iso(cov_end)) if cov_end is not None else end
+    now_utc = datetime.now(UTC)
+    lag = max(0.0, (now_utc - cov_end_dt).total_seconds()) if cov_end_dt else 0.0
+    last_ev = str(rows[-1]["event_id"]) if rows else None
+
+    return HighScaleRequestFactResponse.with_telemetry(
+        rows=rows,
+        next_cursor=next_cursor,
+        metadata=QueryResponseMetadataResponse(
+            status="complete",
+            exact=True,
+            coverage=1.0,
+            freshness_lag_seconds=round(lag, 2),
+            watermark=ServingWatermarkResponse(
+                service_id=ctx.service_id,
+                domain="request",
+                owner_epoch=1,
+                coverage_start=cov_start_dt,
+                coverage_end=cov_end_dt,
+                last_accepted_cursor=next_cursor,
+                last_archived_event_id=last_ev,
+                last_visible_event_id=last_ev,
+                exact=True,
+            ),
+            approximation_error=None,
+            error=None,
+            mode="duckdb_emulation",
+        ),
+    )
+
+
+def _execute_request_facts_query(
+    ctx: RequestContext,
+    req: HighScaleRequestFactRequest,
+    registry: HighScaleServiceRegistryProtocol,
+    *,
+    allow_standard_emulation: bool,
+    default_window_if_missing: bool,
+) -> HighScaleRequestFactResponse:
+    from datetime import UTC, timedelta
+
+    from backend.utils.date_utils import iso_z
+
+    req_start = req.start_time
+    req_end = req.end_time
+    if default_window_if_missing and (not req_start or not req_end):
+        now_dt = datetime.now(UTC)
+        if not req_end:
+            req_end = iso_z(now_dt)
+        if not req_start:
+            req_start = iso_z(now_dt - timedelta(hours=24))
+
+    start_raw, end_raw = ctx.clamp(req_start, req_end)
+    start = parse_iso_utc(start_raw)
+    end = parse_iso_utc(end_raw)
+    if start is None or end is None:
+        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
+
+    service = registry.resolve(ctx.service_id)
+    if service is None:
+        if allow_standard_emulation or req.emulate_standard:
+            return _emulate_standard_request_facts(ctx, req, start=start, end=end)
+        raise HTTPException(
+            status_code=404,
+            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
+        )
+    if service.service_id != ctx.service_id:
+        raise HTTPException(
+            status_code=409,
+            detail=make_error(
+                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
+            ),
+        )
+
+    page = query_request_facts(
+        service.client,
+        service_id=ctx.service_id,
+        start=start,
+        end=end,
+        cursor_secret=service.cursor_secret,
+        watermark=service.watermark(),
+        limit=req.limit,
+        cursor=req.cursor,
+        status=req.status,
+        domain_filter=req.domain,
+        pop=req.pop,
+        country=req.country,
+        batch_id=req.batch_id,
+    )
+    rows = [dict(row) for row in page.rows]
+    for row in rows:
+        cf = row.get("custom_fields")
+        if isinstance(cf, dict):
+            for k in ("status", "pop", "host"):
+                if k not in row and cf.get(k) is not None:
+                    row[k] = cf[k]
+    if mask_ips_for(ctx.analyst_session):
+        for row in rows:
+            value = row.get("client_ip")
+            if isinstance(value, str):
+                row["client_ip"] = mask_ip(value)
+
+    meta = page.metadata
+    return HighScaleRequestFactResponse.with_telemetry(
+        rows=rows,
+        next_cursor=page.next_cursor,
+        metadata=QueryResponseMetadataResponse(
+            status=meta.status,
+            exact=meta.exact,
+            coverage=meta.coverage,
+            freshness_lag_seconds=meta.freshness_lag_seconds,
+            watermark=ServingWatermarkResponse(
+                service_id=meta.watermark.service_id,
+                domain=meta.watermark.domain,
+                owner_epoch=meta.watermark.owner_epoch,
+                coverage_start=meta.watermark.coverage_start,
+                coverage_end=meta.watermark.coverage_end,
+                last_accepted_cursor=meta.watermark.last_accepted_cursor,
+                last_archived_event_id=meta.watermark.last_archived_event_id,
+                last_visible_event_id=meta.watermark.last_visible_event_id,
+                exact=meta.watermark.exact,
+            ),
+            approximation_error=meta.approximation_error,
+            error=meta.error,
+            mode="clickhouse",
+        ),
+    )
+
+
+@router.get(
+    "/request-facts",
+    response_model=HighScaleRequestFactResponse,
+    responses={409: {"model": ErrorEnvelope, "description": "Service binding conflict"}},
+)
+@query_errors()
+def get_request_facts_root(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
+    status: str | None = None,
+    domain: str | None = None,
+    pop: str | None = None,
+    country: str | None = None,
+    batch_id: str | None = None,
+    emulate_standard: bool = True,
+    ctx: RequestContext = Depends(build_request_context),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+):
+    req = HighScaleRequestFactRequest(
+        start_time=start_time,
+        end_time=end_time,
+        limit=max(1, min(500, limit)),
+        cursor=cursor,
+        status=status,
+        domain=domain,
+        pop=pop,
+        country=country,
+        batch_id=batch_id,
+        emulate_standard=emulate_standard,
+    )
+    return _execute_request_facts_query(
+        ctx,
+        req,
+        registry,
+        allow_standard_emulation=emulate_standard,
+        default_window_if_missing=True,
+    )
+
+
+@router.post(
+    "/request-facts",
+    response_model=HighScaleRequestFactResponse,
+    responses={409: {"model": ErrorEnvelope, "description": "Service binding conflict"}},
+)
+@query_errors()
+def post_request_facts_root(
+    req: HighScaleRequestFactRequest,
+    ctx: RequestContext = Depends(build_request_context),
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+):
+    return _execute_request_facts_query(
+        ctx,
+        req,
+        registry,
+        allow_standard_emulation=True,
+        default_window_if_missing=True,
+    )
+
+
 @router.post(
     "/services/{service_id}/request-facts",
     response_model=HighScaleRequestFactResponse,
@@ -254,66 +615,12 @@ def request_facts(
 ):
     if service_id != ctx.service_id:
         raise HTTPException(status_code=403, detail=make_error("service_access_denied", "Service access denied"))
-    service = registry.resolve(ctx.service_id)
-    if service is None:
-        raise HTTPException(
-            status_code=404,
-            detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
-        )
-    if service.service_id != ctx.service_id:
-        raise HTTPException(
-            status_code=409,
-            detail=make_error(
-                "high_scale_service_mismatch", "High-scale service binding does not match the requested service"
-            ),
-        )
-
-    start_raw, end_raw = ctx.clamp(req.start_time, req.end_time)
-    start = parse_iso_utc(start_raw)
-    end = parse_iso_utc(end_raw)
-    if start is None or end is None:
-        raise ValueError("start_time and end_time are required ISO-8601 timestamps")
-
-    page = query_request_facts(
-        service.client,
-        service_id=ctx.service_id,
-        start=start,
-        end=end,
-        cursor_secret=service.cursor_secret,
-        watermark=service.watermark(),
-        limit=req.limit,
-        cursor=req.cursor,
-    )
-    rows = [dict(row) for row in page.rows]
-    if mask_ips_for(ctx.analyst_session):
-        for row in rows:
-            value = row.get("client_ip")
-            if isinstance(value, str):
-                row["client_ip"] = mask_ip(value)
-
-    metadata = page.metadata
-    return HighScaleRequestFactResponse.with_telemetry(
-        rows=rows,
-        next_cursor=page.next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status=metadata.status,
-            exact=metadata.exact,
-            coverage=metadata.coverage,
-            freshness_lag_seconds=metadata.freshness_lag_seconds,
-            watermark=ServingWatermarkResponse(
-                service_id=metadata.watermark.service_id,
-                domain=metadata.watermark.domain,
-                owner_epoch=metadata.watermark.owner_epoch,
-                coverage_start=metadata.watermark.coverage_start,
-                coverage_end=metadata.watermark.coverage_end,
-                last_accepted_cursor=metadata.watermark.last_accepted_cursor,
-                last_archived_event_id=metadata.watermark.last_archived_event_id,
-                last_visible_event_id=metadata.watermark.last_visible_event_id,
-                exact=metadata.watermark.exact,
-            ),
-            approximation_error=metadata.approximation_error,
-            error=metadata.error,
-        ),
+    return _execute_request_facts_query(
+        ctx,
+        req,
+        registry,
+        allow_standard_emulation=req.emulate_standard,
+        default_window_if_missing=False,
     )
 
 

@@ -16,6 +16,12 @@ export interface HighScaleRequestFactsOptions {
   startTime: string | null | undefined
   endTime: string | null | undefined
   pageSize?: number
+  status?: string | number | null
+  domain?: string | null
+  pop?: string | null
+  country?: string | null
+  batchId?: string | null
+  emulateStandard?: boolean
 }
 
 export function useHighScaleRequestFacts({
@@ -23,8 +29,15 @@ export function useHighScaleRequestFacts({
   startTime,
   endTime,
   pageSize = DEFAULT_PAGE_SIZE,
+  status,
+  domain,
+  pop,
+  country,
+  batchId,
+  emulateStandard,
 }: HighScaleRequestFactsOptions) {
-  const rangeKey = `${serviceId ?? ''}|${startTime ?? ''}|${endTime ?? ''}|${pageSize}`
+  const filterKey = `${status ?? ''}|${domain ?? ''}|${pop ?? ''}|${country ?? ''}|${batchId ?? ''}|${emulateStandard ?? ''}`
+  const rangeKey = `${serviceId ?? ''}|${startTime ?? ''}|${endTime ?? ''}|${pageSize}|${filterKey}`
   const [pagination, setPagination] = useState<{
     key: string
     pageIndex: number
@@ -36,8 +49,12 @@ export function useHighScaleRequestFacts({
   const { pageIndex, cursors } = activePagination
   const cursor = cursors[pageIndex] ?? null
 
+  const queryKey = filterKey === '|||||'
+    ? ['high-scale', 'request-facts', serviceId, startTime, endTime, pageSize, cursor]
+    : ['high-scale', 'request-facts', serviceId, startTime, endTime, pageSize, cursor, filterKey]
+
   const query = useQuery<RequestFactsResponse, Error>({
-    queryKey: ['high-scale', 'request-facts', serviceId, startTime, endTime, pageSize, cursor],
+    queryKey,
     enabled: Boolean(serviceId && startTime && endTime),
     queryFn: async ({ signal }) => {
       if (!serviceId || !startTime || !endTime) {
@@ -49,6 +66,22 @@ export function useHighScaleRequestFacts({
         end_time: endTime,
         limit: pageSize,
         cursor,
+        emulate_standard: Boolean(emulateStandard),
+      }
+      if (status !== undefined && status !== null && String(status).trim() !== '') {
+        body.status = status
+      }
+      if (domain !== undefined && domain !== null && domain.trim() !== '') {
+        body.domain = domain.trim()
+      }
+      if (pop !== undefined && pop !== null && pop.trim() !== '') {
+        body.pop = pop.trim()
+      }
+      if (country !== undefined && country !== null && country.trim() !== '') {
+        body.country = country.trim()
+      }
+      if (batchId !== undefined && batchId !== null && batchId.trim() !== '') {
+        body.batch_id = batchId.trim()
       }
       const { data, error } = await client.POST(REQUEST_FACTS_PATH, {
         params: {

@@ -70,7 +70,7 @@ docs/pages/
 | `/alerts` | [Alerts](alerts.md) | Alert rules list, status history, notification channels | **Live-certified** |
 | `/logs` | [Raw Logs](logs.md) | High-throughput paginated log viewer, column toggle, drill-down | **Live-certified** |
 | `/assets-shield` | [Assets & Shield](assets-shield.md) | Origin shielding efficiency, PoP topology, asset types | **Live-certified** |
-| `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer (High-Scale only) | **Scaffolded (Pending AI Verification)** |
+| `/high-scale/request-facts` | [High-Scale Facts](high-scale-request-facts.md) | ClickHouse raw facts table explorer & Standard-mode DuckDB emulation | **Live-certified** |
 | `/share-login` | [Analyst Share Login](share-login.md) | Passcode & SSO authentication, TOS acceptance gate | **Scaffolded (Pending AI Verification)** |
 | `/admin` | [Admin Overview](admin/overview.md) | Sync status, compaction, storage usage, services CRUD | **Scaffolded (Pending AI Verification)** |
 | `/admin/queries` | [Live Query Monitor](admin/queries.md) | Running & recent SQLite/DuckDB queries, durations, locks | **Scaffolded (Pending AI Verification)** |

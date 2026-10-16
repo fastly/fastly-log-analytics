@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -9,6 +10,7 @@ from typing import Any, Protocol
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.pagination import MAX_PAGE_SIZE, KeysetCursor
 from backend.high_scale.query_contracts import QueryResponseMetadata
+from backend.utils.telemetry import _QUERIES, _RECORDING_TELEMETRY, get_page_load_id, get_queries
 
 
 class QueryClient(Protocol):
@@ -45,6 +47,11 @@ def query_request_facts(
     limit: int = MAX_PAGE_SIZE,
     cursor: str | None = None,
     now: datetime | None = None,
+    status: str | int | None = None,
+    domain_filter: str | None = None,
+    pop: str | None = None,
+    country: str | None = None,
+    batch_id: str | None = None,
 ) -> RequestFactPage:
     if not service_id:
         raise ValueError("service_id is required")
@@ -73,6 +80,11 @@ def query_request_facts(
         limit=limit,
         cursor=cursor,
         now=now,
+        status=status,
+        domain_filter=domain_filter,
+        pop=pop,
+        country=country,
+        batch_id=batch_id,
     )
 
 
@@ -138,6 +150,30 @@ def query_cmcd_facts(
     )
 
 
+def _record_clickhouse_telemetry(service_id: str, sql: str, elapsed_ms: float) -> None:
+    queries = get_queries()
+    queries.append({"sql": sql.strip(), "time_ms": elapsed_ms, "engine": "ClickHouse"})
+    _QUERIES.set(queries)
+    plid = get_page_load_id()
+    if plid and not _RECORDING_TELEMETRY.get():
+        token = _RECORDING_TELEMETRY.set(True)
+        try:
+            from backend.core.metadata import usage_log
+
+            usage_log.log_telemetry_query(
+                service_id=service_id,
+                page_load_id=plid,
+                request_id="unknown",
+                engine="clickhouse",
+                sql=sql.strip(),
+                duration_ms=elapsed_ms,
+            )
+        except Exception:
+            pass
+        finally:
+            _RECORDING_TELEMETRY.reset(token)
+
+
 def _query_facts(
     client: QueryClient,
     *,
@@ -153,6 +189,11 @@ def _query_facts(
     cursor: str | None,
     now: datetime | None,
     event_column: str = "event_id",
+    status: str | int | None = None,
+    domain_filter: str | None = None,
+    pop: str | None = None,
+    country: str | None = None,
+    batch_id: str | None = None,
 ) -> RequestFactPage:
     if not service_id:
         raise ValueError("service_id is required")
@@ -177,6 +218,27 @@ def _query_facts(
         "end": end_utc,
         "limit": limit + 1,
     }
+    filter_clauses: list[str] = []
+    if country is not None and str(country).strip():
+        params["filter_country"] = str(country).strip()
+        filter_clauses.append(" AND country = {filter_country:String}")
+    if status is not None and str(status).strip():
+        params["filter_status"] = str(status).strip()
+        filter_clauses.append(" AND custom_fields['status'] = {filter_status:String}")
+    if pop is not None and str(pop).strip():
+        params["filter_pop"] = str(pop).strip()
+        filter_clauses.append(" AND custom_fields['pop'] = {filter_pop:String}")
+    if domain_filter is not None and str(domain_filter).strip():
+        dom_val = str(domain_filter).strip()
+        params["filter_domain"] = dom_val
+        params["filter_domain_like"] = f"%{dom_val}%"
+        filter_clauses.append(
+            " AND (custom_fields['host'] = {filter_domain:String} OR url ILIKE {filter_domain_like:String})"
+        )
+    if batch_id is not None and str(batch_id).strip():
+        params["filter_batch_id"] = str(batch_id).strip()
+        filter_clauses.append(" AND toString(batch_id) = {filter_batch_id:String}")
+
     cursor_clause = ""
     if decoded:
         params.update({"cursor_timestamp": decoded.timestamp, "cursor_event_id": decoded.event_id})
@@ -185,7 +247,8 @@ def _query_facts(
             "OR (event_timestamp = {cursor_timestamp:DateTime64(3)} "
             f"AND {event_column} > {{cursor_event_id:UUID}}))"
         )
-    rows = client.execute(
+    extra_filter_sql = "".join(filter_clauses)
+    sql_query = (
         f"SELECT {event_column} AS event_id, event_timestamp AS timestamp, service_id, {columns} "
         f"FROM {table} "
         "WHERE service_id={service_id:String} "
@@ -197,11 +260,18 @@ def _query_facts(
         "WHERE service_id={service_id:String} AND domain={domain:String} "
         "AND publication_state = 'visible'"
         ")"
+        f"{extra_filter_sql}"
         f"{cursor_clause} "
         f"ORDER BY event_timestamp ASC, {event_column} ASC "
-        "LIMIT {limit:UInt32}",
-        params,
+        "LIMIT {limit:UInt32}"
     )
+    before_queries = len(get_queries())
+    t0 = time.perf_counter()
+    rows = client.execute(sql_query, params)
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+    if len(get_queries()) == before_queries:
+        _record_clickhouse_telemetry(service_id, sql_query, elapsed_ms)
+
     page_rows = tuple(rows[:limit])
     next_cursor = None
     if len(rows) > limit:

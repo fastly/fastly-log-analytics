@@ -1,10 +1,15 @@
-import { Skeleton } from '@/components/ui/skeleton'
+import { TableSkeleton } from '@/components/skeletons/PageSkeleton'
 
 export default function Loading() {
   return (
-    <main className="container mx-auto max-w-7xl px-4 py-6">
-      <Skeleton className="mb-6 h-12 w-80" />
-      <Skeleton className="h-80 w-full" />
-    </main>
+    <div
+      data-testid="high-scale-request-facts-route-loading"
+      className="min-h-[720px] [content-visibility:auto] [contain-intrinsic-size:auto_720px]"
+    >
+      <TableSkeleton
+        title="High-scale request facts"
+        description="Explicit opt-in access to the isolated high-scale request-facts API."
+      />
+    </div>
   )
 }

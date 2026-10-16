@@ -16,6 +16,12 @@ class HighScaleRequestFactRequest(BaseModel):
     end_time: str | None = None
     limit: int = Field(default=MAX_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
     cursor: str | None = None
+    status: str | int | None = None
+    domain: str | None = None
+    pop: str | None = None
+    country: str | None = None
+    batch_id: str | None = None
+    emulate_standard: bool = False
 
 
 class ServingWatermarkResponse(BaseModel):
@@ -38,6 +44,7 @@ class QueryResponseMetadataResponse(BaseModel):
     watermark: ServingWatermarkResponse
     approximation_error: float | None
     error: str | None
+    mode: Literal["clickhouse", "duckdb_emulation"] = "clickhouse"
 
 
 class HighScaleRequestFactResponse(BaseResponse):

@@ -206,6 +206,7 @@ _READ_ALLOWLIST: set[tuple[str, str]] = {
     # Live log streaming feed (analyst-safe masked client IPs).
     ("GET", "/api/stream/{service_id}"),
     ("GET", "/api/services/{service_id}/stream"),
+    ("GET", "/api/high-scale/request-facts"),
     ("GET", "/api/high-scale/services/{service_id}/exports/{export_id}"),
     ("GET", "/api/high-scale/services/{service_id}/queries/{job_id}"),
     # ── FLAGGED FOR TRIAGE ───────────────────────────────────────────────
@@ -262,6 +263,7 @@ _WRITE_VERB_GATE_ROUTES: set[tuple[str, str]] = {
     ("POST", "/api/value/summary"),
     ("POST", "/api/web-vitals"),
     ("POST", "/api/ux-events"),
+    ("POST", "/api/high-scale/request-facts"),
     ("POST", "/api/high-scale/services/{service_id}/request-facts"),
     ("POST", "/api/high-scale/services/{service_id}/rum-facts/{domain}"),
     ("POST", "/api/high-scale/services/{service_id}/cmcd-facts"),

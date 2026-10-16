@@ -515,3 +515,167 @@ def _sha256(value: bytes) -> str:
     import hashlib
 
     return hashlib.sha256(value).hexdigest()
+
+
+def test_request_facts_clickhouse_filters_and_telemetry(client, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    service = _service()
+    agg_client = _AggregateQueryClient(
+        [
+            {
+                "event_id": "event-filtered-1",
+                "timestamp": datetime(2026, 9, 11, 20, 1, tzinfo=UTC),
+                "service_id": test_service_source["service_id"],
+                "status": 503,
+                "host": "api.example.com",
+                "pop": "IAD",
+                "country": "US",
+                "client_ip": "203.0.113.42",
+                "url": "/v1/checkout",
+            }
+        ]
+    )
+    object.__setattr__(service, "client", agg_client)
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(service)
+
+    response = client.post(
+        f"/api/high-scale/services/{test_service_source['service_id']}/request-facts",
+        headers={"X-Page-Load-ID": "page-load-hs-test"},
+        json={
+            "start_time": "2026-09-11T20:00:00Z",
+            "end_time": "2026-09-11T21:00:00Z",
+            "status": 503,
+            "domain": "api.example.com",
+            "pop": "IAD",
+            "country": "US",
+            "batch_id": "batch-42",
+            "limit": 10,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["metadata"]["mode"] == "clickhouse"
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["status"] == 503
+    assert agg_client.last_params["filter_status"] == "503"
+    assert agg_client.last_params["filter_domain"] == "api.example.com"
+    assert agg_client.last_params["filter_pop"] == "IAD"
+    assert agg_client.last_params["filter_country"] == "US"
+    assert agg_client.last_params["filter_batch_id"] == "batch-42"
+    assert isinstance(body.get("_debug_queries"), list)
+    assert len(body["_debug_queries"]) >= 1
+
+
+def test_request_facts_standard_mode_duckdb_emulation_and_filters(client, in_memory_duckdb, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    in_memory_duckdb.execute(
+        """
+        CREATE OR REPLACE TABLE logs (
+            timestamp TIMESTAMP WITH TIME ZONE,
+            status INTEGER,
+            method VARCHAR,
+            host VARCHAR,
+            url VARCHAR,
+            pop VARCHAR,
+            geo_country_code VARCHAR,
+            client_ip VARCHAR,
+            cache_status VARCHAR,
+            time_elapsed BIGINT
+        )
+        """
+    )
+    in_memory_duckdb.execute(
+        """
+        INSERT INTO logs VALUES
+        ('2026-09-11T20:01:00Z', 200, 'GET', 'www.example.com', '/home', 'IAD', 'US', '198.51.100.10', 'HIT', 1200),
+        ('2026-09-11T20:02:00Z', 503, 'POST', 'api.example.com', '/pay', 'LHR', 'GB', '198.51.100.25', 'PASS', 45000)
+        """
+    )
+
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry()
+
+    # Service-scoped POST with emulate_standard=True falls back cleanly to DuckDB
+    res_post = client.post(
+        f"/api/high-scale/services/{test_service_source['service_id']}/request-facts",
+        headers={"X-Page-Load-ID": "page-load-emul-test"},
+        json={
+            "start_time": "2026-09-11T20:00:00Z",
+            "end_time": "2026-09-11T21:00:00Z",
+            "status": 503,
+            "domain": "api.example.com",
+            "pop": "LHR",
+            "country": "GB",
+            "emulate_standard": True,
+        },
+    )
+    assert res_post.status_code == 200, res_post.text
+    body = res_post.json()
+    assert body["metadata"]["mode"] == "duckdb_emulation"
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["status"] == 503
+    assert body["rows"][0]["host"] == "api.example.com"
+    assert body["rows"][0]["pop"] == "LHR"
+    assert body["rows"][0]["country"] == "GB"
+    assert body["rows"][0]["client_ip"] == "198.51.100.25"
+    assert isinstance(body.get("_debug_queries"), list)
+    assert len(body["_debug_queries"]) >= 1
+
+    # Direct GET /api/high-scale/request-facts
+    res_get = client.get(
+        "/api/high-scale/request-facts",
+        params={
+            "service_id": test_service_source["service_id"],
+            "start_time": "2026-09-11T20:00:00Z",
+            "end_time": "2026-09-11T21:00:00Z",
+            "status": 200,
+        },
+    )
+    assert res_get.status_code == 200, res_get.text
+    get_body = res_get.json()
+    assert get_body["metadata"]["mode"] == "duckdb_emulation"
+    assert len(get_body["rows"]) == 1
+    assert get_body["rows"][0]["url"] == "/home"
+
+
+def test_request_facts_standard_emulation_masks_analyst_ip(client, in_memory_duckdb, test_service_source):
+    from backend.high_scale.registry import get_high_scale_service_registry
+
+    in_memory_duckdb.execute(
+        """
+        CREATE OR REPLACE TABLE logs (
+            timestamp TIMESTAMP WITH TIME ZONE,
+            status INTEGER,
+            method VARCHAR,
+            host VARCHAR,
+            url VARCHAR,
+            pop VARCHAR,
+            geo_country_code VARCHAR,
+            client_ip VARCHAR
+        )
+        """
+    )
+    in_memory_duckdb.execute(
+        """
+        INSERT INTO logs VALUES
+        ('2026-09-11T20:01:00Z', 200, 'GET', 'www.example.com', '/home', 'IAD', 'US', '198.51.100.77')
+        """
+    )
+
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry()
+    app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, in_memory_duckdb)
+
+    response = client.get(
+        "/api/high-scale/request-facts",
+        params={
+            "service_id": test_service_source["service_id"],
+            "start_time": "2026-09-11T20:00:00Z",
+            "end_time": "2026-09-11T21:00:00Z",
+        },
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["client_ip"] == "198.51.100.xxx"
