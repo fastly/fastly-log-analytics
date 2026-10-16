@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
+import { showToast } from '@/lib/toast'
 import { useServiceStore } from '@/stores/serviceStore'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +14,7 @@ import {
   Activity,
   Trash2,
   Pencil,
+  Send,
 } from 'lucide-react'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import {
@@ -60,6 +62,7 @@ export function AlertsList({
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const queryClient = useQueryClient()
   const [togglingId, setTogglingId] = React.useState<string | null>(null)
+  const [testingId, setTestingId] = React.useState<string | null>(null)
   const { relative, full, abbr } = useDateFormat()
 
   const toggleEnabled = React.useCallback(async (alert: Alert, newEnabled: boolean) => {
@@ -90,6 +93,37 @@ export function AlertsList({
       setTogglingId(null)
     }
   }, [activeServiceId, queryClient])
+
+  const testNotification = React.useCallback(async (alert: Alert) => {
+    if (!alert.id) return
+    setTestingId(alert.id)
+    try {
+      const { data, error } = await client.POST("/api/alerts/{alert_id}/test", {
+        params: { path: { alert_id: alert.id } },
+        body: {
+          service_id: activeServiceId || alert.service_id,
+          channel_type: "webhook",
+          dry_run: true,
+        },
+      })
+      if (error) {
+        showToast(extractApiError(error) || 'Failed to test alert notification', 'error')
+        return
+      }
+      const dispatched = data?.data?.targets_tested ?? 0
+      showToast(
+        dispatched > 0
+          ? `Validated ${dispatched} notification channel${dispatched === 1 ? '' : 's'}`
+          : 'Alert rule validated (no external channels configured)',
+        'success'
+      )
+    } catch (err) {
+      console.error('Failed to test alert notification', err)
+      showToast(extractApiError(err) || 'Failed to test alert notification', 'error')
+    } finally {
+      setTestingId(null)
+    }
+  }, [activeServiceId])
 
   const columns = React.useMemo(() => [
     {
@@ -251,7 +285,11 @@ export function AlertsList({
         // that does nothing.
         if (isAnalyst) {
           return (
-            <Badge variant={info.getValue() ? 'secondary' : 'outline'} className="text-[10px]">
+            <Badge
+              variant={info.getValue() ? 'secondary' : 'outline'}
+              className="text-[10px]"
+              data-testid={`analyst-alert-enabled-${info.row.original.id}`}
+            >
               {info.getValue() ? 'On' : 'Off'}
             </Badge>
           )
@@ -261,6 +299,8 @@ export function AlertsList({
             checked={info.getValue()}
             onCheckedChange={(checked) => toggleEnabled(info.row.original, checked)}
             disabled={isPending}
+            data-testid={`toggle-alert-${info.row.original.id}`}
+            aria-label={`Toggle alert ${info.row.original.name}`}
             className={isPending ? 'opacity-50 cursor-wait' : undefined}
           />
         )
@@ -276,7 +316,20 @@ export function AlertsList({
             <Button
               variant="ghost"
               size="icon"
+              aria-label="Test alert notification"
+              data-testid={`test-alert-${info.row.original.id}`}
+              className="h-8 w-8 text-muted-foreground hover:text-primary"
+              onClick={() => testNotification(info.row.original)}
+              disabled={testingId === info.row.original.id}
+              title="Test alert notification"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               aria-label="Edit alert"
+              data-testid={`edit-alert-${info.row.original.id}`}
               className="h-8 w-8 text-muted-foreground hover:text-primary"
               onClick={() => onEdit(info.row.original)}
               title="Edit alert"
@@ -287,6 +340,7 @@ export function AlertsList({
               variant="ghost"
               size="icon"
               aria-label="Delete alert"
+              data-testid={`delete-alert-${info.row.original.id}`}
               className="h-8 w-8 text-muted-foreground hover:text-destructive"
               onClick={() => onDelete(info.row.original.id)}
               title="Delete alert"
@@ -296,7 +350,7 @@ export function AlertsList({
           </div>
         )
       }])
-  ], [togglingId, relative, full, abbr, toggleEnabled, onEdit, onDelete, isAnalyst])
+  ], [togglingId, testingId, relative, full, abbr, toggleEnabled, testNotification, onEdit, onDelete, isAnalyst, activeServiceId])
 
   return (
     <DataTable

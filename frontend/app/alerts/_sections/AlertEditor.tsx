@@ -188,27 +188,36 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
     setIsSaving(true)
     try {
-      await client.POST("/api/alerts/", {
-        body: {
-          id: initialAlert?.id,
-          service_id: activeServiceId,
-          name,
-          category,
-          metric,
-          evaluation_type: evalType,
-          evaluation_scope: evalScope,
-          operator: evalType === 'anomaly_zscore' ? '>' : operator,
-          threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
-          window_min: parseFloat(windowMin),
-          comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
-          status_codes: parsedCodes,
-          webhook_url: webhookUrl || undefined,
-          channels: channels,
-          zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
-          baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
-          enabled: initialAlert ? initialAlert.enabled : true
-        } as any
-      })
+      const payload = {
+        id: initialAlert?.id,
+        service_id: activeServiceId,
+        name,
+        category,
+        metric,
+        evaluation_type: evalType,
+        evaluation_scope: evalScope,
+        operator: evalType === 'anomaly_zscore' ? '>' : operator,
+        threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : parseFloat(threshold),
+        window_min: parseFloat(windowMin),
+        comparison_period_min: (evalType !== 'absolute' && evalType !== 'anomaly_zscore') ? parseFloat(compPeriodMin) : undefined,
+        status_codes: parsedCodes,
+        webhook_url: webhookUrl || undefined,
+        channels: channels,
+        zscore_threshold: evalType === 'anomaly_zscore' ? parseFloat(zscoreThreshold) : undefined,
+        baseline_period_days: evalType === 'anomaly_zscore' ? parseInt(baselinePeriodDays) : undefined,
+        enabled: initialAlert ? initialAlert.enabled : true
+      } as any
+
+      if (initialAlert?.id) {
+        await client.PUT("/api/alerts/{alert_id}", {
+          params: { path: { alert_id: initialAlert.id } },
+          body: payload,
+        })
+      } else {
+        await client.POST("/api/alerts/", {
+          body: payload,
+        })
+      }
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       onSuccess()
     } catch (error) {

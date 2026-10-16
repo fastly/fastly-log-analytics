@@ -680,6 +680,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate Alerts Endpoint
+         * @description Evaluate enabled alert rules on demand for the active service (Admin only).
+         */
+        post: operations["evaluate_alerts_endpoint_api_alerts_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/preview": {
         parameters: {
             query?: never;
@@ -692,6 +712,24 @@ export interface paths {
         /** Preview Alert */
         post: operations["preview_alert_api_alerts_preview_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Alert */
+        put: operations["update_alert_api_alerts__alert_id__put"];
+        post?: never;
+        /** Delete Alert */
+        delete: operations["delete_alert_api_alerts__alert_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -714,7 +752,7 @@ export interface paths {
         patch: operations["toggle_alert_enabled_api_alerts__alert_id__enabled_patch"];
         trace?: never;
     };
-    "/api/alerts/{alert_id}": {
+    "/api/alerts/{alert_id}/test": {
         parameters: {
             query?: never;
             header?: never;
@@ -723,9 +761,26 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post?: never;
-        /** Delete Alert */
-        delete: operations["delete_alert_api_alerts__alert_id__delete"];
+        /** Test Alert Webhook */
+        post: operations["test_alert_webhook_api_alerts__alert_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{service_id}/{alert_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Alert Webhook By Service */
+        post: operations["test_alert_webhook_by_service_api_alerts__service_id___alert_id__test_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -6545,6 +6600,64 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** AlertEvaluateData */
+        AlertEvaluateData: {
+            /** Service Id */
+            service_id: string;
+            /** Evaluated */
+            evaluated: number;
+            /** Triggered */
+            triggered: number;
+            /** Results */
+            results: components["schemas"]["AlertEvaluateResultItem"][];
+            /** Evaluated At */
+            evaluated_at: string;
+        };
+        /** AlertEvaluateRequest */
+        AlertEvaluateRequest: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Alert Id */
+            alert_id?: string | null;
+        };
+        /** AlertEvaluateResponse */
+        AlertEvaluateResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            data: components["schemas"]["AlertEvaluateData"];
+        };
+        /** AlertEvaluateResultItem */
+        AlertEvaluateResultItem: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Metric */
+            metric: string;
+            /** Triggered */
+            triggered: boolean;
+            /** Last Triggered At */
+            last_triggered_at?: string | null;
+        };
         /** AlertListResponse */
         AlertListResponse: {
             /** Debug Queries */
@@ -6573,6 +6686,35 @@ export interface components {
             /** Evaluated At */
             evaluated_at: string;
         };
+        /** AlertMutationData */
+        AlertMutationData: {
+            /** Id */
+            id: string;
+            /**
+             * Status
+             * @default success
+             */
+            status: string;
+            /** Service Id */
+            service_id?: string | null;
+        };
+        /** AlertPreviewData */
+        AlertPreviewData: {
+            /** Times */
+            times: string[];
+            /** Values */
+            values: number[];
+            /**
+             * Type
+             * @default absolute
+             * @enum {string}
+             */
+            type: "absolute" | "relative" | "anomaly_zscore";
+            /** Hist Values */
+            hist_values?: number[] | null;
+            /** Threshold Values */
+            threshold_values?: number[] | null;
+        };
         /** AlertPreviewResponse */
         AlertPreviewResponse: {
             /** Debug Queries */
@@ -6597,7 +6739,7 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Data */
-            data?: {
+            data?: components["schemas"]["AlertPreviewData"] | {
                 [key: string]: unknown;
             } | null;
             /** Error */
@@ -6627,9 +6769,73 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /** Data */
-            data: {
+            data: components["schemas"]["AlertMutationData"] | {
                 [key: string]: unknown;
             };
+        };
+        /** AlertTestWebhookData */
+        AlertTestWebhookData: {
+            /** Alert Id */
+            alert_id: string;
+            /** Service Id */
+            service_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "sent" | "validated" | "failed";
+            /** Targets Tested */
+            targets_tested: number;
+            /**
+             * Channel Type
+             * @default webhook
+             */
+            channel_type: string;
+            /** Detail */
+            detail?: string | null;
+        };
+        /** AlertTestWebhookRequest */
+        AlertTestWebhookRequest: {
+            /** Service Id */
+            service_id?: string | null;
+            /** Webhook Url */
+            webhook_url?: string | null;
+            /**
+             * Channel Type
+             * @default webhook
+             * @enum {string}
+             */
+            channel_type: "webhook" | "slack" | "pagerduty";
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /** AlertTestWebhookResponse */
+        AlertTestWebhookResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            /** Section Timings */
+            _section_timings?: {
+                [key: string]: unknown;
+            }[];
+            data: components["schemas"]["AlertTestWebhookData"];
         };
         /** AnalystInvite */
         AnalystInvite: {
@@ -19911,6 +20117,8 @@ export interface operations {
             query?: {
                 /** @description Max alerts to return; oldest dropped. */
                 limit?: number;
+                /** @description Optional filter by alert state: all, alerting, ok, or muted. */
+                status?: ("all" | "alerting" | "ok" | "muted") | null;
             };
             header?: never;
             path?: never;
@@ -20120,6 +20328,8 @@ export interface operations {
             query?: {
                 /** @description Max alerts to return. */
                 limit?: number;
+                /** @description Optional filter by alert state: all, alerting, ok, or muted. */
+                status?: ("all" | "alerting" | "ok" | "muted") | null;
             };
             header?: never;
             path: {
@@ -20136,6 +20346,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AlertListResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    evaluate_alerts_endpoint_api_alerts_evaluate_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertEvaluateRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertEvaluateResponse"];
                 };
             };
             /** @description Bad request */
@@ -20333,7 +20654,7 @@ export interface operations {
             };
         };
     };
-    toggle_alert_enabled_api_alerts__alert_id__enabled_patch: {
+    update_alert_api_alerts__alert_id__put: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -20350,7 +20671,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["_ToggleBody"];
+                "application/json": components["schemas"]["Alert"];
             };
         };
         responses: {
@@ -20469,6 +20790,340 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    toggle_alert_enabled_api_alerts__alert_id__enabled_patch: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_ToggleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_alert_webhook_api_alerts__alert_id__test_post: {
+        parameters: {
+            query?: {
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertTestWebhookRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTestWebhookResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    test_alert_webhook_by_service_api_alerts__service_id___alert_id__test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AlertTestWebhookRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertTestWebhookResponse"];
+                };
             };
             /** @description Bad request */
             400: {

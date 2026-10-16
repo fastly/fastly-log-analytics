@@ -867,3 +867,257 @@ def test_delete_view_analyst_not_authorized_returns_403(client):
         assert response.json()["detail"]["error"] == "service_not_authorized"
     finally:
         del app.dependency_overrides[get_service_id]
+
+
+# ---------------------------------------------------------------------------
+# Alerts: PUT /api/alerts/{alert_id}
+# ---------------------------------------------------------------------------
+
+
+def test_update_alert_persists_changes(client):
+    alert_id = _seed_alert(client)
+
+    updated_body = {
+        **_ALERT_BODY,
+        "name": "Updated 5xx Rate Rule",
+        "threshold": 12.5,
+        "window_min": 15.0,
+        "channels": [{"type": "slack", "url": "https://hooks.slack.com/services/T00/B00/X00"}],
+    }
+    response = client.put(
+        f"/api/alerts/{alert_id}",
+        json=updated_body,
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "success"
+    assert data["id"] == alert_id
+
+    row = _alert_row(alert_id)
+    assert row is not None
+    assert row["name"] == "Updated 5xx Rate Rule"
+    assert row["threshold"] == pytest.approx(12.5)
+
+
+# ---------------------------------------------------------------------------
+# Alerts: Status Filtering (?status=all|alerting|ok|muted)
+# ---------------------------------------------------------------------------
+
+
+def test_list_alerts_status_filtering(client):
+    # 1. Healthy enabled alert (never triggered -> 'ok')
+    r1 = client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "name": "Healthy Rule", "enabled": True},
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert r1.status_code == 201
+
+    # 2. Muted alert (enabled=False -> 'muted')
+    r2 = client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "name": "Muted Rule", "enabled": False},
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert r2.status_code == 201
+
+    # 3. Alerting rule (recently triggered within 2x window -> 'alerting')
+    now_iso = datetime.now(UTC).isoformat()
+    r3 = client.post(
+        "/api/alerts/",
+        json={
+            **_ALERT_BODY,
+            "name": "Firing Rule",
+            "enabled": True,
+            "window_min": 5.0,
+        },
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert r3.status_code == 201
+    metadata_db.update_alert_last_triggered(_SERVICE_ID, r3.json()["data"]["id"], now_iso)
+
+    resp_all = client.get(f"/api/alerts/{_SERVICE_ID}?status=all")
+    assert resp_all.status_code == 200
+    assert {a["name"] for a in resp_all.json()["data"]} == {"Healthy Rule", "Muted Rule", "Firing Rule"}
+
+    resp_alerting = client.get(f"/api/alerts/{_SERVICE_ID}?status=alerting")
+    assert resp_alerting.status_code == 200
+    assert [a["name"] for a in resp_alerting.json()["data"]] == ["Firing Rule"]
+
+    resp_ok = client.get(f"/api/alerts/{_SERVICE_ID}?status=ok")
+    assert resp_ok.status_code == 200
+    assert [a["name"] for a in resp_ok.json()["data"]] == ["Healthy Rule"]
+
+    resp_muted = client.get(f"/api/alerts/{_SERVICE_ID}?status=muted")
+    assert resp_muted.status_code == 200
+    assert [a["name"] for a in resp_muted.json()["data"]] == ["Muted Rule"]
+
+
+# ---------------------------------------------------------------------------
+# Alerts: POST /api/alerts/evaluate
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_alerts_endpoint(client, in_memory_duckdb):
+    _seed_preview_table(in_memory_duckdb, row_count=10)
+    # Create an enabled rule on 5xx > 1.0 (seeded table has 5 rows with status=500)
+    create_resp = client.post(
+        "/api/alerts/",
+        json={
+            **_ALERT_BODY,
+            "name": "Immediate 5xx Check",
+            "metric": "5xx",
+            "operator": ">",
+            "threshold": 1.0,
+            "window_min": 5.0,
+            "enabled": True,
+        },
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert create_resp.status_code == 201
+
+    with patch(
+        "backend.core.duckdb.get_source_for_service",
+        return_value={"name": "test_service", "service_id": _SERVICE_ID},
+    ):
+        eval_resp = client.post(
+            "/api/alerts/evaluate",
+            json={"service_id": _SERVICE_ID},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+
+    assert eval_resp.status_code == 200
+    payload = eval_resp.json()["data"]
+    assert payload["service_id"] == _SERVICE_ID
+    assert payload["evaluated"] >= 1
+    assert payload["triggered"] >= 1
+    assert any(r["name"] == "Immediate 5xx Check" and r["triggered"] is True for r in payload["results"])
+
+
+# ---------------------------------------------------------------------------
+# Alerts: Webhook SSRF Validation & POST /api/alerts/{alert_id}/test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "http://127.0.0.1:8080/hook",
+        "http://localhost/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/internal",
+        "http://192.168.1.1/hook",
+        "ftp://hooks.slack.com/services/T00/B00/X00",
+    ],
+)
+def test_create_alert_rejects_ssrf_webhook_urls(client, unsafe_url):
+    resp = client.post(
+        "/api/alerts/",
+        json={**_ALERT_BODY, "webhook_url": unsafe_url},
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "invalid_webhook_url"
+
+
+def test_test_alert_webhook_dry_run_and_dispatch(client):
+    resp = client.post(
+        "/api/alerts/",
+        json={
+            **_ALERT_BODY,
+            "name": "Webhook Rule",
+            "channels": [{"type": "slack", "url": "https://hooks.slack.com/services/T00/B00/X00"}],
+        },
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert resp.status_code == 201
+    alert_id = resp.json()["data"]["id"]
+
+    # Dry run validates URLs without external network call
+    dry_resp = client.post(
+        f"/api/alerts/{alert_id}/test",
+        json={"service_id": _SERVICE_ID, "dry_run": True},
+        headers={"x-fastly-service-id": _SERVICE_ID},
+    )
+    assert dry_resp.status_code == 200
+    dry_data = dry_resp.json()["data"]
+    assert dry_data["alert_id"] == alert_id
+    assert dry_data["status"] == "validated"
+    assert dry_data["targets_tested"] == 1
+    assert dry_data["channel_type"] == "slack"
+
+    # Service-scoped alias with mocked _post_slack_notification
+    with patch("backend.cron.jobs.metadata._post_slack_notification") as mock_post:
+        live_resp = client.post(
+            f"/api/alerts/{_SERVICE_ID}/{alert_id}/test",
+            json={"dry_run": False},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+    assert live_resp.status_code == 200
+    assert live_resp.json()["data"]["status"] == "sent"
+    assert live_resp.json()["data"]["targets_tested"] == 1
+    assert mock_post.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Alerts: Analyst Path B 403 admin_only Enforcement on In-Scope Mutations
+# ---------------------------------------------------------------------------
+
+
+def test_analyst_in_scope_mutations_return_403_admin_only(client):
+    alert_id = _seed_alert(client)
+
+    with patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}):
+        # POST /api/alerts/
+        r_create = client.post(
+            "/api/alerts/",
+            json=_ALERT_BODY,
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_create.status_code == 403
+        assert r_create.json()["detail"]["error"] == "admin_only"
+
+        # PUT /api/alerts/{alert_id}
+        r_update = client.put(
+            f"/api/alerts/{alert_id}",
+            json=_ALERT_BODY,
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_update.status_code == 403
+        assert r_update.json()["detail"]["error"] == "admin_only"
+
+        # PATCH /api/alerts/{alert_id}/enabled
+        r_toggle = client.patch(
+            f"/api/alerts/{alert_id}/enabled",
+            json={"enabled": False},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_toggle.status_code == 403
+        assert r_toggle.json()["detail"]["error"] == "admin_only"
+
+        # DELETE /api/alerts/{alert_id}
+        r_delete = client.delete(
+            f"/api/alerts/{alert_id}",
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_delete.status_code == 403
+        assert r_delete.json()["detail"]["error"] == "admin_only"
+
+        # POST /api/alerts/evaluate
+        r_eval = client.post(
+            "/api/alerts/evaluate",
+            json={"service_id": _SERVICE_ID},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_eval.status_code == 403
+        assert r_eval.json()["detail"]["error"] == "admin_only"
+
+        # POST /api/alerts/{alert_id}/test
+        r_test = client.post(
+            f"/api/alerts/{alert_id}/test",
+            json={"service_id": _SERVICE_ID, "dry_run": True},
+            headers={"x-fastly-service-id": _SERVICE_ID},
+        )
+        assert r_test.status_code == 403
+        assert r_test.json()["detail"]["error"] == "admin_only"

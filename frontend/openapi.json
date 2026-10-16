@@ -6844,6 +6844,30 @@
               "title": "Limit"
             },
             "description": "Max alerts to return; oldest dropped."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "all",
+                    "alerting",
+                    "ok",
+                    "muted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional filter by alert state: all, alerting, ok, or muted.",
+              "title": "Status"
+            },
+            "description": "Optional filter by alert state: all, alerting, ok, or muted."
           }
         ],
         "responses": {
@@ -7101,6 +7125,30 @@
               "title": "Limit"
             },
             "description": "Max alerts to return."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "all",
+                    "alerting",
+                    "ok",
+                    "muted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional filter by alert state: all, alerting, ok, or muted.",
+              "title": "Status"
+            },
+            "description": "Optional filter by alert state: all, alerting, ok, or muted."
           }
         ],
         "responses": {
@@ -7110,6 +7158,201 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AlertListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/evaluate": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Evaluate Alerts Endpoint",
+        "description": "Evaluate enabled alert rules on demand for the active service (Admin only).",
+        "operationId": "evaluate_alerts_endpoint_api_alerts_evaluate_post",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AlertEvaluateRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertEvaluateResponse"
                 }
               }
             }
@@ -7405,6 +7648,379 @@
         }
       }
     },
+    "/api/alerts/{alert_id}": {
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Update Alert",
+        "operationId": "update_alert_api_alerts__alert_id__put",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Alert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Delete Alert",
+        "operationId": "delete_alert_api_alerts__alert_id__delete",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/alerts/{alert_id}/enabled": {
       "patch": {
         "tags": [
@@ -7601,13 +8217,13 @@
         }
       }
     },
-    "/api/alerts/{alert_id}": {
-      "delete": {
+    "/api/alerts/{alert_id}/test": {
+      "post": {
         "tags": [
           "alerts"
         ],
-        "summary": "Delete Alert",
-        "operationId": "delete_alert_api_alerts__alert_id__delete",
+        "summary": "Test Alert Webhook",
+        "operationId": "test_alert_webhook_api_alerts__alert_id__test_post",
         "parameters": [
           {
             "name": "alert_id",
@@ -7683,9 +8299,181 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AlertTestWebhookRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertTestWebhookResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/{service_id}/{alert_id}/test": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Test Alert Webhook By Service",
+        "operationId": "test_alert_webhook_by_service_api_alerts__service_id___alert_id__test_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AlertTestWebhookRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertTestWebhookResponse"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request",
@@ -50901,6 +51689,164 @@
         ],
         "title": "AlertChannel"
       },
+      "AlertEvaluateData": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "evaluated": {
+            "type": "integer",
+            "title": "Evaluated"
+          },
+          "triggered": {
+            "type": "integer",
+            "title": "Triggered"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/AlertEvaluateResultItem"
+            },
+            "type": "array",
+            "title": "Results"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "title": "Evaluated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "evaluated",
+          "triggered",
+          "results",
+          "evaluated_at"
+        ],
+        "title": "AlertEvaluateData"
+      },
+      "AlertEvaluateRequest": {
+        "properties": {
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "alert_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Id"
+          }
+        },
+        "type": "object",
+        "title": "AlertEvaluateRequest"
+      },
+      "AlertEvaluateResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "data": {
+            "$ref": "#/components/schemas/AlertEvaluateData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "AlertEvaluateResponse"
+      },
+      "AlertEvaluateResultItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "metric": {
+            "type": "string",
+            "title": "Metric"
+          },
+          "triggered": {
+            "type": "boolean",
+            "title": "Triggered"
+          },
+          "last_triggered_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Triggered At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "metric",
+          "triggered"
+        ],
+        "title": "AlertEvaluateResultItem"
+      },
       "AlertListResponse": {
         "properties": {
           "_debug_queries": {
@@ -50965,6 +51911,97 @@
         ],
         "title": "AlertListResponse"
       },
+      "AlertMutationData": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "success"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "AlertMutationData"
+      },
+      "AlertPreviewData": {
+        "properties": {
+          "times": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Times"
+          },
+          "values": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Values"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "absolute",
+              "relative",
+              "anomaly_zscore"
+            ],
+            "title": "Type",
+            "default": "absolute"
+          },
+          "hist_values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hist Values"
+          },
+          "threshold_values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold Values"
+          }
+        },
+        "type": "object",
+        "required": [
+          "times",
+          "values"
+        ],
+        "title": "AlertPreviewData"
+      },
       "AlertPreviewResponse": {
         "properties": {
           "_debug_queries": {
@@ -51012,6 +52049,9 @@
           },
           "data": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/AlertPreviewData"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -51083,8 +52123,15 @@
             "title": "Section Timings"
           },
           "data": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AlertMutationData"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
             "title": "Data"
           }
         },
@@ -51093,6 +52140,153 @@
           "data"
         ],
         "title": "AlertResponse"
+      },
+      "AlertTestWebhookData": {
+        "properties": {
+          "alert_id": {
+            "type": "string",
+            "title": "Alert Id"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "validated",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "targets_tested": {
+            "type": "integer",
+            "title": "Targets Tested"
+          },
+          "channel_type": {
+            "type": "string",
+            "title": "Channel Type",
+            "default": "webhook"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "alert_id",
+          "service_id",
+          "status",
+          "targets_tested"
+        ],
+        "title": "AlertTestWebhookData"
+      },
+      "AlertTestWebhookRequest": {
+        "properties": {
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "webhook_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Url"
+          },
+          "channel_type": {
+            "type": "string",
+            "enum": [
+              "webhook",
+              "slack",
+              "pagerduty"
+            ],
+            "title": "Channel Type",
+            "default": "webhook"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "AlertTestWebhookRequest"
+      },
+      "AlertTestWebhookResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_section_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "data": {
+            "$ref": "#/components/schemas/AlertTestWebhookData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "AlertTestWebhookResponse"
       },
       "AnalystInvite": {
         "properties": {

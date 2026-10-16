@@ -446,16 +446,48 @@ export const handlers = [
   ),
 
   // ── Alerts ────────────────────────────────────────────────────────
-  http.get(`${API_BASE}/api/alerts/`, () => HttpResponse.json({ alerts: [] })),
-  http.get(`${API_BASE}/api/alerts/:service_id`, () => HttpResponse.json({ alerts: [] })),
+  http.get(`${API_BASE}/api/alerts/`, () => HttpResponse.json({ data: [] })),
+  http.get(`${API_BASE}/api/alerts/:service_id`, () => HttpResponse.json({ data: [] })),
   http.post(`${API_BASE}/api/alerts/`, () =>
-    HttpResponse.json({ alert_id: 'alert-test', ok: true }),
+    HttpResponse.json({ data: { id: 'alert-test', status: 'saved' } }),
+  ),
+  http.put(`${API_BASE}/api/alerts/:alert_id`, ({ params }) =>
+    HttpResponse.json({ data: { id: String(params.alert_id), status: 'updated' } }),
+  ),
+  http.post(`${API_BASE}/api/alerts/evaluate`, () =>
+    HttpResponse.json({ data: { service_id: 'svc-default', evaluated: 0, triggered: 0, results: [] } }),
   ),
   http.post(`${API_BASE}/api/alerts/preview`, () =>
-    HttpResponse.json({ rows: [], total: 0 }),
+    HttpResponse.json({ data: { series: [], threshold: 0, operator: '>', metric: '5xx_rate', window_min: 5 } }),
   ),
-  http.delete(`${API_BASE}/api/alerts/:alert_id`, noContent()),
-  http.patch(`${API_BASE}/api/alerts/:alert_id/enabled`, ok({ ok: true })),
+  http.post(`${API_BASE}/api/alerts/:alert_id/test`, ({ params }) =>
+    HttpResponse.json({
+      data: {
+        alert_id: String(params.alert_id),
+        service_id: 'svc-default',
+        status: 'validated',
+        targets_tested: 1,
+        channel_type: 'webhook',
+      },
+    }),
+  ),
+  http.post(`${API_BASE}/api/alerts/:service_id/:alert_id/test`, ({ params }) =>
+    HttpResponse.json({
+      data: {
+        alert_id: String(params.alert_id),
+        service_id: String(params.service_id),
+        status: 'validated',
+        targets_tested: 1,
+        channel_type: 'webhook',
+      },
+    }),
+  ),
+  http.delete(`${API_BASE}/api/alerts/:alert_id`, () =>
+    HttpResponse.json({ data: { id: 'alert-test', status: 'deleted' } }),
+  ),
+  http.patch(`${API_BASE}/api/alerts/:alert_id/enabled`, ({ params }) =>
+    HttpResponse.json({ data: { id: String(params.alert_id), status: 'success' } }),
+  ),
 
   // ── Saved views ───────────────────────────────────────────────────
   http.get(`${API_BASE}/api/views/`, () => HttpResponse.json({ views: [] })),
