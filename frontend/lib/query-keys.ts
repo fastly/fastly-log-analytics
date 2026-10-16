@@ -15,6 +15,14 @@ export const queryKeys = {
 
   rumStatus: (serviceId: string | null | undefined) => ['rum-status', serviceId] as const,
 
+  syncStatus: (serviceId: string | null | undefined) => ['sync-status', serviceId] as const,
+  /** Prefix key: matches every service's sync-status entry. */
+  syncStatusAll: () => ['sync-status'] as const,
+
+  lastSync: (serviceId: string | null | undefined) => ['last-sync', serviceId] as const,
+  /** Prefix key: matches every service's last-sync entry. */
+  lastSyncAll: () => ['last-sync'] as const,
+
   logFieldsCatalog: (serviceId?: string) => (serviceId ? ['log-fields-catalog', serviceId] as const : ['log-fields-catalog'] as const),
 
   filtered: (

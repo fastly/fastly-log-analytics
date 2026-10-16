@@ -4,6 +4,7 @@ import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap';
 import { fetchRumStatusServerSide } from '@/lib/ssr/rum';
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed';
 import RumPageClient from './_sections/RumPageClient';
+import { queryKeys } from '@/lib/query-keys';
 
 export const dynamic = 'force-dynamic';
 export const metadata = {
@@ -27,7 +28,7 @@ export default async function RumPage({
     try {
       const status = await fetchRumStatusServerSide(serviceId);
       if (status) {
-        dehydratedState = seedDehydratedState(['rum-status', serviceId], status);
+        dehydratedState = seedDehydratedState(queryKeys.rumStatus(serviceId), status);
       }
     } catch (e) {
       // Ignore prefetch errors - client fallback will handle it

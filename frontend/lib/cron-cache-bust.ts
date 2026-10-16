@@ -39,9 +39,9 @@ export function cronCacheBust(queryClient: QueryClient, serviceId?: string | nul
   queryClient.invalidateQueries({ queryKey: ['admin', 'schema'] })
 
   // Header badge + FilterBar bounds + sync-status badge.
-  queryClient.invalidateQueries({ queryKey: ['last-sync'] })
+  queryClient.invalidateQueries({ queryKey: queryKeys.lastSyncAll() })
   queryClient.invalidateQueries({ queryKey: ['log-extents'] })
-  queryClient.invalidateQueries({ queryKey: ['sync-status'] })
+  queryClient.invalidateQueries({ queryKey: queryKeys.syncStatusAll() })
 
   // Dashboard surfaces that consume the new log data. These are the
   // legitimate "user pressed Import Logs, expects fresh charts" targets.
@@ -61,8 +61,8 @@ export function cronCacheBust(queryClient: QueryClient, serviceId?: string | nul
   if (serviceId) {
     queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', serviceId] })
     queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent', serviceId] })
-    queryClient.invalidateQueries({ queryKey: ['last-sync', serviceId] })
+    queryClient.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
     queryClient.invalidateQueries({ queryKey: ['log-extents', serviceId] })
-    queryClient.invalidateQueries({ queryKey: ['sync-status', serviceId] })
+    queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(serviceId) })
   }
 }

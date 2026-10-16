@@ -12,6 +12,7 @@
 
 import type { QueryClient } from '@tanstack/react-query'
 import type { SyncStatus } from '@/hooks/useSyncStatus'
+import { queryKeys } from '@/lib/query-keys'
 
 // ── sync-status ───────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ import type { SyncStatus } from '@/hooks/useSyncStatus'
  * the shared cache. Mirrors the old ``useSyncStatusStream``.
  */
 export function applySyncStatus(qc: QueryClient, serviceId: string | null, data: unknown): void {
-  qc.setQueryData(['sync-status', serviceId], data as SyncStatus)
+  qc.setQueryData(queryKeys.syncStatus(serviceId), data as SyncStatus)
 }
 
 // ── system-metrics ────────────────────────────────────────────────────────────
@@ -160,7 +161,7 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
       qc.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent', serviceId] })
     }
     if (due.has('last-sync')) {
-      qc.invalidateQueries({ queryKey: ['last-sync', serviceId] })
+      qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
     }
     if (due.has('iceberg')) {
       qc.invalidateQueries({ queryKey: ['admin', 'iceberg'] })

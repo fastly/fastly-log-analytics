@@ -117,11 +117,11 @@ export default async function RootLayout({
       if (b.log_fields_catalog) {
         client.setQueryData(["log-fields-catalog", sid], b.log_fields_catalog);
       }
-      client.setQueryData(["sync-status", sid], b.sync_status ?? null);
+      client.setQueryData(queryKeys.syncStatus(sid), b.sync_status ?? null);
       if (b.log_extents) {
         client.setQueryData(["log-extents", sid], b.log_extents);
       }
-      client.setQueryData(["last-sync", sid], b.last_sync ?? null);
+      client.setQueryData(queryKeys.lastSync(sid), b.last_sync ?? null);
       const schemaList = b.schema as unknown[] | undefined;
       const tableName = b.table_name as string | undefined;
       if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {

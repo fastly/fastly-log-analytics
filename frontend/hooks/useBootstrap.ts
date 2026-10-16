@@ -65,7 +65,7 @@ export function useBootstrap() {
         if (seededCatalog) {
           queryClient.setQueryData(['log-fields-catalog', sid], seededCatalog)
         }
-        queryClient.setQueryData(['sync-status', sid], (data as any).sync_status ?? null)
+        queryClient.setQueryData(queryKeys.syncStatus(sid), (data as any).sync_status ?? null)
         // Available to both admin and analyst.
         const seededLogExtents = (data as any).log_extents
         if (seededLogExtents) {
@@ -92,7 +92,7 @@ export function useBootstrap() {
         // Always seed ['last-sync', sid] so the cache entry exists before
         // SyncStatusBadge's useLastSync() subscribes (prevents mid-render
         // QueryCache.build → notify race).
-        queryClient.setQueryData(['last-sync', sid], (data as any).last_sync ?? null)
+        queryClient.setQueryData(queryKeys.lastSync(sid), (data as any).last_sync ?? null)
         // /scoring/labels seed — TopFlaggedTable + admin Labels tab +
         // dashboard Flag column all read from ['scoring-labels', sid].
         // Skipping the standalone fetch on cold load.

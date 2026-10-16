@@ -1,13 +1,16 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from './useSyncStatus'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 
 import { useBootstrapPending } from '@/hooks/useIsDataReady'
+import { useSeededReady } from '@/hooks/useSeededReady'
+import { queryKeys } from '@/lib/query-keys'
+
+const SEED_KEYS = [queryKeys.lastSync] as const
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 
@@ -32,27 +35,10 @@ export function useLastSync() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const isAnalyst = useIsAnalyst()
   const bootstrapPending = useBootstrapPending()
-  const queryClient = useQueryClient()
-
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    if (activeServiceId) {
-      const existing = queryClient.getQueryData(['last-sync', activeServiceId])
-      if (existing === undefined) {
-        queryClient.setQueryData(['last-sync', activeServiceId], null)
-      }
-      queueMicrotask(() => {
-        setReady(true)
-      })
-    } else {
-      queueMicrotask(() => {
-        setReady(false)
-      })
-    }
-  }, [activeServiceId, queryClient])
+  const ready = useSeededReady(activeServiceId, SEED_KEYS)
 
   return useQuery({
-    queryKey: ['last-sync', activeServiceId],
+    queryKey: queryKeys.lastSync(activeServiceId),
     queryFn: async ({ signal }) => {
       // Single-row peek — the endpoint already supports task filter
       // + per_page, so this is a tiny query, not a full table dump.

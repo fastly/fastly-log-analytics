@@ -10,22 +10,24 @@ import { useIsAnalyst, useSyncStatus, type SyncStatus } from '@/hooks/useSyncSta
 import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
 import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
 import { useLastSync, type LastSyncInfo } from '@/hooks/useLastSync'
-import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { LiveElapsed } from '@/components/LiveElapsed'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
 import type { StreamMetrics } from '@/types/api'
+import { useSeededReady } from '@/hooks/useSeededReady'
+import { queryKeys } from '@/lib/query-keys'
 
 // The live "X ago" text node now lives in the shared `@/components/TimeAgo`
 // (text-only leaf so the surrounding header chrome stays stable between
 // cron pushes — putting useNowMs() on SyncStatusBadge itself would
 // re-render the whole badge every second). Imported above.
 
+const SEED_KEYS = [queryKeys.syncStatus, queryKeys.lastSync] as const
+
 export function SyncStatusBadge() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const queryClient = useQueryClient()
 
   // Sibling Warning and Cache Mount Race Fix: returning null on the first client
   // render lets us safely and synchronously seed the query cache with empty/placeholder
@@ -33,22 +35,7 @@ export function SyncStatusBadge() {
   // This guarantees that when the inner component mounts and calls those hooks, the cache
   // keys already exist and we never trigger a mid-render QueryCache.build -> add notify
   // update that causes React 19 setState-in-render violations.
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    if (activeServiceId) {
-      const existingStatus = queryClient.getQueryData(['sync-status', activeServiceId])
-      if (existingStatus === undefined) {
-        queryClient.setQueryData(['sync-status', activeServiceId], null)
-      }
-      const existingLast = queryClient.getQueryData(['last-sync', activeServiceId])
-      if (existingLast === undefined) {
-        queryClient.setQueryData(['last-sync', activeServiceId], null)
-      }
-    }
-    queueMicrotask(() => {
-      setReady(true)
-    })
-  }, [activeServiceId, queryClient])
+  const ready = useSeededReady(activeServiceId, SEED_KEYS, true)
 
   if (!ready) return null
 
