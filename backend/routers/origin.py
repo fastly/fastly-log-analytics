@@ -7,7 +7,6 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -25,7 +24,6 @@ from backend.models.origin import (
 )
 from backend.repositories import origin as repo
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror OriginAggregatesResponse fields one-to-one so
@@ -142,15 +140,7 @@ async def origin_aggregates(
     # network-health, get_aggregates has no response memo to stabilize, so the
     # token is NOT threaded into the repo — it exists purely to make the FE's
     # first-paint key server-reproducible (the origin SSR-seed contract).
-    if is_valid_range_token(req.range_token):
-        # earliest_log_at drives the "auto" adaptive default; sourced from the
-        # persisted status snapshot (same field the bootstrap + /api/log-extents
-        # read — no DuckDB connection, no cron contention).
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
     sections = _expand_sections(req.sections)
     from backend.high_scale.registry import get_high_scale_service_registry
 

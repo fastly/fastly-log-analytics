@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import Depends, HTTPException, Request
 
@@ -46,6 +46,15 @@ if TYPE_CHECKING:
     import duckdb
 
     from backend.utils.remote_access import TimeBounds
+
+
+class RangeWindowRequest(Protocol):
+    """Structural type for request bodies that carry a (relative or absolute) window."""
+
+    range_token: str | None
+    anchor: str | None
+    start_time: str | None
+    end_time: str | None
 
 
 @dataclass(slots=True)
@@ -97,6 +106,25 @@ class RequestContext:
         except asyncio.CancelledError:
             await task
             raise
+
+    def resolve_window(self, req: RangeWindowRequest) -> tuple[str | None, str | None]:
+        """Resolve a request's scan window, then clamp it to the invite ceiling.
+
+        Keyed path: a recognized ``range_token`` makes the SERVER resolve the
+        window from (token, anchor), ignoring FE-supplied absolute bounds so a
+        crafted body can't widen the scan. Legacy path clamps the supplied
+        ``start_time``/``end_time``. The clamp always runs AFTER the resolve so
+        it is the single enforcement point: an analyst can't widen past their
+        invite by picking ``"30d"``.
+        """
+        from backend import config as svcconfig
+        from backend.utils.time_window import is_valid_range_token, resolve_window
+
+        if is_valid_range_token(req.range_token):
+            earliest_log_at = svcconfig.get_status(self.source["name"]).get("earliest_log_at")
+            resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
+            return self.clamp(resolved_start, resolved_end)
+        return self.clamp(req.start_time, req.end_time)
 
     def clamp(self, start: str | None, end: str | None) -> tuple[str | None, str | None]:
         """Clamp a request's start/end against this request's analyst window.

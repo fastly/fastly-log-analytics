@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.value import ValueSectionName, ValueSummaryRequest, ValueSummaryResponse
 from backend.repositories import value as repo
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/value", tags=["value"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -25,12 +23,7 @@ def value_summary(
 ):
     start_time: str | None
     end_time: str | None
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        start_time, end_time = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(start_time, end_time)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
 
     sections = _expand_sections(req.sections)
 

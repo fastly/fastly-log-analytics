@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend import config as svcconfig
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.share_db.validation import mask_ip
@@ -23,7 +22,6 @@ from backend.repositories import security as repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import make_section_expander, query_errors
 from backend.utils.telemetry import track_query
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/security", tags=["security"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror SecurityAggregatesResponse fields one-to-one
@@ -96,12 +94,7 @@ def security_aggregates(
     # Keyed path: resolve the scan window server-side from (range_token, anchor),
     # ignoring FE-supplied absolute bounds; clamp AFTER resolve so the invite
     # ceiling is enforced regardless of token. Mirrors routers/origin.py.
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
 
     from backend.high_scale.registry import get_high_scale_service_registry
 

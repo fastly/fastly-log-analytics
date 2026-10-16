@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend import config as svcconfig
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.session_token import (
@@ -24,7 +23,6 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.router_utils import query_errors
 from backend.utils.telemetry import process_context_scope
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -36,12 +34,7 @@ def sessions_endpoint(
     ctx: RequestContext = Depends(build_request_context),
 ):
     with process_context_scope("sessions:list"):
-        if is_valid_range_token(req.range_token):
-            earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-            resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-            start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-        else:
-            start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+        start_time, end_time = ctx.resolve_window(req)
 
         # Guard against unbounded scans (14–20s observed) when the frontend hasn't
         # sent a time range yet. Default to the last 7 days — matches the max

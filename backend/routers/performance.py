@@ -6,14 +6,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.common import FilteredRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.performance import PerformanceAggregatesResponse
 from backend.repositories import performance as repo
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.time_window import is_valid_range_token, resolve_window
 
 router = APIRouter(prefix="/api/performance", tags=["performance"], responses=DEFAULT_ERROR_RESPONSES)
 # Section selector — names mirror PerformanceAggregatesResponse fields one-to-one
@@ -64,12 +62,7 @@ def performance_aggregates(
 ):
     # Keyed path: resolve window server-side from (range_token, anchor), ignore
     # FE-supplied bounds, clamp AFTER resolve. Mirrors routers/origin.py.
-    if is_valid_range_token(req.range_token):
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    start_time, end_time = ctx.resolve_window(req)
 
     from backend.high_scale.registry import get_high_scale_service_registry
 

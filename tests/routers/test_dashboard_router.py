@@ -866,7 +866,6 @@ async def test_high_scale_bundle_runs_off_event_loop(monkeypatch):
     from backend.core.request_context import RequestContext
     from backend.models.dashboard import AggregatesRequest
 
-    monkeypatch.setattr(dash, "_clamp_window", lambda req, ctx: (req.start_time, req.end_time))
 
     sentinel_service = object()
 
