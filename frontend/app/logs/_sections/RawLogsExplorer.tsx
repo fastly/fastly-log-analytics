@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useState, useMemo } from 'react'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useDebounce } from '@/hooks/useDebounce'
 import {
   Search,
   X,
@@ -48,6 +49,11 @@ import { resolveRangeWire } from '@/lib/range-wire'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { cn } from '@/lib/utils'
 
+// Wire rows are flat scalar records (backend `rows: list[dict[str, Any]]`).
+type LogRow = Record<string, string | number | null | undefined>
+
+const SKELETON_ROW_IDS = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
+
 const DEFAULT_COLUMNS = [
   'timestamp',
   'status',
@@ -70,7 +76,7 @@ const COMMON_OPTIONAL_COLUMNS = [
   'server_datacenter',
 ]
 
-function getStatusBadgeVariant(status: number | string | undefined): string {
+function getStatusBadgeVariant(status: number | string | null | undefined): string {
   const code = typeof status === 'number' ? status : parseInt(String(status), 10)
   if (isNaN(code)) return 'bg-muted text-muted-foreground'
   if (code >= 200 && code < 300) return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'
@@ -80,8 +86,8 @@ function getStatusBadgeVariant(status: number | string | undefined): string {
   return 'bg-muted text-muted-foreground'
 }
 
-function getMethodBadgeVariant(method: string | undefined): string {
-  const m = (method || '').toUpperCase()
+function getMethodBadgeVariant(method: string | number | null | undefined): string {
+  const m = String(method || '').toUpperCase()
   if (m === 'GET') return 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20'
   if (m === 'POST') return 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
   if (m === 'PUT' || m === 'PATCH') return 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
@@ -118,28 +124,21 @@ export function RawLogsExplorer({
   }, [relativeRange, isAutoRange, startTime, endTime, anchor])
 
   const [searchInput, setSearchInput] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const debouncedSearch = useDebounce(searchInput.trim(), 300)
   const [limit, setLimit] = useState(50)
-  const [offset, setOffset] = useState(0)
+  // Pagination is keyed to the filter/range/search it was set under; a key
+  // mismatch reads as page 0, so a filter change never fires a fetch with the
+  // previous filter's stale offset (no reset effect needed).
+  const pageKey = JSON.stringify([filterPayload, rangeWire.rangeKey, debouncedSearch])
+  const [page, setPage] = useState({ offset: 0, key: pageKey })
+  const offset = page.key === pageKey ? page.offset : 0
+  const setOffset = (next: number | ((prev: number) => number)) =>
+    setPage({ offset: typeof next === 'function' ? next(offset) : next, key: pageKey })
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const [selectedColumns, setSelectedColumns] = useState<string[]>(DEFAULT_COLUMNS)
-  const [selectedRow, setSelectedRow] = useState<Record<string, any> | null>(null)
+  const [selectedRow, setSelectedRow] = useState<LogRow | null>(null)
   const [copied, setCopied] = useState(false)
   const [detailFilter, setDetailFilter] = useState('')
-
-  // Debounce search input
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(searchInput.trim())
-      setOffset(0) // Reset to first page on search change
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchInput])
-
-  // Reset pagination on filter or range change
-  useEffect(() => {
-    setOffset(0)
-  }, [filterPayload, rangeWire.rangeKey])
 
   // Query logs
   const {
@@ -186,13 +185,12 @@ export function RawLogsExplorer({
   })
 
   // Discover all available columns from response or fallback list
+  const schemaColumns = data?.schema_columns
   const availableColumns = useMemo(() => {
     const cols = new Set<string>([...DEFAULT_COLUMNS, ...COMMON_OPTIONAL_COLUMNS])
-    if (data?.schema_columns) {
-      data.schema_columns.forEach((col: any) => cols.add(col.name))
-    }
+    schemaColumns?.forEach((col) => cols.add(col.name))
     return Array.from(cols)
-  }, [data?.schema_columns])
+  }, [schemaColumns])
 
   const toggleColumn = (col: string) => {
     setSelectedColumns((prev) => {
@@ -214,7 +212,7 @@ export function RawLogsExplorer({
   }
 
   const totalCount = data?.total_count ?? 0
-  const rows = data?.rows ?? []
+  const rows = (data?.rows ?? []) as LogRow[]
   const hasMore = data?.has_more ?? false
 
   const filteredDetailKeys = useMemo(() => {
@@ -368,8 +366,8 @@ export function RawLogsExplorer({
                 <span>Querying edge log records...</span>
               </div>
               <div className="space-y-2">
-                {[...Array(8)].map((_, i) => (
-                  <div key={i} className="h-10 w-full bg-muted/40 rounded animate-pulse" />
+                {SKELETON_ROW_IDS.map((id) => (
+                  <div key={id} className="h-10 w-full bg-muted/40 rounded animate-pulse" />
                 ))}
               </div>
             </div>
@@ -409,7 +407,7 @@ export function RawLogsExplorer({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">
-                {rows.map((row: any, idx: number) => (
+                {rows.map((row, idx) => (
                   <tr
                     key={row.timestamp ? `${row.timestamp}-${idx}` : idx}
                     onClick={() => setSelectedRow(row)}
