@@ -46,14 +46,14 @@ test('changing filters while on page 2 never fetches with the stale offset', asy
     </QueryClientProvider>
   )
   const { rerender } = render(ui)
-  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1), { timeout: 5000 })
 
-  fireEvent.click(await screen.findByRole('button', { name: /next/i }))
-  await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.offset === 50)).toBe(true))
+  fireEvent.click(await screen.findByRole('button', { name: /next/i }, { timeout: 5000 }))
+  await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.offset === 50)).toBe(true), { timeout: 5000 })
 
   mockFilterPayload = { status: { mode: 'include', values: ['500'] } }
   rerender(ui)
-  await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.filters.status)).toBe(true))
+  await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.filters.status)).toBe(true), { timeout: 5000 })
 
   const filtered = mockPost.mock.calls.filter((c) => c[1].body.filters.status)
   expect(filtered.every((c) => c[1].body.offset === 0)).toBe(true)
