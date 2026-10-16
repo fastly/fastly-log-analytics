@@ -1216,7 +1216,7 @@ def ensure_logging_endpoint(cfg: dict, fos_access_key: str, fos_secret_key: str,
             raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
         ok("Draft validated")
 
-        info("Activating version {new_ver}…")
+        info(f"Activating version {new_ver}…")
         if status_cb:
             status_cb(f"⏳ Activating version {new_ver}...")
         fastly("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token)
