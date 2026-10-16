@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 import {
   Loader2,
   Copy,
@@ -19,6 +19,26 @@ import { ColumnDef } from '@tanstack/react-table'
 import { cn } from '@/lib/utils'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 import { LiveTimer } from './CronScheduleBox'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+
+function CopyTextButton({ text, label, title, className }: { text: string; label: string; title: string; className: string }) {
+  const { copied, copy } = useCopyToClipboard(2000)
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={label}
+      className={className}
+      onClick={(e) => {
+        e.stopPropagation()
+        copy(text)
+      }}
+      title={title}
+    >
+      {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+    </Button>
+  )
+}
 
 export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
   return React.useMemo(() => [
@@ -91,17 +111,6 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
       cell: ({ row }) => {
         const val = row.original.status
         const err = row.original.error_message
-        const [copied, setCopied] = useState(false)
-
-        const handleCopy = (e: React.MouseEvent) => {
-          e.stopPropagation()
-          if (err) {
-            navigator.clipboard.writeText(err)
-            setCopied(true)
-            setTimeout(() => setCopied(false), 2000)
-          }
-        }
-
         if (val === 'running') {
           return (
             <Badge variant="outline" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold border-blue-500/30 text-blue-700 dark:text-blue-400 bg-blue-500/10 flex items-center gap-1 w-fit">
@@ -130,16 +139,12 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
               </TooltipContent>
             </Tooltip>
             {err && (
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Copy full error message"
-                className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                onClick={handleCopy}
+              <CopyTextButton
+                text={err}
+                label="Copy full error message"
                 title="Copy full error message"
-              >
-                {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-              </Button>
+                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+              />
             )}
           </div>
         )
@@ -233,7 +238,6 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
 
         const rows = row.original.rows_ingested || 0
         const corrupt = row.original.corrupt_rows || 0
-        const [copiedCorrupt, setCopiedCorrupt] = useState(false)
 
         if (task === 'metadata_sync') {
           if (rows === 0) return <span className="text-muted-foreground">—</span>
@@ -260,21 +264,12 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
                   </TooltipContent>
                 </Tooltip>
                 {row.original.error_message && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Copy corrupt-line details"
-                    className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      navigator.clipboard.writeText(row.original.error_message)
-                      setCopiedCorrupt(true)
-                      setTimeout(() => setCopiedCorrupt(false), 2000)
-                    }}
+                  <CopyTextButton
+                    text={row.original.error_message}
+                    label="Copy corrupt-line details"
                     title="Copy corrupt lines"
-                  >
-                    {copiedCorrupt ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                  </Button>
+                    className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
+                  />
                 )}
               </div>
             )}

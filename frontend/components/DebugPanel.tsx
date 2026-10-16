@@ -11,6 +11,7 @@ import { client, extractApiError } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
@@ -29,17 +30,9 @@ interface CopyButtonProps {
 }
 
 function CopyButton({ text }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy text: ', err)
-    }
-  }
+  const handleCopy = () => copy(text)
 
   return (
     <Button

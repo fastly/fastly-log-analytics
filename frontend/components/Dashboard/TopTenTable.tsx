@@ -16,6 +16,7 @@ import {
 import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useMaskIps } from '@/hooks/useMaskIps'
 import { isIpFamilyField } from '@/lib/pii'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface TopTenTableProps {
   title: string
@@ -54,7 +55,7 @@ function NotLoggedIndicator() {
 }
 
 export const TopTenTable = React.memo(function TopTenTable({ title, icon, field, data, compareData, onRowClick, inActiveFormat = true }: TopTenTableProps) {
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
   const { data: catalog } = useLogFieldsCatalog()
   // PII: a masking analyst can't drill down by client IP (value is masked,
   // backend 403s the filter). Make the `ip` card's rows non-interactive and
@@ -129,9 +130,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
       val = val.replace(/"/g, '""')
       return `"${val}",${item.count}`
     }).join('\n')
-    navigator.clipboard.writeText(header + rows)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    copy(header + rows)
   }
 
   return (

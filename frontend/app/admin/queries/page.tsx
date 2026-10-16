@@ -58,6 +58,7 @@ import type {
   SnapshotResponse,
   ViewMode,
 } from './_types'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 
@@ -318,12 +319,7 @@ export default function QueryMonitorPage() {
     expandedRunIds,
   })
 
-  const [copiedQueries, setCopiedQueries] = React.useState(false)
-  React.useEffect(() => {
-    if (!copiedQueries) return
-    const t = setTimeout(() => setCopiedQueries(false), 1500)
-    return () => clearTimeout(t)
-  }, [copiedQueries])
+  const { copied: copiedQueries, copy: copyText } = useCopyToClipboard(1500)
 
   const handleCopyQueries = React.useCallback(async () => {
     const queries = slowHistoryMode === 'recent'
@@ -382,13 +378,8 @@ export default function QueryMonitorPage() {
 
     text += `==================================================\n`
 
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopiedQueries(true)
-    } catch {
-      // ignore
-    }
-  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs])
+    await copyText(text)
+  }, [slowHistoryMode, slowQueries, historicalQuery.data?.rows, slowThresholdMs, copyText])
 
   const requestKill = React.useCallback(
     (row: ActiveRow) => {

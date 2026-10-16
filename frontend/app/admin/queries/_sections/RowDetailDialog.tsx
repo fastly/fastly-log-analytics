@@ -32,6 +32,7 @@ import {
 
 import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow
 
@@ -197,21 +198,8 @@ export function RowDetailDialog({
  *  the Clipboard API is unavailable (e.g. insecure context); copying SQL
  *  is convenience, not safety-critical. */
 function CopySqlButton({ sql }: { sql: string }) {
-  const [copied, setCopied] = React.useState(false)
-  React.useEffect(() => {
-    if (!copied) return
-    const t = setTimeout(() => setCopied(false), 1500)
-    return () => clearTimeout(t)
-  }, [copied])
-  const onClick = async () => {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return
-    try {
-      await navigator.clipboard.writeText(sql)
-      setCopied(true)
-    } catch {
-      // ignore — common in non-secure contexts and on permission denial
-    }
-  }
+  const { copied, copy } = useCopyToClipboard(1500)
+  const onClick = () => copy(sql)
   return (
     <Button
       variant="outline"

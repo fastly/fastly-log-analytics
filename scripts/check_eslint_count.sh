@@ -69,8 +69,9 @@ cd "$REPO_ROOT/frontend"
 # 824 -> 804: dropped `as any` path casts on typed client calls (share dashboard,
 # scoring labels, ngwaf, network) plus the raw-logs explorer lint fixes (baseline
 # had drifted to 830 above the 824 ceiling).
+# 804 -> 802: adopt useCopyToClipboard/downloadBlob (hook-in-cell extraction in CronColumns).
 # Drive toward zero.
-CEILING=804
+CEILING=802
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { adminFetch, adminJson } from '@/lib/api'
+import { downloadBlob } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
 
@@ -93,12 +94,7 @@ export function QuarantineSection() {
     try {
       const response = await adminFetch(`/api/admin/quarantine/download/${item.id}`)
       if (!response.ok) throw new Error(`Unable to download evidence (HTTP ${response.status})`)
-      const url = URL.createObjectURL(await response.blob())
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `quarantine-item-${item.id}.dat`
-      anchor.click()
-      URL.revokeObjectURL(url)
+      downloadBlob(await response.blob(), `quarantine-item-${item.id}.dat`)
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Unable to download evidence.')
     } finally {

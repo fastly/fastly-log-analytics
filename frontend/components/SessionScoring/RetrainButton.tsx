@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
@@ -40,7 +41,7 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
   const [open, setOpen] = React.useState(false)
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
-  const [copied, setCopied] = React.useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
 
   const mutation = useMutation({
     mutationFn: async (): Promise<RetrainResult> => {
@@ -79,7 +80,6 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
         setOpen(o)
         if (!o) {
           setResult(null)
-          setCopied(false)
           mutation.reset()
         }
       }}
@@ -194,11 +194,7 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
                       size="icon"
                       aria-label={copied ? 'Copied deploy hint' : 'Copy deploy hint'}
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => {
-                        navigator.clipboard.writeText(result.deploy_hint!)
-                        setCopied(true)
-                        setTimeout(() => setCopied(false), 2000)
-                      }}
+                      onClick={() => copy(result.deploy_hint!)}
                     >
                       {copied ? (
                         <Check className="h-3 w-3 text-emerald-500" />

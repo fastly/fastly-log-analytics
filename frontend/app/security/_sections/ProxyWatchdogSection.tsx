@@ -16,6 +16,7 @@ import { useColumnVisibility } from '@/hooks/useColumnVisibility'
 import { FilterValueCell } from '@/components/FilterValueCell'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { formatCount } from '@/lib/format'
+import { downloadBlob } from '@/lib/utils'
 
 const ImpossibleDistanceModal = dynamic(
   () => import('@/components/Insights/ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
@@ -233,15 +234,10 @@ export function ProxyWatchdogSection({
         throw new Error(`Export failed: ${response.statusText}`)
       }
 
-      const blob = await response.blob()
-      const blobUrl = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      window.URL.revokeObjectURL(blobUrl)
+      downloadBlob(
+        await response.blob(),
+        format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`,
+      )
     } catch (err) {
       console.error('Export error:', err)
     } finally {

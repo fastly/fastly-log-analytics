@@ -235,7 +235,7 @@ describe('TopTenTable', () => {
     expect(onRowClick).toHaveBeenCalledWith('status', 'a')
   })
 
-  it('copies the table to the clipboard as CSV and toggles the copied state', () => {
+  it('copies the table to the clipboard as CSV and toggles the copied state', async () => {
     // jsdom doesn't ship a Clipboard API and `userEvent.setup()` installs
     // its own clipboard shim that would shadow this one — so we use
     // fireEvent here to keep our mock in place and assert directly on it.
@@ -261,7 +261,7 @@ describe('TopTenTable', () => {
     expect(writeText).toHaveBeenCalledWith('status,count\n"Alpha",2\n"Beta",1')
     // After clicking the button's aria-label flips to "Copied!" until the
     // 2s timeout re-arms it.
-    expect(screen.getByRole('button', { name: /copied!/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /copied!/i })).toBeInTheDocument()
   })
 
   it('escapes CSV/formula-injection payloads in attacker-controlled fields (finding 020)', () => {

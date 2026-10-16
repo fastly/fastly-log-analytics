@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 interface RumPageClientProps {
   initialServiceId?: string;
@@ -34,7 +35,7 @@ function ServiceSync({ serviceId, onSync }: ServiceSyncProps) {
 export default function RumPageClient({ initialServiceId }: RumPageClientProps) {
   const [showInstructions, setShowInstructions] = useState(false);
   const [activeServiceId, setActiveServiceId] = useState<string | null>(initialServiceId || null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard(2000);
   const isAnalyst = useIsAnalyst();
 
   const scriptTag = '<script src="/js/rum.js"></script>';
@@ -101,11 +102,7 @@ export default function RumPageClient({ initialServiceId }: RumPageClientProps) 
                       size="icon"
                       aria-label={copied ? 'Copied script tag' : 'Copy script tag'}
                       className="h-6 w-6 hover:bg-muted-foreground/10"
-                      onClick={() => {
-                        navigator.clipboard.writeText(scriptTag)
-                        setCopied(true)
-                        setTimeout(() => setCopied(false), 2000)
-                      }}
+                      onClick={() => copy(scriptTag)}
                     >
                       {copied ? (
                         <Check className="h-3 w-3 text-emerald-500" />

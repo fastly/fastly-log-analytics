@@ -48,6 +48,7 @@ import { quantizeAnchor } from '@/lib/time-window'
 import { resolveRangeWire } from '@/lib/range-wire'
 import { useDebouncedFilterPayload } from '@/hooks/useFilterPayload'
 import { cn } from '@/lib/utils'
+import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
 // Wire rows are flat scalar records (backend `rows: list[dict[str, Any]]`).
 type LogRow = Record<string, string | number | null | undefined>
@@ -137,7 +138,7 @@ export function RawLogsExplorer({
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const [selectedColumns, setSelectedColumns] = useState<string[]>(DEFAULT_COLUMNS)
   const [selectedRow, setSelectedRow] = useState<LogRow | null>(null)
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useCopyToClipboard(2000)
   const [detailFilter, setDetailFilter] = useState('')
 
   // Query logs
@@ -205,10 +206,8 @@ export function RawLogsExplorer({
 
   const handleCopyJson = () => {
     if (!selectedRow) return
-    navigator.clipboard.writeText(JSON.stringify(selectedRow, null, 2))
-    setCopied(true)
+    copy(JSON.stringify(selectedRow, null, 2))
     showToast('Log record JSON copied to clipboard', 'success')
-    setTimeout(() => setCopied(false), 2000)
   }
 
   const totalCount = data?.total_count ?? 0
