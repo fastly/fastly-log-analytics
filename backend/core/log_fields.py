@@ -601,7 +601,7 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
         return errors
 
     # 2. Name regex
-    if not VALID_NAME_RE.match(name):
+    if not VALID_NAME_RE.fullmatch(name):
         errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
 
     # 3. DuckDB/SQL reserved word

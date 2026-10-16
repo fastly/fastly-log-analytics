@@ -246,7 +246,7 @@ def _validate_service_id(service_id: str) -> str:
             f"invalid service_id length {len(service_id) if service_id else 0}: "
             f"1..{_SERVICE_ID_MAX_LEN} characters required (security)"
         )
-    if not _SERVICE_ID_RE.match(service_id):
+    if not _SERVICE_ID_RE.fullmatch(service_id):
         raise ValueError(f"invalid service_id {service_id!r}: must be alphanumeric / dash / underscore (security)")
     return service_id
 

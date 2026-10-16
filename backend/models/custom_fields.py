@@ -29,7 +29,7 @@ class CustomField(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_valid(cls, v: str) -> str:
-        if not VALID_NAME_RE.match(v):
+        if not VALID_NAME_RE.fullmatch(v):
             raise ValueError("name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
         return v
 

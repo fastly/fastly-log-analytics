@@ -153,7 +153,7 @@ class FeatureState:
         # Validate custom field names
         for field_dict in self.log_fields.custom_fields:
             field_name = field_dict.get("name", "")
-            if not re.match(r"^[a-z_][a-z0-9_]*$", field_name):
+            if not re.fullmatch(r"^[a-z_][a-z0-9_]*$", field_name):
                 raise ValueError(f"Custom field name '{field_name}' must be lowercase alphanumeric + underscore")
 
         # Validate cmcd settings

@@ -72,7 +72,7 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _is_safe_ident(name: str) -> bool:
-    return bool(name) and bool(_SAFE_IDENT_RE.match(name))
+    return bool(name) and bool(_SAFE_IDENT_RE.fullmatch(name))
 
 
 def _safe_table_for(source: dict) -> str | None:
