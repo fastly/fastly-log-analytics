@@ -264,6 +264,7 @@ def _emulate_standard_request_facts(
     import uuid
     from datetime import UTC
 
+    from backend.core.duckdb import _safe_table_name
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.high_scale.pagination import KeysetCursor
     from backend.utils.telemetry import track_query
@@ -273,16 +274,26 @@ def _emulate_standard_request_facts(
     if decoded and (decoded.service_id != ctx.service_id or decoded.domain != "request"):
         raise ValueError("cursor does not belong to this service and domain")
 
-    table = "logs"
+    candidate_tables = [_safe_table_name(str(ctx.source.get("name") or "default"))]
+    if "logs" not in candidate_tables:
+        candidate_tables.append("logs")
 
     def _run_emulation(con):
-        try:
-            with track_query(con, f"DESCRIBE {table}", [], "high_scale.describe_emulation") as desc_cur:
-                col_names = {str(r[0]) for r in desc_cur.fetchall()}
-        except Exception:
-            col_names = set()
+        table = candidate_tables[0]
+        col_names: set[str] = set()
+        for cand in candidate_tables:
+            try:
+                with track_query(con, f"DESCRIBE {cand}", [], "high_scale.describe_emulation") as desc_cur:
+                    col_names = {str(r[0]) for r in desc_cur.fetchall()}
+                if col_names:
+                    table = cand
+                    break
+            except Exception:
+                continue
 
         if "timestamp" not in col_names:
+            with track_query(con, "SELECT 1 AS duckdb_emulation_probe", [], "high_scale.emulation_probe") as probe_cur:
+                probe_cur.fetchone()
             return [], None, None
 
         country_col = (
