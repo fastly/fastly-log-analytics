@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from backend.core.fastly.client import fastly
 from backend.core.fastly.service import get_active_version
+from backend.provision.draft_version import draft_version
 
 logger = logging.getLogger(__name__)
 
@@ -75,40 +76,22 @@ def cleanup_legacy_logging_endpoints(
         if status_cb:
             status_cb(f"⏳ Removing {len(to_remove)} legacy logging endpoint(s)...")
 
-        # Clone the version for modification
-        new_ver = fastly(
-            "PUT",
-            f"/service/{service_id}/version/{active_ver}/clone",
-            token=token,
-        )
-        new_ver_num = new_ver.get("number")
+        # Clone, delete, then validate + activate. A failed validation raises and is
+        # swallowed by the outer handler below; nothing is rolled back because the
+        # active version was never replaced.
+        with draft_version(service_id, token, base_version=active_ver, call=fastly, rollback=False) as new_ver_num:
+            for ep_name in to_remove:
+                encoded_name = urllib.parse.quote(ep_name, safe="")
+                try:
+                    fastly(
+                        "DELETE",
+                        f"/service/{service_id}/version/{new_ver_num}/logging/s3/{encoded_name}",
+                        token=token,
+                    )
+                    logger.info(f"✓ Removed legacy endpoint: {ep_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove {ep_name}: {e}")
 
-        # Delete each legacy endpoint
-        for ep_name in to_remove:
-            encoded_name = urllib.parse.quote(ep_name, safe="")
-            try:
-                fastly(
-                    "DELETE",
-                    f"/service/{service_id}/version/{new_ver_num}/logging/s3/{encoded_name}",
-                    token=token,
-                )
-                logger.info(f"✓ Removed legacy endpoint: {ep_name}")
-            except Exception as e:
-                logger.warning(f"Failed to remove {ep_name}: {e}")
-
-        # Validate and activate the new version
-        validation = fastly(
-            "GET",
-            f"/service/{service_id}/version/{new_ver_num}/validate",
-            token=token,
-        )
-        if validation.get("status") != "ok":
-            raise RuntimeError(f"Validation failed: {validation.get('errors') or validation}")
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{new_ver_num}/activate",
-            token=token,
-        )
         logger.info(f"✓ Activated clean version {new_ver_num}")
         if status_cb:
             status_cb(f"✓ Cleaned {len(to_remove)} legacy endpoints, activated version {new_ver_num}")
