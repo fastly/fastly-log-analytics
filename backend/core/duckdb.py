@@ -1587,25 +1587,52 @@ def rum_source_for(source: dict) -> dict:
     return rum_source
 
 
-def get_or_generate_cid_salt(service_id: str) -> str:
-    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing."""
+_cid_salt_lock = threading.Lock()
+# Used only when a service has no config to persist into. Random per process and
+# never written anywhere, so the repo never ships a salt an attacker could use to
+# dictionary-reverse pseudonymized cids.
+_process_cid_salt: str | None = None
+
+
+def ensure_cid_salt(rum_cfg: dict) -> str:
+    """Return ``rum_cfg["cid_salt"]``, generating and setting a fresh 32-byte hex salt if absent."""
     import secrets
-
-    from backend.config import load_config, save_config
-
-    cfg = load_config(service_id)
-    if not cfg:
-        # Fallback if no config exists (e.g. during test mode without a persistent config)
-        return "default_test_salt_static_fallback_value_12345678"
-
-    rum_cfg = cfg.get("rum") or {}
-    if not isinstance(rum_cfg, dict):
-        rum_cfg = {}
 
     salt = rum_cfg.get("cid_salt")
     if not salt:
         salt = secrets.token_hex(32)
         rum_cfg["cid_salt"] = salt
-        cfg["rum"] = rum_cfg
-        save_config(service_id, cfg)
     return salt
+
+
+def get_or_generate_cid_salt(service_id: str) -> str:
+    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing."""
+    global _process_cid_salt
+
+    from backend.config import load_config, save_config
+
+    cfg = load_config(service_id)
+    if cfg:
+        rum_cfg = cfg.get("rum")
+        if isinstance(rum_cfg, dict) and rum_cfg.get("cid_salt"):
+            return rum_cfg["cid_salt"]
+
+    # First use (or no config). Serialize generation and re-read under the lock so two
+    # concurrent first calls can't mint different salts and let the later save win.
+    with _cid_salt_lock:
+        cfg = load_config(service_id)
+        if not cfg:
+            if _process_cid_salt is None:
+                import secrets
+
+                _process_cid_salt = secrets.token_hex(32)
+            return _process_cid_salt
+
+        existing = cfg.get("rum")
+        locked_rum: dict = existing if isinstance(existing, dict) else {}
+        if locked_rum.get("cid_salt"):
+            return locked_rum["cid_salt"]
+        salt = ensure_cid_salt(locked_rum)
+        cfg["rum"] = locked_rum
+        save_config(service_id, cfg)
+        return salt
