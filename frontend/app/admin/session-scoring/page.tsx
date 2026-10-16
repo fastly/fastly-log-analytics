@@ -60,6 +60,12 @@ const AuditLogTab = dynamic(
   },
 )
 import { useServiceStore } from '@/stores/serviceStore'
+import {
+  scoringAnalyticsCompositeKey,
+  scoringAnalyticsCompositeOptions,
+  scoringConfigCompositeKey,
+  scoringConfigCompositeOptions,
+} from '@/lib/queries/scoring'
 
 export default function SessionScoringPage() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -77,37 +83,12 @@ export default function SessionScoringPage() {
   // Individual component queries stay intact — they find pre-populated
   // cache entries and skip their network requests.
   const analyticsComposite = useQuery({
-    queryKey: ['scoring-analytics-composite', activeServiceId, sinceHours],
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/analytics',
-        {
-          params: {
-            path: { service_id: activeServiceId ?? '' },
-            query: { since_hours: sinceHours },
-          },
-          signal,
-        },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as Record<string, unknown>
-    },
+    ...scoringAnalyticsCompositeOptions(activeServiceId, sinceHours),
     enabled: !!activeServiceId,
   })
 
   const configComposite = useQuery({
-    queryKey: ['scoring-config-composite', activeServiceId],
-    queryFn: async ({ signal }) => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/config',
-        {
-          params: { path: { service_id: activeServiceId ?? '' } },
-          signal,
-        },
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as unknown as Record<string, unknown>
-    },
+    ...scoringConfigCompositeOptions(activeServiceId),
     enabled: !!activeServiceId,
   })
 
@@ -159,8 +140,8 @@ export default function SessionScoringPage() {
   const refreshAll = () => {
     analyticsSeededAt.current = 0
     configSeededAt.current = 0
-    qc.invalidateQueries({ queryKey: ['scoring-analytics-composite', activeServiceId] })
-    qc.invalidateQueries({ queryKey: ['scoring-config-composite', activeServiceId] })
+    qc.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(activeServiceId) })
+    qc.invalidateQueries({ queryKey: scoringConfigCompositeKey(activeServiceId) })
     qc.invalidateQueries({
       predicate: (q) =>
         Array.isArray(q.queryKey) &&

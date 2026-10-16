@@ -4,6 +4,7 @@ import React from 'react'
 import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
+import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/lib/queries/scoring'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buttonVariants } from '@/components/ui/button'
 import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye } from 'lucide-react'
@@ -37,37 +38,8 @@ export function AdminPrefetchLinks() {
         prefetch={false}
         onMouseEnter={() => {
           if (!activeServiceId) return
-          queryClient.prefetchQuery({
-            queryKey: ['scoring-analytics-composite', activeServiceId, 24],
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET(
-                '/api/services/{service_id}/scoring/analytics',
-                {
-                  params: {
-                    path: { service_id: activeServiceId },
-                    query: { since_hours: 24 },
-                  },
-                  signal,
-                },
-              )
-              if (!response.ok) throw new Error(`status ${response.status}`)
-              return data
-            },
-          })
-          queryClient.prefetchQuery({
-            queryKey: ['scoring-config-composite', activeServiceId],
-            queryFn: async ({ signal }) => {
-              const { data, response } = await client.GET(
-                '/api/services/{service_id}/scoring/config',
-                {
-                  params: { path: { service_id: activeServiceId } },
-                  signal,
-                },
-              )
-              if (!response.ok) throw new Error(`status ${response.status}`)
-              return data
-            },
-          })
+          queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24))
+          queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId))
         }}
         className={buttonVariants({ variant: 'secondary', size: 'sm' })}
       >

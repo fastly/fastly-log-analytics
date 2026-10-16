@@ -14,6 +14,7 @@ import { client } from '@/lib/api'
 
 import { useScoringQuery } from '../useScoringQuery'
 import type { Expect, WireParity, components } from '@/types/api'
+import { scoringAnalyticsCompositeKey, scoringConfigCompositeKey } from '@/lib/queries/scoring'
 
 /**
  * Operator control for whether edge Layer-2 contributes to the *enforced*
@@ -97,8 +98,8 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-l2-enforce', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-analytics-composite', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-config-composite', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
     },
   })
 
