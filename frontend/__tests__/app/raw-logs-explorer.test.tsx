@@ -40,19 +40,20 @@ beforeEach(() => {
 test('changing filters while on page 2 never fetches with the stale offset', async () => {
   mockFilterPayload = {}
   const qc = createTestQueryClient()
-  const ui = (
+  const ui = () => (
     <QueryClientProvider client={qc}>
       <RawLogsExplorer activeServiceId="svc" />
     </QueryClientProvider>
   )
-  const { rerender } = render(ui)
+  const { rerender } = render(ui())
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1), { timeout: 5000 })
 
   fireEvent.click(await screen.findByRole('button', { name: /next/i }, { timeout: 5000 }))
   await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.offset === 50)).toBe(true), { timeout: 5000 })
 
   mockFilterPayload = { status: { mode: 'include', values: ['500'] } }
-  rerender(ui)
+  // A fresh element each time: re-rendering the identical element reference is a React no-op.
+  rerender(ui())
   await waitFor(() => expect(mockPost.mock.calls.some((c) => c[1].body.filters.status)).toBe(true), { timeout: 5000 })
 
   const filtered = mockPost.mock.calls.filter((c) => c[1].body.filters.status)

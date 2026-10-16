@@ -62,6 +62,11 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/sharing/deploy-frontend',
   'POST /api/sharing/teardown-frontend',
 
+  // High-Scale request-facts aliases of POST /api/high-scale/services/:service_id/request-facts
+  // (which has a handler); the page hook only calls the service-scoped path.
+  'GET /api/high-scale/request-facts',
+  'POST /api/high-scale/request-facts',
+
   // Live Log Streaming SSE endpoints — MSW does not model SSE; the page test
   // injects its own EventSource shim.
   'GET /api/stream/:service_id',
