@@ -14,6 +14,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -21,6 +24,7 @@ jobs:
   backend:
     name: Backend (Python)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -50,10 +54,10 @@ jobs:
       DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
           python-version: "3.13"
@@ -157,13 +161,13 @@ jobs:
       - name: Install terraform
         # Required by tests/utils/test_terraform_gen.py — runs `terraform fmt`
         # against generator output and `validate` when TERRAFORM_VALIDATE=1.
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "~1.9"
           terraform_wrapper: false
 
       - name: Cache Terraform provider plugins
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: cache/tf_provider_cache
           key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py', 'tests/utils/test_terraform_resource_graph.py') }}
@@ -294,6 +298,7 @@ jobs:
   frontend:
     name: Frontend (Node)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -318,17 +323,17 @@ jobs:
       DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
           python-version: "3.13"
@@ -388,12 +393,13 @@ jobs:
   scorer:
     name: Scorer (Rust)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: compute/scorer
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
         # compute/scorer/rust-toolchain.toml pins the channel (1.90). We install
@@ -408,7 +414,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: compute/scorer
 
@@ -430,5 +436,6 @@ jobs:
         # vulnerability in the locked tree. cargo-audit is cached by rust-cache
         # (cache-bin) after the first install.
         run: |
-          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          cargo audit --version 2>/dev/null | grep -q ' 0.22.2$' \
+            || cargo install cargo-audit --version 0.22.2 --locked --force
           cargo audit
