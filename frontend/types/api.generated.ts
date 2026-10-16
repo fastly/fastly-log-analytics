@@ -6377,6 +6377,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Chart Interval
              * @default 1 minute
@@ -6398,10 +6402,6 @@ export interface components {
             include_map_data?: boolean | null;
             /** Sections */
             sections?: ("core" | "topten" | "bots")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** AggregatesResponse */
         AggregatesResponse: {
@@ -7643,6 +7643,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Seconds
              * @default 300
@@ -7655,10 +7659,6 @@ export interface components {
             top_n: number;
             /** Sections */
             sections?: ("overview" | "sessions_ts" | "buffer_health_ts" | "bitrate_ts" | "throughput_ts" | "top_content" | "rebuffer_by_country" | "rebuffer_by_asn" | "object_type_dist" | "streaming_format_dist" | "startup_ts" | "session_duration_dist")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /**
          * CmcdSettingsResponse
@@ -10200,6 +10200,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Metric
              * @default health_score
@@ -10222,10 +10226,6 @@ export interface components {
             map_asn: string;
             /** Sections */
             sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
             /**
              * Region Country
              * @default US
@@ -10290,6 +10290,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Metric
              * @default health_score
@@ -10312,10 +10316,6 @@ export interface components {
             map_asn: string;
             /** Sections */
             sections?: ("health" | "summary" | "heatmap" | "buckets" | "leaderboard" | "metro_leaderboard" | "cities" | "map_buckets" | "shielding_analysis" | "quality" | "pop_health" | "transport")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** NetworkHealthResponse */
         NetworkHealthResponse: {
@@ -10638,6 +10638,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Minutes
              * @default 5
@@ -10682,10 +10686,6 @@ export interface components {
             pop_latency_limit: number;
             /** Sections */
             sections?: ("summary" | "timeseries" | "slow_urls" | "status_codes" | "path_breakdown" | "pop_latency" | "ip_health")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /**
          * OriginAggregatesResponse
@@ -11524,6 +11524,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Sort By
              * @default p99
@@ -11532,10 +11536,6 @@ export interface components {
             sort_by: "avg" | "p50" | "p95" | "p99";
             /** Sections */
             sections?: ("waterfall" | "top_urls" | "top_asns" | "ttl_dist" | "scatter")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /**
          * PiiPolicyPayload
@@ -13892,6 +13892,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Bucket Seconds
              * @default 300
@@ -13899,10 +13903,6 @@ export interface components {
             bucket_seconds: number;
             /** Sections */
             sections?: ("verified_bots_ts" | "ngwaf_verified_bots" | "ngwaf_verified_bots_ts" | "wellknown_bots" | "tls_fingerprints" | "fingerprint_coverage" | "req_size_dist" | "top_ips_header" | "ipv6_adoption" | "proxy_dist" | "conn_reuse_dist" | "proxies" | "top_bots")[] | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** SecurityAggregatesResponse */
         SecurityAggregatesResponse: {
@@ -14427,6 +14427,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /**
              * Limit
              * @default 50
@@ -14451,10 +14455,6 @@ export interface components {
             min_reqs_flag?: number | null;
             /** Min 4Xx Pct Flag */
             min_4xx_pct_flag?: number | null;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** SessionsResponse */
         SessionsResponse: {
@@ -15652,6 +15652,10 @@ export interface components {
             filters: {
                 [key: string]: components["schemas"]["FilterSpec"];
             };
+            /** Range Token */
+            range_token?: string | null;
+            /** Anchor */
+            anchor?: string | null;
             /** Sections */
             sections?: ("overview" | "caching" | "security" | "bots" | "performance" | "network" | "io")[] | null;
             /**
@@ -15659,10 +15663,6 @@ export interface components {
              * @default 1 day
              */
             chart_interval: string;
-            /** Range Token */
-            range_token?: string | null;
-            /** Anchor */
-            anchor?: string | null;
         };
         /** ValueSummaryResponse */
         ValueSummaryResponse: {

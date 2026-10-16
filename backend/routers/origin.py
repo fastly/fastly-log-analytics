@@ -8,7 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440
+from backend.models.common import FilteredRequest, Limit100, Limit200, Limit1440, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.origin import (
     OriginAggregatesResponse,
@@ -86,7 +86,7 @@ class OriginDrilldownRequest(FilteredRequest):
     limit: Limit100 = 30
 
 
-class OriginAggregatesRequest(FilteredRequest):
+class OriginAggregatesRequest(RangeKeyedRequest):
     bucket_minutes: Limit1440 = 5
     split_by_leg: bool = False
     timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
@@ -96,20 +96,6 @@ class OriginAggregatesRequest(FilteredRequest):
     ip_health_limit: Limit100 = 30
     pop_latency_limit: Limit100 = 30
     sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional). When ``range_token`` is
-    # a recognized token, the SERVER resolves the scan window itself from
-    # (token, anchor) and ignores FE-supplied ``start_time``/``end_time`` on this
-    # path — so a crafted body can't widen the scan. The resolved bounds are
-    # still passed through ``ctx.clamp`` so the invite ceiling is enforced
-    # regardless of token (an analyst can't widen past their invite by picking
-    # "30d"). Unlike network-health this endpoint has no response memo to
-    # stabilize — the token exists purely so the FE first-paint React Query key
-    # is server-reproducible (it keys on the token + a quantized anchor instead
-    # of a client-now()-anchored absolute window), which is what makes the
-    # origin page SSR-seedable. Absent/unknown token → legacy absolute-bounds
-    # path unchanged. See backend/utils/time_window.py + the spec.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)

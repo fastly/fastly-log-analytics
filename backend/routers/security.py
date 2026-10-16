@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.share_db.validation import mask_ip
-from backend.models.common import BaseResponse, FilteredRequest
+from backend.models.common import BaseResponse, RangeKeyedRequest
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.security import (
     SecurityAggregatesResponse,
@@ -68,19 +68,9 @@ _expand_sections = make_section_expander(
 )
 
 
-class SecurityAggregatesRequest(FilteredRequest):
+class SecurityAggregatesRequest(RangeKeyedRequest):
     bucket_seconds: int = 300
     sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional) — see origin.py /
-    # backend/utils/time_window.py. When ``range_token`` is recognized the
-    # SERVER resolves the scan window from (token, anchor) and ignores
-    # FE-supplied start/end, then clamps to the invite ceiling (an analyst can't
-    # widen past their invite by picking "30d"). This endpoint has no response
-    # memo to stabilize — the token exists purely so the FE first-paint key is
-    # server-reproducible (origin SSR-seed contract). Absent/unknown token →
-    # legacy absolute-bounds path unchanged.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)

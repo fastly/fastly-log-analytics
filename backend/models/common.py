@@ -92,6 +92,23 @@ class FilteredRequest(DateRangeMixin):
     filters: FiltersDict = {}
 
 
+class RangeKeyedRequest(FilteredRequest):
+    """``FilteredRequest`` plus the relative-range wire contract (additive, optional).
+
+    When ``range_token`` is a recognized token the SERVER resolves the scan
+    window from (token, ``anchor``) and ignores FE-supplied ``start_time`` /
+    ``end_time`` (see ``RequestContext.resolve_window``), then clamps to the
+    invite ceiling, so an analyst can't widen past their invite by picking
+    ``"30d"``. The token also makes the FE first-paint key server-reproducible
+    (the origin SSR-seed contract) and, on network-health, stabilizes the
+    response-memo key. Absent/unknown token falls back to the legacy absolute
+    bounds path. See ``backend/utils/time_window.py``.
+    """
+
+    range_token: str | None = None
+    anchor: str | None = None
+
+
 class PaginationMixin(BaseModel):
     """Mixin for endpoints that page/sort their results.
 

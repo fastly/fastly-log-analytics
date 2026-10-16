@@ -50239,6 +50239,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "chart_interval": {
             "type": "string",
             "title": "Chart Interval",
@@ -50326,28 +50348,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -53446,6 +53446,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_seconds": {
             "type": "integer",
             "title": "Bucket Seconds",
@@ -53483,28 +53505,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -60465,6 +60465,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "metric": {
             "type": "string",
             "title": "Metric",
@@ -60512,28 +60534,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           },
           "region_country": {
             "type": "string",
@@ -60720,6 +60720,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "metric": {
             "type": "string",
             "title": "Metric",
@@ -60767,28 +60789,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -61560,6 +61560,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_minutes": {
             "type": "number",
             "title": "Bucket Minutes",
@@ -61631,28 +61653,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -63332,6 +63332,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "sort_by": {
             "type": "string",
             "enum": [
@@ -63363,28 +63385,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -70438,6 +70438,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "bucket_seconds": {
             "type": "integer",
             "title": "Bucket Seconds",
@@ -70471,28 +70493,6 @@
               }
             ],
             "title": "Sections"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -71911,6 +71911,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "limit": {
             "type": "integer",
             "title": "Limit",
@@ -71952,28 +71974,6 @@
               }
             ],
             "title": "Min 4Xx Pct Flag"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",
@@ -75153,6 +75153,28 @@
             "title": "Filters",
             "default": {}
           },
+          "range_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Token"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
           "sections": {
             "anyOf": [
               {
@@ -75180,28 +75202,6 @@
             "type": "string",
             "title": "Chart Interval",
             "default": "1 day"
-          },
-          "range_token": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Range Token"
-          },
-          "anchor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Anchor"
           }
         },
         "type": "object",

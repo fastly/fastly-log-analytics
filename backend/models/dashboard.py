@@ -8,7 +8,14 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, field_serializer
 
 from backend.models._base import WireSafeModel
-from backend.models.common import BaseResponse, FilteredRequest, Limit500, LogExtentsMixin, PaginationMixin
+from backend.models.common import (
+    BaseResponse,
+    FilteredRequest,
+    Limit500,
+    LogExtentsMixin,
+    PaginationMixin,
+    RangeKeyedRequest,
+)
 from backend.models.security import SecurityTopBotsResponse
 
 # ── Dashboard aggregates ──────────────────────────────────────────────────────
@@ -41,7 +48,7 @@ ChartMetric = Literal[
 DashboardSectionName = Literal["core", "topten", "bots"]
 
 
-class AggregatesRequest(FilteredRequest):
+class AggregatesRequest(RangeKeyedRequest):
     chart_interval: str = "1 minute"
     chart_metric: ChartMetric = "requests"
     fields: list[str] | None = None
@@ -62,16 +69,6 @@ class AggregatesRequest(FilteredRequest):
     # knobs stay for backwards compat with the /charts callers that already
     # pass them).
     sections: list[DashboardSectionName] | None = None
-    # Relative-range wire contract (additive, optional) — see
-    # backend/routers/origin.py / backend/utils/time_window.py. When
-    # ``range_token`` is recognized the SERVER resolves the scan window from
-    # (token, anchor), ignoring FE-supplied start/end, then clamps to the invite
-    # ceiling. Consumed by /dashboard/bundle + /dashboard/aggregates so the FE
-    # first-paint key is server-reproducible (origin SSR-seed contract). The
-    # dashboard response memo is hard-disabled (DASHBOARD_CACHE_TTL=0) so the
-    # token does not interact with it. Absent/unknown token → legacy path.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class FieldTopEntry(BaseModel):
@@ -170,17 +167,13 @@ from backend.models.insights import (  # noqa: F401
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 
-class SessionsRequest(FilteredRequest, PaginationMixin):
+class SessionsRequest(RangeKeyedRequest, PaginationMixin):
     limit: Limit500 = 50
     sort_by: str = "session_start"
     flagged_only: bool = False
     streaming_only: bool = False
     min_reqs_flag: int | None = None
     min_4xx_pct_flag: float | None = None
-    # Relative-range wire contract (optional). When ``range_token`` is recognized
-    # the server resolves the window from (range_token, anchor) deterministically.
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class Session(BaseModel):

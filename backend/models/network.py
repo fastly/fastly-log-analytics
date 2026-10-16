@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
-from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
+from backend.models.common import BaseResponse, FilteredRequest, Limit100, RangeKeyedRequest, Seconds14400
 
 
 class NetworkWorstEntry(BaseModel):
@@ -195,28 +195,24 @@ NetworkSectionName = Literal[
 SectionName = NetworkSectionName
 
 
-class NetworkHealthRequest(FilteredRequest):
+class NetworkHealthRequest(RangeKeyedRequest):
     metric: str = "health_score"
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     map_asn: str = "all"
     sections: list[SectionName] | None = None
-    range_token: str | None = None
-    anchor: str | None = None
 
 
 class NetworkQualityRequest(FilteredRequest):
     region_country: str = "US"
 
 
-class NetworkBundleRequest(FilteredRequest):
+class NetworkBundleRequest(RangeKeyedRequest):
     metric: str = "health_score"
     bucket_seconds: Seconds14400 = 300
     top_n: Limit100 = 30
     map_asn: str = "all"
     sections: list[SectionName] | None = None
-    range_token: str | None = None
-    anchor: str | None = None
     region_country: str = "US"
 
 
