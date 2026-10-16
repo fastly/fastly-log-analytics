@@ -97,11 +97,13 @@ def cleanup_legacy_logging_endpoints(
                 logger.warning(f"Failed to remove {ep_name}: {e}")
 
         # Validate and activate the new version
-        fastly(
+        validation = fastly(
             "GET",
             f"/service/{service_id}/version/{new_ver_num}/validate",
             token=token,
         )
+        if validation.get("status") != "ok":
+            raise RuntimeError(f"Validation failed: {validation.get('errors') or validation}")
         fastly(
             "PUT",
             f"/service/{service_id}/version/{new_ver_num}/activate",

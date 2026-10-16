@@ -60,6 +60,8 @@ def test_legacy_endpoints_removed_and_new_version_activated():
             return endpoints
         if method == "PUT" and path.endswith("/clone"):
             return {"number": 6}
+        if method == "GET" and path.endswith("/validate"):
+            return {"status": "ok"}
         return {}
 
     status_messages: list[str] = []
@@ -86,6 +88,8 @@ def test_per_endpoint_delete_failure_is_swallowed_and_cleanup_still_activates():
             return {"number": 6}
         if method == "DELETE":
             raise RuntimeError("HTTP 500 upstream flaked")
+        if method == "GET" and path.endswith("/validate"):
+            return {"status": "ok"}
         return {}
 
     with patch.object(lec, "get_active_version", return_value=5), patch.object(lec, "fastly", side_effect=_fake):
@@ -116,3 +120,23 @@ def test_works_without_status_cb():
 
     with patch.object(lec, "get_active_version", side_effect=RuntimeError("boom")):
         assert lec.cleanup_legacy_logging_endpoints("svc1", "tok") is False
+
+
+def test_failed_validation_does_not_activate_and_returns_false():
+    calls: list[tuple[str, str]] = []
+
+    def _fake(method, path, *args, **kwargs):
+        calls.append((method, path))
+        if method == "GET" and path.endswith("/logging/s3"):
+            return [{"name": "Fastly Object Storage Logs"}]
+        if method == "PUT" and path.endswith("/clone"):
+            return {"number": 6}
+        if method == "GET" and path.endswith("/validate"):
+            return {"status": "error", "errors": ["bad vcl"]}
+        return {}
+
+    with patch.object(lec, "get_active_version", return_value=5), patch.object(lec, "fastly", side_effect=_fake):
+        result = lec.cleanup_legacy_logging_endpoints("svc1", "tok")
+
+    assert result is False
+    assert ("PUT", "/service/svc1/version/6/activate") not in calls
