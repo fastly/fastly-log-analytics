@@ -268,10 +268,14 @@ _ANALYST_SSE_ALLOWLIST: set[str] = {
     # Control Room's bounded recent 4xx/5xx request-event feed. Payloads are
     # analyst-safe because client IPs are masked in the router.
     "/control-room/error-stream",
-    # Live log streaming feed (/api/stream/{service_id}).
-    "/stream",
+    # Live log streaming feed (/api/stream/{service_id}). The sibling
+    # /api/services/{service_id}/stream is matched by
+    # _ANALYST_SSE_ALLOWED_PATTERNS — a bare "/stream" suffix entry here would
+    # open every ``*/stream`` route (cron, admin, ...) to analysts.
     "/api/stream",
 }
+
+_ANALYST_SSE_ALLOWED_PATTERNS = (re.compile(r"^/api/services/[^/]+/stream$"),)
 
 # Local "is this a real LAN hostname" allowlist; admins can extend via env.
 # ``testserver`` is starlette.testclient.TestClient's default Host header.
@@ -1356,11 +1360,15 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         # path suffix (a leading "/"-prefixed segment, for routes
         # parameterized by service_id, e.g. "/realtime-stream" matching
         # "/api/services/{service_id}/realtime-stream").
-        if _is_sse_route(path) and not any(
-            path == allowed
-            or path.endswith(allowed)
-            or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
-            for allowed in _ANALYST_SSE_ALLOWLIST
+        if (
+            _is_sse_route(path)
+            and not any(
+                path == allowed
+                or path.endswith(allowed)
+                or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
+                for allowed in _ANALYST_SSE_ALLOWLIST
+            )
+            and not any(pat.match(path) for pat in _ANALYST_SSE_ALLOWED_PATTERNS)
         ):
             return JSONResponse(status_code=403, content={"error": "sse_blocked"})
 
