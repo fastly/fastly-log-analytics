@@ -1,4 +1,5 @@
 import * as os from 'os'
+import { headers } from 'next/headers'
 
 async function fetchGceMetadata(path: string): Promise<string | null> {
   try {
@@ -16,6 +17,14 @@ async function fetchGceMetadata(path: string): Promise<string | null> {
 }
 
 export async function ServerFooter() {
+  // The root layout renders this server-side for EVERY request, so the
+  // analyst/public check can't live only in the client AppLayout — the footer
+  // would already be in the HTML/RSC payload. Requests through Caddy (the
+  // analyst/public path; admin uses the SSH tunnel without the marker) get
+  // nothing, and we skip the metadata lookups entirely.
+  const requestHeaders = await headers()
+  if (requestHeaders.get('x-proxied-by-caddy') === 'true') return null
+
   let envName = 'local'
   let machineName = process.env.POD_NAME || os.hostname()
 
