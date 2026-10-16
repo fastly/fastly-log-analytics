@@ -63,16 +63,15 @@ def _decode_outcome_counters(raw: str | None) -> dict[str, int]:
         raise RuntimeError("invalid outcome_counters values in metadata") from exc
 
 
-def _begin_metadata_write(con: Any, *, postgres: bool) -> None:
-    con.execute("BEGIN" if postgres else "BEGIN IMMEDIATE")
+def _begin_metadata_write(con: Any) -> None:
+    con.execute("BEGIN")
 
 
-def _lock_cron_run(con: Any, service_id: str, run_id: int, *, postgres: bool) -> None:
-    if postgres:
-        con.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
-            (service_id, run_id),
-        )
+def _lock_cron_run(con: Any, service_id: str, run_id: int) -> None:
+    con.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, ?))",
+        (service_id, run_id),
+    )
 
 
 def _publish_cron_run_change(service_id: str, run_id: int, task: str, status: str) -> None:
@@ -230,16 +229,13 @@ def log_cron_run(
         nonlocal final_status
         import time
 
-        from backend.core.metadata import pg_connection
-
         final_rows_ingested = rows_ingested
         final_corrupt_rows = corrupt_rows
-        postgres = pg_connection.is_postgres()
-        _begin_metadata_write(con, postgres=postgres)
+        _begin_metadata_write(con)
         try:
-            _lock_cron_run(con, service_id, run_id, postgres=postgres) if run_id is not None else None
             if run_id is not None:
-                lock_clause = " FOR UPDATE" if postgres else ""
+                _lock_cron_run(con, service_id, run_id)
+                lock_clause = " FOR UPDATE"
                 existing = con.execute(
                     "SELECT status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
                     (run_id, service_id),
@@ -353,14 +349,12 @@ def record_ingest_object_outcome(service_id: str, object_key: str, outcome_count
     The ledger snapshot and aggregated cron counters commit together, so task
     retries and later source-deletion outcomes cannot double-count an object.
     """
-    from backend.core.metadata import pg_connection
 
     new_counters = _normalize_outcome_counters(outcome_counters)
     con = get_con(service_id)
-    postgres = pg_connection.is_postgres()
-    _begin_metadata_write(con, postgres=postgres)
+    _begin_metadata_write(con)
     try:
-        lock_clause = " FOR UPDATE" if postgres else ""
+        lock_clause = " FOR UPDATE"
         ledger_row = con.execute(
             "SELECT originating_task, originating_run_id, outcome_counters "
             "FROM ingest_ledger WHERE service_id = ? AND object_key = ?" + lock_clause,
@@ -376,7 +370,7 @@ def record_ingest_object_outcome(service_id: str, object_key: str, outcome_count
         new_run_status: str | None = None
         if run_id is not None:
             run_id = int(run_id)
-            _lock_cron_run(con, service_id, run_id, postgres=postgres)
+            _lock_cron_run(con, service_id, run_id)
             run_row = con.execute(
                 "SELECT task, status, outcome_counters FROM cron_runs WHERE id = ? AND service_id = ?" + lock_clause,
                 (run_id, service_id),
@@ -813,63 +807,38 @@ def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...
     lifecycle artifacts, not failing crons). Default callers are unaffected.
     """
     con = get_con(service_id)
-    from backend.core.metadata import pg_connection
 
-    if pg_connection.is_postgres():
-        exclusion_sql = ""
-        params: list[Any] = [service_id]
-        if exclude_error_messages:
-            placeholders = ",".join(["?"] * len(exclude_error_messages))
-            exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
-            params.extend(exclude_error_messages)
+    exclusion_sql = ""
+    params: list[Any] = [service_id]
+    if exclude_error_messages:
+        placeholders = ",".join(["?"] * len(exclude_error_messages))
+        exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
+        params.extend(exclude_error_messages)
 
-        sql = f"""
-        WITH RECURSIVE tasks AS (
-            (
-                SELECT task FROM cron_runs WHERE service_id = ? ORDER BY service_id, task LIMIT 1
-            )
-            UNION ALL
-            SELECT (
-                SELECT task FROM cron_runs WHERE service_id = ? AND task > t.task ORDER BY service_id, task LIMIT 1
-            )
-            FROM tasks t WHERE t.task IS NOT NULL
+    sql = f"""
+    WITH RECURSIVE tasks AS (
+        (
+            SELECT task FROM cron_runs WHERE service_id = ? ORDER BY service_id, task LIMIT 1
         )
-        SELECT r.task, r.started_at, r.status, r.duration_s, r.summary, r.error_message
-        FROM tasks t
-        CROSS JOIN LATERAL (
-            SELECT task, started_at, status, duration_s, summary, error_message
-            FROM cron_runs
-            WHERE service_id = ? AND task = t.task AND status != 'running'{exclusion_sql}
-            ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
-        ) r WHERE t.task IS NOT NULL
-        """
-        cte_params: list[Any] = [service_id, service_id, service_id]
-        if exclude_error_messages:
-            cte_params.extend(exclude_error_messages)
-        rows = con.execute(sql, tuple(cte_params)).fetchall()
-    else:
-        exclusion_sql = ""
-        sqlite_params: list[Any] = []
-        if exclude_error_messages:
-            placeholders = ",".join(["?"] * len(exclude_error_messages))
-            exclusion_sql = f" AND COALESCE(error_message, '') NOT IN ({placeholders})"
-            sqlite_params.extend(exclude_error_messages)
-
-        rows = con.execute(
-            f"""
-            SELECT task, started_at, status, duration_s, summary, error_message
-            FROM (
-                SELECT task, started_at, status, duration_s, summary, error_message,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY task ORDER BY started_at DESC, id DESC
-                       ) AS rn
-                FROM cron_runs
-                WHERE status != 'running'{exclusion_sql}
-            ) AS ranked
-            WHERE rn = 1
-            """,
-            tuple(sqlite_params),
-        ).fetchall()
+        UNION ALL
+        SELECT (
+            SELECT task FROM cron_runs WHERE service_id = ? AND task > t.task ORDER BY service_id, task LIMIT 1
+        )
+        FROM tasks t WHERE t.task IS NOT NULL
+    )
+    SELECT r.task, r.started_at, r.status, r.duration_s, r.summary, r.error_message
+    FROM tasks t
+    CROSS JOIN LATERAL (
+        SELECT task, started_at, status, duration_s, summary, error_message
+        FROM cron_runs
+        WHERE service_id = ? AND task = t.task AND status != 'running'{exclusion_sql}
+        ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
+    ) r WHERE t.task IS NOT NULL
+    """
+    cte_params: list[Any] = [service_id, service_id, service_id]
+    if exclude_error_messages:
+        cte_params.extend(exclude_error_messages)
+    rows = con.execute(sql, tuple(cte_params)).fetchall()
     return {
         r["task"]: {
             "started_at": r["started_at"],
@@ -974,37 +943,20 @@ def cron_summary_for_tasks(service_id: str, tasks: tuple[str, ...] = ("log_disco
     if not tasks:
         return {}
     con = get_con(service_id)
-    from backend.core.metadata import pg_connection
 
-    if pg_connection.is_postgres():
-        rows = con.execute(
-            """
-            SELECT r.task, r.started_at, r.duration_s, r.status, r.error_message, r.summary
-            FROM UNNEST(?::text[]) AS t(task_name)
-            CROSS JOIN LATERAL (
-                SELECT task, started_at, duration_s, status, error_message, summary
-                FROM cron_runs
-                WHERE service_id = ? AND task = t.task_name
-                ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
-            ) r
-            """,
-            (list(tasks), service_id),
-        ).fetchall()
-    else:
-        placeholders = ",".join("?" * len(tasks))
-        rows = con.execute(
-            f"""
+    rows = con.execute(
+        """
+        SELECT r.task, r.started_at, r.duration_s, r.status, r.error_message, r.summary
+        FROM UNNEST(?::text[]) AS t(task_name)
+        CROSS JOIN LATERAL (
             SELECT task, started_at, duration_s, status, error_message, summary
-            FROM (
-                SELECT task, started_at, duration_s, status, error_message, summary,
-                       ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC, id DESC) AS rn
-                FROM cron_runs
-                WHERE task IN ({placeholders})
-            ) AS ranked
-            WHERE rn = 1
-            """,
-            tuple(tasks),
-        ).fetchall()
+            FROM cron_runs
+            WHERE service_id = ? AND task = t.task_name
+            ORDER BY service_id, task, started_at DESC, id DESC LIMIT 1
+        ) r
+        """,
+        (list(tasks), service_id),
+    ).fetchall()
     return {
         row["task"]: {
             "last_run": row["started_at"],
