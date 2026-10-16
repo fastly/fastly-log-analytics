@@ -25,8 +25,10 @@ export function StructuredMode({ structuredSql }: StructuredModeProps) {
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 font-semibold">
         Generated SQL (sync'd with filter bar)
       </div>
-      <pre className="text-xs font-mono whitespace-pre-wrap break-words text-foreground/90 bg-background border rounded p-3 overflow-x-auto">
-        {mounted ? structuredSql : '-- building query preview…'}
+      <pre className="text-xs font-mono whitespace-pre-wrap break-words text-foreground/90 bg-background border rounded p-3 overflow-x-auto min-h-[106px]">
+        {mounted
+          ? structuredSql
+          : 'SELECT *\nFROM logs\nWHERE -- building query preview…\nORDER BY timestamp DESC\nLIMIT 100'}
       </pre>
       <div className="text-[10px] text-muted-foreground mt-2">
         Edit the date range or filters in the header bar above to refine.

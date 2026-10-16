@@ -451,17 +451,26 @@ function QueryPageInner() {
   }
   if (!activeServiceId) {
     // Bootstrap in flight on cold load — render a pre-allocated zero-CLS
-    // skeleton matching the editor + results layout footprint.
+    // skeleton matching the exact header + toggles + editor + results footprint.
     return (
       <div
         className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
         data-testid="query-engine-initializing"
       >
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Database className="h-4 w-4 animate-spin" />
-          <span>Initializing DuckDB analytical engine...</span>
+        <PageHeader
+          title="Query Explorer"
+          description="Browse raw request logs using the global filter bar — column headers sort server-side."
+        >
+          <Button disabled size="lg" data-testid="query-run-btn">
+            <Database className="h-4 w-4 mr-2 animate-spin" />
+            Initializing DuckDB analytical engine...
+          </Button>
+        </PageHeader>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <ModeToggle mode={mode} onModeChange={handleModeChange} />
+          <DatasetToggle dataset={dataset} onDatasetChange={handleDatasetChange} />
         </div>
-        <Skeleton className="h-[420px] w-full rounded-lg" />
+        <Skeleton className="h-[238px] w-full rounded-lg" />
         <Skeleton className="h-[380px] w-full rounded-lg" />
       </div>
     )
@@ -652,7 +661,27 @@ export function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) 
 // the route render eagerly while the search-params subtree streams in.
 export default function QueryPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense
+      fallback={
+        <div
+          className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
+          data-testid="query-engine-initializing"
+        >
+          <PageHeader
+            title="Query Explorer"
+            description="Browse raw request logs using the global filter bar — column headers sort server-side."
+          >
+            <Button disabled size="lg" data-testid="query-run-btn">
+              <Database className="h-4 w-4 mr-2 animate-spin" />
+              Initializing DuckDB analytical engine...
+            </Button>
+          </PageHeader>
+          <Skeleton className="h-9 w-full rounded-lg" />
+          <Skeleton className="h-[238px] w-full rounded-lg" />
+          <Skeleton className="h-[380px] w-full rounded-lg" />
+        </div>
+      }
+    >
       <QueryPageInner />
     </Suspense>
   )
