@@ -9,7 +9,19 @@ import { createTestQueryClient } from '../../helpers/query'
 
 const { adminFetchMock } = vi.hoisted(() => ({ adminFetchMock: vi.fn() }))
 
-vi.mock('@/lib/api', () => ({ adminFetch: adminFetchMock }))
+vi.mock('@/lib/api', () => ({
+  adminFetch: adminFetchMock,
+  adminJson: async (
+    _spec: string,
+    url: string,
+    init?: RequestInit,
+    errorMessage: (status: number) => string = (status) => `status ${status}`,
+  ) => {
+    const r = await adminFetchMock(url, init)
+    if (!r.ok) throw new Error(errorMessage(r.status))
+    return r.json()
+  },
+}))
 
 const evidence = {
   id: 17,

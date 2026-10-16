@@ -21,7 +21,7 @@
 import * as React from 'react'
 import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminFetch } from '@/lib/api'
+import { adminFetch, adminJson } from '@/lib/api'
 import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -119,9 +119,7 @@ export default function QueryMonitorPage() {
   const { data: cfg } = useQuery<MonitorConfig>({
     queryKey: ['admin', 'query-monitor', 'config'],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/app-config/query-monitor', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/app-config/query-monitor', '/api/admin/app-config/query-monitor', { signal })
     },
     staleTime: 60_000,
   })

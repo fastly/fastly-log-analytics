@@ -9,7 +9,7 @@ import { CardErrorState } from '@/components/CardErrorState'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { adminFetch } from '@/lib/api'
+import { adminFetch, adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
 
@@ -32,9 +32,12 @@ export function QuarantineSection() {
   const summaryQuery = useQuery<QuarantineSummary>({
     queryKey: ['admin', 'quarantine', 'summary', activeServiceId],
     queryFn: async ({ signal }) => {
-      const response = await adminFetch('/api/admin/quarantine/summary', { signal })
-      if (!response.ok) throw new Error(`Unable to load quarantine summary (HTTP ${response.status})`)
-      return response.json()
+      return adminJson(
+        '/api/admin/quarantine/summary',
+        '/api/admin/quarantine/summary',
+        { signal },
+        (status) => `Unable to load quarantine summary (HTTP ${status})`,
+      )
     },
     enabled: !!activeServiceId,
     staleTime: 30_000,
@@ -47,9 +50,12 @@ export function QuarantineSection() {
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
       if (errorCategory) params.set('error_category', errorCategory)
-      const response = await adminFetch(`/api/admin/quarantine?${params}`, { signal })
-      if (!response.ok) throw new Error(`Unable to load quarantine items (HTTP ${response.status})`)
-      return response.json()
+      return adminJson(
+        '/api/admin/quarantine',
+        `/api/admin/quarantine?${params}`,
+        { signal },
+        (status) => `Unable to load quarantine items (HTTP ${status})`,
+      )
     },
     enabled: !!activeServiceId && showDetails,
     staleTime: 30_000,

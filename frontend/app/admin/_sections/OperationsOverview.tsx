@@ -27,7 +27,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
-import { adminFetch } from '@/lib/api'
+import { adminFetch, adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 
@@ -80,9 +80,7 @@ function LiveQueriesCard() {
   const { data, isError } = useQuery<SummaryResponse>({
     queryKey: ['admin', 'overview', 'queries-summary'],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/queries/summary', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/queries/summary', '/api/admin/queries/summary', { signal })
     },
     initialData: seed,
     retry: false,
@@ -128,9 +126,7 @@ function IngestHealthCard() {
   const { data, isError } = useQuery<LogAccountingResponse>({
     queryKey: ['admin', 'overview', 'log-accounting', activeServiceId],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/log-accounting?hours=24', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson('/api/admin/log-accounting', '/api/admin/log-accounting?hours=24', { signal })
     },
     initialData: seed,
     enabled: !!activeServiceId,

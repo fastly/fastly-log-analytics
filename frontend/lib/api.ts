@@ -150,6 +150,27 @@ export function adminFetch(
   return fetch(input, { ...init, headers })
 }
 
+type JsonOf<P extends keyof paths> = paths[P] extends {
+  get: { responses: { 200: { content: { "application/json": infer T } } } }
+}
+  ? T
+  : never
+
+// Typed JSON GET over ``adminFetch``. ``spec`` is the OpenAPI path template the
+// concrete ``url`` instantiates; it only exists to derive the response type
+// from the generated schema, so a backend model change fails ``tsc`` here
+// instead of hiding behind a hand-written cast. Throws on a non-2xx status.
+export async function adminJson<P extends keyof paths>(
+  _spec: P,
+  url: string,
+  init: RequestInit = {},
+  errorMessage: (status: number) => string = (status) => `status ${status}`,
+): Promise<JsonOf<P>> {
+  const r = await adminFetch(url, init)
+  if (!r.ok) throw new Error(errorMessage(r.status))
+  return r.json() as Promise<JsonOf<P>>
+}
+
 // Paths that don't need an active service (bootstrap before service is
 // known, share/login flows, share-analyst chrome). Anything else is
 // treated as a service-scoped call, and we abort on the FE if no
