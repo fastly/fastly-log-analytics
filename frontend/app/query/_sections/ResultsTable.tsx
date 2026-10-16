@@ -5,6 +5,7 @@ import type { ColumnDef, SortingState } from '@tanstack/react-table'
 import { DataTable } from '@/components/DataTable'
 import { Clock, Database } from 'lucide-react'
 
+import { formatCount } from '@/lib/format'
 interface ResultsTableProps {
   data: any
   isPending: boolean
@@ -40,7 +41,7 @@ export function ResultsTable({
           {data.truncated && (
             <span className="text-amber-500 font-semibold ml-1">
               {data.total_rows && data.total_rows > 0
-                ? `(Truncated to ${data.data?.length} of ${data.total_rows.toLocaleString()})`
+                ? `(Truncated to ${data.data?.length} of ${formatCount(data.total_rows)})`
                 : `(Truncated to ${data.data?.length} — more available; add LIMIT to count)`}
             </span>
           )}

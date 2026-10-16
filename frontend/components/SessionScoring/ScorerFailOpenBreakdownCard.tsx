@@ -10,6 +10,7 @@ import type { components } from '@/types/api.generated'
 
 import { useScoringQuery } from './useScoringQuery'
 
+import { formatCount } from '@/lib/format'
 // Generated from the /scoring/health response_model — single source of truth.
 type HealthResponse = components['schemas']['ScoringHealthResponse']
 type FailOpenBucket = NonNullable<components['schemas']['ScoringReasonCount']>
@@ -78,7 +79,7 @@ export function ScorerFailOpenBreakdownCard({
       ) : (
         <div className="space-y-3">
           <div className="text-xs text-muted-foreground">
-            <span className="font-mono tabular-nums text-foreground">{total.toLocaleString()}</span>{' '}
+            <span className="font-mono tabular-nums text-foreground">{formatCount(total)}</span>{' '}
             fail-open {total === 1 ? 'row' : 'rows'} across{' '}
             <span className="font-mono tabular-nums text-foreground">{buckets.length}</span>{' '}
             {buckets.length === 1 ? 'class' : 'classes'}.
@@ -118,7 +119,7 @@ function FailOpenRow({ bucket, max }: { bucket: FailOpenBucket; max: number }) {
         <code className="mt-1 block truncate text-[10px] text-muted-foreground">{bucket.reason}</code>
       </div>
       <span className="shrink-0 font-mono tabular-nums text-foreground">
-        {(bucket.count ?? 0).toLocaleString()}
+        {formatCount(bucket.count ?? 0)}
       </span>
     </div>
   )

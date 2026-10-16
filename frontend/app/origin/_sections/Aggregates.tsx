@@ -5,6 +5,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { cn } from '@/lib/utils'
 import { ApproxBadge } from './ApproxBadge'
 
+import { formatCount } from '@/lib/format'
 export function Aggregates({ summary }: { summary: any }) {
   const error = summary.error as AnalyticsCardError | null
   // Backend sets ``_approx: true`` on long-window panels (>= 48h) that
@@ -77,7 +78,7 @@ export function Aggregates({ summary }: { summary: any }) {
       >
         <div className="flex flex-col">
           <div className="text-3xl font-bold">
-            {((summary.data?.total_misses || 0) + (summary.data?.total_passes || 0)).toLocaleString()}
+            {formatCount((summary.data?.total_misses || 0) + (summary.data?.total_passes || 0))}
           </div>
           <div className="text-xs text-muted-foreground mt-1">Total cache misses & passes</div>
         </div>

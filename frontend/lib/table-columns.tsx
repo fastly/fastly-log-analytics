@@ -1,7 +1,6 @@
 import { ColumnDef } from '@tanstack/react-table'
 import { DateTimeCell } from '@/components/DataTable/DateTimeCell'
-import { formatBytes } from '@/lib/format'
-
+import { formatBytes, formatCount } from '@/lib/format'
 export const ingestedFilesColumns: ColumnDef<unknown>[] = [
   {
     accessorKey: 'file_name',
@@ -24,7 +23,7 @@ export const ingestedFilesColumns: ColumnDef<unknown>[] = [
     header: 'Rows',
     cell: ({ row }) => (
       <span className="font-mono text-muted-foreground tabular-nums text-xs">
-        {((row.original as { row_count?: number }).row_count || 0).toLocaleString()}
+        {formatCount((row.original as { row_count?: number }).row_count || 0)}
       </span>
     ),
   },

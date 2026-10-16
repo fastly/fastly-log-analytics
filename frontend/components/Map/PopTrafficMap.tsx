@@ -7,7 +7,7 @@ maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
-import { formatCompactCount } from '@/lib/format'
+import { formatCompactCount, formatCount } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
 import { CHART_COLORS } from '@/lib/chart-colors'
@@ -344,7 +344,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
               <td>{i + 1}</td>
               <td>{e.code}</td>
               <td>{formatPopGeo(geoMap[e.code])}</td>
-              <td>{e.requests.toLocaleString()}</td>
+              <td>{formatCount(e.requests)}</td>
               <td>{(e.errorRate * 100).toFixed(2)}%</td>
             </tr>
           ))}
@@ -376,7 +376,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
           <div className="mt-1 text-xs space-y-0.5">
             <div>
               <span className="text-muted-foreground">Requests:</span>{' '}
-              <span className="tabular-nums">{tooltip.requests.toLocaleString()}</span>
+              <span className="tabular-nums">{formatCount(tooltip.requests)}</span>
             </div>
             <div>
               <span className="text-muted-foreground">Error rate:</span>{' '}

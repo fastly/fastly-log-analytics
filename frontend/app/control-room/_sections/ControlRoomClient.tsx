@@ -23,6 +23,7 @@ import { RealtimeMetricCard } from './RealtimeMetricCard'
 import { CHART_COLORS } from '@/lib/chart-colors'
 import { useNowMs } from '@/hooks/useNowSeconds'
 
+import { formatCount } from '@/lib/format'
 const RealtimeChart = dynamic(() => import('./RealtimeChart').then((m) => m.RealtimeChart), {
   ssr: false,
 })
@@ -343,7 +344,7 @@ export function CorrelatorLeaderboard({
               <div className="relative flex items-center justify-between px-2 py-1">
                 <span className="truncate text-xs font-mono">{item.value || '(empty)'}</span>
                 <span className="text-xs tabular-nums text-muted-foreground ml-2 shrink-0">
-                  {item.count.toLocaleString()}
+                  {formatCount(item.count)}
                 </span>
               </div>
             </div>

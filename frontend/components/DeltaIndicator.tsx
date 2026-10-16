@@ -1,5 +1,6 @@
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react'
 
+import { formatCount } from '@/lib/format'
 interface DeltaIndicatorProps {
   current: number
   baseline: number | null | undefined
@@ -9,7 +10,7 @@ export function DeltaIndicator({ current, baseline }: DeltaIndicatorProps) {
   if (baseline == null || baseline === 0) return null
   const pct = ((current - baseline) / Math.abs(baseline)) * 100
   const abs = current - baseline
-  const absStr = abs > 0 ? `+${abs.toLocaleString(undefined, { maximumFractionDigits: 1 })}` : abs.toLocaleString(undefined, { maximumFractionDigits: 1 })
+  const absStr = abs > 0 ? `+${formatCount(abs, { maximumFractionDigits: 1 })}` : formatCount(abs, { maximumFractionDigits: 1 })
 
   if (Math.abs(pct) < 1) return <Minus className="h-3 w-3 text-muted-foreground" />
 

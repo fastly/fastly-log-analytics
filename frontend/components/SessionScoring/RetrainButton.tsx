@@ -20,6 +20,7 @@ import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
+import { formatCount } from '@/lib/format'
 type RetrainResult = components['schemas']['ScoringRetrainResponse']
 
 interface RetrainButtonProps {
@@ -135,16 +136,16 @@ export function RetrainButton({ serviceId }: RetrainButtonProps) {
           <div className="space-y-3 py-2 text-sm">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <Metric label="Matrix version" value={result.matrix_version} mono />
-              <Metric label="Sessions trained" value={(result.sessions_trained_on ?? 0).toLocaleString()} />
-              <Metric label="Transitions" value={(result.transitions ?? 0).toLocaleString()} />
-              <Metric label="Vocab size" value={(result.vocab_size ?? 0).toLocaleString()} />
+              <Metric label="Sessions trained" value={formatCount(result.sessions_trained_on ?? 0)} />
+              <Metric label="Transitions" value={formatCount(result.transitions ?? 0)} />
+              <Metric label="Vocab size" value={formatCount(result.vocab_size ?? 0)} />
             </div>
             {result.rejected && (
               <p className="text-xs text-muted-foreground">
-                Kept {(result.rejected.kept ?? 0).toLocaleString()} sessions ·
-                {' '}dropped {(result.rejected.too_few_events ?? 0).toLocaleString()} too-short,
-                {' '}{(result.rejected.too_fast ?? 0).toLocaleString()} too-fast ·
-                {' '}{(result.rejected.routes_seen ?? 0).toLocaleString()} routes seen
+                Kept {formatCount(result.rejected.kept ?? 0)} sessions ·
+                {' '}dropped {formatCount(result.rejected.too_few_events ?? 0)} too-short,
+                {' '}{formatCount(result.rejected.too_fast ?? 0)} too-fast ·
+                {' '}{formatCount(result.rejected.routes_seen ?? 0)} routes seen
               </p>
             )}
             {result.auc_against_labels ? (

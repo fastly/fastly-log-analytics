@@ -20,14 +20,14 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils';
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 function fmtN(n: number): string {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return n.toLocaleString()
+  return formatCount(n)
 }
 
 
@@ -570,7 +570,7 @@ function UsagePageContent({
                     <p className="text-xs text-muted-foreground">Total Beacons</p>
                     <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_beacons)}</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      {rumBreakdown.average_beacons_per_day?.toLocaleString()} / day avg
+                      {formatCountMaybe(rumBreakdown.average_beacons_per_day)} / day avg
                     </p>
                   </div>
                   <div>

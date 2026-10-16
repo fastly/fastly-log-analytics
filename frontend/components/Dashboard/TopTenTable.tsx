@@ -6,7 +6,7 @@ import { FieldSearchDialog } from './FieldSearchDialog'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { formatValue, calculateDelta } from '@/lib/format'
+import { formatValue, calculateDelta, formatCount } from '@/lib/format'
 import { PopLabel } from '@/components/PopLabel'
 import {
   Tooltip,
@@ -222,7 +222,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
                   </span>
                 )}
                 <span className="text-xs font-mono tabular-nums text-muted-foreground">
-                  {item.count.toLocaleString()}
+                  {formatCount(item.count)}
                 </span>
               </div>
             </>

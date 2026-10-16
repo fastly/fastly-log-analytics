@@ -2,6 +2,7 @@ import React from 'react'
 import { ColumnDef } from '@tanstack/react-table'
 import { FilterValueCell } from '@/components/FilterValueCell'
 
+import { formatCountMaybe } from '@/lib/format'
 const latencyHeader = (label: string) => () => (
   <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
 )
@@ -30,7 +31,7 @@ export const makeLatencyColumns = (labelField: string, labelName: string, filter
       )
     }
   },
-  { accessorKey: 'requests', header: latencyHeader('Reqs'), cell: (info: any) => info.getValue()?.toLocaleString() ?? '0' },
+  { accessorKey: 'requests', header: latencyHeader('Reqs'), cell: (info: any) => formatCountMaybe(info.getValue()) ?? '0' },
   { accessorKey: 'avg', header: latencyHeader('Avg (ms)'), cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' },
   { accessorKey: 'p50', header: latencyHeader('P50'), cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' },
   { accessorKey: 'p95', header: latencyHeader('P95'), cell: (info: any) => info.getValue()?.toFixed(2) ?? '0.00' },

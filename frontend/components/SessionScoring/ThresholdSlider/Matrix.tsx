@@ -3,6 +3,7 @@
 import * as React from 'react'
 import type { Expect, WireParity, components } from '@/types/api'
 
+import { formatCount } from '@/lib/format'
 interface BucketCounts {
   total: number
   good: number
@@ -66,19 +67,19 @@ function Bucket({
   return (
     <div className={`p-3 border rounded-md ${tint}`}>
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
-      <div className="text-xl font-mono font-semibold tabular-nums">{total.toLocaleString()}</div>
+      <div className="text-xl font-mono font-semibold tabular-nums">{formatCount(total)}</div>
       <div className="mt-1 space-y-0.5 text-[11px]">
         <div className="flex justify-between">
           <span className="text-emerald-700">good</span>
-          <span className="font-mono tabular-nums">{good.toLocaleString()}</span>
+          <span className="font-mono tabular-nums">{formatCount(good)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-destructive">bad</span>
-          <span className="font-mono tabular-nums">{bad.toLocaleString()}</span>
+          <span className="font-mono tabular-nums">{formatCount(bad)}</span>
         </div>
         <div className="flex justify-between text-muted-foreground">
           <span>unlabeled</span>
-          <span className="font-mono tabular-nums">{unlabeled.toLocaleString()}</span>
+          <span className="font-mono tabular-nums">{formatCount(unlabeled)}</span>
         </div>
       </div>
     </div>

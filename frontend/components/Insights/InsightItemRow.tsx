@@ -7,6 +7,7 @@ import { useServiceStore } from '@/stores/serviceStore'
 import { InsightItem } from '@/types/api'
 import { ImpossibleDistanceData, ScriptedTrafficData } from './types'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
 interface InsightItemRowProps {
   item: InsightItem
   insightId: string
@@ -116,12 +117,12 @@ export function InsightItemRow({ item, insightId, onMapClick, onCacheCollapseCli
         <div className="flex items-center gap-1.5">
           <DeltaIndicator current={item.current_val ?? 0} baseline={item.baseline_val} />
           <span className="font-bold tabular-nums">
-            {item.current_val?.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
+            {formatCountMaybe(item.current_val, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         </div>
         {item.baseline_val != null && (
           <span className="text-[11px] sm:text-[10px] text-muted-foreground tabular-nums">
-            {item.baseline_label || 'baseline'}: {item.baseline_val.toLocaleString(undefined, { maximumFractionDigits: 1 })} {item.unit}
+            {item.baseline_label || 'baseline'}: {formatCount(item.baseline_val, { maximumFractionDigits: 1 })} {item.unit}
           </span>
         )}
         {investigateHref && (

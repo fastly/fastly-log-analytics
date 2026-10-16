@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table"
 import { Skeleton } from '@/components/ui/skeleton'
 
+import { formatCountMaybe } from '@/lib/format'
 export function SchemaTab({
   schemaData,
   isLoadingSchema,
@@ -66,7 +67,7 @@ export function SchemaTab({
                     ) : '—'}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-right text-muted-foreground tabular-nums">
-                    {hasStats ? col.approx_unique?.toLocaleString() ?? '—' : '—'}
+                    {hasStats ? formatCountMaybe(col.approx_unique) ?? '—' : '—'}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]" title={col.min}>
                     {hasStats ? col.min ?? '—' : '—'}

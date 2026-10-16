@@ -11,6 +11,7 @@ import { StatusPanelHelp } from '@/components/SessionScoring/help-content'
 import { SSEModal } from '@/components/SSEModal'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { formatLocalDateTime } from '@/lib/date'
 
 interface StatusPanelProps {
   serviceId: string
@@ -349,7 +350,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
 // the title attribute by the caller.
 function formatActivated(raw: string): string {
   const d = new Date(raw)
-  return isNaN(d.getTime()) ? raw : d.toLocaleString()
+  return isNaN(d.getTime()) ? raw : formatLocalDateTime(d)
 }
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {

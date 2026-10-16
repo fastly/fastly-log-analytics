@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
 interface ShieldingMapProps {
   rows: any[]
   isLoading?: boolean
@@ -149,7 +150,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
             so the two surfaces don't disagree. (L4) */}
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">Requests</span>
-          <span className="text-[11px] font-semibold tabular-nums">{Number(props.requests).toLocaleString()}</span>
+          <span className="text-[11px] font-semibold tabular-nums">{formatCount(Number(props.requests))}</span>
         </div>
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">P50 (E→S)</span>
@@ -166,7 +167,7 @@ function ShieldingTooltip({ info }: { info: TooltipInfo }) {
         {props.distance_km != null && (
           <div className="flex justify-between gap-4">
             <span className="text-[11px] text-muted-foreground">Distance</span>
-            <span className="text-[11px] font-semibold tabular-nums">{Number(props.distance_km).toLocaleString()}km</span>
+            <span className="text-[11px] font-semibold tabular-nums">{formatCount(Number(props.distance_km))}km</span>
           </div>
         )}
         {props.light_speed_rtt_ms != null && (
@@ -566,7 +567,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
       return 'Shielding map showing edge-POP to shield-POP paths. No paths available.'
     }
     const topThree = sortedRows.slice(0, 3)
-      .map(r => `${r.edge_pop} to ${r.shield_pop} ${r.requests?.toLocaleString() ?? '0'} requests`)
+      .map(r => `${r.edge_pop} to ${r.shield_pop} ${formatCountMaybe(r.requests) ?? '0'} requests`)
       .join(', ')
     return `Shielding map of ${sortedRows.length} edge-to-shield paths. Top routes: ${topThree}.`
   }, [sortedRows])
@@ -678,11 +679,11 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
             <tr key={`${r.edge_pop}-${r.shield_pop}-${i}`}>
               <td><PopLabel code={r.edge_pop} /></td>
               <td><PopLabel code={r.shield_pop} /></td>
-              <td>{(r.requests ?? 0).toLocaleString()}{r.low_sample ? ' (low sample)' : ''}</td>
+              <td>{formatCount(r.requests ?? 0)}{r.low_sample ? ' (low sample)' : ''}</td>
               <td>{r.p50_ms != null ? r.p50_ms.toFixed(0) : 'n/a'}</td>
               <td>{r.p95_ms != null ? r.p95_ms.toFixed(0) : 'n/a'}</td>
               <td>{r.p99_ms != null ? r.p99_ms.toFixed(0) : 'n/a'}</td>
-              <td>{r.distance_km != null ? r.distance_km.toLocaleString() : 'n/a'}</td>
+              <td>{r.distance_km != null ? formatCount(r.distance_km) : 'n/a'}</td>
               <td>{r.light_speed_rtt_ms != null ? r.light_speed_rtt_ms.toFixed(1) : 'n/a'}</td>
               <td>{r.efficiency_ratio != null ? r.efficiency_ratio.toFixed(2) : 'n/a'}</td>
               <td>{r.anomaly_static ? 'yes' : 'no'}</td>

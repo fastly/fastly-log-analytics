@@ -9,8 +9,7 @@ import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
 import { countryFill } from '@/components/Map/colors'
 import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
-import { formatCompactCount, resolveCountryName } from '@/lib/format'
-
+import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/format'
 const alpha3ToAlpha2: Record<string, string> = {}
 Object.entries(countryCodes as Record<string, string>).forEach(([a2, a3]) => {
   alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()
@@ -358,7 +357,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
             <tr key={d.country}>
               <td>{i + 1}</td>
               <td>{resolveCountryName(d.country)}</td>
-              <td>{d.count.toLocaleString()}</td>
+              <td>{formatCount(d.count)}</td>
             </tr>
           ))}
         </tbody>
@@ -414,7 +413,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
                       {resolveCountryName(d.country)}
                     </span>
                     <span className="text-muted-foreground tabular-nums">
-                      {d.count.toLocaleString()}
+                      {formatCount(d.count)}
                     </span>
                   </li>
                 )
@@ -434,7 +433,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
           }}
         >
           <div className="font-semibold text-foreground">{tooltip.name}</div>
-          <div className="text-muted-foreground">{tooltip.count.toLocaleString()} requests</div>
+          <div className="text-muted-foreground">{formatCount(tooltip.count)} requests</div>
         </div>
       )}
 

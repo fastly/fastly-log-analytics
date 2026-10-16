@@ -3,7 +3,7 @@
 import React from 'react'
 import { useServiceQuery } from '@/hooks/useServiceQuery'
 import { client, extractApiError } from '@/lib/api'
-import { formatBytes, formatCompactCount } from '@/lib/format'
+import { formatBytes, formatCompactCount, formatCount } from '@/lib/format'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
@@ -207,7 +207,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Activity className="h-3 w-3" /> Requests
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.requests.toLocaleString()}
+                            {formatCount(pop.requests)}
                           </span>
                         </div>
                         <div className="flex flex-col">
@@ -311,7 +311,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.requests.toLocaleString()}
+                        {formatCount(selectedPop.requests)}
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
                         Routes <strong className="font-mono text-foreground">{((selectedPop.requests / (totalRequests || 1)) * 100).toFixed(2)}%</strong> of total edge traffic.
@@ -329,8 +329,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.cache_hit_rate.toFixed(2)}%
                       </div>
                       <div className="text-[10px] text-muted-foreground/90 font-medium mt-1 space-y-0.5 font-mono">
-                        <div>Hits: {Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100).toLocaleString()}</div>
-                        <div>Misses: {Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100).toLocaleString()}</div>
+                        <div>Hits: {formatCount(Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100))}</div>
+                        <div>Misses: {formatCount(Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100))}</div>
                       </div>
                     </div>
                   </div>
@@ -365,7 +365,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.error_rate.toFixed(2)}%
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
-                        Total Failed Reqs: <strong className="font-mono text-foreground">{Math.round(selectedPop.requests * selectedPop.error_rate / 100).toLocaleString()}</strong>
+                        Total Failed Reqs: <strong className="font-mono text-foreground">{formatCount(Math.round(selectedPop.requests * selectedPop.error_rate / 100))}</strong>
                       </span>
                     </div>
                   </div>

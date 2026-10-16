@@ -19,6 +19,7 @@ import { DataTable } from '@/components/DataTable'
 import { STREAMING_INFO, OBJECT_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from './streamingInfo'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCountMaybe } from '@/lib/format'
 const SESSIONS_LAYOUT = {
   yaxis: { title: { text: 'Active Viewers' } },
   yaxis2: { title: { text: 'Rebuffer Rate (%)' }, overlaying: 'y', side: 'right' as const, rangemode: 'tozero' },
@@ -334,7 +335,7 @@ function StreamingBody({
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
         <StatCard
           title="Total Sessions"
-          value={overview?.active_sessions?.toLocaleString() ?? '—'}
+          value={formatCountMaybe(overview?.active_sessions) ?? '—'}
           sub="in selected range"
           icon={Play}
           loading={cmcdQuery.isLoading}
@@ -343,7 +344,7 @@ function StreamingBody({
         />
         <StatCard
           title="Peak Viewers"
-          value={overview?.peak_viewers?.toLocaleString() ?? '—'}
+          value={formatCountMaybe(overview?.peak_viewers) ?? '—'}
           sub="max concurrent"
           icon={TrendingUp}
           loading={cmcdQuery.isLoading}

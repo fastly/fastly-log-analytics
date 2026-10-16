@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { formatLocalDateTime } from '@/lib/date'
 
 type SessionEvent = components['schemas']['ScoringSessionEvent']
 type SessionEventsResponse = components['schemas']['ScoringSessionEventsResponse']
@@ -155,7 +156,7 @@ function EventRow({
   index: number
   prev: SessionEvent | null
 }) {
-  const ts = event.ts ? new Date(event.ts).toLocaleString() : '—'
+  const ts = event.ts ? formatLocalDateTime(event.ts) : '—'
   const score = event.edge_score
   const compliance = event.edge_cookie_compliance
   const reason = event.edge_score_reason

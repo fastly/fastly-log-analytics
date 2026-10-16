@@ -61,6 +61,15 @@ export function formatCount(n: number, options?: Intl.NumberFormatOptions): stri
 }
 
 /**
+ * ``formatCount`` for possibly-missing values — the drop-in for
+ * ``n?.toLocaleString()``: ``undefined`` in, ``undefined`` out, so callers keep
+ * their ``?? '—'`` fallbacks.
+ */
+export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
+  return n == null ? undefined : formatCount(n, options)
+}
+
+/**
  * Formats a raw value (like bytes or country codes) based on its field name.
  */
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {

@@ -13,6 +13,7 @@ import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
 import { useRumStatus } from '@/hooks/useRumStatus';
+import { formatLocalDateTime } from '@/lib/date'
 
 
 export function RumStatusPanel() {
@@ -94,7 +95,7 @@ export function RumStatusPanel() {
           {status?.enabled && (
             <>
               <p className="text-sm">
-                <strong>Enabled at:</strong> {status.enabled_at ? new Date(status.enabled_at).toLocaleString() : 'Unknown'}
+                <strong>Enabled at:</strong> {status.enabled_at ? formatLocalDateTime(status.enabled_at) : 'Unknown'}
               </p>
               <p className="text-sm">
                 <strong>VCL Drift:</strong> {status.vcl_drift ? '⚠️ Yes' : '✅ No'}

@@ -34,6 +34,7 @@ import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLa
 import type { components } from '@/types/api.generated'
 import type { SessionsResponse } from '@/types/api'
 
+import { formatCount, formatCountMaybe } from '@/lib/format'
 type SessionRow = components['schemas']['Session']
 
 interface SessionDetailProps {
@@ -109,7 +110,7 @@ export function SessionDetail({
           return <Badge variant={s >= 500 ? 'destructive' : s >= 400 ? 'outline' : 'secondary'}>{s}</Badge>
         }
         if (col === 'resp_bytes' || col === 'elapsed') {
-          return <span className="text-xs font-mono tabular-nums">{Number(value).toLocaleString()}</span>
+          return <span className="text-xs font-mono tabular-nums">{formatCount(Number(value))}</span>
         }
         if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, value as string)}</span>
         if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, value as string)}</span>
@@ -223,7 +224,7 @@ export function SessionDetail({
             {selectedSession?.asn ? `AS${selectedSession.asn}` : '—'}
           </MetadataItem>
           <MetadataItem label="Requests">
-            <span className="font-semibold">{selectedSession?.req_count?.toLocaleString()}</span>
+            <span className="font-semibold">{formatCountMaybe(selectedSession?.req_count)}</span>
           </MetadataItem>
           <MetadataItem label="Unique URLs">
             {selectedSession?.unique_urls ?? '—'}

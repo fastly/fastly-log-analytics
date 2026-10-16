@@ -3,6 +3,7 @@
 import React from 'react'
 import { METRIC_OPTIONS } from './controls'
 
+import { formatCount } from '@/lib/format'
 export interface TooltipInfo {
   clientX: number
   clientY: number
@@ -61,7 +62,7 @@ export function MapTooltip({ info, metric }: { info: TooltipInfo; metric: string
         )}
         <div className="flex justify-between gap-4">
           <span className="text-[11px] text-muted-foreground">Requests</span>
-          <span className="text-[11px] font-semibold tabular-nums">{reqs.toLocaleString()}</span>
+          <span className="text-[11px] font-semibold tabular-nums">{formatCount(reqs)}</span>
         </div>
       </div>
     </div>

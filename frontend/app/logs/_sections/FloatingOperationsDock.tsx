@@ -14,6 +14,7 @@ import { CronLiveLog } from '@/components/CronLiveLog'
 import { useDateFormat } from '@/hooks/useDateFormat'
 import { cn } from '@/lib/utils'
 
+import { formatCount } from '@/lib/format'
 export function FloatingOperationsDock({
   displayedJobs,
   setDisplayedJobs,
@@ -98,7 +99,7 @@ export function FloatingOperationsDock({
               {backgroundCronToast.status !== 'running' && (
                 <div className="mt-2 pt-2 border-t border-zinc-900 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400 font-mono">
                   {backgroundCronToast.rows_ingested !== undefined && (
-                    <span>Ingested: <strong className="text-zinc-300">{backgroundCronToast.rows_ingested.toLocaleString()} rows</strong></span>
+                    <span>Ingested: <strong className="text-zinc-300">{formatCount(backgroundCronToast.rows_ingested)} rows</strong></span>
                   )}
                   {backgroundCronToast.duration_s !== undefined && (
                     <span>Duration: <strong className="text-zinc-300">{backgroundCronToast.duration_s.toFixed(1)}s</strong></span>

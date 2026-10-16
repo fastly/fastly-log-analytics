@@ -12,14 +12,14 @@ const eslintConfig = defineConfig([
       "jsx-a11y/no-static-element-interactions": "error",
     },
   },
-  // F5/F6 DRY enforcement: analytics UI must format numbers/dates through the
+  // F5/F6 DRY enforcement (app-wide): UI must format numbers/dates through the
   // shared helpers in lib/format.ts (formatCount) and lib/date.ts
   // (formatLocalDateTime), never ad-hoc `.toLocaleString()`. This keeps
   // locale/precision consistent and prevents the inline-formatting drift the
   // 2026 DRY audit flagged. The shared helpers themselves live in lib/ and are
   // intentionally outside this scope.
   {
-    files: ["app/network/**", "app/security/**", "app/admin/**"],
+    files: ["app/**", "components/**", "hooks/**"],
     rules: {
       "no-restricted-syntax": [
         "error",

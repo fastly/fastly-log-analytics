@@ -18,6 +18,7 @@ import { AlertCircle, Loader2, Clock, Activity, ShieldAlert, FileText, CheckCirc
 import { cn } from '@/lib/utils'
 import { CHART_COLORS } from '@/lib/chart-colors'
 
+import { formatCount } from '@/lib/format'
 interface CacheCollapseModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
@@ -165,7 +166,7 @@ export function CacheCollapseModal({
                     <Activity className="h-3 w-3" /> Total Requests
                   </div>
                   <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {stats.totalRequests.toLocaleString()}
+                    {formatCount(stats.totalRequests)}
                   </div>
                 </div>
 
@@ -174,7 +175,7 @@ export function CacheCollapseModal({
                     <CheckCircle2 className="h-3 w-3 text-emerald-500" /> Total Cache Hits
                   </div>
                   <div className="mt-1.5 font-mono text-xl font-bold text-foreground">
-                    {stats.realHits.toLocaleString()}
+                    {formatCount(stats.realHits)}
                   </div>
                 </div>
               </div>
@@ -192,15 +193,15 @@ export function CacheCollapseModal({
                 </div>
                 <div className="grid grid-cols-3 gap-3 text-center">
                   <div className="p-2 rounded-md bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="font-mono text-lg font-bold text-emerald-500">{(data.breakdown?.hits ?? 0).toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-emerald-500">{formatCount(data.breakdown?.hits ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Cacheable Hits</div>
                   </div>
                   <div className="p-2 rounded-md bg-red-500/10 border border-red-500/20">
-                    <div className="font-mono text-lg font-bold text-red-500">{(data.breakdown?.misses ?? 0).toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-red-500">{formatCount(data.breakdown?.misses ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Misses</div>
                   </div>
                   <div className="p-2 rounded-md bg-amber-500/10 border border-amber-500/20">
-                    <div className="font-mono text-lg font-bold text-amber-500">{(data.breakdown?.passes ?? 0).toLocaleString()}</div>
+                    <div className="font-mono text-lg font-bold text-amber-500">{formatCount(data.breakdown?.passes ?? 0)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Uncacheable (PASS)</div>
                   </div>
                 </div>

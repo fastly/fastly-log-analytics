@@ -19,6 +19,7 @@ import type { StreamMetrics } from '@/types/api'
 import { useSeededReady } from '@/hooks/useSeededReady'
 import { queryKeys } from '@/lib/query-keys'
 
+import { formatCount } from '@/lib/format'
 // The live "X ago" text node now lives in the shared `@/components/TimeAgo`
 // (text-only leaf so the surrounding header chrome stays stable between
 // cron pushes — putting useNowMs() on SyncStatusBadge itself would
@@ -190,7 +191,7 @@ function SyncStatusBadgeInner() {
 
         {/* Column 2: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
         {totalRows != null && totalRows > 0 ? (
-          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {formatCount(totalRows)}</span>
         ) : (
           <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2">—</span>
         )}

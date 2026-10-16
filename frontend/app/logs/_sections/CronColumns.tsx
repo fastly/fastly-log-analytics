@@ -21,6 +21,7 @@ import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronExplanations'
 import { LiveTimer } from './CronScheduleBox'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
+import { formatCount } from '@/lib/format'
 function CopyTextButton({ text, label, title, className }: { text: string; label: string; title: string; className: string }) {
   const { copied, copy } = useCopyToClipboard(2000)
   return (
@@ -208,7 +209,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
 
         return (
           <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
-            {count.toLocaleString()} <span className="text-[10px] text-muted-foreground">{label}</span>
+            {formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span>
           </span>
         )
       }
@@ -243,7 +244,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           if (rows === 0) return <span className="text-muted-foreground">—</span>
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {rows.toLocaleString()}
+              {formatCount(rows)}
             </span>
           )
         }
@@ -251,13 +252,13 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
         return (
           <div className="flex items-center gap-2">
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {rows.toLocaleString()}
+              {formatCount(rows)}
             </span>
             {corrupt > 0 && (
               <div className="flex items-center gap-1 group/corrupt">
                 <Tooltip>
                   <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none  text-[10px] font-bold" />}>
-                    {corrupt.toLocaleString()} Skipped
+                    {formatCount(corrupt)} Skipped
                   </TooltipTrigger>
                   <TooltipContent>
                     These lines were skipped due to missing timestamps or invalid JSON structure.
@@ -287,7 +288,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           }
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {(row.original.files_deleted_fos || 0).toLocaleString()}
+              {formatCount(row.original.files_deleted_fos || 0)}
             </span>
           )
         }
@@ -304,7 +305,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<any>[] {
           const val = row.original.task === 'commit' ? row.original.rows_ingested : null
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs">
-              {val !== null ? val.toLocaleString() : <span className="text-muted-foreground">—</span>}
+              {val !== null ? formatCount(val) : <span className="text-muted-foreground">—</span>}
             </span>
           )
         }

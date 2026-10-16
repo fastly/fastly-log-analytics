@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import type { SessionsResponse } from '@/types/api'
 
+import { formatCountMaybe } from '@/lib/format'
 type SessionRow = components['schemas']['Session']
 
 interface SessionsTableProps {
@@ -92,7 +93,7 @@ export function SessionsTable({
       {
         accessorKey: 'unique_urls',
         header: 'Unique URLs',
-        cell: ({ row }) => (row.getValue('unique_urls') as number)?.toLocaleString() ?? '—',
+        cell: ({ row }) => formatCountMaybe(row.getValue('unique_urls') as number) ?? '—',
       },
       {
         accessorKey: 'asn',

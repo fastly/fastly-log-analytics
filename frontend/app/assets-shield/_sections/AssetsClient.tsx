@@ -12,7 +12,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatBytes, formatPercent } from '@/lib/format'
+import { formatBytes, formatPercent, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 export function AssetsReportContent({
@@ -233,7 +233,7 @@ export function AssetsReportContent({
                     className="text-xs font-medium text-muted-foreground px-2.5 py-1 bg-muted hover:bg-primary hover:text-primary-foreground hover:shadow-sm cursor-pointer transition-all rounded-full"
                     title="Click to view these requests on the Dashboard"
                   >
-                    {row.requests.toLocaleString()} reqs
+                    {formatCount(row.requests)} reqs
                   </Link>
                 </div>
 
@@ -309,7 +309,7 @@ export function AssetsReportContent({
                             className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
                             title="Click to view these requests on the Dashboard"
                           >
-                            {totalRequests.toLocaleString()} requests
+                            {formatCount(totalRequests)} requests
                           </Link>
                         </div>
                         <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
@@ -329,7 +329,7 @@ export function AssetsReportContent({
                                   }
                                 />
                                 <TooltipContent side="top" className="text-xs font-semibold">
-                                  {statusRow.cache_status}: {statusRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
+                                  {statusRow.cache_status}: {formatCount(statusRow.requests)} ({pct.toFixed(1)}%)
                                 </TooltipContent>
                               </Tooltip>
                             )
@@ -403,7 +403,7 @@ export function AssetsReportContent({
                             className="text-muted-foreground text-xs hover:text-primary hover:underline transition-colors cursor-pointer font-medium"
                             title="Click to view these requests on the Dashboard"
                           >
-                            {totalRequests.toLocaleString()} requests
+                            {formatCount(totalRequests)} requests
                           </Link>
                         </div>
                         <div className="h-6 w-full bg-muted rounded-md overflow-hidden flex">
@@ -423,7 +423,7 @@ export function AssetsReportContent({
                                   }
                                 />
                                 <TooltipContent side="top" className="text-xs font-semibold">
-                                  {compRow.content_encoding}: {compRow.requests.toLocaleString()} ({pct.toFixed(1)}%)
+                                  {compRow.content_encoding}: {formatCount(compRow.requests)} ({pct.toFixed(1)}%)
                                 </TooltipContent>
                               </Tooltip>
                             )
@@ -513,7 +513,7 @@ export function AssetsReportContent({
                           {row.url}
                         </Link>
                       </td>
-                      <td className="py-3 px-2 text-right font-medium">{row.requests.toLocaleString()}</td>
+                      <td className="py-3 px-2 text-right font-medium">{formatCount(row.requests)}</td>
                       <td className="py-3 px-2 text-right text-muted-foreground">{formatBytes(row.avg_bytes ?? 0)}</td>
                       <td className="py-3 px-2 text-right font-bold text-rose-500">{formatBytes(row.total_bytes ?? 0)}</td>
                     </tr>
@@ -592,7 +592,7 @@ export function AssetsReportContent({
                           {row.asset_type}
                         </span>
                       </td>
-                      <td className="py-3 px-2 text-right font-bold text-amber-500">{row.requests.toLocaleString()}</td>
+                      <td className="py-3 px-2 text-right font-bold text-amber-500">{formatCount(row.requests)}</td>
                       <td className="py-3 px-2 text-right text-muted-foreground">
                         {row.avg_ttl ? `${row.avg_ttl.toFixed(1)}s` : '0s'}
                       </td>

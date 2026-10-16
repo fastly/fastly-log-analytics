@@ -7,7 +7,7 @@ import { PopLabel } from '@/components/PopLabel'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ApproxBadge } from './ApproxBadge'
 import { cn } from '@/lib/utils';
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 import { Server, MapPin, Globe } from 'lucide-react'
 import { useActiveLogFields } from '@/hooks/useActiveLogFields'
 
@@ -20,7 +20,7 @@ const metricHeader = (label: string) => () => (
 )
 const msCell = (info: any) => <span>{info.getValue()?.toFixed(1)}ms</span>
 
-const requestsCol = { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'), cell: (info: any) => info.getValue().toLocaleString() }
+const requestsCol = { accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: metricHeader('Reqs'), cell: (info: any) => formatCount(info.getValue()) }
 const p50Col = { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: metricHeader('P50'), cell: msCell }
 const p95Col = { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: metricHeader('P95'), cell: msCell }
 

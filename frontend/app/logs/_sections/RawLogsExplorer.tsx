@@ -51,6 +51,7 @@ import { cn } from '@/lib/utils'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { statusBadgeClass } from '@/lib/status-style'
 
+import { formatCount } from '@/lib/format'
 // Wire rows are flat scalar records (backend `rows: list[dict[str, Any]]`).
 type LogRow = Record<string, string | number | null | undefined>
 
@@ -508,7 +509,7 @@ export function RawLogsExplorer({
               <span>
                 Showing <strong className="text-foreground">{offset + 1}</strong> to{' '}
                 <strong className="text-foreground">{Math.min(offset + limit, totalCount)}</strong> of{' '}
-                <strong className="text-foreground">{totalCount.toLocaleString()}</strong> events
+                <strong className="text-foreground">{formatCount(totalCount)}</strong> events
               </span>
             ) : (
               <span>0 events</span>

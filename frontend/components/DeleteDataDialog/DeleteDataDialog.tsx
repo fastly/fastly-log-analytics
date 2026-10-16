@@ -17,7 +17,7 @@ import { AlertTriangle, AlertCircle, HardDrive, Cloud } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEProgressView } from '@/components/SSEModal'
 import { client } from '@/lib/api'
-import { formatBytes } from '@/lib/format'
+import { formatBytes, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   panelDialogContent,
@@ -155,7 +155,7 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
                       {formatBytes(service.duckdb_size_bytes ?? 0)}
                     </div>
                     <div className="text-[11px] text-muted-foreground">
-                      {(service.cache_file_count ?? 0).toLocaleString()} file{service.cache_file_count === 1 ? '' : 's'}
+                      {formatCount(service.cache_file_count ?? 0)} file{service.cache_file_count === 1 ? '' : 's'}
                     </div>
                   </div>
 
@@ -171,7 +171,7 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
                           {formatBytes(icebergInfo?.size_bytes ?? 0)}
                         </div>
                         <div className="text-[11px] text-muted-foreground">
-                          {(icebergInfo?.data_files ?? 0).toLocaleString()} file{icebergInfo?.data_files === 1 ? '' : 's'}
+                          {formatCount(icebergInfo?.data_files ?? 0)} file{icebergInfo?.data_files === 1 ? '' : 's'}
                         </div>
                       </>
                     )}

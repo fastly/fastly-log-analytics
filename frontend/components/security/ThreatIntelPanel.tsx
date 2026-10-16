@@ -13,6 +13,7 @@ import { DataTable } from '@/components/DataTable/DataTable'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { Button } from '@/components/ui/button'
 
+import { formatCount } from '@/lib/format'
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
 
 interface ThreatIntelPanelProps {
@@ -71,7 +72,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
       header: 'Requests',
       cell: ({ row }) => (
         <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">
-          {row.original.requests.toLocaleString()}
+          {formatCount(row.original.requests)}
         </span>
       ),
     },
@@ -98,7 +99,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
         const count = row.original.matched_waf_rules_count
         return count > 0 ? (
           <Badge variant="outline" className="font-mono bg-destructive/10 text-destructive border-destructive/20 hover:bg-destructive/15">
-            {count.toLocaleString()} triggers
+            {formatCount(count)} triggers
           </Badge>
         ) : (
           <span className="text-xs text-muted-foreground font-medium">None</span>

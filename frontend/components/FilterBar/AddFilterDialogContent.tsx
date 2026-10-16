@@ -27,6 +27,7 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useMaskIps } from '@/hooks/useMaskIps'
 import { isIpFamilyField } from '@/lib/pii'
 
+import { formatCount } from '@/lib/format'
 const COMMON_FIELD_IDS = [
   'ip', 'url', 'host', 'method', 'status', 'ua', 'country', 'city',
   'asn', 'p_type', 'p_desc', 'ja4', 'ja3', 'cache', 'edge', 'pop',
@@ -180,7 +181,7 @@ export function AddFilterDialogContent({ onClose }: { onClose: () => void }) {
                           {v.value === null ? <em className="text-muted-foreground">NULL</em> : String(v.label || v.value)}
                         </span>
                         <span className="text-[10px] text-muted-foreground group-hover:text-foreground tabular-nums">
-                          {v.count.toLocaleString()} hits
+                          {formatCount(v.count)} hits
                         </span>
                       </button>
                     ))}
