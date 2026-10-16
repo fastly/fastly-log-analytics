@@ -21,6 +21,7 @@ import dynamic from 'next/dynamic'
 import { useTickHistory, type MetricsData, type MetricsTick } from './useTickHistory'
 import { RealtimeMetricCard } from './RealtimeMetricCard'
 import { CHART_COLORS } from '@/lib/chart-colors'
+import { useNowMs } from '@/hooks/useNowSeconds'
 
 const RealtimeChart = dynamic(() => import('./RealtimeChart').then((m) => m.RealtimeChart), {
   ssr: false,
@@ -247,12 +248,8 @@ function ConnectionBadge({ connected }: { connected: boolean }) {
 }
 
 function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date | null; timezone: string }) {
-  const [, setTick] = useState(0)
-
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1_000)
-    return () => clearInterval(id)
-  }, [])
+  // Subscribe to the shared 1 Hz ticker so the freshness level re-evaluates.
+  useNowMs()
 
   const level = getFreshnessLevel(lastTickTime)
   const label = lastTickTime
