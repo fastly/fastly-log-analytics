@@ -1,4 +1,4 @@
-import { buildTrafficData, type BuildTrafficDataParams } from '@/app/dashboard/_sections/chartHelpers'
+import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/traffic-chart'
 
 /**
  * Async wrapper around buildTrafficData that runs on a Web Worker
