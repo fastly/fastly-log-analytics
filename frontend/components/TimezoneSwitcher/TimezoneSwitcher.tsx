@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/select'
 import { useTimezoneStore } from '@/stores/timezoneStore'
 import { getTimezoneAbbr } from '@/lib/date'
+import { useMounted } from '@/hooks/useMounted'
 
 const SYSTEM_TIME_VALUE = '__system__'
 
@@ -27,13 +28,8 @@ const COMMON_TIMEZONES = [
 ]
 
 export function TimezoneSwitcher() {
-  const [mounted, setMounted] = React.useState(false)
+  const mounted = useMounted()
   const { mode, timezone, setTimezone, setSystemTimezone } = useTimezoneStore()
-
-  React.useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMounted(true)
-  }, [])
 
   if (!mounted) {
     return <div className="w-[180px] h-10 border rounded-md" />
