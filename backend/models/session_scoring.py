@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+
+from backend.models._base import PassthroughModel
 
 
 class ScoringThresholdBody(BaseModel):
@@ -116,11 +118,9 @@ class ScoringLabelUpdate(BaseModel):
 # ``+00:00`` to ``Z`` on UTC-configured hosts — a silent wire change.
 
 
-class _ScoringRead(BaseModel):
+class _ScoringRead(PassthroughModel):
     """Base for the scoring read responses — passes the telemetry envelope
     (and any undeclared key) through instead of stripping it."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ScoringTopFlaggedRow(_ScoringRead):

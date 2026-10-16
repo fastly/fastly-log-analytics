@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+from backend.models._base import PassthroughModel
 
 
 class ShareStartPayload(BaseModel):
@@ -121,10 +123,8 @@ class SettingsPayload(BaseModel):
 # key sets. Field lists derive from the producers (TunnelManager, share_db).
 
 
-class _ShareAdminRead(BaseModel):
+class _ShareAdminRead(PassthroughModel):
     """Base for share-admin responses — passes undeclared keys through."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class ShareBannerResponse(_ShareAdminRead):

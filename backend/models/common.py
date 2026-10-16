@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel
 
 from backend.models._base import PassthroughModel, WireSafeModel  # noqa: F401 (re-exported)
 from backend.models.log_fields_catalog import LogFieldsCatalogResponse
@@ -239,8 +239,7 @@ class BaseResponse(BaseModel):
         return cls(**data, debug_queries=dq, debug_calls=dc, debug_sqlite=ds, debug_postgres=ds)
 
 
-class BootstrapService(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class BootstrapService(PassthroughModel):
     service_id: str
     name: str | None = None
     access_level: str | None = None

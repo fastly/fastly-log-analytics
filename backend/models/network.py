@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from pydantic import BaseModel, model_serializer
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, FilteredRequest, Limit100, RangeKeyedRequest, Seconds14400
 
 
@@ -46,7 +47,7 @@ class ShieldingRow(BaseModel):
     shield_lon: float | None = None
 
 
-class ShieldingAnalysis(BaseModel):
+class ShieldingAnalysis(PassthroughModel):
     """Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``.
 
     Deliberately a plain ``BaseModel`` (NOT ``BaseResponse``): nesting a
@@ -62,8 +63,6 @@ class ShieldingAnalysis(BaseModel):
     None so the emitted bytes match the pre-typing dict exactly (the repo
     only sets the keys relevant to each branch).
     """
-
-    model_config = ConfigDict(extra="allow")
 
     has_data: bool = False
     rows: list[ShieldingRow] = []

@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse
 
 
@@ -208,7 +209,7 @@ class ServiceCredentialsBody(BaseModel):
     secret_key: str = ""
 
 
-class CronRunEntry(BaseModel):
+class CronRunEntry(PassthroughModel):
     """One row of GET /api/cron-runs.
 
     ``extra="allow"`` passes any future cron_runs column through verbatim, and
@@ -218,7 +219,6 @@ class CronRunEntry(BaseModel):
     store ``0.0``), the count columns are ints, ``parquet_keys`` is the
     json.loads'd list."""
 
-    model_config = ConfigDict(extra="allow")
     id: int | None = None
     task: str | None = None
     started_at: str | None = None
@@ -235,8 +235,7 @@ class CronRunEntry(BaseModel):
     summary: str | None = None
 
 
-class CronRunsResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CronRunsResponse(PassthroughModel):
     total: int | None = None
     page: int | None = None
     per_page: int | None = None
@@ -250,30 +249,27 @@ class CronRunsResponse(BaseModel):
 # key sets stay byte-identical on the wire.
 
 
-class OkMessageResponse(BaseModel):
+class OkMessageResponse(PassthroughModel):
     """``{ok, message}`` ack used by time-range clear and similar routes."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
 
 
-class CredentialsUpdateResponse(BaseModel):
+class CredentialsUpdateResponse(PassthroughModel):
     """PATCH /services/{id}/credentials — ``access_key_id`` present only on
     the Fastly-API rotation branch."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
     access_key_id: str | None = None
 
 
-class CronScheduleEntry(BaseModel):
+class CronScheduleEntry(PassthroughModel):
     """One row of GET /api/cron-schedule (``build_cron_schedule_payload``).
     ``disabled_reason`` appears only on synthesized disabled rows; the
     last_run_* trio only when a run has been recorded."""
 
-    model_config = ConfigDict(extra="allow")
     task: str | None = None
     next_run_time: str | None = None
     last_run_time: str | None = None
@@ -283,24 +279,21 @@ class CronScheduleEntry(BaseModel):
     disabled_reason: str | None = None
 
 
-class CronScheduleResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CronScheduleResponse(PassthroughModel):
     schedules: list[CronScheduleEntry] = []
 
 
-class LogFieldsUpdateResponse(BaseModel):
+class LogFieldsUpdateResponse(PassthroughModel):
     """POST /services/{id}/log-fields — no-change branch carries
     ``message``; the applied branch carries ``estimate`` +
     ``line_budget_warning`` (the ``waf_warning``-shaped dict, or null)."""
 
-    model_config = ConfigDict(extra="allow")
     ok: bool | None = None
     message: str | None = None
     estimate: int | None = None
     line_budget_warning: dict[str, Any] | None = None
 
 
-class CustomFieldsImportResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class CustomFieldsImportResponse(PassthroughModel):
     ok: bool | None = None
     imported_count: int | None = None

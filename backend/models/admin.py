@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, Field, RootModel
 
+from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, LogExtentsMixin
 
 # ── Metric snapshots history ───────────────────────────────────────────────
@@ -492,11 +493,9 @@ class UsageLoggingUpdateBody(BaseModel):
 # Field lists derive from the producers, not from any frontend consumer.
 
 
-class _AdminMaintRead(BaseModel):
+class _AdminMaintRead(PassthroughModel):
     """Base for the maintenance read responses — passes undeclared keys
     through instead of stripping them."""
-
-    model_config = ConfigDict(extra="allow")
 
 
 class UsageLoggingConfigResponse(_AdminMaintRead):
