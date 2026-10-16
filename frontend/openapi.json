@@ -22540,7 +22540,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RdnsStatsResponse"
+                }
               }
             }
           },
@@ -22650,7 +22652,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CeleryStatusResponse"
+                }
               }
             }
           },
@@ -28797,9 +28801,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object",
-                  "title": "Response Get Duckdb Status Endpoint Api Admin Duckdb Status Get"
+                  "$ref": "#/components/schemas/DuckdbStatusResponse"
                 }
               }
             }
@@ -33255,7 +33257,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NgwafStatusResponse"
+                }
               }
             }
           },
@@ -51241,6 +51245,11 @@
             "title": "Per Page"
           },
           "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
             "title": "Entries"
           }
         },
@@ -52715,6 +52724,79 @@
         ],
         "title": "CancelResponse",
         "description": "Outcome of ``POST /api/admin/queries/{qid}/cancel``."
+      },
+      "CeleryStatusResponse": {
+        "properties": {
+          "broker_reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broker Reachable"
+          },
+          "workers": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workers"
+          },
+          "queues": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queues"
+          },
+          "schedules": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedules"
+          },
+          "ledger": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ledger"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CeleryStatusResponse"
       },
       "CheckFosRequest": {
         "properties": {
@@ -55420,6 +55502,50 @@
         ],
         "title": "DebugStateResponse",
         "description": "``GET /api/debug/state``."
+      },
+      "DuckdbStatusResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory"
+          },
+          "barrier": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Barrier"
+          },
+          "pools": {
+            "title": "Pools"
+          },
+          "retired_pools": {
+            "title": "Retired Pools"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "DuckdbStatusResponse"
       },
       "ErrorDetail": {
         "properties": {
@@ -61270,6 +61396,89 @@
         ],
         "title": "NetworkWorstEntry"
       },
+      "NgwafStatusResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "total_cached_bots": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Cached Bots"
+          },
+          "workspaces": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaces"
+          },
+          "top_bots": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top Bots"
+          },
+          "service_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Workspace Id"
+          },
+          "service_configured": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Configured"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "NgwafStatusResponse",
+        "description": "``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;\n``service_workspace_id`` / ``service_configured`` only when ``service_id`` was passed."
+      },
       "NgwafWorkspace": {
         "properties": {
           "id": {
@@ -65527,6 +65736,11 @@
             "title": "Columns"
           },
           "data": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
             "title": "Data"
           },
           "row_count": {
@@ -65731,6 +65945,32 @@
           "pending"
         ],
         "title": "RdnsStats"
+      },
+      "RdnsStatsResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stats"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "RdnsStatsResponse"
       },
       "RealtimeSeedResponse": {
         "properties": {

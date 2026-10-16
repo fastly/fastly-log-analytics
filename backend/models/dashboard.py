@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field
 
-from backend.models._base import WireSafeModel
+from backend.models._base import JsonRows, WireSafeModel
 from backend.models.common import (
     BaseResponse,
     FilteredRequest,
@@ -274,16 +273,12 @@ class QueryResponse(WireSafeModel):
     """
 
     columns: list[str]
-    data: list[dict[str, Any]]
+    data: JsonRows
     row_count: int
     total_rows: int
     truncated: bool
     elapsed_ms: int
     explain_plan: str | None = None
-
-    @field_serializer("data")
-    def _encode_rows(self, rows: list[dict[str, Any]]) -> Any:
-        return jsonable_encoder(rows)
 
 
 class PresetQuery(WireSafeModel):

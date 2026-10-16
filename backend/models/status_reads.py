@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi.encoders import jsonable_encoder
-from pydantic import Field, field_serializer
+from pydantic import Field
 
-from backend.models._base import WireSafeModel
+from backend.models._base import JsonRows, WireSafeModel
 
 
 class DebugStateResponse(WireSafeModel):
@@ -29,11 +28,7 @@ class AuditLogsResponse(WireSafeModel):
     total: int
     page: int
     per_page: int
-    entries: list[dict[str, Any]]
-
-    @field_serializer("entries")
-    def _encode_entries(self, rows: list[dict[str, Any]]) -> Any:
-        return jsonable_encoder(rows)
+    entries: JsonRows
 
 
 class CmcdStatusResponse(WireSafeModel):

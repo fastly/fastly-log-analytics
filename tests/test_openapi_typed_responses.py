@@ -1,10 +1,10 @@
 """Ratchet: JSON operations without a typed ``response_model`` may only shrink.
 
 An untyped 2xx JSON body (``{}`` / bare ``additionalProperties: true``) reaches
-the frontend as ``unknown``. ``UNTYPED_JSON`` is the seeded backlog (19 JSON
-routes; 77 untyped operations before the Phase 3 pass, SSE/file routes
-included); remove an entry when its route gets a model and never add one. ``NON_JSON_EXEMPT`` lists SSE, file, redirect, beacon and
-always-501 stub routes whose body is not a JSON contract.
+the frontend as ``unknown``. ``UNTYPED_JSON`` is the seeded backlog (26 JSON
+routes on release/v3.0.0-beta3; SSE/file routes excluded); remove an entry when
+its route gets a model and never add one. ``NON_JSON_EXEMPT`` lists SSE, file,
+redirect, beacon and always-501 stub routes whose body is not a JSON contract.
 """
 
 from __future__ import annotations
@@ -14,6 +14,14 @@ import pytest
 # Never grows. Each entry is a route whose JSON body still needs a response_model.
 UNTYPED_JSON = frozenset(
     {
+        "POST /api/admin/bot-sources/refresh",
+        "POST /api/admin/bots/refresh",
+        "POST /api/admin/duckdb/recycle",
+        "POST /api/admin/ducklake/migrate",
+        "POST /api/admin/metadata-cleanup/{service_id}",
+        "POST /api/admin/ngwaf/sync/{service_id}",
+        "POST /api/admin/rdns/enrich",
+        "POST /api/admin/share/purge",
         "GET /api/admin/iceberg-calendar",
         "GET /api/admin/vcl-health",
         "GET /api/debug/page-telemetry",
@@ -23,7 +31,6 @@ UNTYPED_JSON = frozenset(
         "POST /api/admin/commit-iceberg",
         "POST /api/admin/ingest-logs",
         "POST /api/admin/metadata-cleanup",
-        "POST /api/admin/quarantine/purge",
         "POST /api/admin/rebuild-local-view",
         "POST /api/admin/reset-logs",
         "POST /api/admin/reset-rum",
@@ -38,9 +45,9 @@ UNTYPED_JSON = frozenset(
 
 NON_JSON_EXEMPT = frozenset(
     {
+        "GET /api/admin/quarantine/download/{item_id}",
+        "GET /api/services/{service_id}/control-room/error-stream",
         "GET /api/admin/events/stream",
-        "GET /api/admin/quarantine/export",
-        "GET /api/admin/quarantine/{quarantine_id}/download",
         "GET /api/admin/usage-log/export",
         "GET /api/cron-runs/{run_id}/stream",
         "GET /api/download",
@@ -54,8 +61,6 @@ NON_JSON_EXEMPT = frozenset(
         "GET /api/share/oauth/callback",
         "GET /js/faro-sdk.js",
         "GET /js/rum.js",
-        "GET /rum-beacon",
-        "POST /rum-beacon",
         "POST /api/admin/share/backup/export",
         "POST /api/dashboard/raw/csv",
         "POST /api/provision/execute",
@@ -77,7 +82,7 @@ NON_JSON_EXEMPT = frozenset(
     }
 )
 
-UNTYPED_JSON_CEILING = 19
+UNTYPED_JSON_CEILING = 26
 _METHODS = ("get", "post", "put", "patch", "delete")
 
 

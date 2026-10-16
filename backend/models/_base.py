@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from typing import Annotated, Any
+
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, ConfigDict, PlainSerializer, model_serializer
 
 
 class PassthroughModel(BaseModel):
@@ -26,3 +29,14 @@ class WireSafeModel(PassthroughModel):
         for name in type(self).model_fields.keys() - self.model_fields_set:
             data.pop(name, None)
         return data
+
+
+# DB/cache-native values (Decimal, tz-aware datetimes, bytes) encode differently under
+# pydantic's JSON mode than under ``jsonable_encoder`` (the pre-typing wire path, e.g.
+# ``+00:00`` vs ``Z``). These aliases keep the old encoding while the OpenAPI schema
+# still advertises the row/dict shape.
+JsonRows = Annotated[
+    list[dict[str, Any]], PlainSerializer(jsonable_encoder, return_type=list[dict[str, Any]], when_used="json")
+]
+JsonAny = Annotated[Any, PlainSerializer(jsonable_encoder, when_used="json")]
+JsonDict = Annotated[dict[str, Any], PlainSerializer(jsonable_encoder, return_type=dict[str, Any], when_used="json")]

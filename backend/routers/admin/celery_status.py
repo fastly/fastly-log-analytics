@@ -6,10 +6,11 @@ routers package. Admin-only via RemoteAccessMiddleware path gating.
 """
 
 from backend.celery_status import get_celery_status
+from backend.models.admin_status import CeleryStatusResponse
 from backend.routers.admin._router import router
 
 
-@router.get("/admin/celery/status")
+@router.get("/admin/celery/status", response_model=CeleryStatusResponse, response_model_exclude_unset=True)
 def api_celery_status():
     """Expose Celery queue depths, worker status, RedBeat schedule, and
     ingest-ledger summary."""

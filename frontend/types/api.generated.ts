@@ -6759,7 +6759,9 @@ export interface components {
             /** Per Page */
             per_page: number;
             /** Entries */
-            entries: unknown;
+            entries: {
+                [key: string]: unknown;
+            }[];
         } & {
             [key: string]: unknown;
         };
@@ -7287,6 +7289,29 @@ export interface components {
             state: "cancelled" | "not_found" | "already_finished" | "connection_gone";
             /** Query Id */
             query_id: number;
+        };
+        /** CeleryStatusResponse */
+        CeleryStatusResponse: {
+            /** Broker Reachable */
+            broker_reachable?: boolean | null;
+            /** Workers */
+            workers?: {
+                [key: string]: unknown;
+            } | null;
+            /** Queues */
+            queues?: {
+                [key: string]: number;
+            } | null;
+            /** Schedules */
+            schedules?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Ledger */
+            ledger?: {
+                [key: string]: number;
+            } | null;
+        } & {
+            [key: string]: unknown;
         };
         /**
          * CheckFosRequest
@@ -8386,6 +8411,25 @@ export interface components {
         DebugStateResponse: {
             /** Debug Responses Enabled */
             debug_responses_enabled: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** DuckdbStatusResponse */
+        DuckdbStatusResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Memory */
+            memory?: {
+                [key: string]: unknown;
+            } | null;
+            /** Barrier */
+            barrier?: {
+                [key: string]: unknown;
+            } | null;
+            /** Pools */
+            pools?: unknown;
+            /** Retired Pools */
+            retired_pools?: unknown;
         } & {
             [key: string]: unknown;
         };
@@ -10527,6 +10571,31 @@ export interface components {
             /** Score */
             score?: number | null;
         };
+        /**
+         * NgwafStatusResponse
+         * @description ``total_cached_bots`` / ``workspaces`` / ``top_bots`` come from the cache stats;
+         *     ``service_workspace_id`` / ``service_configured`` only when ``service_id`` was passed.
+         */
+        NgwafStatusResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Total Cached Bots */
+            total_cached_bots?: number | null;
+            /** Workspaces */
+            workspaces?: {
+                [key: string]: string | null;
+            } | null;
+            /** Top Bots */
+            top_bots?: {
+                [key: string]: number;
+            } | null;
+            /** Service Workspace Id */
+            service_workspace_id?: string | null;
+            /** Service Configured */
+            service_configured?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** NgwafWorkspace */
         NgwafWorkspace: {
             /** Id */
@@ -12388,7 +12457,9 @@ export interface components {
             /** Columns */
             columns: string[];
             /** Data */
-            data: unknown;
+            data: {
+                [key: string]: unknown;
+            }[];
             /** Row Count */
             row_count: number;
             /** Total Rows */
@@ -12465,6 +12536,17 @@ export interface components {
             pending: number;
             /** Last Enrichment At */
             last_enrichment_at?: string | null;
+        };
+        /** RdnsStatsResponse */
+        RdnsStatsResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Stats */
+            stats?: {
+                [key: string]: unknown;
+            } | null;
+        } & {
+            [key: string]: unknown;
         };
         /** RealtimeSeedResponse */
         RealtimeSeedResponse: {
@@ -29415,7 +29497,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["RdnsStatsResponse"];
                 };
             };
             /** @description Bad request */
@@ -29516,7 +29598,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CeleryStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -33282,9 +33364,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DuckdbStatusResponse"];
                 };
             };
             /** @description Bad request */
@@ -35991,7 +36071,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NgwafStatusResponse"];
                 };
             };
             /** @description Bad request */
