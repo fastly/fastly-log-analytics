@@ -87,7 +87,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
         onError('')
         try {
           const params: Record<string, string | number> = { limit: 200, email: initialEmailFilter }
-          const { data, response } = await client.GET('/api/admin/share/audit-logs' as any, {
+          const { data, response } = await client.GET('/api/admin/share/audit-logs', {
             params: { query: params },
           } as any)
           if (!response.ok) throw new Error(`status ${response.status}`)
@@ -116,7 +116,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       if (filters.email) params.email = filters.email
       if (filters.since) params.since = filters.since
       if (filters.until) params.until = filters.until
-      const { data, response } = await client.GET('/api/admin/share/audit-logs' as any, {
+      const { data, response } = await client.GET('/api/admin/share/audit-logs', {
         params: { query: params },
       } as any)
       if (!response.ok) throw new Error(`status ${response.status}`)

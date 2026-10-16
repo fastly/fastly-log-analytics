@@ -71,7 +71,7 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Type generation: `npm run gen:types` from OpenAPI spec (`frontend/openapi.json` -> `frontend/types/api.generated.ts`)
 - UI primitives: ReportLayout/ReportShell for page structure, AnalyticsCard for cards, PlotlyChart + ChartA11yTable for charts
 - Design tokens: OKLCH in `globals.css`
-- ESLint ceiling ratchet (832) — drive DOWN, never raise
+- ESLint ceiling ratchet (804) — drive DOWN, never raise
 - `SERVICELESS_PATH_PREFIXES` in api-client: routes that work without an active service
 
 ### Scorer (Rust/Python parity)
@@ -80,7 +80,7 @@ Major feature areas: interactive analytics (dashboard, origin, security, network
 - Changes to scoring logic require updating both sides + cross-language fixtures
 
 ### CI ratchets
-- ESLint ceiling: 832 (check_eslint_count.sh) — drive down
+- ESLint ceiling: 804 (check_eslint_count.sh) — drive down
 - Security regression floor: 206 — never lower
 - Backend coverage floor: 86%
 - Frontend coverage floors: defined in Makefile `test-frontend-ci` target

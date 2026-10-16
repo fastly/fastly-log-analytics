@@ -49,7 +49,7 @@ export function useShareStatusBanner({ enabled }: Options) {
         // public_url; the full status response carries services / invites
         // / sessions / audit_logs / telemetry that the banner never reads
         // and the poll runs every 15s on every page with AppLayout.
-        const { data, response } = await client.GET('/api/admin/share/banner' as any, {})
+        const { data, response } = await client.GET('/api/admin/share/banner', {})
         if (cancelled) return
         if (!response.ok) return
         const body = data as any

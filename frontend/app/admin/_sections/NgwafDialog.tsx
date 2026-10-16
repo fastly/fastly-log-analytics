@@ -100,7 +100,7 @@ export function NgwafDialog({ service, onClose }: Props) {
                     setNgwafFetchError('')
                     setNgwafFetching(true)
                     try {
-                      const { data } = await client.GET("/api/provision/ngwaf-workspaces" as any, {
+                      const { data } = await client.GET("/api/provision/ngwaf-workspaces", {
                         params: { query: { service_id: service.service_id } },
                         headers: { Authorization: `Bearer ${ngwafApiToken}` }
                       })
@@ -165,7 +165,7 @@ export function NgwafDialog({ service, onClose }: Props) {
                     // entered above; backend accepts either the stored key
                     // (constant-time match) or a token with the 'global'
                     // scope on this service.
-                    await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace" as any, {
+                    await client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
                       params: {
                         path: { service_id: service.service_id },
                       },

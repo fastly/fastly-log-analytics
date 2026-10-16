@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 import {
   Dialog,
   DialogContent,
@@ -17,16 +18,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 
-export interface PopHealthItem {
-  pop: string
-  requests: number
-  errors: number
-  error_rate: number
-  p50_rtt_us: number | null
-  p95_ttfb_ms: number | null
-  cache_hit_rate: number
-  bandwidth_bytes: number
-}
+export type PopHealthItem = components['schemas']['PopHealthItem']
 
 interface PopHealthHeatmapProps {
   serviceId: string
@@ -41,8 +33,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const popHealthQuery = useServiceQuery<PopHealthItem[]>(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await client.GET('/api/network/pop-health' as any, {
+      const { data } = await client.GET('/api/network/pop-health', {
         signal,
         params: {
           query: {

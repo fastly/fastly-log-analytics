@@ -100,7 +100,7 @@ function CreateInviteDialogInner({
 
   const handleWordphrase = async () => {
     try {
-      const { data, response } = await client.GET('/api/admin/share/wordphrase' as any, {})
+      const { data, response } = await client.GET('/api/admin/share/wordphrase', {})
       if (!response.ok) throw new Error(`status ${response.status}`)
       setPasscode((data as any).passcode)
     } catch (e: any) {
@@ -112,7 +112,7 @@ function CreateInviteDialogInner({
     setError('')
     setCreating(true)
     try {
-      await client.POST('/api/admin/share/invites' as any, {
+      await client.POST('/api/admin/share/invites', {
         body: {
           name,
           email,

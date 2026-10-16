@@ -9,6 +9,7 @@ import { client } from '@/lib/api'
 import { formatCompactCount } from '@/lib/format'
 import { Activity, AlertTriangle, ArrowDownUp, Gauge, Network, Wifi } from 'lucide-react'
 import type { components } from '@/types/api'
+import type { FiltersPayload } from '@/types/filters'
 
 type TransportMetrics = components['schemas']['TransportMetrics']
 type TransportProtocolShare = components['schemas']['TransportProtocolShare']
@@ -17,7 +18,7 @@ interface TransportSectionProps {
   activeServiceId?: string | null
   startTime?: string | null
   endTime?: string | null
-  filterPayload?: Record<string, unknown>
+  filterPayload?: FiltersPayload
 }
 
 export function TransportSection({
@@ -29,14 +30,20 @@ export function TransportSection({
   const transportQuery = useServiceQuery(
     ['network', 'bundle', 'transport', activeServiceId, startTime, endTime, filterPayload],
     async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await client.POST('/api/network/bundle' as any, {
+      const { data } = await client.POST('/api/network/bundle', {
         signal,
         body: {
           start_time: startTime ?? undefined,
           end_time: endTime ?? undefined,
-          filters: filterPayload,
+          filters: filterPayload ?? {},
           sections: ['transport'],
+          // The generated request type marks defaulted fields required; these
+          // equal the backend NetworkBundleRequest defaults.
+          metric: 'health_score',
+          bucket_seconds: 300,
+          top_n: 30,
+          map_asn: 'all',
+          region_country: 'US',
         },
       })
       return (data as { transport?: TransportMetrics } | undefined)?.transport ?? null

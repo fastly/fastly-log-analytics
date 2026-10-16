@@ -84,7 +84,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
       return
     }
     return run(() =>
-      client.POST('/api/admin/share/start' as any, {
+      client.POST('/api/admin/share/start', {
         body: {
           public_endpoint: publicEndpoint,
           forward_port: 3000,
@@ -93,11 +93,11 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     )
   }
 
-  const handleStop = () => run(() => client.POST('/api/admin/share/stop' as any, {} as any))
+  const handleStop = () => run(() => client.POST('/api/admin/share/stop', {} as any))
 
   const handlePanic = () => {
     if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops sharing.')) return
-    run(() => client.POST('/api/admin/share/panic' as any, {} as any))
+    run(() => client.POST('/api/admin/share/panic', {} as any))
   }
 
   const handlePreviewInNewTab = () => {
@@ -114,7 +114,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     }
     setCapBusy(true)
     try {
-      await client.PATCH('/api/admin/share/settings' as any, {
+      await client.PATCH('/api/admin/share/settings', {
         body: { max_concurrent_analyst_sessions: n },
       } as any)
       await onRefresh()

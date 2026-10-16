@@ -125,7 +125,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     // soft-revoke endpoint still exists for callers that want to keep
     // the row for audit; the trash-icon UX expects "gone".
     run(() =>
-      client.DELETE('/api/admin/share/invites/{invite_id}' as any, {
+      client.DELETE('/api/admin/share/invites/{invite_id}', {
         params: { path: { invite_id: id } },
       } as any),
     )
@@ -142,7 +142,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingServices(true)
     onError('')
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/services' as any, {
+      await client.PATCH('/api/admin/share/invites/{invite_id}/services', {
         params: { path: { invite_id: inviteId } },
         body: { service_ids: editingServicesDraft },
       } as any)
@@ -174,7 +174,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setSavingPasscode(true)
     setPasscodeError(null)
     try {
-      await client.PATCH('/api/admin/share/invites/{invite_id}/passcode' as any, {
+      await client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
         params: { path: { invite_id: inviteId } },
         body: { passcode: passcodeDraft },
       } as any)

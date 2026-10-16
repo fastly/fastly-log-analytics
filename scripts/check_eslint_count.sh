@@ -66,8 +66,11 @@ cd "$REPO_ROOT/frontend"
 # react/no-unescaped-entities violations in network/help-content.tsx (JSX
 # apostrophes/quotes, render-identical) while converting its number formatting
 # to the shared formatCount helper.
+# 824 -> 804: dropped `as any` path casts on typed client calls (share dashboard,
+# scoring labels, ngwaf, network) plus the raw-logs explorer lint fixes (baseline
+# had drifted to 830 above the 824 ceiling).
 # Drive toward zero.
-CEILING=824
+CEILING=804
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

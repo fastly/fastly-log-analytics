@@ -28,8 +28,7 @@ export function ThreatIntelPanel({ serviceId, startTime, endTime }: ThreatIntelP
     ['security', 'threat-intel', serviceId, startTime, endTime],
     async ({ signal }) => {
       if (!serviceId) return []
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel' as any, {
+      const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel', {
         signal,
         params: {
           query: {

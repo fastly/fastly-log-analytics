@@ -70,7 +70,7 @@ export function FlagSessionPopover({
     setBusy(label)
     setError('')
     try {
-      await client.POST('/api/services/{service_id}/scoring/labels' as any, {
+      await client.POST('/api/services/{service_id}/scoring/labels', {
         params: { path: { service_id: serviceId } },
         body: {
           sid,
@@ -96,7 +96,7 @@ export function FlagSessionPopover({
     setClearing(true)
     setError('')
     try {
-      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+      await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: currentLabelId } },
       } as any)
       setOpen(false)

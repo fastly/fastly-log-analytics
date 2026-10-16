@@ -61,8 +61,7 @@ export default function ShareDashboardPage() {
   const { data: status, error: statusError, refetch } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, response } = await client.GET('/api/admin/share/status' as any, { signal })
+      const { data, response } = await client.GET('/api/admin/share/status', { signal })
       if (!response.ok) throw new Error(`status ${response.status}`)
       return data as ShareStatus
     },
@@ -80,8 +79,7 @@ export default function ShareDashboardPage() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, response } = await client.GET('/api/admin/share/live' as any, { signal })
+      const { data, response } = await client.GET('/api/admin/share/live', { signal })
       if (!response.ok) throw new Error(`live ${response.status}`)
       return data as ShareLiveFields
     },

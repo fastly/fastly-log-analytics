@@ -48,7 +48,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
 
   const handleBootSession = (sid: string) =>
     run(() =>
-      client.POST('/api/admin/share/sessions/{session_id}/boot' as any, {
+      client.POST('/api/admin/share/sessions/{session_id}/boot', {
         params: { path: { session_id: sid } },
       } as any),
     )

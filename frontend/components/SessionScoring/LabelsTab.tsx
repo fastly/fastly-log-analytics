@@ -76,7 +76,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     setBusyId(row.id)
     setError('')
     try {
-      await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+      await client.PATCH('/api/services/{service_id}/scoring/labels/{label_id}', {
         params: { path: { service_id: serviceId, label_id: row.id } },
         body: { label: editLabel, notes: editNotes },
       } as any)
@@ -101,7 +101,7 @@ export function LabelsTab({ serviceId }: LabelsTabProps) {
     const timer = setTimeout(async () => {
       pendingTimersRef.current.delete(id)
       try {
-        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}' as any, {
+        await client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
           params: { path: { service_id: serviceId, label_id: id } },
         } as any)
         qc.invalidateQueries({ queryKey: ['scoring-labels', serviceId] })
