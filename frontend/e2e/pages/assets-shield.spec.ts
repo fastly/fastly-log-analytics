@@ -106,7 +106,7 @@ test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
 
     // Check main section headings
     await expect(page.getByText('Cache Efficiency by Asset Type')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByText('Payload Compression Efficiency')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Payload Compression Efficiency' })).toBeVisible({ timeout: 15_000 })
     await expect(page.getByText('Large Uncompressed Assets')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByText('Low Cache-TTL Hotspots')).toBeVisible({ timeout: 15_000 })
   })

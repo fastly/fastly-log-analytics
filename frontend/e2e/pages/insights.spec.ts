@@ -104,7 +104,7 @@ test.describe('Insights Page Contract (/insights)', () => {
       await trigger.click()
 
       // Active trigger should have active state
-      await expect(trigger).toHaveAttribute('data-state', 'active')
+      await expect(trigger).toHaveAttribute('aria-selected', 'true')
 
       // Active panel should contain either cards or clean pass state with zero CLS container
       const activeContent = page
@@ -146,7 +146,7 @@ test.describe('Insights Page Contract (/insights)', () => {
     // Verify security tab is active
     const secTrigger = page.locator('button[data-tab="security"]').first()
     await expect(secTrigger).toBeVisible({ timeout: 10_000 })
-    await expect(secTrigger).toHaveAttribute('data-state', 'active')
+    await expect(secTrigger).toHaveAttribute('aria-selected', 'true')
   })
 
   test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
