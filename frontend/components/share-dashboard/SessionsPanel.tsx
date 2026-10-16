@@ -18,12 +18,12 @@ import { client } from '@/lib/api'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
 import {
-  formatStamp,
   type RateLimitFailure,
   type RateLimitLockout,
   type ShareSession,
   type ShareStatus,
 } from './utils'
+import { formatDeterministicUTC } from '@/lib/date'
 
 interface SessionsPanelProps {
   status: ShareStatus | null
@@ -117,7 +117,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
                   )}
                 </div>
               </TableCell>
-              <TableCell className="text-xs">{formatStamp(s.last_active_time)}</TableCell>
+              <TableCell className="text-xs">{formatDeterministicUTC(s.last_active_time)}</TableCell>
               <TableCell className="text-right">
                 <Button
                   size="sm"

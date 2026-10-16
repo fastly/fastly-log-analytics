@@ -24,7 +24,8 @@ import {
 import { client, extractApiError } from '@/lib/api'
 
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
-import { formatStamp, type AuditLog, type ShareStatus } from './utils'
+import { type AuditLog, type ShareStatus } from './utils'
+import { formatDeterministicUTC } from '@/lib/date'
 
 const EVENT_TYPE_FILTER_OPTIONS = [
   'ALL',
@@ -232,7 +233,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             {sorted.map((row: AuditLog, i: number) => (
               <TableRow key={`${row.id || i}`}>
                 <TableCell className="text-muted-foreground align-top whitespace-nowrap">
-                  {formatStamp(row.timestamp)}
+                  {formatDeterministicUTC(row.timestamp)}
                 </TableCell>
                 <TableCell className="align-top">
                   <Badge variant="outline" className="text-[10px]">

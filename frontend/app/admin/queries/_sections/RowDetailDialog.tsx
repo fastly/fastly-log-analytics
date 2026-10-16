@@ -30,7 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
+import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 
@@ -139,7 +139,7 @@ export function RowDetailDialog({
           <div>
             <span className="text-muted-foreground">Duration:</span>{' '}
             <span className={`font-mono ${durationColor(display.duration_ms)}`}>
-              {formatDuration(display.duration_ms)}
+              {formatDurationMs(display.duration_ms)}
             </span>
           </div>
           {attr.cron_job && (

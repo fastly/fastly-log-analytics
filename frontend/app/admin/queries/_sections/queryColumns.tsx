@@ -23,7 +23,7 @@ import { ChevronDown, ChevronRight, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
-import { durationColor, formatDuration, formatMemoryMb, kindBadgeVariant } from '../_helpers'
+import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type {
   ActiveOrPromotedRow,
   ActiveRow,
@@ -110,7 +110,7 @@ function activeDurationCell({ row }: { row: any }) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${promoted ? 'opacity-60' : ''} ${stuck ? 'animate-pulse font-bold' : ''}`}
-      title={stuck ? `Live query running for ${formatDuration(r.duration_ms)} — investigate` : undefined}
+      title={stuck ? `Live query running for ${formatDurationMs(r.duration_ms)} — investigate` : undefined}
     >
       {!promoted && !isCancelled && (
         <span className="relative flex h-2 w-2" aria-hidden="true">
@@ -118,7 +118,7 @@ function activeDurationCell({ row }: { row: any }) {
           <span className="relative inline-flex rounded-full h-2 w-2 bg-current"></span>
         </span>
       )}
-      {formatDuration(r.duration_ms)}
+      {formatDurationMs(r.duration_ms)}
     </span>
   )
 }
@@ -324,7 +324,7 @@ export function buildCompletedColumns(opts: {
       size: 110,
       cell: ({ row }) => (
         <span className={`font-mono text-xs ${durationColor(row.original.duration_ms)}`}>
-          {formatDuration(row.original.duration_ms)}
+          {formatDurationMs(row.original.duration_ms)}
         </span>
       ),
     },

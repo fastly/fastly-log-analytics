@@ -75,12 +75,3 @@ export type ShareStatus = {
     tunnel_uptime_history: TunnelHistoryEntry[]
   }
 }
-import { formatDuration, formatDeterministicUTC } from '@/lib/date'
-
-export function formatUptime(seconds: number | null | undefined): string {
-  return formatDuration(seconds)
-}
-
-export function formatStamp(s: string | null | undefined): string {
-  return formatDeterministicUTC(s)
-}

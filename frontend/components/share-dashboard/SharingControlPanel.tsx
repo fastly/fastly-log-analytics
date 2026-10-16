@@ -11,7 +11,8 @@ import { client, extractApiError } from '@/lib/api'
 import { useSearchParams } from 'next/navigation'
 
 import { useShareMutation } from './useShareMutation'
-import { formatUptime, type ShareStatus } from './utils'
+import { type ShareStatus } from './utils'
+import { formatDuration } from '@/lib/date'
 
 interface SharingControlPanelProps {
   status: ShareStatus | null
@@ -37,7 +38,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   // (slightly later) first client render → React #418. This gates the two
   // live counters below — telemetry uptime and the rate-limit lockout
   // countdown — so server HTML and first client render agree; the live values
-  // fill in right after mount. Sibling to formatStamp's fix in ./utils.ts.
+  // fill in right after mount. Sibling to formatDeterministicUTC's fix in lib/date.ts.
   const mounted = useMounted()
   const [mode, setMode] = React.useState<SharingMode>('hostname')
   const [hostnameValue, setHostnameValue] = React.useState('')
@@ -206,7 +207,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             {/* Live seconds counter — placeholder until mounted (see #418 note above). */}
             Uptime:{' '}
             <span className="font-mono">
-              {mounted ? formatUptime(status.telemetry.current_uptime_s) : '—'}
+              {mounted ? formatDuration(status.telemetry.current_uptime_s) : '—'}
             </span>
           </span>
           <span>

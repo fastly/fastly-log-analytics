@@ -25,7 +25,8 @@ import { client, extractApiError } from '@/lib/api'
 import { CreateInviteDialog } from './CreateInviteDialog'
 import { SortableHead, useTableSort, type SortAccessors } from './sortable'
 import { useShareMutation } from './useShareMutation'
-import { formatStamp, type Invite, type ShareStatus } from './utils'
+import { type Invite, type ShareStatus } from './utils'
+import { formatDeterministicUTC } from '@/lib/date'
 
 interface InvitationsPanelProps {
   status: ShareStatus | null
@@ -266,7 +267,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
               <TableCell className="text-xs">{invite.email}</TableCell>
               <TableCell className="text-xs whitespace-nowrap">
                 {invite.last_login_at ? (
-                  formatStamp(invite.last_login_at)
+                  formatDeterministicUTC(invite.last_login_at)
                 ) : (
                   <span className="text-muted-foreground">Never</span>
                 )}
@@ -294,7 +295,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                   })}
                 </div>
               </TableCell>
-              <TableCell className="text-xs">{formatStamp(invite.expires_at)}</TableCell>
+              <TableCell className="text-xs">{formatDeterministicUTC(invite.expires_at)}</TableCell>
               <TableCell className="text-right space-x-1">
                 <Button
                   size="sm"

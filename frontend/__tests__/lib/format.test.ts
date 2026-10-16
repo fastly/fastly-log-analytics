@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatValue, formatBytes, calculateDelta, formatCount } from '@/lib/format'
+import { formatValue, formatBytes, calculateDelta, formatCount, formatCountMaybe, formatAbbreviatedCount } from '@/lib/format'
 
 describe('formatCount', () => {
   it('matches Number.prototype.toLocaleString() byte-for-byte', () => {
@@ -98,5 +98,24 @@ describe('calculateDelta', () => {
   it('returns null for zero or undefined baseline', () => {
     expect(calculateDelta(100, 0)).toBe(null)
     expect(calculateDelta(100, undefined)).toBe(null)
+  })
+})
+
+describe('formatCountMaybe', () => {
+  it('returns undefined for null/undefined and formats numbers like formatCount', () => {
+    expect(formatCountMaybe(undefined)).toBeUndefined()
+    expect(formatCountMaybe(null)).toBeUndefined()
+    expect(formatCountMaybe(1234567)).toBe(formatCount(1234567))
+    expect(formatCountMaybe(0)).toBe('0')
+  })
+})
+
+describe('formatAbbreviatedCount', () => {
+  it('abbreviates with K/M/B and configurable M/B precision', () => {
+    expect(formatAbbreviatedCount(999)).toBe('999')
+    expect(formatAbbreviatedCount(1500)).toBe('1.5K')
+    expect(formatAbbreviatedCount(2_345_678)).toBe('2.3M')
+    expect(formatAbbreviatedCount(2_345_678, 2)).toBe('2.35M')
+    expect(formatAbbreviatedCount(3_210_000_000, 2)).toBe('3.21B')
   })
 })

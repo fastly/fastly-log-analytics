@@ -36,7 +36,7 @@ export function durationColor(ms: number): string {
 
 /** Human-readable duration. <1s → `123 ms`; <1 min → `1.23 s`; ≥1 min →
  *  `Xm Ys`. */
-export function formatDuration(ms: number): string {
+export function formatDurationMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`
   const mins = Math.floor(ms / 60_000)

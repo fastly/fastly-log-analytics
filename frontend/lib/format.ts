@@ -48,6 +48,19 @@ export function formatCompactCount(n: number): string {
 }
 
 /**
+ * Abbreviated count with a K/M/B suffix (``1_500`` -> "1.5K", ``2_345_678`` ->
+ * "2.3M" at the default one decimal). ``millionDecimals`` sets the precision
+ * of the M and B forms; K is always one decimal. Below 1000 it falls through to
+ * ``formatCount``.
+ */
+export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(millionDecimals) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(millionDecimals) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return formatCount(n)
+}
+
+/**
  * Locale-grouped number (e.g. 1234567 → "1,234,567"). Thin wrapper over
  * ``Intl.NumberFormat`` — byte-identical to ``n.toLocaleString()`` with the
  * same options, but centralized so analytics UI can't drift back into inline

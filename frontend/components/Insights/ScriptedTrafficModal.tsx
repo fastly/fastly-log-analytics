@@ -14,36 +14,18 @@ import { cn } from '@/lib/utils'
 import { ScriptedTrafficData } from './types'
 
 import { formatCount } from '@/lib/format'
+import { formatDuration } from '@/lib/date'
 interface ScriptedTrafficModalProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
   data: ScriptedTrafficData | null
 }
 
-// Seconds → compact human string ("45s", "12m 30s", "2h 15m", "3d 4h").
-function humanizeDuration(totalSeconds: number): string {
-  const s = Math.max(0, Math.round(totalSeconds))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) {
-    const rem = s % 60
-    return rem ? `${m}m ${rem}s` : `${m}m`
-  }
-  const h = Math.floor(m / 60)
-  if (h < 24) {
-    const remM = m % 60
-    return remM ? `${h}h ${remM}m` : `${h}h`
-  }
-  const d = Math.floor(h / 24)
-  const remH = h % 24
-  return remH ? `${d}d ${remH}h` : `${d}d`
-}
-
 // Inter-arrival gap: keep sub-90s readable in seconds, humanize longer cadences.
 function formatInterval(sec: number | null): string {
   if (sec == null) return '—'
   if (sec < 90) return `${formatCount(sec, { maximumFractionDigits: 1 })}s`
-  return humanizeDuration(sec)
+  return formatDuration(Math.max(0, sec))
 }
 
 interface StatCardProps {
@@ -72,7 +54,7 @@ export function ScriptedTrafficModal({ isOpen, onOpenChange, data }: ScriptedTra
   if (!data) return null
 
   const modalPct = Math.round(data.modal_frac * 100)
-  const span = humanizeDuration(data.span_s)
+  const span = formatDuration(Math.max(0, data.span_s))
   // Score colour tracks the backend severity bands (≥90 critical, ≥70 warning).
   const scoreColor =
     data.score >= 90 ? 'text-red-500' : data.score >= 70 ? 'text-amber-500' : 'text-blue-500'

@@ -20,17 +20,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils';
-import { formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
+import { formatAbbreviatedCount, formatBytes, formatCount, formatCountMaybe } from '@/lib/format'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
-function fmtN(n: number): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return formatCount(n)
-}
-
-
 const FosOperationsHelp = ({ note }: { note?: string }) => (
   <div className="space-y-4">
     <p>Fastly Object Storage (FOS) bills operations in two classes:</p>
@@ -410,7 +402,7 @@ function UsagePageContent({
         />
         <StatCard
           title="Class A Ops (period)"
-          value={fmtN(totalClassA)}
+          value={formatAbbreviatedCount(totalClassA)}
           sub={
             <div className="space-y-1">
               <div>Writes, lists, deletes</div>
@@ -426,7 +418,7 @@ function UsagePageContent({
         />
         <StatCard
           title="Class B Ops (period)"
-          value={fmtN(totalClassB)}
+          value={formatAbbreviatedCount(totalClassB)}
           sub={
             <div className="space-y-1">
               <div>Reads / downloads</div>
@@ -568,14 +560,14 @@ function UsagePageContent({
                 <div className="grid grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Total Beacons</p>
-                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_beacons)}</p>
+                    <p className="text-2xl font-bold">{formatAbbreviatedCount(rumBreakdown.total_beacons)}</p>
                     <p className="text-xs text-muted-foreground mt-1">
                       {formatCountMaybe(rumBreakdown.average_beacons_per_day)} / day avg
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Class A Operations</p>
-                    <p className="text-2xl font-bold">{fmtN(rumBreakdown.total_estimated_class_a)}</p>
+                    <p className="text-2xl font-bold">{formatAbbreviatedCount(rumBreakdown.total_estimated_class_a)}</p>
                     <p className="text-xs text-muted-foreground mt-1">@${rumBreakdown.class_a_rate_per_1k?.toFixed(3)}/1k</p>
                   </div>
                   <div>
