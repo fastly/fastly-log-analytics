@@ -378,25 +378,22 @@ def adopt_iceberg_to_ducklake(service_id: str) -> dict:
             try:
                 _ducklake_add_data_files(con, batch, alias="lake", table=table)
                 adopted += len(batch)
-            except Exception as e:
-                logger.warning(
-                    "[ducklake] %s: batch adoption failed (%s), falling back to file-by-file for %d files",
-                    service_id,
-                    e,
-                    len(batch),
-                )
+            except Exception:
+                # Batch failed, fall back to registering individual surviving files
+                batch_skipped = 0
                 for p in batch:
                     try:
                         _ducklake_add_data_files(con, [p], alias="lake", table=table)
                         adopted += 1
-                    except Exception as fe:
-                        logger.warning(
-                            "[ducklake] %s: skipping unreadable or missing legacy parquet file %s: %s",
-                            service_id,
-                            p,
-                            fe,
-                        )
+                    except Exception:
                         failed_files.add(p)
+                        batch_skipped += 1
+                if batch_skipped > 0:
+                    logger.info(
+                        "[ducklake] %s: batch adoption skipped %d unreadable or pruned legacy files",
+                        service_id,
+                        batch_skipped,
+                    )
 
         # Validate that all adopted files are registered in DuckLake's catalog.
         # This checks the catalog metadata table in milliseconds, avoiding
