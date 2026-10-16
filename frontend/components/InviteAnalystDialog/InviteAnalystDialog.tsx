@@ -33,8 +33,8 @@ import {
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
 import type { components } from '@/types/api.generated'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 type AnalystInvite = components["schemas"]["AnalystInvite"]
 
 interface InviteAnalystDialogProps {

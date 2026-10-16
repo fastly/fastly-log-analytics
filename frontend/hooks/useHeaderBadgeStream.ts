@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useServiceStream } from '@/hooks/useServiceStream'
 import { queryKeys } from '@/lib/query-keys'
+import type { StreamMetrics } from '@/types/api'
 
 /**
  * Analyst-safe sibling of ``useAdminEventStream``.
@@ -19,12 +20,6 @@ import { queryKeys } from '@/lib/query-keys'
  * "Latest Log: Xs ago" / "Total Logs" updates via
  * ``useAdminEventStream``; this hook brings analysts to parity.
  */
-interface StreamMetrics {
-  latest_log_at?: string | null
-  total_rows?: number | null
-  last_sync_at?: string | null
-}
-
 interface BootstrapHeaderBadge {
   rum?: StreamMetrics | null
   request?: StreamMetrics | null

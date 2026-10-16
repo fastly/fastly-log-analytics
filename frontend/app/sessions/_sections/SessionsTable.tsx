@@ -16,8 +16,8 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
-type SessionsResponse = components['schemas']['SessionsResponse']
 type SessionRow = components['schemas']['Session']
 
 interface SessionsTableProps {

@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { client } from '@/lib/api'
 
 import { useScoringQuery } from '../useScoringQuery'
+import type { Expect, WireParity, components } from '@/types/api'
 
 /**
  * Operator control for whether edge Layer-2 contributes to the *enforced*
@@ -44,6 +45,8 @@ interface L2EnforceState {
   ramp_days: number
   readiness_days: number
 }
+
+export type _L2EnforceStateParity = Expect<WireParity<L2EnforceState, components['schemas']['ScoringL2EnforceState']>>
 
 interface HealthForL2 {
   matrix_staleness?: { l2_high_pct: number; l2_evaluated: number }

@@ -16,6 +16,7 @@ import { useDateFormat } from '@/hooks/useDateFormat'
 import { useElapsedTime } from '@/hooks/useElapsedTime'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
+import type { StreamMetrics } from '@/types/api'
 
 // The live "X ago" text node now lives in the shared `@/components/TimeAgo`
 // (text-only leaf so the surrounding header chrome stays stable between
@@ -122,12 +123,6 @@ function SyncStatusBadgeInner() {
   // renders so analysts see Latest Log / Total Logs the same way
   // admins do. Refreshes at bootstrap's 5-min staleTime — fine for an
   // at-a-glance header.
-  interface StreamMetrics {
-    latest_log_at?: string | null
-    total_rows?: number | null
-    last_sync_at?: string | null
-  }
-
   interface HeaderBadgeData {
     latest_log_at?: string | null
     local_rows?: number | null

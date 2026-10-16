@@ -13,6 +13,7 @@ import { client } from '@/lib/api'
 import { ThresholdMatrix } from './Matrix'
 import { ThresholdPreviewStats } from './Preview'
 import { ThresholdSliderControls } from './Slider'
+import type { Expect, WireParity, components } from '@/types/api'
 
 interface ThresholdPreviewResponse {
   threshold: number
@@ -23,6 +24,8 @@ interface ThresholdPreviewResponse {
   precision: number | null
   recall: number | null
 }
+
+export type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
 
 interface ThresholdSliderProps {
   serviceId: string

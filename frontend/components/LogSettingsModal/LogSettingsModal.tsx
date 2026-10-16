@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { client } from '@/lib/api'
-import { components } from '@/types/api.generated'
 import {
   Dialog,
   DialogContent,
@@ -25,13 +24,12 @@ import {
 import { CollapsibleGroup, StandardFieldsStep } from './FieldGroups'
 import { CustomFieldsStep } from './CustomFields'
 import { ReviewStep } from './Preview'
+import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
 
 // Re-export CollapsibleGroup so existing imports from this module keep working
 // (e.g. ProvisionWizard imports it from this path).
 export { CollapsibleGroup }
 
-type ServiceConfig = components['schemas']['ServiceConfig']
-type LogFieldsConfig = components['schemas']['LogFieldsConfig']
 
 interface LogSettingsModalProps {
   service: ServiceConfig | null

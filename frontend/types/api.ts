@@ -73,6 +73,12 @@ export type { components } from '@/types/api.generated'
 
 export type BootstrapService = components['schemas']['BootstrapService']
 
+export type ServiceConfig = components['schemas']['ServiceConfig']
+
+export type LogFieldsConfig = components['schemas']['LogFieldsConfig']
+
+export type StreamMetrics = components['schemas']['StreamMetrics']
+
 export type BootstrapResponse = components['schemas']['BootstrapResponse']
 
 export type DashboardTableData = components['schemas']['FieldAggregate']

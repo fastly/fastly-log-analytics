@@ -1,7 +1,6 @@
 'use client'
 import React, { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import type { components } from '@/types/api.generated'
 import { client } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,8 +21,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { Bot } from 'lucide-react'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface Props {
   service: ServiceConfig | null

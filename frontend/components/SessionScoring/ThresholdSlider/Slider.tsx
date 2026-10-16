@@ -5,6 +5,7 @@ import { Check, Loader2, ShieldCheck, ShieldOff } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
+import type { Expect, WireParity, components } from '@/types/api'
 
 interface StatusCodeMeta {
   current: number | null
@@ -14,6 +15,8 @@ interface StatusCodeMeta {
   max: number
   is_default: boolean
 }
+
+export type _StatusCodeMetaParity = Expect<WireParity<StatusCodeMeta, components['schemas']['ScoringEnforceStatusCodeState']>>
 
 interface ThresholdSliderControlsProps {
   thresholdRaw: number

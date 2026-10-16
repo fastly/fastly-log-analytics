@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import type { Expect, WireParity, components } from '@/types/api'
 
 interface BucketCounts {
   total: number
@@ -8,6 +9,8 @@ interface BucketCounts {
   bad: number
   unlabeled: number
 }
+
+export type _BucketCountsParity = Expect<WireParity<BucketCounts, components['schemas']['ScoringThresholdBucket']>>
 
 interface ThresholdMatrixProps {
   flagged: BucketCounts

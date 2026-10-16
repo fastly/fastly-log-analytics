@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation'
 import { client } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
-import type { components } from '@/types/api.generated'
 import { useServiceStore } from '@/stores/serviceStore'
 // Direct import (not via the barrel) so the page bundle drops the
 // @dnd-kit tree that the reorder-enabled DataTable pulls in.
@@ -23,8 +22,8 @@ import { AlertCircle, Plus } from 'lucide-react'
 import { buildServiceColumns } from './ServicesTableColumns'
 import { CredentialsDialog } from './CredentialsDialog'
 import { NgwafDialog } from './NgwafDialog'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 export function ServicesTable() {
   const queryClient = useQueryClient()

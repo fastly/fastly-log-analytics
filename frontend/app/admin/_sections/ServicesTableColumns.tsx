@@ -1,7 +1,6 @@
 'use client'
 import React from 'react'
 import { ColumnDef } from '@tanstack/react-table'
-import type { components } from '@/types/api.generated'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -26,8 +25,8 @@ import {
   Eye,
 } from 'lucide-react'
 import { formatBytes, formatCount } from '@/lib/format'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 export interface ServiceColumnDeps {
   activeServiceId: string | null

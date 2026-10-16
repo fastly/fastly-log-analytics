@@ -18,12 +18,11 @@ import {
   panelDialogFooter,
   panelDialogHeaderMuted,
 } from '@/lib/panel-dialog'
-import type { components } from '@/types/api.generated'
 import { AnalystSchedulePanel, LogSyncSection } from './Schedule'
 import { NgwafSection, IcebergOptimizationSection } from './Triggers'
 import { Preview } from './Preview'
+import type { ServiceConfig } from '@/types/api'
 
-type ServiceConfig = components["schemas"]["ServiceConfig"]
 
 interface CronSettingsModalProps {
   service: ServiceConfig | null

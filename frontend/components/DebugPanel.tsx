@@ -10,26 +10,17 @@ import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
 import type { components } from '@/types/api.generated'
+import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
-interface DebugQuery {
-  id: string
-  sql: string
-  time_ms: number
-  is_cached?: boolean
-  engine?: string
-}
+type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & { id: string; is_cached?: boolean }
 
-interface DebugCall {
+type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   id: string
-  service: string
   caller?: string
-  method: string
-  path: string
   status: string
-  time_ms: number
   details?: string
 }
 

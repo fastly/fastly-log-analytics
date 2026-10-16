@@ -15,6 +15,7 @@ import type { components } from '@/types/api.generated'
 
 import { ScoringControls } from './_sections/ScoringControls'
 import { SessionsTable } from './_sections/SessionsTable'
+import type { SessionsResponse } from '@/types/api'
 
 // SessionDetail is only rendered after a row click. Lazy-loading it
 // (with the DataTable + 7 sub-components it pulls in) keeps the
@@ -26,7 +27,6 @@ const SessionDetail = dynamic(
 )
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 // Lifted out of the ReportLayout render-prop so the (large) hook list —
 // useIsDataReady, useMemo, useQueryClient, useScoringLabels, useCallback,

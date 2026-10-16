@@ -32,9 +32,9 @@ import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { components } from '@/types/api.generated'
+import type { SessionsResponse } from '@/types/api'
 
 type SessionRow = components['schemas']['Session']
-type SessionsResponse = components['schemas']['SessionsResponse']
 
 interface SessionDetailProps {
   selectedSession: SessionRow | null

@@ -1,13 +1,11 @@
 'use client'
 
 import React from 'react'
-import { components } from '@/types/api.generated'
 import { AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
+import type { ServiceConfig, LogFieldsConfig } from '@/types/api'
 
-type ServiceConfig = components['schemas']['ServiceConfig']
-type LogFieldsConfig = components['schemas']['LogFieldsConfig']
 
 interface ReviewStepProps {
   service: ServiceConfig
