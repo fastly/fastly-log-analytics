@@ -90,7 +90,7 @@ interface UseMapInitArgs {
  */
 import { rafThrottle } from '@/components/Map/ShieldingMap'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap } from '@/components/Map/baseLayers'
 
 export function useMapInit({
   mapContainer,
@@ -107,31 +107,14 @@ export function useMapInit({
 
     if (!map.current) {
       try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.current = new maplibregl.Map({
-        container: mapContainer.current,
+      map.current = createBaseMap(maplibregl, mapContainer.current, {
         renderWorldCopies: false,
-        preserveDrawingBuffer: true,
-        style: {
-          version: 8,
-          sources: {},
-          layers: [
-            {
-              id: 'background',
-              type: 'background',
-              paint: { 'background-color': 'transparent' }
-            }
-          ]
-        },
-        center: [0, 20],
         zoom: 1,
-        interactive: true,
         // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
         // ⌘/Ctrl + wheel (or pinch / the +/- buttons) zooms the map. The map
         // sits mid-page, so bare-wheel zoom traps the scroll. (cooperative gestures)
         cooperativeGestures: true,
-      } as any)
-      map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
+      })
 
       map.current.on('error', (e) => {
         console.error("[NetworkMap:map] MapLibre error event:", e)
@@ -141,11 +124,6 @@ export function useMapInit({
         map.current?.resize()
       })
       resizeObserver.observe(mapContainer.current)
-
-      if (typeof window !== 'undefined') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).map = map.current
-      }
 
       map.current.on('load', () => {
         if (!map.current) return

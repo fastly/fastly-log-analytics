@@ -9,7 +9,7 @@ import { usePopGeoStore } from '@/stores/popGeoStore'
 import { formatPopGeo, type PopGeo } from '@/lib/pop'
 import { formatCompactCount } from '@/lib/format'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
 
 type CoordTree = number | CoordTree[]
 
@@ -130,29 +130,14 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
 
     if (!map.current) {
       try {
-        map.current = new maplibregl.Map({
-          container: mapContainer.current,
+        map.current = createBaseMap(maplibregl, mapContainer.current, {
           renderWorldCopies: false,
-          preserveDrawingBuffer: true,
-          style: {
-            version: 8,
-            sources: {},
-            layers: [
-              {
-                id: 'background',
-                type: 'background',
-                paint: { 'background-color': theme === 'dark' ? '#1a1b23' : '#f0f4fa' },
-              },
-            ],
-          },
-          center: [0, 20],
           zoom: 0.5,
-          dragRotate: false,
-          touchZoomRotate: false,
+          background: theme === 'dark' ? '#1a1b23' : '#f0f4fa',
+          lockRotation: true,
+          showCompass: false,
           cooperativeGestures: true,
-        } as maplibregl.MapOptions)
-
-        map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+        })
 
         requestAnimationFrame(() => {
           map.current?.resize()
@@ -161,11 +146,7 @@ export const PopTrafficMap = React.memo(function PopTrafficMap({ allPops, classN
         map.current.on('load', () => {
           if (!map.current) return
 
-          if (mapContainer.current) {
-            mapContainer.current
-              .querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-              .forEach((el) => el.setAttribute('tabindex', '-1'))
-          }
+          removeMapTabStops(mapContainer.current)
 
           addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
 

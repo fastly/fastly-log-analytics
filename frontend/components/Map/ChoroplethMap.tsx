@@ -8,7 +8,7 @@ import { useTheme } from 'next-themes'
 import { DashboardMapData } from '@/types/api'
 import countryCodes from '@/lib/country-codes.json'
 import { countryFill } from '@/components/Map/colors'
-import { addCountryBaseLayer } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops } from '@/components/Map/baseLayers'
 import { formatCompactCount, resolveCountryName } from '@/lib/format'
 
 const alpha3ToAlpha2: Record<string, string> = {}
@@ -77,34 +77,15 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
 
     if (!map.current) {
       try {
-      map.current = new maplibregl.Map({
-        container: mapContainer.current,
+      map.current = createBaseMap(maplibregl, mapContainer.current, {
         renderWorldCopies: false,
-        preserveDrawingBuffer: true,
-        style: {
-          version: 8,
-          sources: {},
-          layers: [
-            {
-              id: 'background',
-              type: 'background',
-              paint: { 'background-color': 'transparent' }
-            }
-          ]
-        },
-        center: [0, 20],
         zoom: 0.5,
-        dragRotate: false,
-        touchZoomRotate: false,
+        lockRotation: true,
+        showCompass: false,
         // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
         // ⌘/Ctrl + wheel (or the +/- buttons) zooms the map. (cooperative gestures)
         cooperativeGestures: true,
-      } as maplibregl.MapOptions)
-
-      map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
-      if (typeof window !== 'undefined') {
-        (window as unknown as { map: maplibregl.Map }).map = map.current;
-      }
+      })
 
       requestAnimationFrame(() => {
         map.current?.resize();
@@ -113,10 +94,7 @@ export const ChoroplethMap = React.memo(function ChoroplethMap({ data, className
       map.current.on('load', () => {
         if (!map.current) return
 
-        if (mapContainer.current) {
-          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-            .forEach(el => el.setAttribute('tabindex', '-1'))
-        }
+        removeMapTabStops(mapContainer.current)
 
         addCountryBaseLayer(map.current, { isDark: theme === 'dark' })
 

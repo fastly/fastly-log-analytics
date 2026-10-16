@@ -213,7 +213,7 @@ describe('useMapInit', () => {
     expect(inst.options).toMatchObject({
       renderWorldCopies: false,
       zoom: 1,
-      interactive: true,
+      cooperativeGestures: true,
     })
   })
 

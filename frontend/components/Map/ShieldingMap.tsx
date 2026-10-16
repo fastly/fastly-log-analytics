@@ -7,7 +7,7 @@ import * as maplibregl from 'maplibre-gl'
 maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs')
 import { useTheme } from 'next-themes'
 import { Shield, Maximize2 } from 'lucide-react'
-import { addCountryBaseLayer, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
+import { addCountryBaseLayer, createBaseMap, removeMapTabStops, updateCountryBaseLayerTheme } from '@/components/Map/baseLayers'
 import { PopLabel } from '@/components/PopLabel'
 import {
   Dialog,
@@ -324,31 +324,15 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
 
     if (!map.current) {
       try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.current = new maplibregl.Map({
-        container: mapContainer.current,
+      // Default to a 3D globe: edge→shield arcs are great-circle paths
+      // that wrap the planet, and on a flat Mercator map a long route
+      // reads as a misleading straight slash across the world. On a globe
+      // the same arc curves naturally over the surface. The GlobeControl
+      // below lets the operator flip back to flat Mercator at will.
+      map.current = createBaseMap(maplibregl, mapContainer.current, {
         renderWorldCopies: true,
-        preserveDrawingBuffer: true,
-        style: {
-          version: 8,
-          // Default to a 3D globe: edge→shield arcs are great-circle paths
-          // that wrap the planet, and on a flat Mercator map a long route
-          // reads as a misleading straight slash across the world. On a globe
-          // the same arc curves naturally over the surface. The GlobeControl
-          // below lets the operator flip back to flat Mercator at will.
-          projection: { type: 'globe' },
-          sources: {},
-          layers: [
-            {
-              id: 'background',
-              type: 'background',
-              paint: { 'background-color': 'transparent' }
-            }
-          ]
-        },
-        center: [0, 20],
         zoom: 1,
-        interactive: true,
+        globe: true,
         // The inline card sits mid-page, so a bare mousewheel would zoom the
         // map and swallow the page scroll. Cooperative gestures make a plain
         // wheel scroll the PAGE (with a brief "use ⌘/Ctrl + scroll to zoom"
@@ -356,9 +340,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
         // buttons. In the fullscreen dialog there's nothing to scroll behind
         // it, so let a bare wheel zoom the globe directly.
         cooperativeGestures: !fillHeight,
-      } as any)
-
-      map.current.addControl(new maplibregl.NavigationControl(), 'top-right')
+      })
       // Globe ⇄ Mercator toggle button (MapLibre v5 built-in), stacked under
       // the zoom/compass control in the same corner.
       map.current.addControl(new maplibregl.GlobeControl(), 'top-right')
@@ -366,10 +348,7 @@ export function ShieldingMap({ rows, isLoading, edgeOnly, errored, className, ex
       map.current.on('load', () => {
         if (!map.current) return
 
-        if (mapContainer.current) {
-          mapContainer.current.querySelectorAll<HTMLElement>('a, button, [tabindex], canvas')
-            .forEach(el => el.setAttribute('tabindex', '-1'))
-        }
+        removeMapTabStops(mapContainer.current)
 
         map.current.addSource('arcs', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
         map.current.addSource('dots', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
