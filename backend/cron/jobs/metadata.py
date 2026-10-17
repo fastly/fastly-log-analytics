@@ -852,7 +852,7 @@ def _run_metadata_cleanup(service_id: str) -> None:
     cleanup's trimming target (capped at cron_runs_days retention).
     """
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
     from backend.core.metadata import cleanup_metadata
     from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.active_requests import should_defer_cron
@@ -876,23 +876,23 @@ def _run_metadata_cleanup(service_id: str) -> None:
 
     _display = _display_label(src, service_id)
 
-    start_ts = time.time()
-    try:
-        run_id = start_cron_run(src, "metadata_cleanup")
-    except RuntimeError as e:
-        logger.info("⏭️  %s %s: skipping — %s", label, _display, e)
-        return
+    with cron_run(
+        service_id,
+        "metadata_cleanup",
+        source=src,
+        error_summary=lambda exc: f"cleanup failed: {exc}",
+        finalize_duration=True,
+        include_log_output=False,
+        skip_log_prefix="metadata_cleanup",
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        logger.info("🏎️  %s %s: Starting metadata cleanup.", label, _display)
 
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
+        def _on_event(event: dict) -> None:
+            _log_and_add_progress(run_id, service_id, job_name="metadata_cleanup", event=event)
 
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="metadata_cleanup")
-    logger.info("🏎️  %s %s: Starting metadata cleanup.", label, _display)
-
-    def _on_event(event: dict) -> None:
-        _log_and_add_progress(run_id, service_id, job_name="metadata_cleanup", event=event)
-
-    try:
         result = cleanup_metadata(service_id, retention, on_event=_on_event)
         total_deleted = sum(result["deleted"].values())
         summary_parts = [f"{t}={n}" for t, n in result["deleted"].items() if n]
@@ -931,37 +931,13 @@ def _run_metadata_cleanup(service_id: str) -> None:
         except Exception as e:
             logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
 
-        log_cron_run(
-            src,
-            "metadata_cleanup",
-            time.time() - start_ts,
-            "success",
-            summary=summary,
-            # Repurpose the rows_ingested column for the count of rows trimmed —
-            # the schema is shared across all cron tasks, and "rows_ingested" is
-            # the closest semantic fit (each task interprets it by context).
-            rows_ingested=total_deleted,
-            run_id=run_id,
-        )
+        # Repurpose the rows_ingested column for the count of rows trimmed —
+        # the schema is shared across all cron tasks, and "rows_ingested" is
+        # the closest semantic fit (each task interprets it by context).
+        run.success(summary, rows_ingested=total_deleted)
         _log_and_add_progress(
             run_id,
             service_id,
             job_name="metadata_cleanup",
             event={"type": "done", "message": summary},
         )
-    except Exception as e:
-        logger.exception("%s %s: cleanup failed: %s", label, _display, e)
-        log_cron_run(
-            src,
-            "metadata_cleanup",
-            time.time() - start_ts,
-            "error",
-            error_message=str(e),
-            summary=f"cleanup failed: {e}",
-            run_id=run_id,
-        )
-    finally:
-        end_progress(run_id)
-        from backend.cron.jobs._common import finalize_cron_duration
-
-        finalize_cron_duration(src, run_id, start_ts)

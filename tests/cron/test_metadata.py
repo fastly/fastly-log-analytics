@@ -464,3 +464,45 @@ def test_failure_row_summary_and_single_end_progress(monkeypatch, stub_load_conf
     assert kwargs["summary"] == "Metadata sync failed"
     assert kwargs["error_message"] == "catalog down"
     stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_metadata_cleanup_lease_held_skips_without_row(monkeypatch, stub_source, stub_load_config):
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(side_effect=RuntimeError("held")))
+    log_cron = MagicMock()
+    cleanup = MagicMock()
+    end_prog = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", cleanup)
+    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+
+    _run_metadata_cleanup("svc-1")
+
+    log_cron.assert_not_called()
+    cleanup.assert_not_called()
+    end_prog.assert_not_called()
+
+
+def test_metadata_cleanup_error_row_shape(monkeypatch, stub_source, stub_load_config):
+    from backend.cron.jobs.metadata import _run_metadata_cleanup
+
+    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=456))
+    log_cron = MagicMock()
+    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.metadata.cleanup_metadata", MagicMock(side_effect=RuntimeError("db locked")))
+    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
+
+    _run_metadata_cleanup("svc-1")
+
+    log_cron.assert_called_once()
+    _, kwargs = log_cron.call_args
+    assert kwargs["summary"] == "cleanup failed: db locked"
+    assert kwargs["error_message"] == "db locked"
+    assert kwargs["run_id"] == 456
+    assert kwargs["log_output"] is None
