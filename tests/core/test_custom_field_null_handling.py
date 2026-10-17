@@ -11,22 +11,20 @@ Contracts:
      DOUBLE / BOOLEAN.
   2. Aggregates over an all-NULL column follow ANSI SQL: COUNT(*)
      counts rows, COUNT(col) skips NULLs, AVG returns NULL.
-  3. Old NULL rows survive a disable/re-enable cycle — Iceberg
-     field-id slot reservation (see test_custom_field_lifecycle.py)
-     keeps old parquet schema-compatible.
+  3. Old NULL rows survive a disable/re-enable cycle — the DuckLake
+     table keeps the column (commit only ever ADDs columns), so old
+     rows stay schema-compatible.
 """
 
 from __future__ import annotations
 
-import glob
 import gzip
 import io
 import json
 import os
-import shutil
+import uuid
 from datetime import UTC, datetime, timedelta
 
-import duckdb
 import pytest
 
 
@@ -35,13 +33,14 @@ import pytest
 # defined in sibling test modules.
 @pytest.fixture
 def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
+    # Per-test service_id: DuckLake tables persist in the shared per-worker
+    # Postgres catalog, and a reused table name resolves a data dir that was
+    # never created under this test's tmp root.
+    fos_source["service_id"] = f"nh{uuid.uuid4().hex[:10]}"
     fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
-    warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
 
     class _Shim:
@@ -83,7 +82,6 @@ def custom_field_env(s3_mock, fos_source, monkeypatch, tmp_path):
 
     return {
         "fos_source": fos_source,
-        "warehouse": warehouse_path,
         "cache": cache_path,
         "set_custom_fields": _set_fields,
         "seed_gz": _seed,
@@ -106,18 +104,13 @@ def _row(ts, idx, **extra):
 
 
 def _connect(env):
-    """Sync warehouse parquet → cache and open an in-memory connection
-    with the Iceberg view registered. Returns (con, view_name)."""
+    """Open a DuckLake-attached connection with the ``logs`` view registered.
+    Returns (con, view_name)."""
     from backend.core import iceberg as ice
+    from backend.core.duckdb import get_connection
     from backend.repositories._base import _safe_table
 
-    data_dir = os.path.join(env["cache"], "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for sp in glob.glob(os.path.join(env["warehouse"], "**", "*.parquet"), recursive=True):
-        dst = os.path.join(data_dir, os.path.basename(sp))
-        if not os.path.exists(dst):
-            shutil.copy2(sp, dst)
-    con = duckdb.connect(":memory:")
+    con = get_connection(env["fos_source"])
     ice.update_iceberg_view(con, env["fos_source"])
     return con, _safe_table(env["fos_source"]["name"])
 
@@ -144,7 +137,6 @@ def _ingest_and_commit(env, expected):
         ("BOOLEAN", True),
     ],
 )
-@pytest.mark.skip(reason="Migrated to ducklake")
 def test_null_handling_per_type(custom_field_env, duckdb_type, typed_value):
     """Explicit-null and missing-key rows both become SQL NULL; the
     typed-value row round-trips. Pinned for every declared duckdb_type."""
@@ -158,7 +150,7 @@ def test_null_handling_per_type(custom_field_env, duckdb_type, typed_value):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz",
         [
             _row(base, 0, side_car=None),  # explicit JSON null
             _row(base + timedelta(seconds=1), 1),  # key omitted entirely
@@ -176,7 +168,6 @@ def test_null_handling_per_type(custom_field_env, duckdb_type, typed_value):
     )
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
 def test_aggregation_over_all_null_column(custom_field_env):
     """COUNT(*)=3, COUNT(col)=0, AVG IS NULL — ANSI semantics so
     dashboards render "no data" rather than a misleading zero."""
@@ -188,7 +179,7 @@ def test_aggregation_over_all_null_column(custom_field_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-20/10/2026-05-20T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz",
         [_row(base + timedelta(seconds=i), i, score=None) for i in range(3)],
     )
     _ingest_and_commit(env, expected=3)

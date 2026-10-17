@@ -19,10 +19,10 @@ Two questions the soft tests don't answer:
 
 2.  **Integration:** after a hard delete + a second ingest, does data
     previously written under the deleted field survive at query time?
-    The contract is **yes**: ``init_iceberg_table`` only ADDS columns
-    via ``update_schema``, never DROPS them
-    (``backend/core/iceberg.py:1316-1351``). So Iceberg keeps the
-    column, old parquet files keep their values, new parquet files
+    The contract is **yes**: the DuckLake commit path
+    (``_commit_one_chunk`` in ``backend/core/iceberg/buffer.py``) only
+    ADDs columns (``ALTER TABLE ... ADD COLUMN``), never DROPs them. So
+    the lake table keeps the column, old rows keep their values, new rows
     don't populate it, and DuckDB's view stays valid.
 
 These tests are the only thing that prevents a future refactor from
@@ -37,9 +37,9 @@ import gzip
 import io
 import json
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 
-import duckdb
 import pytest
 
 # ── Unit: get_iceberg_schema after hard delete ───────────────────────────────
@@ -140,14 +140,15 @@ def hard_delete_env(s3_mock, fos_source, monkeypatch, tmp_path):
     """Reuse the environment from test_custom_field_type_mismatch but
     expose a mutable cfg so the test can hard-delete fields between
     ingest cycles."""
+    # Per-test service_id: DuckLake tables persist in the shared per-worker
+    # Postgres catalog, and a reused table name resolves a data dir that was
+    # never created under this test's tmp root.
+    fos_source["service_id"] = f"hd{uuid.uuid4().hex[:10]}"
     fos_source["duckdb_path"] = str(tmp_path / "e2e.duckdb")
     cache_path = str(tmp_path / "cache")
-    warehouse_path = str(tmp_path / "warehouse")
     os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
 
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.iceberg._warehouse_uri", lambda _src: f"file://{warehouse_path}")
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
 
     class _CallerHintShim:
@@ -200,7 +201,6 @@ def hard_delete_env(s3_mock, fos_source, monkeypatch, tmp_path):
 
     return {
         "fos_source": fos_source,
-        "warehouse": warehouse_path,
         "cache": cache_path,
         "set_custom_fields": _set_custom_fields,
         "seed_gz": _seed_gz,
@@ -223,42 +223,29 @@ def _well_typed_row(ts: datetime, idx: int, **extras):
     return row
 
 
-def _sync_warehouse_to_cache(env):
-    """Iceberg writes land in the file:// warehouse; DuckDB reads from
-    the local cache. The type-mismatch test uses the same trick — copy
-    new parquets so the DuckDB view can see them."""
-    import glob
-    import shutil
-
-    data_dir = os.path.join(env["cache"], "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for sp in glob.glob(os.path.join(env["warehouse"], "**", "*.parquet"), recursive=True):
-        dst = os.path.join(data_dir, os.path.basename(sp))
-        if not os.path.exists(dst):
-            shutil.copy2(sp, dst)
-
-
 def _query_all(env, columns: str) -> list:
     from backend.core import iceberg as ice
+    from backend.core.duckdb import get_connection
     from backend.repositories._base import _safe_table
 
-    _sync_warehouse_to_cache(env)
-    con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, env["fos_source"])
-    view_name = _safe_table(env["fos_source"]["name"])
-    return con.execute(f"SELECT {columns} FROM {view_name} ORDER BY url").fetchall()
+    con = get_connection(env["fos_source"])
+    try:
+        ice.update_iceberg_view(con, env["fos_source"])
+        view_name = _safe_table(env["fos_source"]["name"])
+        return con.execute(f"SELECT {columns} FROM {view_name} ORDER BY url").fetchall()
+    finally:
+        con.close()
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
 def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
     """End-to-end contract: ingest with field 'doomed' → commit → hard
     delete 'doomed' from config → ingest fresh rows → query.
 
     Expected:
     - The first batch's rows are still queryable (no data loss).
-    - The 'doomed' column is still present in the view (Iceberg's
-      catalog schema is authoritative; init_iceberg_table only adds,
-      never drops).
+    - The 'doomed' column is still present in the view (the DuckLake
+      table schema is authoritative; the commit path only adds columns,
+      never drops them).
     - First batch shows the original values; second batch shows NULL
       under 'doomed'.
     - Total row count = rows_first + rows_second (no orphaning).
@@ -273,7 +260,7 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-22/10/2026-05-22T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=22/hour=10/minute=00/2026-05-22T10-00-00.svc.gz",
         [
             _well_typed_row(base, 0, doomed="first"),
             _well_typed_row(base + timedelta(seconds=1), 1, doomed="second"),
@@ -301,7 +288,7 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
 
     # ── Phase 3: ingest a fresh row WITHOUT 'doomed' in the payload ──────
     env["seed_gz"](
-        "raw/2026-05-22/11/2026-05-22T11-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=22/hour=11/minute=00/2026-05-22T11-00-00.svc.gz",
         [_well_typed_row(base + timedelta(hours=1), 2)],
     )
     events2 = env["drain_ingest"]()
@@ -319,14 +306,13 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(hard_delete_env):
         f"contract violation: hard-delete erased pre-existing data. /path/0.doomed = {by_url['/path/0']!r}"
     )
     assert by_url["/path/1"] == "second"
-    # The new row had no 'doomed' payload — DuckDB/Iceberg should serve NULL.
+    # The new row had no 'doomed' payload — DuckLake should serve NULL.
     assert by_url["/path/2"] is None, (
         f"contract violation: post-delete row should have NULL for the "
         f"removed column. /path/2.doomed = {by_url['/path/2']!r}"
     )
 
 
-@pytest.mark.skip(reason="Migrated to ducklake")
 def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
     """Two custom fields ('alpha' alphabetically first, 'beta' second).
     Ingest with both, commit, hard-delete 'alpha' (the field whose
@@ -334,8 +320,8 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
     then ingest fresh rows.
 
     Contract: 'beta' values survive intact across the shift. This is the
-    real test that Iceberg's catalog schema — not the in-memory
-    get_iceberg_schema output — is what drives column identity.
+    real test that the DuckLake table's persisted columns — not the
+    in-memory get_iceberg_schema output — drive column identity.
     """
     from backend.core import iceberg as ice
 
@@ -350,7 +336,7 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
-        "raw/2026-05-22/10/2026-05-22T10-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=22/hour=10/minute=00/2026-05-22T10-00-00.svc.gz",
         [
             _well_typed_row(base, 0, alpha="A0", beta="B0"),
             _well_typed_row(base + timedelta(seconds=1), 1, alpha="A1", beta="B1"),
@@ -372,7 +358,7 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(hard_delete_env):
     ice.init_iceberg_table(env["fos_source"])
 
     env["seed_gz"](
-        "raw/2026-05-22/11/2026-05-22T11-00-00.svc.gz",
+        "raw/request/year=2026/month=05/day=22/hour=11/minute=00/2026-05-22T11-00-00.svc.gz",
         [_well_typed_row(base + timedelta(hours=1), 2, beta="B2")],
     )
     events2 = env["drain_ingest"]()
