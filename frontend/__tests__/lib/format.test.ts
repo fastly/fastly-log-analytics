@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { formatValue, formatBytes, calculateDelta, formatCount, formatCountMaybe, formatAbbreviatedCount } from '@/lib/format'
 
 describe('formatCount', () => {
@@ -73,18 +73,13 @@ describe('formatValue', () => {
 
   // Branch coverage: Intl.DisplayNames throw path (line 32 catch)
   it('falls back to raw country code when Intl.DisplayNames throws', () => {
-    const originalDN = Intl.DisplayNames
-    // @ts-expect-error — stubbing for test
-    Intl.DisplayNames = class {
-      constructor() {
-        throw new Error('boom')
-      }
-    }
+    const displayNames = vi.spyOn(Intl, 'DisplayNames').mockImplementation(function () {
+      throw new Error('boom')
+    })
     try {
       expect(formatValue('country', 'US')).toBe('US')
     } finally {
-      // @ts-expect-error — restoring stub
-      Intl.DisplayNames = originalDN
+      displayNames.mockRestore()
     }
   })
 })
