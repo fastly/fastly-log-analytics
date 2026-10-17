@@ -287,7 +287,7 @@ export default function QueryMonitorPage() {
     staleTime: 30_000,
   })
 
-  const { justFinished, filteredActive, completed, slowQueries } = useFilteredActive({
+  const { filteredActive, completed, slowQueries } = useFilteredActive({
     snapshot: bufferedSnapshot,
     search,
     kindFilter,
@@ -428,21 +428,19 @@ export default function QueryMonitorPage() {
   )
 
   const [isManualRefreshing, setIsManualRefreshing] = React.useState(false)
-  React.useEffect(() => {
-    if (!snapshotQuery.isFetching && !historicalQuery.isFetching && isManualRefreshing) {
-      setIsManualRefreshing(false)
-    }
-  }, [snapshotQuery.isFetching, historicalQuery.isFetching, isManualRefreshing])
 
   const handleManualRefresh = React.useCallback(() => {
     setIsManualRefreshing(true)
     resetPendingRef.current = true
-    void queryClient.invalidateQueries({
-      queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
-    })
+    // The refresh is over when every refetch it started has settled — tracked on the promises
+    // instead of mirroring the queries' isFetching flags into state from an effect.
+    const pending: Promise<unknown>[] = [
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() }),
+    ]
     if (slowHistoryMode !== 'recent') {
-      void historicalQuery.refetch()
+      pending.push(historicalQuery.refetch())
     }
+    void Promise.allSettled(pending).then(() => setIsManualRefreshing(false))
   }, [queryClient, slowHistoryMode, historicalQuery])
 
   useKeyboardShortcuts(shortcuts, enabled)
