@@ -17,6 +17,7 @@ import {
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
 import { useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/lib/query-keys'
 import type { components } from '@/types/api.generated'
 
 type TreeNode = components['schemas']['TreeNode']
@@ -159,7 +160,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', activeServiceId, prefix],
+    queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
     queryFn: async () => {
       const endpoint = type === 'iceberg' ? "/api/admin/iceberg-tree" : "/api/admin/raw-tree"
       const { data } = await client.GET(endpoint as any, {
@@ -213,7 +214,7 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await queryClient.invalidateQueries({ queryKey: ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', activeServiceId] })
+    await queryClient.invalidateQueries({ queryKey: queryKeys.admin.fileTreeFor(type, activeServiceId) })
     setTimeout(() => setIsRefreshing(false), 500)
   }
 

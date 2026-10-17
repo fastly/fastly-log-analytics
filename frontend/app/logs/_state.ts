@@ -10,6 +10,7 @@ import { useLogFieldsCatalog } from '@/hooks/useLogFieldsCatalog'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useSSE } from '@/hooks/useSSE'
 import type { WithRequired, components } from '@/types/api'
+import { queryKeys } from '@/lib/query-keys'
 
 export type BackgroundCronToast = Pick<
   WithRequired<components['schemas']['CronRunEntry'], 'id' | 'task' | 'status' | 'started_at'>,
@@ -62,7 +63,7 @@ export function useLogsPageState(initialTab?: string) {
   const { data: status } = useSyncStatus()
 
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
-    queryKey: ['admin', 'cron-logs', activeServiceId, taskFilter, statusFilter],
+    queryKey: queryKeys.admin.cronLogs(activeServiceId, taskFilter, statusFilter),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/cron-runs", { signal,
         params: {
@@ -99,7 +100,7 @@ export function useLogsPageState(initialTab?: string) {
   // backgroundCronToast is tracking. First poll (maxSeenIdRef.current is
   // null) omits since_id and returns up to per_page recent rows like before.
   const { data: recentCrons } = useQuery({
-    queryKey: ['admin', 'cron-logs-recent', activeServiceId],
+    queryKey: queryKeys.admin.cronLogsRecent(activeServiceId),
     queryFn: async ({ signal }) => {
       const max = maxSeenIdRef.current
       const sinceId = max != null ? Math.max(0, max - 1) : undefined
@@ -138,8 +139,8 @@ export function useLogsPageState(initialTab?: string) {
   React.useEffect(() => {
     const count = runningCrons?.entries?.length || 0
     if (prevRunningCount.current > 0 && count < prevRunningCount.current) {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'status'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsAll() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.status() })
     }
     prevRunningCount.current = count
   }, [runningCrons?.entries?.length, queryClient])
@@ -312,7 +313,7 @@ export function useLogsPageState(initialTab?: string) {
   }, [displayedJobs])
 
   const { data: cronSchedule } = useQuery({
-    queryKey: ['admin', 'cron-schedule', activeServiceId],
+    queryKey: queryKeys.admin.cronSchedule(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/cron-schedule", { signal })
       return data as any
@@ -400,7 +401,7 @@ export function useLogsPageState(initialTab?: string) {
   }, [catalog])
 
   const { data: auditLogs, isLoading: isLoadingAudit, isFetching: isFetchingAudit } = useQuery({
-    queryKey: ['admin', 'audit-logs', activeServiceId, eventFilter],
+    queryKey: queryKeys.admin.auditLogs(activeServiceId, eventFilter),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/audit-logs", { signal,
         params: {
@@ -422,7 +423,7 @@ export function useLogsPageState(initialTab?: string) {
   })
 
   const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
-    queryKey: ['admin', 'ingested-files', activeServiceId],
+    queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/admin/ingested-files", { signal })
       return data as any
@@ -435,7 +436,7 @@ export function useLogsPageState(initialTab?: string) {
   })
 
   const { data: schemaData, isLoading: isLoadingSchema } = useQuery({
-    queryKey: ['admin', 'schema', activeServiceId],
+    queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET("/api/schema", { signal })
       return data as any
@@ -452,7 +453,7 @@ export function useLogsPageState(initialTab?: string) {
       await client.DELETE("/api/cron-runs", {})
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', activeServiceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
       setIsPurgeOpen(false)
     }
   })
@@ -468,10 +469,10 @@ export function useLogsPageState(initialTab?: string) {
     //
     // iceberg / raw have no stream coverage, so keep refreshing on entry.
     if (value === 'iceberg') {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'iceberg', activeServiceId] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'iceberg-tree', activeServiceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.iceberg(activeServiceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.icebergTree(activeServiceId) })
     } else if (value === 'raw') {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'raw-tree', activeServiceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.rawTree(activeServiceId) })
     }
   }, [activeServiceId, queryClient])
 

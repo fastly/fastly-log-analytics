@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchCronRunsServerSide } from '@/lib/ssr/logs'
 import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
 import LogsClient from './_sections/LogsClient'
+import { queryKeys } from '@/lib/query-keys'
 
 // Per-request RSC shell for /logs. Pre-fetches the heavy 500-row
 // cron-runs slice server-side and dehydrates it into a HydrationBoundary
@@ -42,7 +43,7 @@ export default async function LogsPage({
   // is only consumed on the cold 'all'/'all' state. Any filter change
   // refetches under a different key.
   const dehydratedState = seedDehydratedState(
-    ['admin', 'cron-logs', serviceId ?? null, 'all', 'all'],
+    queryKeys.admin.cronLogs(serviceId ?? null, 'all', 'all'),
     cronRunsData,
   )
 

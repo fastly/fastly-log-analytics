@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { client, extractApiError } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { cronCacheBust } from '@/lib/cron-cache-bust'
+import { queryKeys } from '@/lib/query-keys'
 
 export function QuickActionsBar({
   isAnalyst,
@@ -131,7 +132,7 @@ export function QuickActionsBar({
             setIsSSEModalOpen(true)
             reset()
             start(`/api/services/${activeServiceId}/ngwaf-sync`, {})
-            queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', activeServiceId] })
+            queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
           }}
         >
           <Bot className="h-3 w-3 mr-1.5" /> NGWAF Bot Sync

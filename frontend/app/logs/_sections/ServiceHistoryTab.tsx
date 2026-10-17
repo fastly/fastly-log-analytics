@@ -25,6 +25,7 @@ import {
 // dropdown column picker above already covers hide/show.
 import { DataTableReadonly as DataTable } from '@/components/DataTable/DataTableReadonly'
 import { ColumnDef } from '@tanstack/react-table'
+import { queryKeys } from '@/lib/query-keys'
 
 export function ServiceHistoryTab({
   auditColumns,
@@ -104,7 +105,7 @@ export function ServiceHistoryTab({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs', activeServiceId] })}
+                onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(activeServiceId) })}
                 disabled={isFetchingAudit}
                 className="h-8 text-xs"
               >

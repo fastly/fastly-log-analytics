@@ -25,6 +25,7 @@ import {
   panelDialogHeaderSolid,
 } from '@/lib/panel-dialog'
 import type { ServiceConfig } from '@/types/api'
+import { queryKeys } from '@/lib/query-keys'
 
 
 interface DeleteDataDialogProps {
@@ -59,7 +60,7 @@ export function DeleteDataDialog({ service, open, onOpenChange, onComplete }: De
   // header the same way the reset-logs call itself does (see handleExecute).
   const serviceId = service?.service_id
   const { data: icebergInfo, isLoading: icebergLoading } = useQuery({
-    queryKey: ['admin', 'iceberg-info', serviceId],
+    queryKey: queryKeys.admin.icebergInfo(serviceId),
     queryFn: async () => {
       // `service_id` isn't in the generated query-param type for this route
       // (it arrives via the shared `Depends(get_source)` chain, which the

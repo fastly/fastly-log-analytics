@@ -33,10 +33,10 @@ import { queryKeys } from '@/lib/query-keys'
 export function cronCacheBust(queryClient: QueryClient, serviceId?: string | null): void {
   // Cron history surfaces that ``useAdminEventStream (cron-runs channel)`` already targets.
   // These are the canonical destinations for "a cron run just changed".
-  queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs'] })
-  queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent'] })
-  queryClient.invalidateQueries({ queryKey: ['admin', 'iceberg'] })
-  queryClient.invalidateQueries({ queryKey: ['admin', 'schema'] })
+  queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsAll() })
+  queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecentAll() })
+  queryClient.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() })
+  queryClient.invalidateQueries({ queryKey: queryKeys.admin.schemaAll() })
 
   // Header badge + FilterBar bounds + sync-status badge.
   queryClient.invalidateQueries({ queryKey: queryKeys.lastSyncAll() })
@@ -59,8 +59,8 @@ export function cronCacheBust(queryClient: QueryClient, serviceId?: string | nul
   // these via the domain-only calls above, so this is a no-op in
   // current shape but documents the per-sid contract for future readers.
   if (serviceId) {
-    queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', serviceId] })
-    queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs-recent', serviceId] })
+    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) })
+    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })
     queryClient.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) })
     queryClient.invalidateQueries({ queryKey: ['log-extents', serviceId] })
     queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(serviceId) })

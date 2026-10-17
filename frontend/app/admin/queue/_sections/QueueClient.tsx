@@ -19,6 +19,7 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import type { components } from '@/types/api.generated'
 
 import { useAdminEventStream } from '@/hooks/useAdminEventStream'
+import { queryKeys } from '@/lib/query-keys'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 
@@ -44,7 +45,7 @@ export function QueueClient() {
   const { state: sseConnected } = useAdminEventStream(true, ['celery-status'])
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', 'celery-status'],
+    queryKey: queryKeys.admin.celeryStatus(),
     queryFn: async ({ signal }): Promise<CeleryStatusResponse> => {
       const { data, response } = await client.GET('/api/admin/celery/status', { signal })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -56,7 +57,7 @@ export function QueueClient() {
   })
 
   const { data: trends, isLoading: trendsLoading, error: trendsError } = useQuery({
-    queryKey: ['admin', 'metric-history-batch', '1h'],
+    queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/metric-history/batch', {
         params: { query: { since: '1h' } },

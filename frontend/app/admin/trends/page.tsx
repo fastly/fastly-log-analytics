@@ -3,6 +3,7 @@ import { HydrationBoundary } from '@tanstack/react-query'
 import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/admin_trends'
 import { seedDehydratedState } from '@/lib/ssr/seed'
 import AdminTrendsClient from './_sections/AdminTrendsClient'
+import { queryKeys } from '@/lib/query-keys'
 
 // Per-request RSC shell for /admin/trends. Pre-fetches the default 1-hour
 // metric-history batch server-side and dehydrates it into a HydrationBoundary
@@ -25,7 +26,7 @@ export default async function AdminTrendsPage() {
   const batch = await fetchMetricHistoryBatchServerSide()
 
   // Must match AdminTrendsClient's useQuery key for the cold '1h' window.
-  const dehydratedState = seedDehydratedState(['admin', 'metric-history-batch', '1h'], batch)
+  const dehydratedState = seedDehydratedState(queryKeys.admin.metricHistoryBatch('1h'), batch)
 
   return (
     <HydrationBoundary state={dehydratedState}>

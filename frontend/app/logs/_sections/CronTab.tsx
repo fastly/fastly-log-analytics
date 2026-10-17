@@ -29,6 +29,7 @@ import { HelpCircle } from 'lucide-react'
 import { HelpDialog } from '@/components/ui/help-dialog'
 import { CRON_GROUPS, CRON_DISPLAY_NAMES, CRON_EXPLANATIONS } from './CronExplanations'
 import { CronScheduleBox } from './CronScheduleBox'
+import { queryKeys } from '@/lib/query-keys'
 
 export function CronTab({
   cronColumns,
@@ -265,7 +266,7 @@ export function CronTab({
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => queryClient.invalidateQueries({ queryKey: ['admin', 'cron-logs', activeServiceId] })}
+                    onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })}
                     disabled={isFetchingCron}
                     className="h-8 text-xs"
                   >

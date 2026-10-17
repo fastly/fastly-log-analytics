@@ -12,6 +12,7 @@ import { PageHeader } from '@/components/ui/page-header'
 import { client } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import { queryKeys } from '@/lib/query-keys'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
@@ -72,7 +73,7 @@ export default function AdminTrendsClient() {
   const [window, setWindow] = React.useState<'1h' | '24h' | '7d'>('1h')
 
   const { data: trends, isLoading, isFetching, error } = useQuery({
-    queryKey: ['admin', 'metric-history-batch', window],
+    queryKey: queryKeys.admin.metricHistoryBatch(window),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/admin/metric-history/batch', {
         params: { query: { since: window } },

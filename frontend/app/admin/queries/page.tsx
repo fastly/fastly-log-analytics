@@ -60,6 +60,7 @@ import type {
   ViewMode,
 } from './_types'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { queryKeys } from '@/lib/query-keys'
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 
@@ -119,7 +120,7 @@ export default function QueryMonitorPage() {
   )
 
   const { data: cfg } = useQuery<MonitorConfig>({
-    queryKey: ['admin', 'query-monitor', 'config'],
+    queryKey: queryKeys.admin.queryMonitorConfig(),
     queryFn: async ({ signal }) => {
       return adminJson('/api/admin/app-config/query-monitor', '/api/admin/app-config/query-monitor', { signal })
     },
@@ -157,7 +158,7 @@ export default function QueryMonitorPage() {
   const [completedBuffer, setCompletedBuffer] = React.useState<Map<number, CompletedRow>>(() => new Map())
 
   const snapshotQuery = useQuery<SnapshotResponse>({
-    queryKey: ['admin', 'query-monitor', 'snapshot', includeCompleted],
+    queryKey: queryKeys.admin.queryMonitorSnapshot(includeCompleted),
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams()
       if (includeCompleted) params.set('include_completed', 'true')
@@ -192,7 +193,7 @@ export default function QueryMonitorPage() {
   React.useEffect(() => {
     lastSeqRef.current = 0
     setCompletedBuffer(new Map())
-    queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
+    queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
     // viewMode is the only dep we want — re-running on queryClient/setCompletedBuffer
     // identity changes would loop. eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -205,7 +206,7 @@ export default function QueryMonitorPage() {
     if (visible && !wasVisibleRef.current) {
       lastSeqRef.current = 0
       setCompletedBuffer(new Map())
-      queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
     }
     wasVisibleRef.current = visible
   }, [visible, queryClient])
@@ -271,7 +272,7 @@ export default function QueryMonitorPage() {
     },
     onSuccess: (res) => {
       setActionError('')
-      queryClient.invalidateQueries({ queryKey: ['admin', 'query-monitor', 'snapshot'] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
       // SRE-17: plain-English result for the non-cancelled terminal states
       // instead of a raw enum dump ("Cancel returned: connection_gone"). The
       // row state-machine already gives the positive confirmation for a real
@@ -293,7 +294,7 @@ export default function QueryMonitorPage() {
   // staleTime is 30s so toggling between 24h / 7d back-to-back doesn't
   // re-hit SQLite if the data was just fetched.
   const historicalQuery = useQuery<SlowQueriesResult>({
-    queryKey: ['admin', 'query-monitor', 'slow-history', slowHistoryMode, slowThresholdMs],
+    queryKey: queryKeys.admin.queryMonitorSlowHistory(slowHistoryMode, slowThresholdMs),
     queryFn: async ({ signal }) => {
       let sinceHours = 24
       if (slowHistoryMode === 'past_1h') sinceHours = 1
@@ -537,7 +538,7 @@ export default function QueryMonitorPage() {
                         // data on the click rather than waiting up to 300ms.
                         setPaused(false)
                         queryClient.invalidateQueries({
-                          queryKey: ['admin', 'query-monitor', 'snapshot'],
+                          queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
                         })
                       } else {
                         setPaused(true)

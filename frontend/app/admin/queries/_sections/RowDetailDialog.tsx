@@ -33,6 +33,7 @@ import {
 import { durationColor, formatDurationMs, formatMemoryMb, kindBadgeVariant } from '../_helpers'
 import type { ActiveOrPromotedRow, ActiveRow, CompletedRow } from '../_types'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { queryKeys } from '@/lib/query-keys'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow
 
@@ -61,7 +62,7 @@ export function RowDetailDialog({
   // sql_preview we have.
   const isLive = row !== null && isActivePromoted(row) && !row._completed
   const { data: fullRow } = useQuery<AnyRow>({
-    queryKey: ['admin', 'query-monitor', 'detail', row?.query_id ?? null],
+    queryKey: queryKeys.admin.queryMonitorDetail(row?.query_id ?? null),
     queryFn: async ({ signal }) => {
       return adminJson<'/api/admin/queries/{qid}', ActiveRow>(
         '/api/admin/queries/{qid}',

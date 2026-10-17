@@ -125,10 +125,10 @@ export default async function RootLayout({
       const schemaList = b.schema as unknown[] | undefined;
       const tableName = b.table_name as string | undefined;
       if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {
-        client.setQueryData(["admin", "schema", sid], { schema: schemaList, table_name: tableName });
+        client.setQueryData(queryKeys.admin.schema(sid), { schema: schemaList, table_name: tableName });
       }
       if (b.cron_runs_first_page) {
-        client.setQueryData(["admin", "cron-logs-recent", sid], b.cron_runs_first_page);
+        client.setQueryData(queryKeys.admin.cronLogsRecent(sid), b.cron_runs_first_page);
       }
       if (b.scoring_labels) {
         client.setQueryData(["scoring-labels", sid], b.scoring_labels);

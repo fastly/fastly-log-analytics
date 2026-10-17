@@ -8,6 +8,7 @@ import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from 
 import { useServiceStore } from '@/stores/serviceStore'
 import { buttonVariants } from '@/components/ui/button'
 import { UserPlus, ShieldCheck, Activity, TrendingUp, Layers, Eye } from 'lucide-react'
+import { queryKeys } from '@/lib/query-keys'
 
 export function AdminPrefetchLinks() {
   const queryClient = useQueryClient()
@@ -20,7 +21,7 @@ export function AdminPrefetchLinks() {
         prefetch={false}
         onMouseEnter={() => {
           queryClient.prefetchQuery({
-            queryKey: ['admin', 'share', 'status'],
+            queryKey: queryKeys.admin.shareStatus(),
             queryFn: async ({ signal }) => {
               const { data, response } = await client.GET('/api/admin/share/status', { signal })
               if (!response.ok) throw new Error(`status ${response.status}`)
@@ -57,7 +58,7 @@ export function AdminPrefetchLinks() {
         prefetch={false}
         onMouseEnter={() => {
           queryClient.prefetchQuery({
-            queryKey: ['admin', 'metric-history-batch', '1h'],
+            queryKey: queryKeys.admin.metricHistoryBatch('1h'),
             queryFn: async ({ signal }) => {
               const { data, response } = await client.GET('/api/admin/metric-history/batch', {
                 params: { query: { since: '1h' } },
@@ -77,7 +78,7 @@ export function AdminPrefetchLinks() {
         prefetch={false}
         onMouseEnter={() => {
           queryClient.prefetchQuery({
-            queryKey: ['admin', 'celery-status'],
+            queryKey: queryKeys.admin.celeryStatus(),
             queryFn: async ({ signal }) => {
               const { data, response } = await client.GET('/api/admin/celery/status', { signal })
               if (!response.ok) throw new Error(`status ${response.status}`)

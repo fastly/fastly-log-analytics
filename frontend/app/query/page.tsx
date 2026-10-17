@@ -29,6 +29,7 @@ import { StructuredMode } from './_sections/StructuredMode'
 import { RawSqlMode } from './_sections/RawSqlMode'
 import { ResultsTable } from './_sections/ResultsTable'
 import { QueryToolbar } from './_sections/QueryToolbar'
+import { queryKeys } from '@/lib/query-keys'
 
 const HISTORY_KEY = 'fastly_qe_history'
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
@@ -223,7 +224,7 @@ function QueryPageInner() {
   }, [])
 
   const { data: schemaData } = useQuery({
-    queryKey: ['admin', 'schema', activeServiceId],
+    queryKey: queryKeys.admin.schema(activeServiceId),
     queryFn: async ({ signal }) => {
       const { data } = await client.GET('/api/schema', { signal })
       return data as any

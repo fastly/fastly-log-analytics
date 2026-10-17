@@ -14,6 +14,7 @@ import { formatBytesTiered } from '@/lib/format'
 import { downloadBlob } from '@/lib/utils'
 import { useServiceStore } from '@/stores/serviceStore'
 import type { components } from '@/types/api.generated'
+import { queryKeys } from '@/lib/query-keys'
 
 type QuarantineSummary = components['schemas']['QuarantineSummary']
 type QuarantineListResponse = components['schemas']['QuarantineListResponse']
@@ -32,7 +33,7 @@ export function QuarantineSection() {
   const [actionError, setActionError] = React.useState<string | null>(null)
 
   const summaryQuery = useQuery<QuarantineSummary>({
-    queryKey: ['admin', 'quarantine', 'summary', activeServiceId],
+    queryKey: queryKeys.admin.quarantineSummary(activeServiceId),
     queryFn: async ({ signal }) => {
       return adminJson(
         '/api/admin/quarantine/summary',
@@ -48,7 +49,7 @@ export function QuarantineSection() {
   })
 
   const listQuery = useQuery<QuarantineListResponse>({
-    queryKey: ['admin', 'quarantine', 'list', activeServiceId, errorCategory, offset],
+    queryKey: queryKeys.admin.quarantineList(activeServiceId, errorCategory, offset),
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
       if (errorCategory) params.set('error_category', errorCategory)
@@ -86,7 +87,7 @@ export function QuarantineSection() {
   if (!summaryQuery.isPending && totalItems === 0 && !showDetails) return null
 
   const invalidateQuarantine = async () => {
-    await queryClient.invalidateQueries({ queryKey: ['admin', 'quarantine'] })
+    await queryClient.invalidateQueries({ queryKey: queryKeys.admin.quarantineAll() })
   }
 
   const handleDownload = async (item: QuarantineItem) => {

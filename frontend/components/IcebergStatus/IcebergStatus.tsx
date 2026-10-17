@@ -30,6 +30,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { queryKeys } from '@/lib/query-keys'
 
 export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -40,7 +41,7 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
   // The 5-min interval is a pure safety net (silently-dropped stream,
   // missed wakeup) — same shape as useSyncStatus/useLastSync.
   const { data: info, isLoading, error } = useQuery({
-    queryKey: ['admin', 'iceberg', activeServiceId],
+    queryKey: queryKeys.admin.iceberg(activeServiceId),
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/iceberg-info")
       return data as any

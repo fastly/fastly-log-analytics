@@ -20,6 +20,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { queryKeys } from '@/lib/query-keys'
 
 export function IcebergCalendar() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
@@ -27,7 +28,7 @@ export function IcebergCalendar() {
   // Freshness via useAdminEventStream invalidation (prefix-matches
   // ['admin', 'iceberg']). 5-min interval is a pure safety net.
   const { data: calendar, isLoading } = useQuery({
-    queryKey: ['admin', 'iceberg', 'calendar', activeServiceId],
+    queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
     queryFn: async () => {
       const { data } = await client.GET("/api/admin/iceberg-calendar")
       return data as any

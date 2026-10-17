@@ -12,6 +12,7 @@ import {
   makeCronRunsApplier,
   type CronRunsApplier,
 } from '@/lib/admin-stream-apply'
+import { queryKeys } from '@/lib/query-keys'
 
 /**
  * The admin channels a single multiplexed connection can carry. Mirrors
@@ -96,7 +97,7 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
           applyShare(queryClient, env.data)
           break
         case 'celery-status':
-          queryClient.setQueryData(['admin', 'celery-status'], env.data)
+          queryClient.setQueryData(queryKeys.admin.celeryStatus(), env.data)
           break
         case 'cron-runs': {
           // Lazily (re)create defensively in case an event lands before

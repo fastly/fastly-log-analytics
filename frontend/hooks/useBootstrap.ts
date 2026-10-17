@@ -78,7 +78,7 @@ export function useBootstrap() {
         const seededSchemaList = (data as any).schema
         const seededTableName = (data as any).table_name
         if (Array.isArray(seededSchemaList) && seededSchemaList.length > 0 && typeof seededTableName === 'string') {
-          queryClient.setQueryData(['admin', 'schema', sid], { schema: seededSchemaList, table_name: seededTableName })
+          queryClient.setQueryData(queryKeys.admin.schema(sid), { schema: seededSchemaList, table_name: seededTableName })
         }
         // P1#5 (perf audit): cron_schedule is no longer seeded from
         // bootstrap (its ~3s build sat on admin first-paint). The /logs
@@ -87,7 +87,7 @@ export function useBootstrap() {
         // runs delta below stays seeded (cheap, with_total=False).
         const seededCronRunsFirstPage = (data as any).cron_runs_first_page
         if (seededCronRunsFirstPage) {
-          queryClient.setQueryData(['admin', 'cron-logs-recent', sid], seededCronRunsFirstPage)
+          queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), seededCronRunsFirstPage)
         }
         // Always seed ['last-sync', sid] so the cache entry exists before
         // SyncStatusBadge's useLastSync() subscribes (prevents mid-render

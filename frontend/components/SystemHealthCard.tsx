@@ -9,6 +9,7 @@ import { ELAPSED_AGE_COMPACT, formatElapsed } from '@/lib/format'
 import { useMounted } from '@/hooks/useMounted'
 import { client } from '@/lib/api'
 import type { components } from '@/types/api.generated'
+import { queryKeys } from '@/lib/query-keys'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
@@ -114,7 +115,7 @@ export function SystemHealthCard() {
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
-    queryKey: ['admin', 'health-snapshot'],
+    queryKey: queryKeys.admin.healthSnapshot(),
     queryFn: async () => {
       const { data } = await client.GET('/api/admin/health-snapshot')
       return data as HealthSnapshot
@@ -128,7 +129,7 @@ export function SystemHealthCard() {
   // so a 1h window gives ~60 points per series. SSE pushes via
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
-    queryKey: ['admin', 'metric-history-batch', '1h'],
+    queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async () => {
       const { data } = await client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } })
       return data as TrendBatch
