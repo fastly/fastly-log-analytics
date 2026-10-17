@@ -26,6 +26,7 @@ Config file schema:
 }
 """
 
+import contextlib
 import copy
 import json
 import logging
@@ -36,9 +37,15 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -353,14 +360,81 @@ def _atomic_write_json(path, data: dict) -> None:
         raise
 
 
-def save_config(service_id: str, cfg: dict):
-    """Write a service config atomically. See :func:`_atomic_write_json`."""
+@contextlib.contextmanager
+def config_lock(service_id: str):
+    """Cross-process exclusive lock for read-modify-write of one service config.
+
+    ``flock`` on a sidecar file works across uvicorn workers, celery workers and
+    separate pods sharing the configs volume; a threading lock only covers one
+    process. Degrades to unlocked (with a warning) where the lock file cannot be
+    opened (read-only FS) or ``fcntl`` is unavailable.
+    """
+    _ensure_dirs()
+    lock_path = CONFIGS_DIR / f".{_validate_service_id(service_id)}.lock"
+    fd = None
+    if fcntl is not None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as e:
+            logger.warning("config_lock_unavailable service_id=%s: %s", service_id, e)
+            if fd is not None:
+                os.close(fd)
+                fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
+            finally:
+                os.close(fd)
+
+
+def _read_config_fresh(service_id: str) -> dict | None:
+    """``load_config`` that bypasses the in-process cache (another process may have written)."""
+    with _config_cache_lock:
+        _config_cache.pop(service_id, None)
+    return load_config(service_id)
+
+
+def _disk_cid_salt(service_id: str) -> str | None:
+    try:
+        disk = _read_config_fresh(service_id)
+    except (OSError, ValueError):
+        return None
+    rum = disk.get("rum") if disk else None
+    salt = rum.get("cid_salt") if isinstance(rum, dict) else None
+    return salt if isinstance(salt, str) and salt else None
+
+
+def _save_config_unlocked(service_id: str, cfg: dict):
     global _cdn_service_id_map
     _ensure_dirs()
     if "created_at" not in cfg or not cfg["created_at"]:
         import datetime as _dt
 
         cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
+    # The cid salt is write-once: pseudonymous cids are keyed on it, so a stale
+    # writer replacing cfg["rum"] wholesale (or a racing first-save) must never
+    # re-key them. Adopt the persisted salt; mint one only when none exists yet.
+    existing_salt = _disk_cid_salt(service_id)
+    rum = cfg.get("rum")
+    if existing_salt:
+        if not isinstance(rum, dict):
+            rum = {}
+            cfg["rum"] = rum
+        if rum.get("cid_salt") != existing_salt:
+            if rum.get("cid_salt"):
+                logger.warning("cid_salt_overwrite_blocked service_id=%s", service_id)
+            rum["cid_salt"] = existing_salt
+    elif not (isinstance(rum, dict) and rum.get("cid_salt")):
+        import secrets
+
+        if not isinstance(rum, dict):
+            rum = {}
+            cfg["rum"] = rum
+        rum["cid_salt"] = secrets.token_hex(32)
     try:
         _atomic_write_json(config_path(service_id), cfg)
     except (OSError, PermissionError) as e:
@@ -379,6 +453,27 @@ def save_config(service_id: str, cfg: dict):
         _config_cache.pop(service_id, None)
     _cdn_service_id_map = None
     _invalidate_service_ids_cache()
+
+
+def save_config(service_id: str, cfg: dict):
+    """Write a service config atomically. See :func:`_atomic_write_json`."""
+    with config_lock(service_id):
+        _save_config_unlocked(service_id, cfg)
+
+
+def mutate_config(service_id: str, mutate: Callable[[dict], None]) -> dict | None:
+    """Locked read-modify-write: fresh-load, apply ``mutate`` in place, save.
+
+    Returns the saved config, or ``None`` when the service has no config.
+    Use for partial edits so a concurrent writer's changes are not clobbered.
+    """
+    with config_lock(service_id):
+        cfg = _read_config_fresh(service_id)
+        if cfg is None:
+            return None
+        mutate(cfg)
+        _save_config_unlocked(service_id, cfg)
+        return cfg
 
 
 def update_status(service_id: str, status: dict):

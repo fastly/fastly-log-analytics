@@ -1606,10 +1606,15 @@ def ensure_cid_salt(rum_cfg: dict) -> str:
 
 
 def get_or_generate_cid_salt(service_id: str) -> str:
-    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing."""
+    """Retrieve or generate a persistent, 32-byte hex-encoded salt for cid pseudonymous hashing.
+
+    New configs get a salt on first save (``backend.config.save_config``), so reaching the
+    lazy path means a legacy config or a lost salt. Generation is a cross-process locked
+    read-modify-write (``mutate_config``), so racing workers converge on one persisted salt.
+    """
     global _process_cid_salt
 
-    from backend.config import load_config, save_config
+    from backend.config import load_config, mutate_config
 
     cfg = load_config(service_id)
     if cfg:
@@ -1617,22 +1622,28 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         if isinstance(rum_cfg, dict) and rum_cfg.get("cid_salt"):
             return rum_cfg["cid_salt"]
 
-    # First use (or no config). Serialize generation and re-read under the lock so two
-    # concurrent first calls can't mint different salts and let the later save win.
-    with _cid_salt_lock:
-        cfg = load_config(service_id)
-        if not cfg:
+    if not cfg:
+        with _cid_salt_lock:
             if _process_cid_salt is None:
                 import secrets
 
                 _process_cid_salt = secrets.token_hex(32)
+            logger.warning(
+                "cid_salt_no_config service_id=%s: using a non-persistent per-process salt; cids will not be stable",
+                service_id,
+            )
             return _process_cid_salt
 
-        existing = cfg.get("rum")
-        locked_rum: dict = existing if isinstance(existing, dict) else {}
-        if locked_rum.get("cid_salt"):
-            return locked_rum["cid_salt"]
-        salt = ensure_cid_salt(locked_rum)
-        cfg["rum"] = locked_rum
-        save_config(service_id, cfg)
-        return salt
+    logger.warning("cid_salt_missing service_id=%s: generating and persisting under cross-process lock", service_id)
+
+    def _set(c: dict) -> None:
+        existing = c.get("rum")
+        rum: dict = existing if isinstance(existing, dict) else {}
+        ensure_cid_salt(rum)
+        c["rum"] = rum
+
+    saved = mutate_config(service_id, _set)
+    if saved is None:
+        # Config vanished between read and lock; nothing to persist into.
+        return get_or_generate_cid_salt(service_id)
+    return saved["rum"]["cid_salt"]
