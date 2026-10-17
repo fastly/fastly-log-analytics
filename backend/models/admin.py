@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from backend.models._base import PassthroughModel
 from backend.models.common import BaseResponse, LogExtentsMixin
@@ -131,6 +131,24 @@ class HealthCeleryStats(BaseModel):
     broker_reachable: bool
 
 
+class HealthHighScaleDisk(BaseModel):
+    """Latest serving-volume disk-guard evaluation (high-scale topology only)."""
+
+    mode: Literal["normal", "warning", "protective", "emergency"]
+    free_fraction: float
+    reserve_bytes: int
+    total_bytes: int
+    free_bytes: int
+    reasoning: str
+    sample_age_s: float
+
+
+class HealthHighScale(BaseModel):
+    """High-scale-only health block; absent from the payload in standard mode."""
+
+    disk: HealthHighScaleDisk | None = None
+
+
 class HealthSnapshotResponse(BaseModel):
     """One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
 
@@ -165,6 +183,16 @@ class HealthSnapshotResponse(BaseModel):
     fos: dict[str, HealthFosProbe] | None = None
     # Scaling Phase 10: Celery metrics (queue depth and worker count)
     celery: HealthCeleryStats | None = None
+    # High-scale topology only (serving-volume disk guard). Omitted entirely in
+    # standard mode so that mode's payload is unchanged.
+    high_scale: HealthHighScale | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_inactive_high_scale(self, handler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if isinstance(data, dict) and data.get("high_scale") is None:
+            data.pop("high_scale", None)
+        return data
 
 
 class TreeNode(BaseModel):

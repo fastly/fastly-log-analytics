@@ -273,6 +273,19 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         except Exception:
             out["fos"] = None
 
+    # ── High-scale disk guard (high-scale topology only) ─────────────
+    # Latest serving-volume mode from the 60 s sampler. Absent in standard
+    # mode so that payload stays byte-identical.
+    try:
+        from backend import config as _hs_cfg
+
+        if _hs_cfg.is_high_scale_mode():
+            from backend.high_scale.disk_sampler import disk_snapshot_payload
+
+            out["high_scale"] = {"disk": disk_snapshot_payload()}
+    except Exception:
+        logger.warning("health snapshot: high-scale block failed", exc_info=True)
+
     # ── Celery Metrics (Deprecated) ──────────
     out["celery"] = None
 

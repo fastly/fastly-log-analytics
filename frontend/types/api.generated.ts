@@ -9132,6 +9132,36 @@ export interface components {
             /** Error */
             error?: string | null;
         };
+        /**
+         * HealthHighScale
+         * @description High-scale-only health block; absent from the payload in standard mode.
+         */
+        HealthHighScale: {
+            disk?: components["schemas"]["HealthHighScaleDisk"] | null;
+        };
+        /**
+         * HealthHighScaleDisk
+         * @description Latest serving-volume disk-guard evaluation (high-scale topology only).
+         */
+        HealthHighScaleDisk: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "normal" | "warning" | "protective" | "emergency";
+            /** Free Fraction */
+            free_fraction: number;
+            /** Reserve Bytes */
+            reserve_bytes: number;
+            /** Total Bytes */
+            total_bytes: number;
+            /** Free Bytes */
+            free_bytes: number;
+            /** Reasoning */
+            reasoning: string;
+            /** Sample Age S */
+            sample_age_s: number;
+        };
         /** HealthInFlightRun */
         HealthInFlightRun: {
             /** Run Id */
@@ -9248,6 +9278,7 @@ export interface components {
                 [key: string]: components["schemas"]["HealthFosProbe"];
             } | null;
             celery?: components["schemas"]["HealthCeleryStats"] | null;
+            high_scale?: components["schemas"]["HealthHighScale"] | null;
         };
         /** HighScaleAggregateRequest */
         HighScaleAggregateRequest: {

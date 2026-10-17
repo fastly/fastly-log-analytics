@@ -59146,6 +59146,73 @@
         "title": "HealthFosProbe",
         "description": "Per-service FOS reachability result (SRE-13), populated only when the\nsnapshot is requested with ``?probe_fos=1``."
       },
+      "HealthHighScale": {
+        "properties": {
+          "disk": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthHighScaleDisk"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "HealthHighScale",
+        "description": "High-scale-only health block; absent from the payload in standard mode."
+      },
+      "HealthHighScaleDisk": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "warning",
+              "protective",
+              "emergency"
+            ],
+            "title": "Mode"
+          },
+          "free_fraction": {
+            "type": "number",
+            "title": "Free Fraction"
+          },
+          "reserve_bytes": {
+            "type": "integer",
+            "title": "Reserve Bytes"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "title": "Total Bytes"
+          },
+          "free_bytes": {
+            "type": "integer",
+            "title": "Free Bytes"
+          },
+          "reasoning": {
+            "type": "string",
+            "title": "Reasoning"
+          },
+          "sample_age_s": {
+            "type": "number",
+            "title": "Sample Age S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode",
+          "free_fraction",
+          "reserve_bytes",
+          "total_bytes",
+          "free_bytes",
+          "reasoning",
+          "sample_age_s"
+        ],
+        "title": "HealthHighScaleDisk",
+        "description": "Latest serving-volume disk-guard evaluation (high-scale topology only)."
+      },
       "HealthInFlightRun": {
         "properties": {
           "run_id": {
@@ -59493,6 +59560,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/HealthCeleryStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "high_scale": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthHighScale"
               },
               {
                 "type": "null"

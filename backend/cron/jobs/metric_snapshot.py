@@ -424,6 +424,32 @@ def _sample_high_scale() -> int:
     return count
 
 
+def _sample_high_scale_disk() -> int:
+    """Evaluate the serving-volume disk guard (high-scale topology only)."""
+    from backend import config as svcconfig
+
+    if not svcconfig.is_high_scale_mode():
+        return 0
+    count = 0
+    try:
+        from backend.core.clickhouse_client import get_clickhouse_client
+        from backend.high_scale.disk_sampler import MODE_LEVELS, sample_disk_state
+
+        client = get_clickhouse_client()
+        if client is None:
+            return 0
+        snapshot = sample_disk_state(client)
+        if _safe_record("high_scale_disk_mode_level", float(MODE_LEVELS[snapshot.state.mode])):
+            count += 1
+        if _safe_record("high_scale_disk_free_fraction", snapshot.state.free_fraction):
+            count += 1
+    except Exception as e:
+        import structlog
+
+        structlog.get_logger(__name__).warning("high_scale.disk_sample_failed", error_kind=type(e).__name__)
+    return count
+
+
 def _sample_duckdb_size() -> int:
     count = 0
     try:
@@ -485,6 +511,7 @@ def _run_metric_snapshot() -> str:
     total += _sample_active_queries()
     total += _sample_ducklake_admission()
     total += _sample_high_scale()
+    total += _sample_high_scale_disk()
     total += _sample_os_vitals()
     total += _sample_celery_queues()
     total += _sample_ingest_ledger()

@@ -24,6 +24,8 @@ _METRICS = {
     "high_scale_publication_lag_seconds": ("Age of the oldest pending high-scale publication", "s"),
     "high_scale_pending_manifests": ("Pending high-scale publication manifests", "{manifests}"),
     "high_scale_rows_published_total": ("High-scale rows published", "{rows}"),
+    "high_scale_disk_mode_level": ("High-scale serving-volume disk mode (0 normal .. 3 emergency)", "1"),
+    "high_scale_disk_free_fraction": ("High-scale serving-volume free-space fraction", "1"),
 }
 
 
