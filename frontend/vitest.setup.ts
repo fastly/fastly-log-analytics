@@ -1,9 +1,15 @@
 import '@testing-library/jest-dom/vitest'
 import { afterAll, afterEach, expect } from 'vitest'
 import { act } from 'react'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import * as matchers from 'vitest-axe/matchers'
 import { server } from './tests/msw/server'
+
+// waitFor/findBy poll observable state and only use this as a failure bound; the
+// 1s default is shorter than a cold render of a large page under worker
+// contention. Keep it below testTimeout (15s) so a real hang still reports the
+// unmet assertion rather than a bare test timeout.
+configure({ asyncUtilTimeout: 10000 })
 
 // React 19 emits "The current testing environment is not configured to support
 // act(...)" whenever a state update is flushed unless this flag is set on
