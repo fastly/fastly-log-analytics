@@ -160,7 +160,7 @@ def test_refresh_bots_alias_endpoint():
 
 def test_rdns_enrich_and_stats_endpoints():
     """POST /api/admin/rdns/enrich triggers batch enrichment and GET /api/admin/rdns/stats returns stats."""
-    fake_summary = {"resolved": 25, "errors": 0, "discovered": 5}
+    fake_summary = {"resolved": 25, "errors": 0, "discovered": 5, "batch_limit": 50}
     fake_stats = {"total": 500, "resolved": 450, "pending": 50}
 
     with (

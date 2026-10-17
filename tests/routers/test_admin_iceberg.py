@@ -46,13 +46,13 @@ def test_iceberg_info_endpoint(client, override_source):
 
 def test_iceberg_calendar_endpoint(client, override_source):
     fake_calendar = {
-        "calendar": {"2026-08-19": 5},
+        "2026-08-19": {"data_files": 5, "size_bytes": 1024},
     }
     with patch("backend.core.iceberg.get_snapshot_calendar", return_value=fake_calendar) as mock_get:
         response = client.get("/api/admin/iceberg-calendar?table_name=logs")
         assert response.status_code == 200
         data = response.json()
-        assert data["calendar"]["2026-08-19"] == 5
+        assert data["2026-08-19"] == {"data_files": 5, "size_bytes": 1024}
         mock_get.assert_called_once_with(override_source, table_name="logs")
 
 

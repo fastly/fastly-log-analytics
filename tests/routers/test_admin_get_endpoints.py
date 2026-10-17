@@ -265,8 +265,7 @@ def test_iceberg_calendar_returns_per_date_file_counts(client):
     Pinned because losing the ``_debug_calls`` extension would
     break the debug-panel telemetry overlay."""
     fake_calendar = {
-        "calendar": [{"date": "2026-01-01", "data_files": 12}],
-        "ok": True,
+        "2026-01-01": {"data_files": 12, "size_bytes": 4096},
     }
     with patch("backend.core.iceberg.get_snapshot_calendar", return_value=fake_calendar):
         resp = client.get(
@@ -276,7 +275,7 @@ def test_iceberg_calendar_returns_per_date_file_counts(client):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["calendar"][0]["date"] == "2026-01-01"
+    assert body["2026-01-01"]["data_files"] == 12
     assert "_debug_calls" in body  # telemetry overlay
 
 
