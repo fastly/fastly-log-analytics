@@ -193,7 +193,12 @@ def get_pg_thread_connection() -> PgConnectionWrapper:
     """
     wrapper = getattr(_thread_local, "wrapper", None)
     if wrapper is not None:
-        return wrapper
+        if not wrapper._returned[0]:
+            return wrapper
+        # close_all_pg_connections() (called from another thread) already returned this
+        # connection to the pool; the cached wrapper is stale. Drop it and check out a fresh one
+        # instead of reusing a connection some other caller may now hold.
+        del _thread_local.wrapper
     pool = get_pg_pool()
     raw = pool.getconn()
     wrapper = PgConnectionWrapper(raw, pool=pool)
