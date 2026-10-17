@@ -57,15 +57,29 @@ def test_one_batch_bytes_raises_the_reserve_floor(monkeypatch: pytest.MonkeyPatc
     assert snapshot.state.mode == "warning"
 
 
-def test_mode_transitions_are_logged_once_each() -> None:
-    with capture_logs() as logs:
-        disk_sampler.sample_disk_state(_FakeClickHouse(0.50))
-        disk_sampler.sample_disk_state(_FakeClickHouse(0.50))
-        disk_sampler.sample_disk_state(_FakeClickHouse(0.08))
+def test_mode_transitions_are_logged_once_each(monkeypatch) -> None:
+    # Record through the module logger directly: structlog's capture_logs() relies on the global
+    # processor chain, which loggers cached by earlier tests in the same process bypass, and the
+    # module keeps the last snapshot in process state that must start empty for a None->mode edge.
+    events: list[tuple[str, dict]] = []
 
-    changes = [e for e in logs if e["event"] == "high_scale.disk_mode_changed"]
-    assert [(e["previous_mode"], e["mode"]) for e in changes] == [(None, "normal"), ("normal", "emergency")]
-    assert changes[-1]["log_level"] == "warning"
+    class _Recorder:
+        def info(self, event: str, **kw) -> None:
+            events.append(("info", {"event": event, **kw}))
+
+        def warning(self, event: str, **kw) -> None:
+            events.append(("warning", {"event": event, **kw}))
+
+    monkeypatch.setattr(disk_sampler, "logger", _Recorder())
+    monkeypatch.setattr(disk_sampler, "_latest", None)
+
+    disk_sampler.sample_disk_state(_FakeClickHouse(0.50))
+    disk_sampler.sample_disk_state(_FakeClickHouse(0.50))
+    disk_sampler.sample_disk_state(_FakeClickHouse(0.08))
+
+    changes = [(level, e) for level, e in events if e["event"] == "high_scale.disk_mode_changed"]
+    assert [(e["previous_mode"], e["mode"]) for _, e in changes] == [(None, "normal"), ("normal", "emergency")]
+    assert changes[-1][0] == "warning"
 
 
 def test_metric_snapshot_tick_samples_disk_in_high_scale_mode() -> None:
