@@ -121,9 +121,9 @@ async def get_rum_tracker(request: Request, service_id: str | None = None):
             headers={"Cache-Control": "private, no-cache, must-revalidate"},
         )
     except Exception as e:
-        logger.error(f"Failed to generate dynamic RUM tracker JS: {e}")
+        logger.error("Failed to generate dynamic RUM tracker JS: %s", e, exc_info=True)
         return Response(
-            content=f"/* Error generating tracker JS: {e} */",
+            content="/* Error generating tracker JS */",
             media_type="application/javascript",
             headers={"Cache-Control": "private, no-cache, must-revalidate"},
         )

@@ -69,3 +69,23 @@ def test_get_faro_sdk_js(client, with_config, monkeypatch):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/javascript")
     assert "console.log('faro bundle version 2.9.0');" in r.text
+
+
+@pytest.mark.security_regression
+def test_get_rum_tracker_js_error_does_not_leak_exception_text(client, with_config, monkeypatch):
+    with_config[SVC] = {"service_id": SVC}
+    secret = '*/ </script> alert("x"); \n /etc/secret-path "quoted" \'single\''
+
+    def boom(sid):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr("backend.provision.rum_assets.generate_rum_tracker_js", boom)
+    r = client.get("/js/rum.js")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/javascript")
+    assert "secret-path" not in r.text
+    assert "</script>" not in r.text
+    assert "alert" not in r.text
+    assert "RuntimeError" not in r.text
+    assert "\n" not in r.text.strip()
+    assert r.text.count("*/") == 1
