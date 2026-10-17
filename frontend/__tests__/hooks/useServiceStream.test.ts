@@ -26,18 +26,20 @@ let mockHydrated = true
 let finishHydrationCb: (() => void) | null = null
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockState) : mockState,
-  )
-  useServiceStore.getState = () => mockState
-  useServiceStore.persist = {
-    hasHydrated: () => mockHydrated,
-    onFinishHydration: (cb: () => void) => {
-      finishHydrationCb = cb
-      return () => { finishHydrationCb = null }
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    {
+      getState: () => mockState,
+      persist: {
+        hasHydrated: () => mockHydrated,
+        onFinishHydration: (cb: () => void) => {
+          finishHydrationCb = cb
+          return () => { finishHydrationCb = null }
+        },
+        rehydrate: () => {},
+      },
     },
-    rehydrate: () => {},
-  }
+  )
   return { useServiceStore }
 })
 
@@ -109,8 +111,8 @@ describe('useServiceStream', () => {
 
   it('aborts the in-flight stream on unmount', async () => {
     let signal: AbortSignal | undefined
-    vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-      signal = (init as RequestInit | undefined)?.signal as AbortSignal
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      signal = init?.signal as AbortSignal
       const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
       return new Response(stream, { status: 200 })
     })
@@ -126,8 +128,8 @@ describe('useServiceStream', () => {
   it('aborts the prior stream and opens a new one when activeServiceId changes', async () => {
     const signals: AbortSignal[] = []
     const ids: string[] = []
-    vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-      const ri = init as RequestInit
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const ri = init ?? {}
       signals.push(ri.signal as AbortSignal)
       ids.push((ri.headers as Record<string, string>)['x-service-id'])
       const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
@@ -204,8 +206,8 @@ describe('useServiceStream', () => {
     it('connects with NO x-service-id when activeServiceId is null', async () => {
       mockState = { activeServiceId: null }
       let headers: Record<string, string> | undefined
-      vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-        headers = (init as RequestInit).headers as Record<string, string>
+      vi.mocked(fetch).mockImplementation(async (_url, init) => {
+        headers = init?.headers as Record<string, string>
         const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
         return new Response(stream, { status: 200 })
       })
@@ -219,8 +221,8 @@ describe('useServiceStream', () => {
     it('sends x-service-id when a service IS selected', async () => {
       mockState = { activeServiceId: 'svc-1' }
       let headers: Record<string, string> | undefined
-      vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-        headers = (init as RequestInit).headers as Record<string, string>
+      vi.mocked(fetch).mockImplementation(async (_url, init) => {
+        headers = init?.headers as Record<string, string>
         const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
         return new Response(stream, { status: 200 })
       })
@@ -235,8 +237,8 @@ describe('useServiceStream', () => {
       mockState = { activeServiceId: null }
       const signals: AbortSignal[] = []
       const ids: (string | undefined)[] = []
-      vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-        const ri = init as RequestInit
+      vi.mocked(fetch).mockImplementation(async (_url, init) => {
+        const ri = init ?? {}
         signals.push(ri.signal as AbortSignal)
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
         const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
@@ -268,8 +270,8 @@ describe('useServiceStream', () => {
       mockHydrated = false
       mockState = { activeServiceId: null }
       const ids: (string | undefined)[] = []
-      vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-        const ri = init as RequestInit
+      vi.mocked(fetch).mockImplementation(async (_url, init) => {
+        const ri = init ?? {}
         ids.push((ri.headers as Record<string, string>)['x-service-id'])
         const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
         return new Response(stream, { status: 200 })

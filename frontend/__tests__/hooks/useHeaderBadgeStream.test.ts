@@ -17,7 +17,7 @@ vi.mock('@/lib/api', () => ({
 // status reactively. Mock useBootstrap so every test can control
 // is_remote_analyst. Each test that wants the hook to fire must set
 // mockBootstrap = { settings: { is_remote_analyst: true } }.
-const mockBootstrap: { data: any } = {
+const mockBootstrap: { data: Record<string, unknown> } = {
   data: { settings: { is_remote_analyst: true }, header_badge: {} },
 }
 vi.mock('@/hooks/useBootstrap', () => ({
@@ -33,10 +33,10 @@ let mockState: {
 }
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockState) : mockState,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    { getState: () => mockState },
   )
-  useServiceStore.getState = () => mockState
   return { useServiceStore }
 })
 
@@ -151,7 +151,10 @@ describe('useHeaderBadgeStream', () => {
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => {
-      const bs = qc.getQueryData<any>(['bootstrap'])
+      const bs = qc.getQueryData<{
+        settings?: { is_remote_analyst?: boolean }
+        header_badge?: { latest_log_at?: string; local_rows?: number }
+      }>(['bootstrap'])
       expect(bs?.header_badge?.latest_log_at).toBe('2026-06-15T22:05:00Z')
       expect(bs?.header_badge?.local_rows).toBe(1234)
       // Unrelated bootstrap fields should be preserved.
@@ -207,8 +210,8 @@ describe('useHeaderBadgeStream', () => {
 
   it('aborts on unmount', async () => {
     let abortSignal: AbortSignal | undefined
-    vi.mocked(fetch).mockImplementation(async (_url: any, init?: any) => {
-      abortSignal = (init as RequestInit | undefined)?.signal as AbortSignal
+    vi.mocked(fetch).mockImplementation(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      abortSignal = init?.signal ?? undefined
       const stream = new ReadableStream<Uint8Array>({ start() { /* never closes */ } })
       return new Response(stream, { status: 200 })
     })

@@ -44,6 +44,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
 import { client, extractApiError } from '@/lib/api'
+import type { components } from '@/types/api.generated'
 
 const API_BASE = 'http://127.0.0.1:8000'
 
@@ -51,10 +52,10 @@ const API_BASE = 'http://127.0.0.1:8000'
 // inject x-service-id. Stub it so the request can be built.
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: 'svc-test' }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 
@@ -121,11 +122,11 @@ describe('API client onResponse middleware (MSW)', () => {
         useMutation({
           mutationFn: async () => {
             const { data } = await client.POST(
-              '/api/services/{service_id}/custom-fields' as any,
+              '/api/services/{service_id}/custom-fields',
               {
                 params: { path: { service_id: 'svc-test' } },
-                body: { name: 'whatever' } as any,
-              } as any,
+                body: { name: 'whatever' } as components['schemas']['CustomFieldCreate'],
+              },
             )
             return data
           },
@@ -154,15 +155,15 @@ describe('API client onResponse middleware (MSW)', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
+            const { data } = await client.POST('/api/dashboard/aggregates', {
               body: {
                 start_time: '2026-01-01T00:00:00Z',
                 end_time: '2026-01-01T01:00:00Z',
-                filters: [],
+                filters: [] as never,
                 chart_metric: 'requests',
                 chart_interval: 'minute',
-              } as any,
-            } as any)
+              },
+            })
             return data
           },
         }),
@@ -188,13 +189,13 @@ describe('API client onResponse middleware (MSW)', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
+            const { data } = await client.POST('/api/dashboard/aggregates', {
               body: {
                 start_time: '2026-01-01T00:00:00Z',
                 end_time: '2026-01-01T01:00:00Z',
                 filters: [],
-              } as any,
-            } as any)
+              } as never,
+            })
             return data
           },
         }),
@@ -224,9 +225,9 @@ describe('API client onResponse middleware (MSW)', () => {
       () =>
         useMutation({
           mutationFn: async () => {
-            const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-              body: {} as any,
-            } as any)
+            const { data } = await client.POST('/api/dashboard/aggregates', {
+              body: {} as components['schemas']['AggregatesRequest'],
+            })
             return data
           },
         }),
@@ -254,7 +255,7 @@ describe('API client onResponse middleware (MSW)', () => {
         useQuery({
           queryKey: ['catalog'],
           queryFn: async () => {
-            const { data } = await client.GET('/api/log-fields/catalog' as any, {} as any)
+            const { data } = await client.GET('/api/log-fields/catalog')
             return data
           },
         }),

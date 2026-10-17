@@ -31,20 +31,20 @@ vi.mock('@/lib/userActivity', () => ({
 // Minimal store mocks mirroring api-admin-token.test.ts.
 vi.mock('@/stores/adminTokenStore', () => {
   const state = { token: null as string | null }
-  const useAdminTokenStore: any = vi.fn(() => state)
-  useAdminTokenStore.getState = () => state
+  const useAdminTokenStore = Object.assign(vi.fn(() => state), { getState: () => state })
   return { useAdminTokenStore }
 })
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: 'svc-test' }
-  const useServiceStore: any = vi.fn((s?: (x: any) => any) => (s ? s(state) : state))
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((s?: (x: typeof state) => unknown) => (s ? s(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 vi.mock('@/stores/debugStore', () => {
   const state = { enabled: false, apiCallsEnabled: false }
-  const useDebugStore: any = vi.fn(() => state)
-  useDebugStore.getState = () => state
+  const useDebugStore = Object.assign(vi.fn(() => state), { getState: () => state })
   return { useDebugStore }
 })
 
@@ -62,9 +62,9 @@ function fireDashboard() {
     () =>
       useMutation({
         mutationFn: async () => {
-          const { data } = await client.POST('/api/dashboard/aggregates' as any, {
-            body: { start_time: 't', end_time: 't', filters: [] } as any,
-          } as any)
+          const { data } = await client.POST('/api/dashboard/aggregates', {
+            body: { start_time: 't', end_time: 't', filters: {}, chart_interval: '1h', chart_metric: 'requests' },
+          })
           return data
         },
       }),

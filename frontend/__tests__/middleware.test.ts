@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { NextResponse } from 'next/server'
+import { NextResponse, type NextRequest } from 'next/server'
 import { proxy as middleware } from '../proxy'
 
-function makeReq(url: string, headers: Record<string, string> = {}): any {
+function makeReq(url: string, headers: Record<string, string> = {}): NextRequest {
   const u = new URL(url)
   const hdrMap = new Headers(headers)
   return {
@@ -30,13 +30,13 @@ function makeReq(url: string, headers: Record<string, string> = {}): any {
     },
     headers: hdrMap,
     url: url,
-  }
+  } as NextRequest
 }
 
 describe('middleware /admin gate (security)', () => {
   it('redirects /admin to / when request came through Caddy', () => {
     const req = makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'true' })
-    const res: any = middleware(req)
+    const res = middleware(req)
     // NextResponse.redirect produces a Response with a 307 status and
     // a Location header pointing to /.
     expect(res.status).toBe(307)
@@ -48,7 +48,7 @@ describe('middleware /admin gate (security)', () => {
 
   it('allows /admin when request has no Caddy marker (SSH-tunnel path)', () => {
     const req = makeReq('http://localhost/admin')
-    const res: any = middleware(req)
+    const res = middleware(req)
     // NextResponse.next() produces a Response without a redirect
     expect(res.status).toBe(200)
     expect(res.headers.get('location')).toBeNull()
@@ -62,25 +62,25 @@ describe('middleware /admin gate (security)', () => {
       host: 'localhost',
       'x-proxied-by-caddy': 'true',
     })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(307)
   })
 
   it('does NOT gate non-/admin paths', () => {
     const req = makeReq('http://localhost/dashboard', { 'x-proxied-by-caddy': 'true' })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(200)
   })
 
   it('blocks /admin sub-paths (e.g. /admin/services)', () => {
     const req = makeReq('http://localhost/admin/services', { 'x-proxied-by-caddy': 'true' })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(307)
   })
 
   it('allows /admin sub-paths from local (no marker)', () => {
     const req = makeReq('http://localhost/admin/services')
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(200)
   })
 
@@ -89,23 +89,23 @@ describe('middleware /admin gate (security)', () => {
     // upstream that someday writes "yes" / "1" / etc. wouldn't
     // accidentally lock admins out.
     const req = makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'maybe' })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(200)
   })
 
   it('blocks Next.js data requests targeting admin paths with a 403 status when from Caddy', () => {
     const req1 = makeReq('http://localhost/_next/data/build-id/admin.json', { 'x-proxied-by-caddy': 'true' })
-    const res1: any = middleware(req1)
+    const res1 = middleware(req1)
     expect(res1.status).toBe(403)
 
     const req2 = makeReq('http://localhost/_next/data/build-id/admin/settings.json', { 'x-proxied-by-caddy': 'true' })
-    const res2: any = middleware(req2)
+    const res2 = middleware(req2)
     expect(res2.status).toBe(403)
   })
 
   it('allows Next.js data requests targeting admin paths when local', () => {
     const req = makeReq('http://localhost/_next/data/build-id/admin.json')
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(200)
   })
 
@@ -114,7 +114,7 @@ describe('middleware /admin gate (security)', () => {
       'x-proxied-by-caddy': 'true',
       'next-action': 'some-action-id',
     })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(403)
   })
 
@@ -122,7 +122,7 @@ describe('middleware /admin gate (security)', () => {
     const req = makeReq('http://localhost/', {
       'next-action': 'some-action-id',
     })
-    const res: any = middleware(req)
+    const res = middleware(req)
     expect(res.status).toBe(200)
   })
 
@@ -130,10 +130,10 @@ describe('middleware /admin gate (security)', () => {
   // (backend allows POST /api/logs/query for analysts), so Caddy-proxied
   // requests must NOT be redirected or blocked.
   it('does not block /logs for analysts behind Caddy', () => {
-    const page: any = middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' }))
+    const page = middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' }))
     expect(page.status).toBe(200)
     expect(page.headers.get('location')).toBeNull()
-    const data: any = middleware(
+    const data = middleware(
       makeReq('http://localhost/_next/data/build-id/logs.json', { 'x-proxied-by-caddy': 'true' }),
     )
     expect(data.status).toBe(200)
@@ -148,7 +148,7 @@ describe('middleware /admin gate (security)', () => {
   describe.each(['/alerts', '/usage'])('analyst-blocked prefix %s', (prefix) => {
     it(`redirects ${prefix} to / when request came through Caddy`, () => {
       const req = makeReq(`http://localhost${prefix}`, { 'x-proxied-by-caddy': 'true' })
-      const res: any = middleware(req)
+      const res = middleware(req)
       expect(res.status).toBe(307)
       const loc = res.headers.get('location') || ''
       const path = new URL(loc).pathname
@@ -157,26 +157,26 @@ describe('middleware /admin gate (security)', () => {
 
     it(`allows ${prefix} when request has no Caddy marker (admin path)`, () => {
       const req = makeReq(`http://localhost${prefix}`)
-      const res: any = middleware(req)
+      const res = middleware(req)
       expect(res.status).toBe(200)
       expect(res.headers.get('location')).toBeNull()
     })
 
     it(`redirects ${prefix} sub-paths through Caddy`, () => {
       const req = makeReq(`http://localhost${prefix}/sub`, { 'x-proxied-by-caddy': 'true' })
-      const res: any = middleware(req)
+      const res = middleware(req)
       expect(res.status).toBe(307)
     })
 
     it(`allows ${prefix} sub-paths from local`, () => {
       const req = makeReq(`http://localhost${prefix}/sub`)
-      const res: any = middleware(req)
+      const res = middleware(req)
       expect(res.status).toBe(200)
     })
 
     it(`blocks Next.js data requests for ${prefix} with 403 when from Caddy`, () => {
       const req = makeReq(`http://localhost/_next/data/build-id${prefix}.json`, { 'x-proxied-by-caddy': 'true' })
-      const res: any = middleware(req)
+      const res = middleware(req)
       expect(res.status).toBe(403)
     })
   })

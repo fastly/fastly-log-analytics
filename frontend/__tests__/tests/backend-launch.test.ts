@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { ChildProcess } from 'node:child_process'
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
@@ -59,7 +60,7 @@ beforeEach(() => {
   vi.stubEnv('OTEL_EXPORTER', 'otlp')
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
   vi.spyOn(console, 'log').mockImplementation(() => {})
-  const child = Object.assign(new EventEmitter(), {
+  const child = Object.assign(new ChildProcess(), {
     stdout: new EventEmitter(),
     stderr: new EventEmitter(),
     kill: vi.fn(() => {
@@ -67,7 +68,7 @@ beforeEach(() => {
       return true
     }),
   })
-  vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>)
+  vi.mocked(spawn).mockReturnValue(child)
 })
 
 afterEach(() => {

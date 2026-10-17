@@ -12,11 +12,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 let storedSid: string | null = null
 
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) => {
-    const state = { activeServiceId: storedSid }
-    return selector ? selector(state) : state
-  })
-  useServiceStore.getState = () => ({ activeServiceId: storedSid })
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: { activeServiceId: string | null }) => unknown) => {
+      const state = { activeServiceId: storedSid }
+      return selector ? selector(state) : state
+    }),
+    { getState: () => ({ activeServiceId: storedSid }) },
+  )
   return { useServiceStore }
 })
 

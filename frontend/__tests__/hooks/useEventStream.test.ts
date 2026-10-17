@@ -47,13 +47,13 @@ describe('runEventStream', () => {
   it('parses CRLF-separated frames (sse-starlette emits \\r\\n\\r\\n)', async () => {
     const frames: string[] = []
     const fetchImpl = vi
-      .fn()
+      .fn<typeof fetch>()
       .mockResolvedValue(makeStreamResponse(['data: a\r\n\r\n', 'data: b\r\n\r\n']))
     await runEventStream({
       url: 'http://test/stream',
       signal: new AbortController().signal,
       onFrame: (f) => frames.push(f),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
     })
     expect(frames).toEqual(['data: a', 'data: b'])
   })
@@ -61,13 +61,13 @@ describe('runEventStream', () => {
   it('parses LF and old-Mac boundaries too', async () => {
     const frames: string[] = []
     const fetchImpl = vi
-      .fn()
+      .fn<typeof fetch>()
       .mockResolvedValue(makeStreamResponse(['data: lf\n\n', 'data: mac\r\r']))
     await runEventStream({
       url: 'http://test/stream',
       signal: new AbortController().signal,
       onFrame: (f) => frames.push(f),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
     })
     expect(frames).toEqual(['data: lf', 'data: mac'])
   })
@@ -75,25 +75,25 @@ describe('runEventStream', () => {
   it('reassembles a frame split across chunks', async () => {
     const frames: string[] = []
     const fetchImpl = vi
-      .fn()
+      .fn<typeof fetch>()
       .mockResolvedValue(makeStreamResponse(['data: hel', 'lo\r\n\r\n']))
     await runEventStream({
       url: 'http://test/stream',
       signal: new AbortController().signal,
       onFrame: (f) => frames.push(f),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
     })
     expect(frames).toEqual(['data: hello'])
   })
 
   it('throws EventStreamHttpError with the status on a non-2xx response', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 503 }))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 503 }))
     await expect(
       runEventStream({
         url: 'http://test/stream',
         signal: new AbortController().signal,
         onFrame: () => {},
-        fetchImpl: fetchImpl as unknown as typeof fetch,
+        fetchImpl: fetchImpl,
       }),
     ).rejects.toMatchObject({ status: 503 })
   })
@@ -106,7 +106,7 @@ describe('runEventStream', () => {
     const frames: string[] = []
     let live = true
     const fetchImpl = vi
-      .fn()
+      .fn<typeof fetch>()
       .mockResolvedValue(makeStreamResponse(['data: first\r\n\r\n', 'data: second\r\n\r\n']))
     await runEventStream({
       url: 'http://test/stream',
@@ -116,20 +116,20 @@ describe('runEventStream', () => {
         live = false // deactivate after the first frame batch
       },
       isActive: () => live,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
     })
     expect(frames).toEqual(['data: first'])
   })
 
   it('fires onOpen after the reader is obtained', async () => {
     const onOpen = vi.fn()
-    const fetchImpl = vi.fn().mockResolvedValue(makeStreamResponse(['data: x\r\n\r\n']))
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(makeStreamResponse(['data: x\r\n\r\n']))
     await runEventStream({
       url: 'http://test/stream',
       signal: new AbortController().signal,
       onOpen,
       onFrame: () => {},
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl: fetchImpl,
     })
     expect(onOpen).toHaveBeenCalledTimes(1)
   })

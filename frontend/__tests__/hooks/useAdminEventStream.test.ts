@@ -36,10 +36,10 @@ vi.mock('@/hooks/useIsDataReady', () => ({
 
 const mockState = { activeServiceId: 'svc-1' as string | null }
 vi.mock('@/stores/serviceStore', () => {
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockState) : mockState,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockState) => unknown) => (selector ? selector(mockState) : mockState)),
+    { getState: () => mockState },
   )
-  useServiceStore.getState = () => mockState
   return { useServiceStore }
 })
 

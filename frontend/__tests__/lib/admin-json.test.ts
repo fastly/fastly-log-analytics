@@ -70,13 +70,15 @@ describe('narrow helpers', () => {
   it('recordOrNull keeps objects and drops everything else', () => {
     expect(recordOrNull({ a: 1 })).toEqual({ a: 1 })
     expect(recordOrNull(null)).toBeNull()
-    expect(recordOrNull([] as unknown as object)).toBeNull()
-    expect(recordOrNull('x' as unknown as object)).toBeNull()
+    const looseRecordOrNull = recordOrNull as (v: unknown) => unknown
+    expect(looseRecordOrNull([])).toBeNull()
+    expect(looseRecordOrNull('x')).toBeNull()
   })
 
   it('arrayOrEmpty returns a copy of arrays and [] otherwise', () => {
     expect(arrayOrEmpty([1, 2])).toEqual([1, 2])
     expect(arrayOrEmpty(null)).toEqual([])
-    expect(arrayOrEmpty({} as unknown as number[])).toEqual([])
+    const looseArrayOrEmpty = arrayOrEmpty as (v: unknown) => unknown
+    expect(looseArrayOrEmpty({})).toEqual([])
   })
 })

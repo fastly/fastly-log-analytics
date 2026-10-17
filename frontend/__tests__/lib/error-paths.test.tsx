@@ -36,10 +36,10 @@ import { server } from '../../tests/msw/server'
 
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: 'test-svc' }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 

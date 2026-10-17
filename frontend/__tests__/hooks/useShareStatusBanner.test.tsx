@@ -15,7 +15,7 @@
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { createTestQueryClient, makeQueryWrapper } from '../helpers/query'
 import { http, HttpResponse } from 'msw'
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { server } from '../../tests/msw/server'
 
@@ -31,16 +31,16 @@ vi.mock('@/stores/serviceStore', () => {
     setServices: vi.fn(),
     setInitialized: vi.fn(),
   }
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(state) : state,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state)),
+    { getState: () => state },
   )
-  useServiceStore.getState = () => state
   return { useServiceStore }
 })
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-function wrapperWithSeed(seedBootstrap?: any) {
+function wrapperWithSeed(seedBootstrap?: unknown) {
   const qc = createTestQueryClient({ queries: { gcTime: 0 } })
   if (seedBootstrap) qc.setQueryData(['bootstrap'], seedBootstrap)
   return makeQueryWrapper(qc)

@@ -24,20 +24,26 @@ const API_BASE = 'http://127.0.0.1:8000'
 // No active service — the fresh-install state.
 vi.mock('@/stores/serviceStore', () => {
   const state = { activeServiceId: null as string | null }
-  const useServiceStore: any = vi.fn((s?: (x: any) => any) => (s ? s(state) : state))
-  useServiceStore.getState = () => state
+  const useServiceStore = Object.assign(
+    vi.fn((s?: (x: typeof state) => unknown) => (s ? s(state) : state)),
+    { getState: () => state },
+  )
   return { useServiceStore }
 })
 vi.mock('@/stores/adminTokenStore', () => {
   const state = { token: null as string | null }
-  const useAdminTokenStore: any = vi.fn(() => state)
-  useAdminTokenStore.getState = () => state
+  const useAdminTokenStore = Object.assign(
+    vi.fn(() => state),
+    { getState: () => state },
+  )
   return { useAdminTokenStore }
 })
 vi.mock('@/stores/debugStore', () => {
   const state = { enabled: false, apiCallsEnabled: false }
-  const useDebugStore: any = vi.fn(() => state)
-  useDebugStore.getState = () => state
+  const useDebugStore = Object.assign(
+    vi.fn(() => state),
+    { getState: () => state },
+  )
   return { useDebugStore }
 })
 
@@ -86,9 +92,9 @@ describe('serviceless service-discovery exemption (fresh install)', () => {
       }),
     )
     await expect(
-      client.GET('/api/services/{service_id}/lake-info' as any, {
-        params: { path: { service_id: 'svc-123' } },
-      } as any),
+      client.GET('/api/services/{service_id}/lake-info', {
+        params: { path: { service_id: 'svc-123' } } as never,
+      }),
     ).rejects.toMatchObject({ code: 'NO_SERVICE' })
     expect(reached).toBe(false)
   })

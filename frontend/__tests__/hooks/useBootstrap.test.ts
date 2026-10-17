@@ -40,10 +40,12 @@ vi.mock('@/stores/serviceStore', () => {
   // ``useServiceStore.getState()`` is what lib/api.ts's middleware uses;
   // without it the openapi-fetch request middleware throws on every
   // request and MSW never sees the call.
-  const useServiceStore: any = vi.fn((selector?: (s: any) => any) =>
-    selector ? selector(mockServiceState) : mockServiceState,
+  const useServiceStore = Object.assign(
+    vi.fn((selector?: (s: typeof mockServiceState) => unknown) =>
+      selector ? selector(mockServiceState) : mockServiceState,
+    ),
+    { getState: () => mockServiceState },
   )
-  useServiceStore.getState = () => mockServiceState
   return { useServiceStore }
 })
 
@@ -275,7 +277,7 @@ describe('useBootstrap (MSW)', () => {
      * staleTime) so query.isStale === true on mount, and hang the network so
      * no refetch replaces it during the test — isolating the stale window.
      */
-    function staleWrapper(seed: { services: any[]; active_service_id: string | null }) {
+    function staleWrapper(seed: { services: unknown[]; active_service_id: string | null }) {
       const qc = createTestQueryClient({ queries: { gcTime: 0 } })
       qc.setQueryData(['bootstrap'], seed, { updatedAt: Date.now() - 10 * 60 * 1000 })
       // Hanging handler: the background refetch fires but never resolves, so the
