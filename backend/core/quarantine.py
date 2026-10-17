@@ -58,9 +58,6 @@ def _service_lock(service_id: str) -> Iterator[None]:
     with _service_locks_guard:
         lock = _service_locks.setdefault(service_id, threading.RLock())
     with lock:
-        if not pg_connection.is_postgres():
-            yield
-            return
         with pg_connection.get_pg_pool().connection() as con:
             with con.transaction():
                 con.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_key(service_id),))
