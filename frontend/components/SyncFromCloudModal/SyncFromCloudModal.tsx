@@ -29,12 +29,7 @@ interface SyncFromCloudModalProps {
   onStartSync: (range?: { start: string; end: string }) => void
 }
 
-// The wire declares only the status keys; the range/calendar payload rides on
-// the extra-allow index signature, so it is narrowed locally here.
-type LakeInfo = components['schemas']['ProvisionLakeInfoResponse'] & {
-  range?: { start?: string; end?: string }
-  calendar?: Record<string, { size_bytes?: number }>
-}
+type LakeInfo = components['schemas']['ProvisionLakeInfoResponse']
 
 export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
   const { timezone } = useTimezoneStore()
@@ -71,7 +66,7 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
         if (end && dateStr > end.split('T')[0]) continue;
       }
 
-      total += (stats as any).size_bytes || 0;
+      total += stats.size_bytes;
     }
     return total;
   }, [lakeInfo, importMode, importRange]);

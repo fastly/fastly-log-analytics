@@ -69129,6 +69129,56 @@
         "type": "object",
         "title": "ProvisionIngestResponse"
       },
+      "ProvisionLakeInfoCalendarDay": {
+        "properties": {
+          "data_files": {
+            "type": "integer",
+            "title": "Data Files"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "data_files",
+          "size_bytes"
+        ],
+        "title": "ProvisionLakeInfoCalendarDay",
+        "description": "One calendar day. ``data_files`` is a row count on the DuckLake path (see\n``get_snapshot_calendar``); ``size_bytes`` is ``0`` there."
+      },
+      "ProvisionLakeInfoRange": {
+        "properties": {
+          "start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ProvisionLakeInfoRange",
+        "description": "Earliest/latest row timestamps (ISO strings; ``None`` for an empty table)."
+      },
       "ProvisionLakeInfoResponse": {
         "properties": {
           "ok": {
@@ -69174,12 +69224,36 @@
               }
             ],
             "title": "Error"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionLakeInfoRange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "calendar": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ProvisionLakeInfoCalendarDay"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar"
           }
         },
         "additionalProperties": true,
         "type": "object",
         "title": "ProvisionLakeInfoResponse",
-        "description": "``fetch_lake_info`` result. Only the branch-stable keys are declared;\nthe table-details payload (row counts / calendar / extents) varies by\nIceberg layout and rides through ``extra``."
+        "description": "``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when\nthe table exists; the table-info block (row counts / extents) varies by\nlayout and rides through ``extra``."
       },
       "ProvisionReconcileRequest": {
         "properties": {

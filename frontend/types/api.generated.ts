@@ -12942,10 +12942,35 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * ProvisionLakeInfoCalendarDay
+         * @description One calendar day. ``data_files`` is a row count on the DuckLake path (see
+         *     ``get_snapshot_calendar``); ``size_bytes`` is ``0`` there.
+         */
+        ProvisionLakeInfoCalendarDay: {
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ProvisionLakeInfoRange
+         * @description Earliest/latest row timestamps (ISO strings; ``None`` for an empty table).
+         */
+        ProvisionLakeInfoRange: {
+            /** Start */
+            start?: string | null;
+            /** End */
+            end?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * ProvisionLakeInfoResponse
-         * @description ``fetch_lake_info`` result. Only the branch-stable keys are declared;
-         *     the table-details payload (row counts / calendar / extents) varies by
-         *     Iceberg layout and rides through ``extra``.
+         * @description ``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when
+         *     the table exists; the table-info block (row counts / extents) varies by
+         *     layout and rides through ``extra``.
          */
         ProvisionLakeInfoResponse: {
             /** Ok */
@@ -12956,6 +12981,11 @@ export interface components {
             message?: string | null;
             /** Error */
             error?: string | null;
+            range?: components["schemas"]["ProvisionLakeInfoRange"] | null;
+            /** Calendar */
+            calendar?: {
+                [key: string]: components["schemas"]["ProvisionLakeInfoCalendarDay"];
+            } | null;
         } & {
             [key: string]: unknown;
         };

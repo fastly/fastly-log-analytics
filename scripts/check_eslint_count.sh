@@ -77,8 +77,9 @@ cd "$REPO_ROOT/frontend"
 # 792 -> 791: adminJson/adminJsonResult replaced the remaining adminFetch().json() hand casts.
 # 791 -> 788: useShareStatusBanner moved from an effect/setState poller to useQuery.
 # 788 -> 786: scoring label rows and /scoring/labels read typed from the generated schema.
+# 786 -> 785: lake-info range/calendar typed on the response model; SyncFromCloudModal lost its any cast.
 # Drive toward zero.
-CEILING=786
+CEILING=785
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

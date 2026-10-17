@@ -2143,3 +2143,27 @@ def test_reconcile_rejects_missing_credentials():
         response = client.post("/api/provision/reconcile", json={})
     assert response.status_code == 400
     mock_reconcile.assert_not_called()
+
+
+def test_lake_info_range_and_calendar_match_producer():
+    """The typed ``range`` / ``calendar`` blocks must serialize exactly as the producer built them."""
+    producer = {
+        "ok": True,
+        "table_exists": True,
+        "info": {"min_timestamp": "2026-05-01T00:00:00", "max_timestamp": "2026-05-02T00:00:00", "snapshots": 3},
+        "calendar": {
+            "2026-05-01": {"data_files": 5, "size_bytes": 512},
+            "unknown": {"data_files": 1, "size_bytes": 0},
+        },
+        "range": {"start": "2026-05-01T00:00:00", "end": None},
+    }
+    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=producer):
+        client = TestClient(app)
+        response = client.post(
+            "/api/provision/lake-info",
+            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk", "prefix": "p/"},
+        )
+
+    assert response.status_code == 200
+    body = {k: v for k, v in response.json().items() if not k.startswith("_")}
+    assert body == producer

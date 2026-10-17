@@ -259,15 +259,32 @@ class ProvisionCheckFosResponse(_ProvisionRead):
     error: str | None = None
 
 
+class ProvisionLakeInfoRange(_ProvisionRead):
+    """Earliest/latest row timestamps (ISO strings; ``None`` for an empty table)."""
+
+    start: str | None = None
+    end: str | None = None
+
+
+class ProvisionLakeInfoCalendarDay(_ProvisionRead):
+    """One calendar day. ``data_files`` is a row count on the DuckLake path (see
+    ``get_snapshot_calendar``); ``size_bytes`` is ``0`` there."""
+
+    data_files: int
+    size_bytes: int
+
+
 class ProvisionLakeInfoResponse(_ProvisionRead):
-    """``fetch_lake_info`` result. Only the branch-stable keys are declared;
-    the table-details payload (row counts / calendar / extents) varies by
-    Iceberg layout and rides through ``extra``."""
+    """``fetch_lake_info`` result. ``range`` / ``calendar`` are present only when
+    the table exists; the table-info block (row counts / extents) varies by
+    layout and rides through ``extra``."""
 
     ok: bool | None = None
     table_exists: bool | None = None
     message: str | None = None
     error: str | None = None
+    range: ProvisionLakeInfoRange | None = None
+    calendar: dict[str, ProvisionLakeInfoCalendarDay] | None = None
 
 
 class ProvisionIngestResponse(_ProvisionRead):
