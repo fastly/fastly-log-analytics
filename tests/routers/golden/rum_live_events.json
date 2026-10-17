@@ -1,0 +1,385 @@
+{
+  "events": [
+    {
+      "browser": "Chrome",
+      "desc": "Err 5",
+      "os": "macOS",
+      "path": "/home",
+      "raw_log": {
+        "cid": "cid_5",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [
+          {
+            "type": "Error",
+            "value": "Err 5"
+          }
+        ],
+        "measurements": [],
+        "meta": {
+          "browser": {
+            "name": "Chrome"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "macOS"
+          },
+          "page": {
+            "url": "/home"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_5",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T13:30:30+00:00",
+      "type": "error"
+    },
+    {
+      "browser": "Chrome",
+      "desc": "Metric LCP: 2000.0 (POOR)",
+      "os": "macOS",
+      "path": "/home",
+      "raw_log": {
+        "cid": "cid_5",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 2000.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Chrome"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "macOS"
+          },
+          "page": {
+            "url": "/home"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_5",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T13:30:00+00:00",
+      "type": "pageview"
+    },
+    {
+      "browser": "Chrome",
+      "desc": "Metric LCP: 2600.0 (POOR)",
+      "os": "Windows",
+      "path": "/search",
+      "raw_log": {
+        "cid": "cid_4",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 2600.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Chrome"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "Windows"
+          },
+          "page": {
+            "url": "/search"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_4",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T11:50:00+00:00",
+      "type": "pageview"
+    },
+    {
+      "browser": "Safari",
+      "desc": "Err 3",
+      "os": "macOS",
+      "path": "/cart",
+      "raw_log": {
+        "cid": "cid_3",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [
+          {
+            "type": "Error",
+            "value": "Err 3"
+          }
+        ],
+        "measurements": [],
+        "meta": {
+          "browser": {
+            "name": "Safari"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "macOS"
+          },
+          "page": {
+            "url": "/cart"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_3",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T11:10:30+00:00",
+      "type": "error"
+    },
+    {
+      "browser": "Safari",
+      "desc": "Metric LCP: 1800.0 (POOR)",
+      "os": "macOS",
+      "path": "/cart",
+      "raw_log": {
+        "cid": "cid_3",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 1800.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Safari"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "macOS"
+          },
+          "page": {
+            "url": "/cart"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_3",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T11:10:00+00:00",
+      "type": "pageview"
+    },
+    {
+      "browser": "Chrome",
+      "desc": "Metric LCP: 4800.0 (POOR)",
+      "os": "Android",
+      "path": "/cart",
+      "raw_log": {
+        "cid": "cid_2",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 4800.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Chrome"
+          },
+          "device": {
+            "type": "Mobile"
+          },
+          "os": {
+            "name": "Android"
+          },
+          "page": {
+            "url": "/cart"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_2",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T10:40:00+00:00",
+      "type": "pageview"
+    },
+    {
+      "browser": "Firefox",
+      "desc": "Err 1",
+      "os": "Windows",
+      "path": "/home",
+      "raw_log": {
+        "cid": "cid_1",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [
+          {
+            "type": "Error",
+            "value": "Err 1"
+          }
+        ],
+        "measurements": [],
+        "meta": {
+          "browser": {
+            "name": "Firefox"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "Windows"
+          },
+          "page": {
+            "url": "/home"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_1",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T10:20:30+00:00",
+      "type": "error"
+    },
+    {
+      "browser": "Firefox",
+      "desc": "Metric LCP: 3400.0 (POOR)",
+      "os": "Windows",
+      "path": "/home",
+      "raw_log": {
+        "cid": "cid_1",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 3400.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Firefox"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "Windows"
+          },
+          "page": {
+            "url": "/home"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_1",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T10:20:00+00:00",
+      "type": "pageview"
+    },
+    {
+      "browser": "Chrome",
+      "desc": "Metric LCP: 2100.0 (POOR)",
+      "os": "macOS",
+      "path": "/home",
+      "raw_log": {
+        "cid": "cid_0",
+        "city": "Austin",
+        "country": "US",
+        "exceptions": [],
+        "measurements": [
+          {
+            "context": {
+              "rating": "poor"
+            },
+            "type": "web-vitals",
+            "values": {
+              "lcp": 2100.0
+            }
+          }
+        ],
+        "meta": {
+          "browser": {
+            "name": "Chrome"
+          },
+          "device": {
+            "type": "Desktop"
+          },
+          "os": {
+            "name": "macOS"
+          },
+          "page": {
+            "url": "/home"
+          }
+        },
+        "pop": "SIN",
+        "region": "TX",
+        "req_id": "req_0",
+        "tls": "1.3",
+        "ttfb": 45
+      },
+      "time": "2026-08-05T10:05:00+00:00",
+      "type": "pageview"
+    }
+  ]
+}
