@@ -31,6 +31,7 @@ from backend import config as svcconfig
 from backend.config import SERVICE_ID_PATTERN
 from backend.core import duckdb as db
 from backend.core.duckdb import DBBusyError, get_connection
+from backend.utils.error_redaction import redact_error_text
 
 ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
 
@@ -155,7 +156,7 @@ class _ConnectionHolder:
         except DBBusyError as e:
             raise HTTPException(
                 status_code=503,  # 503 Service Unavailable so frontend fetch throws and React Query keeps cached data
-                detail={"error": str(e), "busy": True},
+                detail={"error": redact_error_text(e), "busy": True},
             )
         except Exception as e:
             # Pool exhaustion (after wait timeout) surfaces as _PoolBusy.
@@ -166,7 +167,7 @@ class _ConnectionHolder:
             if isinstance(e, _PoolBusy):
                 raise HTTPException(
                     status_code=503,
-                    detail={"error": str(e), "busy": True},
+                    detail={"error": redact_error_text(e), "busy": True},
                 )
             raise
         return self.con

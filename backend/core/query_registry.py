@@ -47,7 +47,6 @@ import collections
 import itertools
 import logging
 import os
-import re
 import threading
 import time
 import weakref
@@ -60,6 +59,7 @@ from backend.core.query_attribution import (
     _capture_caller,
     current_attribution,
 )
+from backend.utils.error_redaction import scrub_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -167,15 +167,9 @@ class CompletedQuery:
     peak_memory_mb: float | None = None
 
 
-# The analyst redaction view embeds the per-service cid salt as a string literal
-# (backend/repositories/query.py). DuckDB cannot bind parameters in a CREATE VIEW,
-# so scrub the literal from every SQL/error text the registry records; the executed
-# SQL (and therefore the hashes) is untouched.
-_CID_SALT_LITERAL_RE = re.compile(r"(sha256\(\s*CONCAT\(\s*')[^']*(')", re.IGNORECASE)
-
-
-def _scrub_secrets(text: str) -> str:
-    return _CID_SALT_LITERAL_RE.sub(r"\1[redacted-salt]\2", text)
+# The cid salt is now bound as a parameter (backend/repositories/query.py), so it is no longer a SQL
+# literal; the by-value scrub stays as defence in depth for every SQL/error text the registry records.
+_scrub_secrets = scrub_secrets
 
 
 def _truncate(text: str, cap: int) -> str:

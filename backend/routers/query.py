@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -15,33 +14,18 @@ from backend.models.query import PresetQuery, QueryResponse, QuerySchemaResponse
 from backend.repositories import query as repo
 from backend.repositories._presets_cache import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
+from backend.utils.error_redaction import redact_error_text
 from backend.utils.router_utils import make_error
 
 logger = logging.getLogger(__name__)
 
 
-# DuckDB exception strings frequently interpolate absolute file paths
-# ("Cannot open file '/srv/...'", "No such file or directory: '/var/...'").
-# Strip them before echoing so the wire payload doesn't leak server-side
-# directory layout while still preserving the SQL diagnostic text
-# (Parser / Binder / Catalog Errors) the admin needs to fix their query.
-#
-# Conservative anchored prefix list: ONLY matches when the leading slash
-# is preceded by a non-alphanumeric character (whitespace, quote, line
-# start) AND the path root is one of the deploy-relevant Unix prefixes.
-# Avoids stripping URL paths that happen to look like server paths
-# ("https://example.com/var/foo" — the /var here is NOT a leak), column
-# references in SQL ("/api/foo"), or qualified names. If a deployment
-# uses a non-standard data root, append it here rather than reverting
-# to the over-broad ``/[A-Za-z0-9_./-]+`` pattern.
-# NB: ``app`` is the prod container WORKDIR (backend/Dockerfile → /app), so the
-# real data root is /app/data/services/<sid>/... — without ``app`` here those
-# absolute paths reach the analyst un-redacted in the query_failed envelope.
-_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app)\b(?:/[A-Za-z0-9_./-]*)?")
+# DuckDB exception strings interpolate absolute file paths and SQL excerpts; every analyst-visible error
+# body goes through backend.utils.error_redaction.redact_error_text (path strip + cid-salt scrub).
 
 
 def _redact_paths(msg: str) -> str:
-    return _ABS_PATH_RE.sub("<path>", msg)
+    return redact_error_text(msg)
 
 
 router = APIRouter(prefix="/api", tags=["query"], responses=DEFAULT_ERROR_RESPONSES)
@@ -93,7 +77,7 @@ def query_endpoint(
                 session_id=audit_session_id,
             )
         except PermissionError as e:
-            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+            raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
         except Exception as e:
             raise HTTPException(
                 status_code=400,
@@ -148,7 +132,9 @@ def query_endpoint(
                     try:
                         return execute_with_stale_view_retry(con, rum_source, _run_rum, table_name=req.dataset)
                     except PermissionError as e:
-                        raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+                        raise HTTPException(
+                            status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e)))
+                        )
                     except Exception as e:
                         msg = str(e)
                         if attempt == 1 and "Cannot open file" in msg:
@@ -186,7 +172,7 @@ def query_endpoint(
             except PermissionError as e:
                 # SQL validator gate — message is controlled ("operation X not
                 # permitted on table Y") so it's safe to echo for the admin.
-                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", str(e)))
+                raise HTTPException(status_code=403, detail=make_error("sql_not_permitted", _redact_paths(str(e))))
             except Exception as e:
                 msg = str(e)
                 if attempt == 1 and "Cannot open file" in msg:

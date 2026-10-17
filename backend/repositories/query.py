@@ -271,10 +271,13 @@ def _rebind_table_to_window_view(
             escaped_col = col.replace('"', '""')
             if col == "cid" and service_id:
                 from backend.core.duckdb import get_or_generate_cid_salt
+                from backend.utils.error_redaction import register_salt
 
+                cid_salt = get_or_generate_cid_salt(service_id)
+                register_salt(cid_salt)
                 con.execute(
                     f"CREATE OR REPLACE TEMP TABLE {_ANALYST_CID_SALT_TABLE} AS SELECT ?::VARCHAR AS salt",
-                    [get_or_generate_cid_salt(service_id)],
+                    [cid_salt],
                 )
                 expr = (
                     f'CASE WHEN "{escaped_col}" IS NULL OR "{escaped_col}" = \'\' THEN "{escaped_col}" '

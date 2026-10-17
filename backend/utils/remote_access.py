@@ -1572,6 +1572,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.error_redaction import redact_error_text
 
 # L5: hard ceiling on the width of an analyst's clamped query window. The
 # per-invite ``query_window_hours`` already bounds scoped invites; this is the
@@ -1775,6 +1776,6 @@ def clamp_or_400(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": str(exc), "time_range_empty": True},
+            detail={"error": redact_error_text(exc), "time_range_empty": True},
         ) from exc
     return start.isoformat(), end.isoformat()

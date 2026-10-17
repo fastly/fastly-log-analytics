@@ -30,6 +30,7 @@ from backend.repositories import alerts as repo
 from backend.routers._state_sync import sync_admin_state
 from backend.utils.auth import analyst_allowed_services as _analyst_allowed_services
 from backend.utils.auth import require_owned_row, require_service_in_scope
+from backend.utils.error_redaction import redact_error_text
 from backend.utils.router_utils import not_found
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"], responses=DEFAULT_ERROR_RESPONSES)
@@ -313,7 +314,7 @@ def preview_alert(
         import logging
 
         logging.getLogger(__name__).error(f"Preview failed: {e}")
-        return AlertPreviewResponse.with_telemetry(error=str(e))
+        return AlertPreviewResponse.with_telemetry(error=redact_error_text(e)[:500])
 
 
 @router.put("/{alert_id}", response_model=AlertResponse)
