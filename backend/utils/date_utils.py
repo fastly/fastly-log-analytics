@@ -15,6 +15,16 @@ def parse_iso_utc(s: str | None) -> datetime | None:
             return None
 
 
+def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime] | None:
+    """Parse a ``(start, end)`` ISO pair to UTC datetimes, or ``None`` when either is missing/unparseable
+    or the window is empty/inverted (``end <= start``)."""
+    st = parse_iso_utc(start)
+    et = parse_iso_utc(end)
+    if st is None or et is None or et <= st:
+        return None
+    return st, et
+
+
 def iso_z(dt: datetime) -> str:
     """Format a datetime to ISO 8601 with a Z suffix."""
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

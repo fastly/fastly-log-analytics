@@ -15,6 +15,7 @@ from backend import config as svcconfig
 from backend.core import metadata as metadata_db
 from backend.core.metrics import get_metric_sql
 from backend.models.alerts import Alert
+from backend.repositories._base import QueryRunner
 from backend.repositories._sql import alerts as SQL
 from backend.utils.telemetry import track_query
 
@@ -121,8 +122,7 @@ def evaluate_alert(
 
         # Safely query table columns to check for dt/timestamp_hour partition columns existence
         try:
-            probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-            existing_cols = {d[0] for d in probe}
+            existing_cols = set(QueryRunner(con, src).get_schema_cols())
         except Exception:
             existing_cols = set()
 
@@ -424,8 +424,7 @@ def preview_alert_series(
         zscore_thresh = getattr(alert, "zscore_threshold", 3.0) or 3.0
 
         try:
-            probe = con.execute(f"SELECT * FROM {table_name} LIMIT 0").description or []
-            existing_cols = {d[0] for d in probe}
+            existing_cols = set(QueryRunner(con, src).get_schema_cols())
         except Exception:
             existing_cols = set()
 

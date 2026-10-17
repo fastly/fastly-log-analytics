@@ -2718,9 +2718,7 @@ class QueryRunner:
             # Any read failure (stale view, missing column, schema drift
             # in older bundles, …) drops us to the raw path. Logged at
             # debug — the caller will produce a working result anyway.
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[time_series_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[time_series_rollup] read failed, falling back to raw: %s", e)
             return None
         finally:
             if direct_live_tmp is not None:
@@ -2896,9 +2894,7 @@ class QueryRunner:
         try:
             return int(self.execute(final_sql, params if live_needs_params else []).fetchone()[0])
         except Exception as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[count_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[count_rollup] read failed, falling back to raw: %s", e)
             return None
         finally:
             if direct_live_tmp is not None:
@@ -2935,7 +2931,7 @@ class QueryRunner:
         """
         from datetime import timedelta
 
-        from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import parse_window
 
         if has_filters:
             return None
@@ -2943,10 +2939,10 @@ class QueryRunner:
             return None
         if require_top_asns is not None and not require_top_asns:
             return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
+        window = parse_window(start_time, end_time)
+        if window is None:
             return None
+        st, et = window
         if (et - st) < timedelta(hours=min_hours if min_hours is not None else self._SLOW_URLS_ROLLUP_MIN_HOURS):
             return None
         if (et - st) > timedelta(days=366):
@@ -3074,9 +3070,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[slow_urls_rollup] read failed, falling back to raw: %s", e)
             return None
 
         out_rows = []
@@ -3243,9 +3237,7 @@ class QueryRunner:
         try:
             row = self.execute(sql).fetchone()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[origin_summary_rollup] read failed, falling back to raw: %s", e)
             return None
 
         if row is None or row[0] is None or row[0] == 0:
@@ -3342,9 +3334,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_pop_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_pop_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3430,9 +3420,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_ip_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_ip_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3494,9 +3482,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_path_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_path_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3580,9 +3566,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_status_rollup] read failed, falling back: %s", e)
+            _logger.debug("[origin_status_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -3757,9 +3741,7 @@ class QueryRunner:
         try:
             rows = self.execute(final_sql, params if crosses_active else []).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
+            _logger.debug("[origin_latency_ts_rollup] read failed, falling back to raw: %s", e)
             return None
 
         series: list[dict] = []
@@ -3865,9 +3847,7 @@ class QueryRunner:
                 "_approx": True,
             }
         except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).debug("[network_quality_rollup] read failed: %s", e)
+            _logger.debug("[network_quality_rollup] read failed: %s", e)
             return None
 
     def try_network_rtt_from_rollup(
@@ -3924,9 +3904,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, top_asns).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_rtt_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_rtt_rollup] read failed, falling back: %s", e)
             return None
 
         out: dict[int, dict[str, float | None]] = {}
@@ -4010,9 +3988,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, top_asns).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_speed_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_speed_rollup] read failed, falling back: %s", e)
             return None
         return [(int(r[0]), str(r[1]), int(r[2])) for r in rows]
 
@@ -4146,9 +4122,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_heatmap_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_heatmap_rollup] read failed, falling back: %s", e)
             return None
 
         if not rows:
@@ -4330,9 +4304,7 @@ class QueryRunner:
             map_rows = self.execute(map_sql).fetchall()
             metro_rows = self.execute(metro_sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[network_geo_rollup] read failed, falling back: %s", e)
+            _logger.debug("[network_geo_rollup] read failed, falling back: %s", e)
             return None
 
         if not map_rows and not metro_rows:
@@ -4377,7 +4349,7 @@ class QueryRunner:
         from datetime import UTC, datetime, timedelta
 
         from backend.core.rollups._common import VERIFIED_BOTS_TS_BUNDLE_FILENAME
-        from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import parse_window
 
         if has_filters:
             return None
@@ -4390,10 +4362,10 @@ class QueryRunner:
         # Minute-granular re-bucketing is only exact for whole-minute buckets.
         if n < 60 or n % 60 != 0:
             return None
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
-        if st is None or et is None or et <= st:
+        window = parse_window(start_time, end_time)
+        if window is None:
             return None
+        st, et = window
         if (et - st) < timedelta(hours=self._SLOW_URLS_ROLLUP_MIN_HOURS):
             return None
         if (et - st) > timedelta(days=366):
@@ -4435,9 +4407,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
+            _logger.debug("[verified_bots_ts_rollup] read failed, falling back: %s", e)
             return None
         return [(r[0], str(r[1]), int(r[2])) for r in rows]
 
@@ -4502,9 +4472,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql, [min_requests, limit]).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[perf_latency_rollup] read failed, falling back: %s", e)
+            _logger.debug("[perf_latency_rollup] read failed, falling back: %s", e)
             return None
 
         def _ms(v: Any) -> float | None:
@@ -4565,9 +4533,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_req_size_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_req_size_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -4612,9 +4578,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_conn_reuse_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -4965,9 +4929,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_top_ips_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_top_ips_rollup] read failed, falling back: %s", e)
             return None
         if not rows:
             return None
@@ -5007,9 +4969,7 @@ class QueryRunner:
         try:
             row = self.execute(sql).fetchone()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[security_coverage_rollup] read failed, falling back: %s", e)
+            _logger.debug("[security_coverage_rollup] read failed, falling back: %s", e)
             return None
         if row is None or row[0] is None or int(row[0]) == 0:
             return None
@@ -5060,9 +5020,7 @@ class QueryRunner:
         try:
             rows = self.execute(sql).fetchall()
         except duckdb.Error as e:
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
+            _logger.debug("[perf_ttl_dist_rollup] read failed, falling back: %s", e)
             return None
         return [{"bucket": r[0], "count": int(r[1])} for r in rows]
 
@@ -5258,9 +5216,7 @@ class QueryRunner:
         except duckdb.Error as e:
             # A read failure here drops the caller to its live fallback
             # — never let an ip_spread bug take down the security tab.
-            import logging as _logging
-
-            _logging.getLogger(__name__).debug("[ip_spread_rollup] read failed: %s", e)
+            _logger.debug("[ip_spread_rollup] read failed: %s", e)
             return {}, {}
         _phase("read", (_time.perf_counter() - _t) * 1000.0)
 

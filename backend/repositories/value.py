@@ -23,7 +23,7 @@ from backend.repositories._base import (
 )
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.date_utils import parse_iso_utc, safe_iso
+from backend.utils.date_utils import parse_window, safe_iso
 
 logger = logging.getLogger(__name__)
 
@@ -324,10 +324,10 @@ def _try_overview_from_rollup(
 
     if not start_time or not end_time:
         return None
-    st = parse_iso_utc(start_time)
-    et = parse_iso_utc(end_time)
-    if st is None or et is None or et <= st:
+    window = parse_window(start_time, end_time)
+    if window is None:
         return None
+    st, et = window
     if (et - st) > timedelta(days=366):
         return None
 
@@ -530,10 +530,10 @@ def _try_network_from_rollup(
 
     if not start_time or not end_time:
         return None
-    st = parse_iso_utc(start_time)
-    et = parse_iso_utc(end_time)
-    if st is None or et is None or et <= st:
+    window = parse_window(start_time, end_time)
+    if window is None:
         return None
+    st, et = window
     if (et - st) > timedelta(days=366):
         return None
 

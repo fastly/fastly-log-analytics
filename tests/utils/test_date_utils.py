@@ -13,6 +13,7 @@ from backend.utils.date_utils import (
     parse_date_window,
     parse_iso_utc,
     parse_relative_time_window,
+    parse_window,
     parse_window_str_to_dt,
     safe_iso,
     window_to_epoch,
@@ -129,3 +130,28 @@ def test_parse_relative_time_window():
     # 5. Invalid / parse fail defaults to 1h
     dt_invalid = parse_relative_time_window("invalid")
     assert (datetime.now(UTC) - dt_invalid).total_seconds() == pytest.approx(3600, abs=10)
+
+
+def test_parse_window_returns_utc_pair_for_a_valid_window():
+    st, et = parse_window("2026-08-05T10:00:00Z", "2026-08-05T12:30:00+00:00")
+    assert (st, et) == (datetime(2026, 8, 5, 10, tzinfo=UTC), datetime(2026, 8, 5, 12, 30, tzinfo=UTC))
+    assert parse_window("2026-08-05", "2026-08-06") == (
+        datetime(2026, 8, 5, tzinfo=UTC),
+        datetime(2026, 8, 6, tzinfo=UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (None, "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", None),
+        ("", ""),
+        ("garbage", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", "garbage"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T10:00:00Z"),
+    ],
+)
+def test_parse_window_is_none_for_missing_unparseable_or_non_positive_windows(start, end):
+    assert parse_window(start, end) is None

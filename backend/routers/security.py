@@ -259,7 +259,7 @@ def get_security_threat_intel(
                 bot_percentage=row[4] or 0.0,
                 is_anonymized_proxy=bool(row[5]),
             )
-            for row in repo.get_threat_intel_rows(con, table_name, resolved_start, resolved_end)
+            for row in repo.get_threat_intel_rows(con, ctx.source, table_name, resolved_start, resolved_end)
         ]
 
     data = execute_with_stale_view_retry(ctx.con, ctx.source, _run_threat_intel)
