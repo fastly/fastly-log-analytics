@@ -32,10 +32,11 @@ import type { LabelRow, LabelValue } from '@/hooks/useScoringLabels'
 import { buildSessionDashboardUrl, buildStreamDetailUrl } from '@/lib/session-urls'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/streamingInfo'
 import type { components } from '@/types/api.generated'
-import type { SessionsResponse } from '@/types/api'
+import type { SessionDetailResponse, SessionsResponse } from '@/types/api'
 
 import { formatCount, formatCountMaybe } from '@/lib/format'
 type SessionRow = components['schemas']['Session']
+type SessionDetailRow = SessionDetailResponse['data'][number]
 
 interface SessionDetailProps {
   selectedSession: SessionRow | null
@@ -83,7 +84,7 @@ export function SessionDetail({
   })
 
   const detailColumnNames = detailData?.columns
-  const detailColumns: ColumnDef<Record<string, unknown>>[] = React.useMemo(() => {
+  const detailColumns: ColumnDef<SessionDetailRow>[] = React.useMemo(() => {
     if (!detailColumnNames) return []
     return detailColumnNames.map(col => ({
       id: col,
@@ -92,16 +93,17 @@ export function SessionDetail({
       header: getFieldLabel(col),
       cell: ({ row }) => {
         const value = row.original[col]
+        const text = value == null ? '' : String(value)
         if (col === 'timestamp') return (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger render={
                 <span className="whitespace-nowrap font-mono text-xs  border-b border-dotted border-muted-foreground/30">
-                  {relative(value as string)}
+                  {relative(text)}
                 </span>
               } />
               <TooltipContent className="text-xs">
-                {full(value as string)} {abbr()}
+                {full(text)} {abbr()}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -113,10 +115,10 @@ export function SessionDetail({
         if (col === 'resp_bytes' || col === 'elapsed') {
           return <span className="text-xs font-mono tabular-nums">{formatCount(Number(value))}</span>
         }
-        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, value as string)}</span>
-        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, value as string)}</span>
-        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, value as string)}</span>
-        return <span className="text-xs truncate max-w-[220px] inline-block">{String(value ?? '')}</span>
+        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, text)}</span>
+        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, text)}</span>
+        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, text)}</span>
+        return <span className="text-xs truncate max-w-[220px] inline-block">{text}</span>
       }
     }))
   }, [detailColumnNames, relative, full, abbr, getFieldLabel])

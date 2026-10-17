@@ -19079,7 +19079,7 @@ export interface components {
             columns: string[];
             /** Data */
             data: {
-                [key: string]: unknown;
+                [key: string]: string | number | boolean | null;
             }[];
         };
         /** SessionHarvestingInsightCard */

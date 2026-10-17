@@ -242,9 +242,14 @@ class SessionDetailRequest(BaseModel):
     end_time: str | None = None
 
 
+# Every raw-log column is a scalar: VARCHAR, the integer/float widths, BOOLEAN, and TIMESTAMP
+# (which both producers serialize to an ISO string). Custom fields are limited to the same types.
+SessionDetailValue = str | int | float | bool | None
+
+
 class SessionDetailResponse(BaseResponse):
     columns: list[str]
-    data: list[dict[str, Any]]
+    data: list[dict[str, SessionDetailValue]]
 
 
 # ── Query (re-exported from backend.models.query for back-compat) ─────────────
