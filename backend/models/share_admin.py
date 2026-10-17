@@ -149,7 +149,9 @@ class InviteRecord(_ShareAdminRead):
     query_start_time: str | None = None
     query_end_time: str | None = None
     created_at: str | None = None
-    revoked: int | None = None
+    # Wire value is the SQLite INTEGER flag, 0 (active) or 1 (revoked), never a JSON
+    # boolean; the literal keeps the bytes unchanged while staying truthiness-compatible.
+    revoked: Literal[0, 1] | None = None
     tos_accepted_at: str | None = None
     tos_version: str | None = None
     allow_concurrent_sessions: bool | None = None

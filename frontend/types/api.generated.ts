@@ -10234,7 +10234,7 @@ export interface components {
             /** Created At */
             created_at?: string | null;
             /** Revoked */
-            revoked?: number | null;
+            revoked?: (0 | 1) | null;
             /** Tos Accepted At */
             tos_accepted_at?: string | null;
             /** Tos Version */

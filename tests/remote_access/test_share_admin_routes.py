@@ -708,3 +708,22 @@ def test_live_and_audit_logs_match_producer(client):
 
     audit = client.get("/api/admin/share/audit-logs").json()
     assert audit["audit_logs"] == jsonable_encoder(share_db.get_share_audit_logs(limit=200))
+
+
+def test_invite_revoked_is_integer_flag_on_the_wire(client):
+    inv = share_db.create_remote_invite(
+        name="Dan",
+        email="dan@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=[],
+    )
+    body = client.get("/api/admin/share/status").json()
+    row = next(i for i in body["invites"] if i["id"] == inv["id"])
+    assert row["revoked"] == 0
+    assert type(row["revoked"]) is int
+    assert share_db.revoke_remote_invite(inv["id"])
+    row = next(i for i in client.get("/api/admin/share/status").json()["invites"] if i["id"] == inv["id"])
+    assert row["revoked"] == 1
+    assert type(row["revoked"]) is int
