@@ -8884,6 +8884,8 @@ export interface components {
             is_cached: boolean;
             /** Engine */
             engine?: string | null;
+            /** Params */
+            params?: unknown[] | null;
         };
         /** DebugSettingsResponse */
         DebugSettingsResponse: {

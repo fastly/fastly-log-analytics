@@ -12,7 +12,7 @@
  */
 
 import { expect, test } from '@playwright/test'
-import type { DebugQuery } from '../_types'
+import type { DebugQuery } from '../../types/api'
 
 type LayoutShiftEntry = PerformanceEntry & {
   hadRecentInput?: boolean

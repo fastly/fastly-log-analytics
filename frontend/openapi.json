@@ -58625,6 +58625,18 @@
               }
             ],
             "title": "Engine"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
           }
         },
         "type": "object",

@@ -136,6 +136,16 @@ class DebugQuery(BaseModel):
     time_ms: float
     is_cached: bool = False
     engine: str | None = None
+    # Bind parameters, when a producer records them. No current producer does, so
+    # the key is dropped from the wire unless it was set (see ``_drop_unset_params``).
+    params: list[Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_params(self, handler):
+        data = handler(self)
+        if "params" not in self.model_fields_set:
+            data.pop("params", None)
+        return data
 
 
 class DebugCall(BaseModel):
