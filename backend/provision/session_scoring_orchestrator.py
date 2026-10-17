@@ -1138,33 +1138,19 @@ def teardown_scoring_resources(
             if status_cb:
                 status_cb("Logging service has no active version — skipping VCL strip.")
         else:
-            clone = fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{active_ver}/clone",
-                token=token,
-            )
-            new_ver = int(clone["number"])
             ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}",
-                {"comment": f"Teardown: strip session scoring {ts}"},
-                token=token,
-            )
-            _remove_scoring_snippets(logging_service_id, new_ver, token)
-            _remove_scoring_backend(logging_service_id, new_ver, token)
-            result = fastly(
-                "GET",
-                f"/service/{logging_service_id}/version/{new_ver}/validate",
-                token=token,
-            )
-            if result.get("status") != "ok":
-                raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/activate",
-                token=token,
-            )
+            # rollback=False: nothing went live until the final activate, so a failure
+            # leaves the current version serving; teardown aborts below instead.
+            with draft_version(
+                logging_service_id,
+                token,
+                base_version=active_ver,
+                call=fastly,
+                comment=f"Teardown: strip session scoring {ts}",
+                rollback=False,
+            ) as new_ver:
+                _remove_scoring_snippets(logging_service_id, new_ver, token)
+                _remove_scoring_backend(logging_service_id, new_ver, token)
             ok(f"Logging service version {new_ver} active (scoring VCL stripped)")
         strip_ok = True
     except Exception as exc:

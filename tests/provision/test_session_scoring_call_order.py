@@ -153,3 +153,58 @@ def test_disable_does_not_tear_down_compute_service_when_vcl_phase_fails():
         with pytest.raises(RuntimeError):
             sso.disable_scoring(LOG_SVC, TOKEN)
     delete_mock.assert_not_called()
+
+
+# ── teardown_scoring_resources (VCL strip) ──────────────────────────────────
+
+
+def _run_teardown(fake: _Fastly, *, delete_mock=None):
+    from contextlib import ExitStack
+
+    meta = {"scoring_service_id": SCORE_SVC, "scoring_keys_store_id": "K", "scoring_config_store_id": "C"}
+    delete_mock = delete_mock if delete_mock is not None else MagicMock(return_value=[])
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(sso, "fastly", fake))
+        stack.enter_context(patch("backend.core.fastly.service.fastly", fake))
+        stack.enter_context(patch.object(sso, "delete_scoring_service", delete_mock))
+        return sso.teardown_scoring_resources(LOG_SVC, meta, TOKEN), delete_mock
+
+
+def test_teardown_strip_order_is_clone_comment_validate_activate_then_compute_delete():
+    fake = _Fastly()
+    failed, delete_mock = _run_teardown(fake)
+    assert failed == []
+    assert _order(fake.calls)[:2] == ["clone", "comment"]
+    assert _order(fake.calls)[-2:] == ["validate", "activate:201"]
+    delete_mock.assert_called_once()
+
+
+def test_teardown_strip_validation_failure_never_activates_anything_and_aborts_before_compute_delete():
+    fake = _Fastly(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Aborting scoring teardown"):
+        _run_teardown(fake)
+    order = _order(fake.calls)
+    assert "activate:201" not in order
+    assert not any(o.startswith("activate:") for o in order), "teardown strip must not roll back by activating"
+
+
+def test_teardown_strip_failure_does_not_delete_the_compute_service():
+    fake = _Fastly(validate_ok=False)
+    delete_mock = MagicMock(return_value=[])
+    with pytest.raises(RuntimeError, match="Aborting scoring teardown"):
+        _run_teardown(fake, delete_mock=delete_mock)
+    delete_mock.assert_not_called()
+
+
+def test_teardown_strip_status_messages_report_the_failure():
+    fake = _Fastly(validate_ok=False)
+    msgs: list[str] = []
+    meta = {"scoring_service_id": SCORE_SVC}
+    with (
+        patch.object(sso, "fastly", fake),
+        patch("backend.core.fastly.service.fastly", fake),
+        patch.object(sso, "delete_scoring_service"),
+    ):
+        with pytest.raises(RuntimeError):
+            sso.teardown_scoring_resources(LOG_SVC, meta, TOKEN, status_cb=msgs.append)
+    assert any(m.startswith("❌ Could not strip scoring VCL: Validation failed") for m in msgs)
