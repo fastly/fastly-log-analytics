@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 from backend.config import get_fastly_api_key
+from backend.core.fastly.mock_fixtures import is_mock_mode
 from backend.core.fastly.utils import FASTLY_LOG_FIELDS
 from backend.deps import get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
@@ -226,6 +227,17 @@ def _compute_prefill_rates(source: dict) -> tuple[dict, dict]:
     return result, prov
 
 
+def _api_key(service_id: str) -> str:
+    """Configured Fastly API key; a placeholder in FASTLY_MOCK_MODE.
+
+    The mock Fastly client short-circuits every call, but the e2e sandbox config
+    deliberately has no key (an empty key keeps the Control Room RT poller off
+    rt.fastly.com), so without this the usage endpoints 403 in e2e.
+    """
+    key = get_fastly_api_key(service_id)
+    return key or ("mock-api-key" if is_mock_mode() else key)
+
+
 @router.get("/prefill/rates", response_model=PrefillRatesResponse)
 @query_errors()
 def prefill_rates(source: dict = Depends(get_source)):
@@ -262,7 +274,7 @@ async def prefill(source: dict = Depends(get_source)):
     }
 
     # Pull real traffic numbers and live logging config from Fastly Stats API.
-    api_key = get_fastly_api_key(source["service_id"])
+    api_key = _api_key(source["service_id"])
     if api_key:
         from backend.core.fastly.client import fastly
         from backend.core.fastly.service import find_condition, get_active_version
@@ -579,7 +591,7 @@ def usage_operations(
     clamped_from_sub_hour = requested_by != by
 
     src = source
-    api_key = get_fastly_api_key(src["logging_service_id"])
+    api_key = _api_key(src["logging_service_id"])
     if not api_key:
         raise HTTPException(status_code=403, detail={"error": "Fastly API key is not configured."})
 
@@ -662,7 +674,7 @@ def usage_bandwidth(
 ):
 
     src = source
-    api_key = get_fastly_api_key(src["logging_service_id"])
+    api_key = _api_key(src["logging_service_id"])
     if not api_key:
         raise HTTPException(status_code=403, detail={"error": "Fastly API key is not configured."})
 
@@ -731,7 +743,7 @@ def usage_log_activity(
     res = repo.get_log_activity(source, start_str, end_str, by)
 
     # Fetch Fastly API stats for the logging service to compare generated vs processed
-    api_key = get_fastly_api_key(source.get("logging_service_id", ""))
+    api_key = _api_key(source.get("logging_service_id", ""))
     logging_svc = source.get("logging_service_id", "").strip()
 
     if api_key and logging_svc and by in ("minute", "hour", "day"):
