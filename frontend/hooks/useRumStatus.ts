@@ -1,22 +1,13 @@
 'use client'
 
 import { useQuery } from '@tanstack/react-query'
-import { adminFetch } from '@/lib/api'
+import { adminJsonResult } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import type { Simplify, WithRequired, components } from '@/types/api'
 
-export interface RumStatus {
-  enabled: boolean
-  enabled_at?: string | null
-  deployed_vcl_sha?: string | null
-  current_vcl_sha?: string
-  vcl_drift?: boolean
-  unauthorized?: boolean
-  capture_vitals?: boolean
-  capture_performance?: boolean
-  capture_errors?: boolean
-  capture_events?: boolean
-  custom_condition?: string | null
-}
+type RumStatusWire = WithRequired<components['schemas']['RumStatusResponse'], 'enabled'>
+
+export type RumStatus = Simplify<RumStatusWire & { unauthorized?: boolean }>
 
 interface UseRumStatusOptions {
   enabled?: boolean
@@ -36,9 +27,12 @@ export function useRumStatus(
     queryKey: queryKeys.rumStatus(serviceId),
     queryFn: async () => {
       if (!serviceId) return null
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`)
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/status', RumStatusWire>(
+        '/api/services/{service_id}/rum/status',
+        `/api/services/${serviceId}/rum/status`,
+      )
       if (res.status === 403) return { enabled: false, unauthorized: true }
-      return res.ok ? ((await res.json()) as RumStatus) : null
+      return res.ok ? res.data : null
     },
     enabled: !!serviceId && enabled,
     refetchInterval,

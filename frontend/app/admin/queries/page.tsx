@@ -21,7 +21,7 @@
 import * as React from 'react'
 import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminFetch, adminJson } from '@/lib/api'
+import { adminJson, adminJsonResult } from '@/lib/api'
 import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, Search } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -55,6 +55,7 @@ import type {
   CompletedRow,
   DbFilter,
   MonitorConfig,
+  SlowQueriesResult,
   SnapshotResponse,
   ViewMode,
 } from './_types'
@@ -171,9 +172,11 @@ export default function QueryMonitorPage() {
         params.set('cold_limit', '50')
       }
       const qs = params.toString()
-      const r = await adminFetch(`/api/admin/queries${qs ? '?' + qs : ''}`, { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson<'/api/admin/queries', SnapshotResponse>(
+        '/api/admin/queries',
+        `/api/admin/queries${qs ? '?' + qs : ''}`,
+        { signal },
+      )
     },
     enabled: visible && enabled && !paused,
     refetchInterval: (query) => {
@@ -258,12 +261,13 @@ export default function QueryMonitorPage() {
 
   const cancelMutation = useMutation({
     mutationFn: async (qid: number): Promise<CancelResponse> => {
-      const r = await adminFetch(`/api/admin/queries/${qid}/cancel`, { method: 'POST' })
-      if (!r.ok) {
-        const body = await r.text().catch(() => '')
-        throw new Error(body || `status ${r.status}`)
-      }
-      return r.json()
+      const r = await adminJsonResult<'/api/admin/queries/{qid}/cancel', CancelResponse, 'post'>(
+        '/api/admin/queries/{qid}/cancel',
+        `/api/admin/queries/${qid}/cancel`,
+        { method: 'POST' },
+      )
+      if (!r.ok) throw new Error(r.errorText || `status ${r.status}`)
+      return r.data
     },
     onSuccess: (res) => {
       setActionError('')
@@ -288,7 +292,7 @@ export default function QueryMonitorPage() {
   // 'recent'. Background polling stays off (this isn't a live view);
   // staleTime is 30s so toggling between 24h / 7d back-to-back doesn't
   // re-hit SQLite if the data was just fetched.
-  const historicalQuery = useQuery<{ rows: CompletedRow[] }>({
+  const historicalQuery = useQuery<SlowQueriesResult>({
     queryKey: ['admin', 'query-monitor', 'slow-history', slowHistoryMode, slowThresholdMs],
     queryFn: async ({ signal }) => {
       let sinceHours = 24
@@ -298,12 +302,11 @@ export default function QueryMonitorPage() {
       else if (slowHistoryMode === 'past_24h') sinceHours = 24
       else if (slowHistoryMode === 'past_7d') sinceHours = 168
 
-      const r = await adminFetch(
+      return adminJson<'/api/admin/slow-queries', SlowQueriesResult>(
+        '/api/admin/slow-queries',
         `/api/admin/slow-queries?since_hours=${sinceHours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
         { signal },
       )
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
     },
     enabled: slowHistoryMode !== 'recent' && enabled,
     staleTime: 30_000,

@@ -69,6 +69,14 @@ export type _ActiveRowParity = Expect<WireParity<ActiveRow, components['schemas'
 export type _CompletedRowParity = Expect<WireParity<CompletedRow, components['schemas']['CompletedQueryRow']>>
 export type _SnapshotParity = Expect<WireParity<SnapshotResponse, components['schemas']['SnapshotResponse']>>
 
+export interface SlowQueriesResult {
+  rows: CompletedRow[]
+  since_hours: number
+  threshold_ms: number
+}
+
+export type _SlowQueriesParity = Expect<WireParity<SlowQueriesResult, components['schemas']['SlowQueriesResponse']>>
+
 export interface MonitorConfig {
   enabled: boolean
 }

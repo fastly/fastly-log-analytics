@@ -1,5 +1,6 @@
 import createClient from "openapi-fetch";
 import type { paths } from "@/types/api.generated";
+import type { StripIndex, WireParity } from "@/types/api";
 import { useAdminTokenStore } from "@/stores/adminTokenStore";
 import { useDebugStore } from "@/stores/debugStore";
 import { useServiceStore } from "@/stores/serviceStore";
@@ -150,25 +151,67 @@ export function adminFetch(
   return fetch(input, { ...init, headers })
 }
 
-type JsonOf<P extends keyof paths> = paths[P] extends {
-  get: { responses: { 200: { content: { "application/json": infer T } } } }
+type JsonOf<P extends keyof paths, M extends "get" | "post" = "get"> = paths[P] extends {
+  [K in M]: { responses: { 200: { content: { "application/json": infer T } } } }
 }
   ? T
   : never
 
-// Typed JSON GET over ``adminFetch``. ``spec`` is the OpenAPI path template the
-// concrete ``url`` instantiates; it only exists to derive the response type
-// from the generated schema, so a backend model change fails ``tsc`` here
-// instead of hiding behind a hand-written cast. Throws on a non-2xx status.
-export async function adminJson<P extends keyof paths>(
-  _spec: P,
+// A caller may pin a deliberate narrowing ``T`` of the wire type (required
+// fields, literal unions). The trailing guard argument is then required and
+// only type-checks while ``T`` keeps WireParity with the generated schema, so a
+// backend rename/removal still fails ``tsc`` at the call site.
+// Arrays compare element-wise; a free-dict wire shape (no declared keys) only
+// requires the local shape to be assignable to it.
+type ParityArgs<T, W> = [W] extends [T]
+  ? []
+  : W extends readonly (infer WE)[]
+    ? T extends readonly (infer TE)[]
+      ? ParityArgs<TE, WE>
+      : [wire_parity: "local type is not an array"]
+    : keyof StripIndex<W> extends never
+      ? [T] extends [W]
+        ? []
+        : [wire_parity: "local type is not assignable to the free-dict wire type"]
+      : WireParity<T, W> extends true
+        ? []
+        : [wire_parity: WireParity<T, W>]
+
+type AdminJsonResult<T> =
+  | { ok: true; status: number; data: T }
+  | { ok: false; status: number; statusText: string; data: null; errorText: string }
+
+// Typed JSON request over ``adminFetch`` that never throws on a non-2xx
+// status — for callers that branch on ``status`` (403 -> unauthorized) or fall
+// back to a default. ``spec`` is the OpenAPI path template the concrete ``url``
+// instantiates; it only exists to derive the response type from the generated
+// schema, so a backend model change fails ``tsc`` here instead of hiding
+// behind a hand-written cast.
+export async function adminJsonResult<
+  P extends keyof paths,
+  T = JsonOf<P>,
+  M extends "get" | "post" = "get",
+>(_spec: P, url: string, init: RequestInit = {}, ..._parity: ParityArgs<T, JsonOf<P, M>>): Promise<AdminJsonResult<T>> {
+  const r = await adminFetch(url, init)
+  if (!r.ok) return { ok: false, status: r.status, statusText: r.statusText, data: null, errorText: await r.text().catch(() => "") }
+  return { ok: true, status: r.status, data: (await r.json()) as T }
+}
+
+// Typed JSON request over ``adminFetch``. Throws on a non-2xx status.
+export async function adminJson<
+  P extends keyof paths,
+  T = JsonOf<P>,
+  M extends "get" | "post" = "get",
+>(
+  spec: P,
   url: string,
   init: RequestInit = {},
   errorMessage: (status: number) => string = (status) => `status ${status}`,
-): Promise<JsonOf<P>> {
-  const r = await adminFetch(url, init)
-  if (!r.ok) throw new Error(errorMessage(r.status))
-  return r.json() as Promise<JsonOf<P>>
+  ...parity: ParityArgs<T, JsonOf<P, M>>
+): Promise<T> {
+  const res = await adminJsonResult<P, T, M>(spec, url, init, ...parity)
+  if (!res.ok) throw new Error(errorMessage(res.status))
+  return res.data
 }
 
 // Paths that don't need an active service (bootstrap before service is

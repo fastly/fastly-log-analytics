@@ -17,7 +17,7 @@
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Copy, X } from 'lucide-react'
-import { adminFetch } from '@/lib/api'
+import { adminJson } from '@/lib/api'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -63,9 +63,11 @@ export function RowDetailDialog({
   const { data: fullRow } = useQuery<AnyRow>({
     queryKey: ['admin', 'query-monitor', 'detail', row?.query_id ?? null],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch(`/api/admin/queries/${row!.query_id}`, { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson<'/api/admin/queries/{qid}', ActiveRow>(
+        '/api/admin/queries/{qid}',
+        `/api/admin/queries/${row!.query_id}`,
+        { signal },
+      )
     },
     enabled: row !== null && isLive,
     refetchInterval: 2000,

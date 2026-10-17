@@ -27,11 +27,23 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
-import { adminFetch, adminJson } from '@/lib/api'
+import type { Expect, WireParity } from '@/types/api'
+import { adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/serviceStore'
 import { buildServiceHref } from '@/lib/navigation'
 
 const POLL_MS = 10_000
+
+// The wire models workers/queues/ledger as free dicts, so these nested shapes
+// are local narrowings; the top-level keys stay pinned by the parity guard.
+type CeleryStatus = {
+  broker_reachable?: boolean
+  workers?: { count?: number }
+  queues?: Record<string, number>
+  schedules?: Record<string, unknown>[]
+  ledger?: { dead_letter?: number; quarantined?: number }
+}
+export type _CeleryStatusParity = Expect<WireParity<CeleryStatus, components['schemas']['CeleryStatusResponse']>>
 
 type SummaryResponse = components['schemas']['SummaryResponse']
 type LogAccountingResponse = components['schemas']['LogAccountingResponse']
@@ -222,12 +234,11 @@ function SlowQueriesTeaser() {
   const { data, isFetching, isLoading, isError } = useQuery<{ count: number }>({
     queryKey: ['admin', 'overview', 'slow-queries-count', activeServiceId],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch(
+      return adminJson(
+        '/api/admin/slow-queries/count',
         '/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000',
         { signal },
       )
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
     },
     initialData: seed,
     enabled: !!activeServiceId,
@@ -347,12 +358,10 @@ function OverviewCard({
 // ── Card 4: Celery Status ───────────────────────────────────────────
 
 function CeleryStatusCard() {
-  const { data, isFetching, isLoading, isError } = useQuery({
+  const { data, isFetching, isLoading, isError } = useQuery<CeleryStatus>({
     queryKey: ['admin', 'overview', 'celery-status'],
     queryFn: async ({ signal }) => {
-      const r = await adminFetch('/api/admin/celery/status', { signal })
-      if (!r.ok) throw new Error(`status ${r.status}`)
-      return r.json()
+      return adminJson<'/api/admin/celery/status', CeleryStatus>('/api/admin/celery/status', '/api/admin/celery/status', { signal })
     },
     retry: false,
     staleTime: POLL_MS,

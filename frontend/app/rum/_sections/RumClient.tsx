@@ -12,7 +12,9 @@ import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart';
 import { useTimezone } from '@/hooks/useTimezone';
 import { formatDate } from '@/lib/date';
 import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye } from 'lucide-react';
-import { adminFetch } from '@/lib/api';
+import { adminJsonResult } from '@/lib/api';
+import { arrayOrEmpty, recordOrNull } from '@/lib/narrow';
+import type { Expect, WireParity, components } from '@/types/api';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
 import type { FiltersPayload } from '@/types/filters';
 import {
@@ -58,7 +60,44 @@ interface RumJsError {
   count: number;
 }
 
-interface RumLiveEvent {
+interface CwvVital {
+  p75: number | null;
+  distribution: { good: number; needs_improvement: number; poor: number };
+}
+
+// The wire models vitals/trends/environments as free dicts, so their nested
+// shapes are local narrowings; the top-level keys stay pinned by the guard below.
+interface RumAnalytics {
+  is_mock?: boolean;
+  no_data?: boolean;
+  beacon_count: number;
+  pageview_count?: number;
+  interaction_count?: number;
+  error_count?: number;
+  message?: string;
+  error?: string;
+  vitals: { lcp: CwvVital; cls: CwvVital; inp: CwvVital };
+  worst_pages: RumWorstPage[];
+  errors: RumJsError[];
+  trends: {
+    timestamps?: string[];
+    lcp: number[];
+    cls: number[];
+    error_rate: number[];
+    pageviews?: number[];
+    interactions?: number[];
+    errors?: number[];
+  };
+  environments: {
+    browsers: Record<string, number>;
+    os: Record<string, number>;
+    devices: Record<string, number>;
+  };
+}
+
+type _RumAnalyticsParity = Expect<WireParity<RumAnalytics, components['schemas']['RumAnalyticsResponse']>>
+
+type RumLiveEvent = {
   time: string;
   type: string;
   path: string;
@@ -283,8 +322,11 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       }
       const qs = params.toString();
       const url = `/api/services/${serviceId}/rum/analytics${qs ? `?${qs}` : ''}`;
-      const res = await adminFetch(url);
-      return res.ok ? res.json() : null;
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/analytics', RumAnalytics>(
+        '/api/services/{service_id}/rum/analytics',
+        url,
+      );
+      return res.ok ? recordOrNull(res.data) : null;
     },
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,
@@ -310,8 +352,11 @@ export function RumClient({ serviceId, startTime, endTime, filterPayload }: RumC
       const qs = params.toString();
       const url = qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`;
 
-      const res = await adminFetch(url);
-      return res.ok ? res.json() : [];
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(
+        '/api/services/{service_id}/rum/live-events',
+        url,
+      );
+      return res.ok ? arrayOrEmpty(res.data) : [];
     },
     enabled: !!serviceId && !!status?.enabled,
     refetchInterval: false,

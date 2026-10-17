@@ -13,7 +13,8 @@ import { Badge } from '@/components/ui/badge'
 import { Loader2, CloudDownload, Calendar } from 'lucide-react'
 import { formatDateTime, cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format'
-import { adminFetch } from '@/lib/api'
+import { adminJsonResult } from '@/lib/api'
+import type { components } from '@/types/api'
 import { formatForInput, parseFromInput } from '@/lib/date'
 import {
   panelDialogContent,
@@ -28,11 +29,18 @@ interface SyncFromCloudModalProps {
   onStartSync: (range?: { start: string; end: string }) => void
 }
 
+// The wire declares only the status keys; the range/calendar payload rides on
+// the extra-allow index signature, so it is narrowed locally here.
+type LakeInfo = components['schemas']['ProvisionLakeInfoResponse'] & {
+  range?: { start?: string; end?: string }
+  calendar?: Record<string, { size_bytes?: number }>
+}
+
 export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFromCloudModalProps) {
   const { timezone } = useTimezoneStore()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  const [lakeInfo, setLakeInfo] = useState<any>(null)
+  const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null)
   const [lakeError, setLakeError] = useState<string | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
 
@@ -79,11 +87,14 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
       // coupled to the backend route. Add a response_model on the
       // handler (and lift service_id into an explicit path arg) to make
       // this typed.
-      const resp = await adminFetch(`/api/services/${activeServiceId}/lake-info`);
+      const resp = await adminJsonResult(
+        '/api/services/{service_id}/lake-info',
+        `/api/services/${activeServiceId}/lake-info`,
+      );
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
       }
-      const data = await resp.json();
+      const data: LakeInfo = resp.data;
       if (data.ok) {
         setLakeInfo(data);
         if (data.range?.start && data.range?.end) {
@@ -197,8 +208,8 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                       type="datetime-local"
                       step="1"
                       value={formatForInput(importRange.start, timezone)}
-                      min={formatForInput(lakeInfo.range?.start, timezone)}
-                      max={formatForInput(importRange.end || lakeInfo.range?.end, timezone)}
+                      min={formatForInput(lakeInfo.range?.start ?? '', timezone)}
+                      max={formatForInput(importRange.end || lakeInfo.range?.end || '', timezone)}
                       onChange={(e) => setImportRange(prev => ({ ...prev, start: parseFromInput(e.target.value, timezone) ?? '' }))}
                       className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono"
                     />
@@ -209,8 +220,8 @@ export function SyncFromCloudModal({ open, onOpenChange, onStartSync }: SyncFrom
                       type="datetime-local"
                       step="1"
                       value={formatForInput(importRange.end, timezone)}
-                      min={formatForInput(importRange.start || lakeInfo.range?.start, timezone)}
-                      max={formatForInput(lakeInfo.range?.end, timezone)}
+                      min={formatForInput(importRange.start || lakeInfo.range?.start || '', timezone)}
+                      max={formatForInput(lakeInfo.range?.end ?? '', timezone)}
                       onChange={(e) => setImportRange(prev => ({ ...prev, end: parseFromInput(e.target.value, timezone) ?? '' }))}
                       className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono"
                     />

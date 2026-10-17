@@ -4,13 +4,14 @@ import { useState, useEffect, useMemo } from 'react'
 import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings } from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportShell'
+import type { components } from '@/types/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { adminFetch, getPageLoadId } from '@/lib/api'
+import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
 import { useQuery } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/serviceStore'
 import { useIsAnalyst } from '@/hooks/useIsAnalyst'
@@ -161,10 +162,14 @@ function useRealtimeStream(): RealtimeStreamState {
     ;(async () => {
       let seedTicks: MetricsTick[] = []
       try {
-        const res = await adminFetch(`/api/services/${activeServiceId}/realtime-seed`, { signal: ac.signal })
+        const res = await adminJsonResult(
+          '/api/services/{service_id}/realtime-seed',
+          `/api/services/${activeServiceId}/realtime-seed`,
+          { signal: ac.signal },
+        )
         if (res.ok) {
-          const json = await res.json()
-          seedTicks = (json.ticks ?? []).filter(isTick)
+          const rawTicks: unknown[] = res.data.ticks ?? []
+          seedTicks = rawTicks.filter(isTick)
         }
       } catch {
         // Seed is best-effort
@@ -283,11 +288,7 @@ function RtDownBanner() {
 // Correlator Leaderboard - auto-refresh Top-N from /correlate endpoint
 // ---------------------------------------------------------------------------
 
-interface CorrelatorResult {
-  dimension: string
-  top: Array<{ value: string; count: number }>
-  freshness: { latest_log_at: string | null; lag_seconds: number }
-}
+type CorrelatorResult = components['schemas']['CorrelateResponse']
 
 export function CorrelatorLeaderboard({
   dimension,
@@ -303,14 +304,16 @@ export function CorrelatorLeaderboard({
   const { data, isFetching: loading } = useQuery<CorrelatorResult | null>({
     queryKey: ['control-room', 'correlate', serviceId, dimension, limit],
     queryFn: async ({ signal }) => {
-      const res = await adminFetch(`/api/services/${serviceId}/control-room/correlate`, {
-        method: 'POST',
-        signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dimension, window_minutes: 60, limit }),
-      })
-      if (!res.ok) throw new Error(`status ${res.status}`)
-      return (await res.json()) as CorrelatorResult
+      return adminJson<'/api/services/{service_id}/control-room/correlate', CorrelatorResult, 'post'>(
+        '/api/services/{service_id}/control-room/correlate',
+        `/api/services/${serviceId}/control-room/correlate`,
+        {
+          method: 'POST',
+          signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dimension, window_minutes: 60, limit }),
+        },
+      )
     },
     enabled: !!serviceId,
     refetchInterval: refreshInterval,

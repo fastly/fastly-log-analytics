@@ -74,8 +74,9 @@ cd "$REPO_ROOT/frontend"
 # 802 -> 800: shared createBaseMap for the four MapLibre maps; dropped window.map debug global.
 # 800 -> 799: correlator useQuery migration and polling/ticker consolidation dropped one violation.
 # 799 -> 794: moved buildTrafficData out of app/ into lib/traffic-chart (lint-clean in its new home).
+# 792 -> 791: adminJson/adminJsonResult replaced the remaining adminFetch().json() hand casts.
 # Drive toward zero.
-CEILING=792
+CEILING=791
 
 # Scope: the user-facing source where the crash-class (rules-of-hooks) and the
 # FE<->BE type-drift (no-explicit-any) live. Keep in sync with the `make

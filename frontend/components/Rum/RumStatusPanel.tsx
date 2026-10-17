@@ -8,7 +8,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Button } from '@/components/ui/button';
 import { useServiceStore } from '@/stores/serviceStore';
 import { useIsAnalyst } from '@/hooks/useIsAnalyst';
-import { adminFetch } from '@/lib/api';
+import { adminJsonResult } from '@/lib/api';
 import type { components } from '@/types/api.generated';
 import { DisableRumDialog } from './DisableRumDialog';
 import { EnableRumDialog } from './EnableRumDialog';
@@ -38,9 +38,8 @@ export function RumStatusPanel() {
   const { data: services } = useQuery({
     queryKey: ['services'],
     queryFn: async () => {
-      const res = await adminFetch('/api/services');
-      if (!res.ok) return null;
-      return res.json();
+      const res = await adminJsonResult('/api/services', '/api/services');
+      return res.ok ? res.data : null;
     },
   });
 
