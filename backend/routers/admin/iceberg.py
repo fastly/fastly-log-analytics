@@ -76,7 +76,10 @@ def iceberg_commit_endpoint(
     poll for completion. 200 (the prior status) misled clients that
     treated it as "done"."""
     if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run DuckLake commit.")
+        raise HTTPException(
+            status_code=403,
+            detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
+        )
 
     from backend.cron.jobs.commit import _run_commit
     from backend.utils.router_utils import start_or_resume_cron
