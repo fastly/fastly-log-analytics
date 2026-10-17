@@ -39,10 +39,14 @@ def cache = true
 def buildContainers = false
 def makeRelease = false
 
-// TEMPORARY: also builds off release/v3.0.0-beta3 to validate the pipeline
-// before this lands on main. Drop that branch name once it merges.
+// Containers are built for main and for release/* branches. origin/main does
+// not carry this Jenkinsfile yet (the release branch is the only place the
+// pipeline exists and the source of the k8s deployments), so release/* must
+// stay in the default. Override the whole pattern per job with
+// FLA_BUILD_REF_PATTERN (a regex matched against the ref name).
+def buildRefPattern = env.FLA_BUILD_REF_PATTERN ?: '^(origin/)?(main|release/.+)$'
 def ref = getBuildRef()
-if (ref.name in ['main', 'origin/main', 'release/v3.0.0-beta3', 'origin/release/v3.0.0-beta3']) {
+if (ref.name =~ buildRefPattern) {
   cache = true
   buildContainers = true
 } else if (ref.name =~ '^v[0-9]+') {
