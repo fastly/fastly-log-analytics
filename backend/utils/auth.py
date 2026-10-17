@@ -15,6 +15,8 @@ plain-function read of ``request.state.analyst_session`` populated by
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import HTTPException, Request
 
 
@@ -60,6 +62,35 @@ def require_service_in_scope(request: Request, service_id: str | None) -> set[st
             detail={"error": "service_not_authorized", "service": service_id},
         )
     return allowed
+
+
+def require_owned_row(
+    request: Request,
+    service_id: str,
+    row_id: str,
+    fetch: Callable[[str, str], dict | None],
+) -> dict | None:
+    """Pre-mutation cross-tenant gate for a row addressed by ``(service_id, row_id)`` (alerts, saved views).
+
+    Admins (``allowed is None``) skip the lookup. For a scoped analyst the addressed ``service_id`` must be
+    in scope (403 ``service_not_authorized``), and when ``fetch(row_id, service_id)`` finds the row its own
+    ``service_id`` must be in scope too — both checks run BEFORE the caller mutates, so a cross-tenant write
+    never lands and the analyst only ever sees the 403. A row that doesn't exist passes (the mutation reports
+    its own not-found). Returns the fetched row (``None`` for admins or a missing row).
+
+    ``fetch`` is the repository's ``get_*_by_id(row_id, service_id)``; the caller still owns the
+    service_id-required 400 and the admin-only mutation check (audit finding 018).
+    """
+    allowed = require_service_in_scope(request, service_id)
+    if allowed is None:
+        return None
+    existing = fetch(row_id, service_id)
+    if existing and existing.get("service_id") not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "service_not_authorized", "service": existing.get("service_id")},
+        )
+    return existing
 
 
 def mask_ips_for(analyst_session: object | None) -> bool:

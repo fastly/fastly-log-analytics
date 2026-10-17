@@ -9,7 +9,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.models.views import SavedView, SavedViewRecord, ViewSaveResponse
 from backend.repositories import views as repo
 from backend.routers._state_sync import sync_admin_state
-from backend.utils.auth import require_service_in_scope
+from backend.utils.auth import require_owned_row, require_service_in_scope
 
 router = APIRouter(prefix="/api/views", tags=["views"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -58,17 +58,8 @@ def delete_view(view_id: str, request: Request, service_id: str | None = Depends
     # exploit for resource exhaustion. Reject early with a 400.
     if not service_id:
         raise HTTPException(status_code=400, detail={"error": "service_id_required"})
-    # Security: pre-flight scope check, mirrors alerts.delete_alert. The
-    # membership gate is shared; the record-ownership check (does the
-    # addressed view actually belong to an in-scope service?) stays inline.
-    allowed = require_service_in_scope(request, service_id)
-    if allowed is not None:
-        existing = repo.get_view_by_id(view_id, service_id)
-        if existing and existing.get("service_id") not in allowed:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "service_not_authorized", "service": existing.get("service_id")},
-            )
+    # Security: pre-flight scope check, mirrors alerts.delete_alert (shared helper).
+    require_owned_row(request, service_id, view_id, repo.get_view_by_id)
     res = repo.delete_view(view_id, service_id)
     sync_admin_state(res.get("service_id") or service_id)
     return Response(status_code=204)

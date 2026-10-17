@@ -29,7 +29,7 @@ from backend.models.errors import DEFAULT_ERROR_RESPONSES
 from backend.repositories import alerts as repo
 from backend.routers._state_sync import sync_admin_state
 from backend.utils.auth import analyst_allowed_services as _analyst_allowed_services
-from backend.utils.auth import require_service_in_scope
+from backend.utils.auth import require_owned_row, require_service_in_scope
 from backend.utils.router_utils import not_found
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"], responses=DEFAULT_ERROR_RESPONSES)
@@ -513,15 +513,7 @@ def toggle_alert_enabled(
     # cross-tenant write would still land and the analyst would just see
     # an error after the fact. Now the toggle never runs for an
     # unauthorized session.
-    allowed = _analyst_allowed_services(request)
-    if allowed is not None:
-        existing = repo.get_alert_by_id(alert_id, service_id)
-        target_sid = existing.get("service_id") if existing else service_id
-        if target_sid not in allowed:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "service_not_authorized", "service": target_sid},
-            )
+    require_owned_row(request, service_id, alert_id, repo.get_alert_by_id)
     _require_admin_mutation(request)
     res = repo.toggle_alert(alert_id, body.enabled, service_id)
     res.setdefault("service_id", service_id)
@@ -541,15 +533,7 @@ def delete_alert(
     # Pre-flight scope check: look up the alert's service_id before
     # deleting so we don't leak the existence of cross-tenant alerts
     # via a delete-then-403 pattern.
-    allowed = _analyst_allowed_services(request)
-    if allowed is not None:
-        existing = repo.get_alert_by_id(alert_id, service_id)
-        target_sid = existing.get("service_id") if existing else service_id
-        if target_sid not in allowed:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "service_not_authorized", "service": target_sid},
-            )
+    require_owned_row(request, service_id, alert_id, repo.get_alert_by_id)
     _require_admin_mutation(request)
     res = repo.delete_alert(alert_id, service_id)
     sync_admin_state(res.get("service_id") or service_id)
