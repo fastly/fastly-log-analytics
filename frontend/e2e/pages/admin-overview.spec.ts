@@ -134,7 +134,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     await expect(page.locator('[data-testid="admin-operations-overview"]')).toBeVisible({ timeout: 30_000 })
 
     // Verify 4 OperationsOverview cards
-    await expect(page.getByText('Live Queries')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('link', { name: /Live Queries/ }).first()).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('Ingest Gap')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('Notable Slow Queries')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('Workers & Queues')).toBeVisible({ timeout: 10_000 })
