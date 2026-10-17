@@ -15,7 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend.core.duckdb import ensure_cid_salt
 from backend.deps import get_service_id, get_source
 from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import CustomFieldsImportBody, ProvisionLakeInfoResponse
+from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody, ProvisionLakeInfoResponse
 from backend.models.services import (
     CredentialsUpdateResponse,
     CronScheduleResponse,
@@ -1379,9 +1379,18 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
     )
 
 
-# response_model intentionally omitted: streams a JSON file download
-# (StreamingResponse with Content-Disposition), not an inline JSON body.
-@router.get("/services/{service_id}/custom-fields/export")
+# No response_model: this is a file download (StreamingResponse with
+# Content-Disposition), so the body schema is declared via ``responses`` instead.
+@router.get(
+    "/services/{service_id}/custom-fields/export",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "model": CustomFieldsExportFile,
+            "description": "JSON file download (Content-Disposition: attachment) holding the user-defined custom fields.",
+        }
+    },
+)
 def api_export_custom_fields(request: Request, service_id: str):
     import json
 

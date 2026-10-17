@@ -890,9 +890,18 @@ def provision_terraform_preview(body: ProvisionConfigRequest):
     return generate_terraform(cfg, access_key, secret_key)
 
 
-# response_model intentionally omitted: streams a ZIP (StreamingResponse),
-# not a JSON body.
-@router.post("/terraform/export")
+# No response_model: streams a ZIP (StreamingResponse), declared as a binary
+# file download via ``responses`` so the generated client does not type it as JSON.
+@router.post(
+    "/terraform/export",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "ZIP archive of the generated Terraform files (Content-Disposition: attachment).",
+            "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}},
+        }
+    },
+)
 def provision_terraform_export(body: ProvisionConfigRequest):
     import io
     import zipfile

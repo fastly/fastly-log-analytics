@@ -20945,10 +20945,12 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "JSON file download (Content-Disposition: attachment) holding the user-defined custom fields.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CustomFieldsExportFile"
+                }
               }
             }
           },
@@ -41088,10 +41090,13 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "ZIP archive of the generated Terraform files (Content-Disposition: attachment).",
             "content": {
-              "application/json": {
-                "schema": {}
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
               }
             }
           },
@@ -58431,6 +58436,22 @@
         "type": "object",
         "title": "CustomFieldUpdate",
         "description": "All fields optional for PATCH semantics."
+      },
+      "CustomFieldsExportFile": {
+        "properties": {
+          "custom_fields": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Custom Fields",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "CustomFieldsExportFile",
+        "description": "Body of the ``GET /api/services/{id}/custom-fields/export`` file download:\nthe exact shape ``/custom-fields/import`` accepts, so an export round-trips."
       },
       "CustomFieldsImportBody": {
         "properties": {

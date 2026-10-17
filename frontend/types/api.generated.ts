@@ -8801,6 +8801,20 @@ export interface components {
             filterable?: boolean | null;
         };
         /**
+         * CustomFieldsExportFile
+         * @description Body of the ``GET /api/services/{id}/custom-fields/export`` file download:
+         *     the exact shape ``/custom-fields/import`` accepts, so an export round-trips.
+         */
+        CustomFieldsExportFile: {
+            /**
+             * Custom Fields
+             * @default []
+             */
+            custom_fields: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
          * CustomFieldsImportBody
          * @description Body for ``POST /api/services/{id}/custom-fields/import``.
          *
@@ -29555,13 +29569,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description JSON file download (Content-Disposition: attachment) holding the user-defined custom fields. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CustomFieldsExportFile"];
                 };
             };
             /** @description Bad request */
@@ -42294,13 +42308,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful Response */
+            /** @description ZIP archive of the generated Terraform files (Content-Disposition: attachment). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/zip": string;
                 };
             };
             /** @description Bad request */

@@ -27,7 +27,6 @@ NON_JSON_EXEMPT = frozenset(
         "GET /api/download-folder",
         "GET /api/log-extents/stream",
         "GET /api/security/proxies/export",
-        "GET /api/services/{service_id}/custom-fields/export",
         "GET /api/services/{service_id}/realtime-stream",
         "GET /api/share/oauth/authorize",
         "GET /api/share/oauth/callback",
@@ -42,7 +41,6 @@ NON_JSON_EXEMPT = frozenset(
         "POST /api/provision/execute",
         "POST /api/provision/reconcile",
         "POST /api/provision/teardown",
-        "POST /api/provision/terraform/export",
         "POST /api/services/{service_id}/cmcd/disable",
         "POST /api/services/{service_id}/cmcd/enable",
         "POST /api/services/{service_id}/control-room/allowlist",
@@ -109,3 +107,25 @@ def test_allowlists_have_no_stale_entries(untyped_ops):
 def test_untyped_json_backlog_only_shrinks():
     assert len(UNTYPED_JSON) <= UNTYPED_JSON_CEILING
     assert not UNTYPED_JSON & NON_JSON_EXEMPT
+
+
+def test_export_downloads_declare_their_body_in_openapi():
+    """File-download routes must say what they return so the client never sees ``unknown``."""
+    from backend.main import app
+
+    paths = app.openapi()["paths"]
+
+    tf = paths["/api/provision/terraform/export"]["post"]["responses"]["200"]["content"]
+    assert tf == {"application/zip": {"schema": {"type": "string", "format": "binary"}}}
+
+    cf = paths["/api/services/{service_id}/custom-fields/export"]["get"]["responses"]["200"]["content"]
+    assert cf == {"application/json": {"schema": {"$ref": "#/components/schemas/CustomFieldsExportFile"}}}
+
+
+def test_custom_fields_export_file_matches_import_body():
+    from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody
+
+    assert (
+        CustomFieldsExportFile.model_json_schema()["properties"]
+        == CustomFieldsImportBody.model_json_schema()["properties"]
+    )

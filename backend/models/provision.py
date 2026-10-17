@@ -208,6 +208,11 @@ class CustomFieldsImportBody(BaseModel):
     custom_fields: list[dict[str, Any]] = []
 
 
+class CustomFieldsExportFile(CustomFieldsImportBody):
+    """Body of the ``GET /api/services/{id}/custom-fields/export`` file download:
+    the exact shape ``/custom-fields/import`` accepts, so an export round-trips."""
+
+
 # ── Wire-safe response models for the provision wizard endpoints ────────────
 #
 # Same contract as backend/models/session_scoring.py: ``extra="allow"`` +
