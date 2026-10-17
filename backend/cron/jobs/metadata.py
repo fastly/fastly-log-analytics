@@ -23,6 +23,7 @@ import httpx
 import tenacity
 
 from backend.cron.decorators import cron_task, global_job
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
     JOB_COLORS,
     RESET_COLOR,
@@ -94,11 +95,8 @@ def _run_metadata_sync(
     from backend.core.duckdb import (
         get_connection,
         get_source_for_service,
-        log_cron_run,
         refresh_config_status,
-        start_cron_run,
     )
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -116,15 +114,6 @@ def _run_metadata_sync(
         if should_defer_cron("metadata_sync", service_id):
             return
 
-    if run_id is None:
-        try:
-            run_id = start_cron_run(src, "metadata_sync")
-        except RuntimeError as e:
-            logger.info("[scheduler] %s: skipping metadata_sync — %s", service_id, str(e))
-            return
-
-    cleanup_progress_and_reap()
-
     # For manual runs (run_id is not None), we ignore the default limit unless
     # it was explicitly passed in. If a manual run is triggered without
     # start_time, it means "Import All", so we should clear any existing limit.
@@ -141,18 +130,29 @@ def _run_metadata_sync(
     def elapsed() -> str:
         return _elapsed_since(start_time_exec)
 
-    start_progress(run_id, service_id=service_id, task="metadata_sync")
     _svc_name = cfg.get("name", service_id) if cfg else service_id
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("🏎️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job started.", _display)
-    _log_and_add_progress(
-        run_id,
+    with cron_run(
         service_id,
-        job_name="metadata_sync",
-        event={"type": "status", "message": f"{elapsed()} Starting metadata sync..."},
-    )
+        "metadata_sync",
+        source=src,
+        run_id=run_id,
+        error_summary="Metadata sync failed",
+        finalize_duration=True,
+        include_log_output=False,
+        skip_log_prefix="scheduler",
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        logger.info("🏎️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job started.", _display)
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="metadata_sync",
+            event={"type": "status", "message": f"{elapsed()} Starting metadata sync..."},
+        )
 
-    try:
         # 1. Refresh Iceberg catalog from cloud
         # In PyIceberg SqlCatalog, load_table() will verify metadata from S3
         _log_and_add_progress(
@@ -200,9 +200,8 @@ def _run_metadata_sync(
             _log_and_add_progress(
                 run_id, service_id, job_name="metadata_sync", event={"type": "status", "message": msg}
             )
-            log_cron_run(src, "metadata_sync", time.time() - start_time_exec, "success", summary=msg, run_id=run_id)
+            run.success(msg)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": msg})
-            end_progress(run_id)
             return
 
         # 2. Sync data files (Pull-to-Local caching)
@@ -308,7 +307,6 @@ def _run_metadata_sync(
         except Exception:
             pass
 
-        duration = time.time() - start_time_exec
         summary = "Refreshed metadata"
         if files_cached > 0:
             verb = "downloaded" if src.get("access_level") == "read_only" else "synced"
@@ -319,31 +317,8 @@ def _run_metadata_sync(
         else:
             run_status = "success"
 
-        log_cron_run(
-            src,
-            "metadata_sync",
-            duration,
-            run_status,
-            files_downloaded=files_cached,
-            rows_ingested=rows_cached,
-            summary=summary,
-            run_id=run_id,
-        )
+        run.record(run_status, summary=summary, files_downloaded=files_cached, rows_ingested=rows_cached)
         _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": summary})
-
-    except Exception as e:
-        duration = time.time() - start_time_exec
-        log_cron_run(
-            src, "metadata_sync", duration, "error", error_message=str(e), summary="Metadata sync failed", run_id=run_id
-        )
-        _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "error", "message": str(e)})
-        logger.exception("[scheduler] %s: Metadata sync failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
-
-    from backend.cron.jobs._common import finalize_cron_duration
-
-    finalize_cron_duration(src, run_id, start_time_exec)
 
     logger.info("🏁  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
 

@@ -433,3 +433,34 @@ def test_metadata_cleanup_handles_failure_and_finalizes_duration(monkeypatch, st
 
     end_prog.assert_called_once_with(456)
     finalize_dur.assert_called_once()
+
+
+def test_lifecycle_rows_have_no_log_output_and_one_terminal_row(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.init_iceberg_table",
+        MagicMock(side_effect=ValueError("Table foo.bar not found in catalog")),
+    )
+
+    metadata._run_metadata_sync("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[1] == "metadata_sync"
+    assert kwargs["run_id"] == 77
+    assert kwargs["log_output"] is None
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_failure_row_summary_and_single_end_progress(monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
+    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", MagicMock(side_effect=RuntimeError("catalog down")))
+
+    metadata._run_metadata_sync("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "Metadata sync failed"
+    assert kwargs["error_message"] == "catalog down"
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
