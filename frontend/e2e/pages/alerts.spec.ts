@@ -107,7 +107,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
       const listRes = await page.request.get(`/api/alerts/${serviceId}`)
       expect(listRes.ok()).toBeTruthy()
       const listJson = await listRes.json()
-      expect(listJson.data.some((a: any) => a.id === ruleId)).toBeTruthy()
+      expect((listJson.data as { id?: string }[]).some((a) => a.id === ruleId)).toBeTruthy()
 
       await page.goto(`/alerts?service=${encodeURIComponent(serviceId)}`)
       await expect(page.getByText('E2E Test High 5xx Alert')).toBeVisible({ timeout: 15_000 })

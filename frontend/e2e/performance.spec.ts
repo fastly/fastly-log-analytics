@@ -1,4 +1,4 @@
-import { test, expect, chromium, type APIRequestContext, type BrowserContext } from '@playwright/test'
+import { test, expect, type APIRequestContext, type BrowserContext } from '@playwright/test'
 import * as fs from 'fs'
 import * as path from 'path'
 import { E2E_BACKEND_PORT } from '../playwright.config'
@@ -280,7 +280,7 @@ test.describe('E2E Performance & Posture Harness', () => {
                   const lastEntry = entries[entries.length - 1]
                   lcp = lastEntry.startTime
                 }).observe({ type: 'largest-contentful-paint', buffered: true })
-              } catch (e) {}
+              } catch {}
 
               setTimeout(() => {
                 const perf = window.performance
@@ -460,7 +460,7 @@ test.describe('E2E Performance & Posture Harness', () => {
                   const lastEntry = entries[entries.length - 1]
                   lcp = lastEntry.startTime
                 }).observe({ type: 'largest-contentful-paint', buffered: true })
-              } catch (e) {}
+              } catch {}
 
               setTimeout(() => {
                 const perf = window.performance
