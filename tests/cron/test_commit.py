@@ -319,3 +319,81 @@ def test_unexpected_exception_logged_as_error(monkeypatch, stub_load_config, stu
     assert args[3] == "error"
     assert "snapshot conflict" in kwargs["error_message"]
     stub_cron_envelope["end_progress"].assert_called_once()
+
+
+def test_lease_held_is_clean_skip_without_row_or_progress(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    stub_cron_envelope["start"].side_effect = RuntimeError("lease held")
+    cb = MagicMock()
+    monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    cb.assert_not_called()
+    stub_cron_envelope["log"].assert_not_called()
+    stub_cron_envelope["end_progress"].assert_not_called()
+
+
+def test_caller_supplied_run_id_is_reused_without_new_lease(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 0, "rows_committed": 0}),
+    )
+
+    commit._run_commit.__wrapped__("svc-1", run_id=77)
+
+    stub_cron_envelope["start"].assert_not_called()
+    assert stub_cron_envelope["log"].call_args.kwargs["run_id"] == 77
+    stub_cron_envelope["end_progress"].assert_called_once_with(77)
+
+
+def test_disk_check_failure_row_has_no_log_output_and_progress_is_closed(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.cron.jobs.commit._check_disk_space", lambda *a, **kw: (False, "disk 95% full"))
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    assert stub_cron_envelope["log"].call_args.kwargs["log_output"] is None
+    stub_cron_envelope["end_progress"].assert_called_once_with(33)
+
+
+def test_exception_after_success_row_overwrites_with_error_row(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr(
+        "backend.core.iceberg.commit_buffer",
+        MagicMock(return_value={"files_committed": 1, "rows_committed": 5, "snapshot_id": 9}),
+    )
+    monkeypatch.setattr(
+        "backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock(side_effect=RuntimeError("warm failed"))
+    )
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    statuses = [c.args[3] for c in stub_cron_envelope["log"].call_args_list]
+    assert statuses == ["success", "error"]
+    last = stub_cron_envelope["log"].call_args
+    assert last.kwargs["summary"] == "Buffer commit failed"
+    assert last.kwargs["error_message"] == "warm failed"
+
+
+def test_high_scale_failure_records_error_row_without_log_output(
+    monkeypatch, stub_load_config, stub_source, stub_cron_envelope
+):
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
+    monkeypatch.setattr("backend.core.ingest.merge_lake_files", MagicMock(side_effect=RuntimeError("merge broke")))
+
+    commit._run_commit.__wrapped__("svc-1")
+
+    stub_cron_envelope["log"].assert_called_once()
+    args, kwargs = stub_cron_envelope["log"].call_args
+    assert args[3] == "error"
+    assert kwargs["summary"] == "DuckLake merge / raw finalization failed"
+    assert kwargs["error_message"] == "merge broke"
+    assert kwargs["log_output"] is None
+    assert kwargs["run_id"] == 33

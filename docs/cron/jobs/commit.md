@@ -159,8 +159,8 @@ Usage records are written to PostgreSQL `usage_log`. There is no SQLite
 
 ### Deployment verification
 
-- [x] Use the canonical `scripts/dev/deploy_test_all.sh` flow (a local-only script, gitignored and not in the public repo; a fresh clone will not have it)
-  only after the change is tested, intentionally committed, and pushed.
+- [x] Use the canonical `scripts/dev/deploy_test_all.sh` flow only after the
+  change is tested, intentionally committed, and pushed.
 - [x] Verify only Local Standard, GCE Standard, and Elevation High-Scale.
 - [x] Capture commit outcomes and freshness/lag observations throughout the
   verification window for each environment; report maximum and p95 values

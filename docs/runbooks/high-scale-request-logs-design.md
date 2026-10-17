@@ -189,7 +189,7 @@ The pipeline reuses existing models, registries, and schemas. **The source of tr
 
 ### 3. Deployment & Verification
 1. Commit (explicitly staged files only) and push to `origin/release/v3.0.0-beta3`.
-2. After the push, run the deployment and verification script (a local-only script, gitignored and not in the public repo; a fresh clone will not have it):
+2. After the push, run the deployment and verification script:
    ```bash
    export MONITOR_MINUTES=1 && ./scripts/dev/deploy_test_all.sh
    ```

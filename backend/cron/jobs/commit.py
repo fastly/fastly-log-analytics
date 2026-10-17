@@ -13,13 +13,12 @@ retain their separate inline ledger-merge path.
 from __future__ import annotations
 
 import logging
-import time
 
 from backend.cron.decorators import cron_task
+from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
     _check_buffer_backlog,
     _check_disk_space,
-    _extract_log_text,
     _log_and_add_progress,
 )
 
@@ -35,7 +34,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     without changing the Fastly logging endpoint period.
     """
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+    from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -53,250 +52,197 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     if not sync_cfg.get("enabled", True) and not force:
         return
 
-    try:
-        if run_id is None:
-            run_id = start_cron_run(src, "commit")
-    except RuntimeError as e:
-        logger.info("⏭️  \x1b[95m[commit]\x1b[0m %s: skipping — %s", service_id, str(e))
-        return
-
-    if svcconfig.is_high_scale_mode(src):
-        # Celery/ledger data plane: converts commit to DuckLake per insert, so
-        # this job's role is adjacent-small-file compaction. Run it INLINE
-        # (this job already executes on a worker in external mode) so the
-        # cron_runs lease is held for the duration — a dispatch-and-forget
-        # released the mutual-exclusion lease before the merge ran, letting
-        # overlapping ticks run concurrent merges — and the row records the
-        # real outcome instead of a fake instant success.
-        from backend.core.ingest import finalize_committed_raw, merge_lake_files
-        from backend.core.metadata.base import get_con
-
-        merge_started = time.time()
-        try:
-            merge_lake_files(service_id)
-
-            # Honest per-run counts for the cron row: how many files the
-            # convert workers landed since the previous commit tick, and
-            # how many durable raw .gz files we deleted (delete_after).
-            meta_con = get_con(service_id)
-            from backend.core.metadata import pg_connection
-
-            where_service = "service_id = ? AND " if pg_connection.is_postgres() else ""
-            service_args = (service_id,) if pg_connection.is_postgres() else ()
-            prev = meta_con.execute(
-                f"SELECT started_at FROM cron_runs WHERE {where_service}task = 'commit' "
-                f"AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
-                service_args,
-            ).fetchone()
-            since_epoch = 0.0
-            if prev and prev["started_at"]:
-                from backend.utils.date_utils import parse_iso_utc
-
-                prev_dt = parse_iso_utc(prev["started_at"])
-                if prev_dt is not None:
-                    since_epoch = prev_dt.timestamp()
-            files_ingested = meta_con.execute(
-                "SELECT count(*) FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
-                (service_id, since_epoch),
-            ).fetchone()[0]
-
-            raw = finalize_committed_raw(service_id)
-
-            summary = f"Ingested {files_ingested} file(s); merged small lake files"
-            if raw["delete_after"]:
-                summary += f"; deleted {raw['deleted']} raw file(s)"
-            else:
-                summary += "; raw deletion disabled (delete_after=false)"
-            log_cron_run(
-                src,
-                "commit",
-                time.time() - merge_started,
-                "success",
-                run_id=run_id,
-                files_downloaded=files_ingested,
-                files_deleted_fos=raw["deleted"],
-                summary=summary,
-            )
-        except Exception as e:
-            log_cron_run(
-                src,
-                "commit",
-                time.time() - merge_started,
-                "error",
-                run_id=run_id,
-                error_message=str(e),
-                summary="DuckLake merge / raw finalization failed",
-            )
-            logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
-        return
-
-    # Disk pre-check: commits write manifest cache + cloud-staged parquet
-    # locally before upload. A full disk during commit can corrupt the
-    # iceberg state midway, which is much worse than refusing to start.
-    from backend.core.duckdb import _cache_dir as _commit_cache_dir
-
-    ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "commit")
-    if not ok:
-        log_cron_run(
-            src,
-            "commit",
-            0.0,
-            "error",
-            run_id=run_id,
-            error_message=disk_msg,
-            summary=f"Commit aborted: {disk_msg}",
-        )
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="commit")
-    _svc_name = cfg.get("name", service_id) if cfg else service_id
+    _svc_name = cfg.get("name", service_id)
     _display = f"{_svc_name} ({service_id})" if _svc_name != service_id else service_id
-    logger.info("🏎️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
-    _log_and_add_progress(
-        run_id,
+    with cron_run(
         service_id,
-        job_name="commit",
-        event={"type": "status", "message": "Committing local buffer to Iceberg snapshot..."},
-    )
+        "commit",
+        source=src,
+        run_id=run_id,
+        error_summary="Buffer commit failed",
+        finalize_duration=True,
+        skip_log_prefix="commit",
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        if svcconfig.is_high_scale_mode(src):
+            # Celery/ledger data plane: converts commit to DuckLake per insert, so
+            # this job's role is adjacent-small-file compaction. Run it INLINE
+            # (this job already executes on a worker in external mode) so the
+            # cron_runs lease is held for the duration — a dispatch-and-forget
+            # released the mutual-exclusion lease before the merge ran, letting
+            # overlapping ticks run concurrent merges — and the row records the
+            # real outcome instead of a fake instant success.
+            from backend.core.ingest import finalize_committed_raw, merge_lake_files
+            from backend.core.metadata.base import get_con
 
-    start_time = time.time()
-    try:
-        from backend.core import iceberg as db_iceberg
-
-        def _commit_progress(type, msg):
-            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": type, "message": msg})
-
-        result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
-        duration = time.time() - start_time
-        quarantined = int(result.get("quarantined_files", 0) or 0)
-        quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
-        commit_error_parts = []
-        if result.get("error"):
-            commit_error_parts.append(str(result["error"]))
-        if quarantined:
-            commit_error_parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
-        commit_error = "; ".join(commit_error_parts)
-        incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
-        # Post-commit backlog probe: if anything is still in the buffer after a
-        # successful commit, the next commit was racing with a fresh ingest OR
-        # the drain is genuinely stuck (catalog perms, schema mismatch, etc.).
-        # The threshold scales with commit_interval_mins so "stuck" means
-        # "older than what a single commit cycle could reasonably leave behind."
-        backlog_suffix = _check_buffer_backlog(
-            src, service_id, commit_interval_mins=int(sync_cfg.get("commit_interval_mins", 5))
-        )
-        if result.get("files_committed", 0) > 0:
-            summary = (
-                f"Committed {result['files_committed']} buffer file(s) "
-                f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}"
-                f"{incomplete_suffix}{backlog_suffix}"
-            )
-            log_cron_run(
-                src,
-                "commit",
-                duration,
-                "error" if commit_error else "success",
-                run_id=run_id,
-                rows_ingested=result["rows_committed"],
-                error_message=commit_error or None,
-                summary=summary,
-                log_output=_extract_log_text(run_id),
-            )
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="commit",
-                event={"type": "error" if commit_error else "done", "message": summary},
-            )
-
-            # ── Post-commit view refresh + pool warm ──
-            # commit_buffer drained the buffer (buf_set changed) and advanced
-            # the Iceberg snapshot (metadata_loc changed). Without this hop,
-            # the next reader on every pool slot would take the slow-path
-            # rebuild under a lock that ingest also contends for. Doing both
-            # the cache refresh and the pool warm on the commit thread keeps
-            # the request path on the fast path.
-            from backend.cron.jobs._common import refresh_view_and_warm_pool
-
-            refresh_view_and_warm_pool(
-                src,
-                service_id,
-                log_prefix="",
-                progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
-            )
-
-            # ── On-demand metadata sync ──
-            # Keep the commit cron's lease and duration scoped to the commit;
-            # metadata sync has its own cron run, telemetry, and follow-up
-            # scheduling if another commit lands while it is already running.
+            run.include_log_output = False
             try:
-                from backend.cron.jobs import metadata as _metadata_jobs
+                merge_lake_files(service_id)
 
-                _metadata_jobs.dispatch_post_commit_metadata_sync(service_id)
+                # Honest per-run counts for the cron row: how many files the
+                # convert workers landed since the previous commit tick, and
+                # how many durable raw .gz files we deleted (delete_after).
+                meta_con = get_con(service_id)
+                from backend.core.metadata import pg_connection
+
+                where_service = "service_id = ? AND " if pg_connection.is_postgres() else ""
+                service_args = (service_id,) if pg_connection.is_postgres() else ()
+                prev = meta_con.execute(
+                    f"SELECT started_at FROM cron_runs WHERE {where_service}task = 'commit' "
+                    f"AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
+                    service_args,
+                ).fetchone()
+                since_epoch = 0.0
+                if prev and prev["started_at"]:
+                    from backend.utils.date_utils import parse_iso_utc
+
+                    prev_dt = parse_iso_utc(prev["started_at"])
+                    if prev_dt is not None:
+                        since_epoch = prev_dt.timestamp()
+                files_ingested = meta_con.execute(
+                    "SELECT count(*) FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+                    (service_id, since_epoch),
+                ).fetchone()[0]
+
+                raw = finalize_committed_raw(service_id)
+
+                summary = f"Ingested {files_ingested} file(s); merged small lake files"
+                if raw["delete_after"]:
+                    summary += f"; deleted {raw['deleted']} raw file(s)"
+                else:
+                    summary += "; raw deletion disabled (delete_after=false)"
+                run.success(summary, files_downloaded=files_ingested, files_deleted_fos=raw["deleted"])
             except Exception as e:
-                _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "warning", "message": e})
+                run.fail("DuckLake merge / raw finalization failed", error_message=str(e))
+                logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
+            return
 
-            # ── Compact-on-sync ──
-            # New parquet files just landed in the local cache. Fire local
-            # compaction immediately to merge them rather than waiting up
-            # to 2 min for the cron tick. Cheap and keeps the small-file
-            # count as low as possible for the next dashboard render.
-            # Wrapped in a fresh thread so a slow merge doesn't extend
-            # the sync cron's wall-clock and risk the watchdog.
-            try:
-                import threading as _t
+        # Disk pre-check: commits write manifest cache + cloud-staged parquet
+        # locally before upload. A full disk during commit can corrupt the
+        # iceberg state midway, which is much worse than refusing to start.
+        from backend.core.duckdb import _cache_dir as _commit_cache_dir
 
-                from backend.core import local_compaction as _lc
+        ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "commit")
+        if not ok:
+            run.include_log_output = False
+            run.fail(f"Commit aborted: {disk_msg}", error_message=disk_msg)
+            return
 
-                _t.Thread(
-                    target=lambda: _lc.compact_local_partitions(src),
-                    name=f"local-compact-on-sync:{service_id}",
-                    daemon=True,
-                ).start()
-            except Exception as e:
-                logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
-        else:
-            summary_start = "No buffer files committed" if commit_error else "No new data to commit"
-            summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
-            log_cron_run(
-                src,
-                "commit",
-                duration,
-                "error" if commit_error else "success",
-                run_id=run_id,
-                error_message=commit_error or None,
-                summary=summary,
-                log_output=_extract_log_text(run_id),
-            )
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="commit",
-                event={"type": "error" if commit_error else "done", "message": summary},
-            )
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "commit",
-            duration,
-            "error",
-            run_id=run_id,
-            error_message=str(e),
-            summary="Buffer commit failed",
-            log_output=_extract_log_text(run_id),
+        logger.info("🏎️  \x1b[95m[commit]\x1b[0m %s: Commit job started.", _display)
+        _log_and_add_progress(
+            run_id,
+            service_id,
+            job_name="commit",
+            event={"type": "status", "message": "Committing local buffer to Iceberg snapshot..."},
         )
-        _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
-        logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
 
-    from backend.cron.jobs._common import finalize_cron_duration
+        try:
+            from backend.core import iceberg as db_iceberg
 
-    finalize_cron_duration(src, run_id, start_time)
+            def _commit_progress(type, msg):
+                _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": type, "message": msg})
+
+            result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
+            quarantined = int(result.get("quarantined_files", 0) or 0)
+            quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
+            commit_error_parts = []
+            if result.get("error"):
+                commit_error_parts.append(str(result["error"]))
+            if quarantined:
+                commit_error_parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
+            commit_error = "; ".join(commit_error_parts)
+            incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
+            # Post-commit backlog probe: if anything is still in the buffer after a
+            # successful commit, the next commit was racing with a fresh ingest OR
+            # the drain is genuinely stuck (catalog perms, schema mismatch, etc.).
+            # The threshold scales with commit_interval_mins so "stuck" means
+            # "older than what a single commit cycle could reasonably leave behind."
+            backlog_suffix = _check_buffer_backlog(
+                src, service_id, commit_interval_mins=int(sync_cfg.get("commit_interval_mins", 5))
+            )
+            if result.get("files_committed", 0) > 0:
+                summary = (
+                    f"Committed {result['files_committed']} buffer file(s) "
+                    f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}"
+                    f"{incomplete_suffix}{backlog_suffix}"
+                )
+                run.record(
+                    "error" if commit_error else "success",
+                    summary=summary,
+                    error_message=commit_error or None,
+                    rows_ingested=result["rows_committed"],
+                )
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="commit",
+                    event={"type": "error" if commit_error else "done", "message": summary},
+                )
+
+                # ── Post-commit view refresh + pool warm ──
+                # commit_buffer drained the buffer (buf_set changed) and advanced
+                # the Iceberg snapshot (metadata_loc changed). Without this hop,
+                # the next reader on every pool slot would take the slow-path
+                # rebuild under a lock that ingest also contends for. Doing both
+                # the cache refresh and the pool warm on the commit thread keeps
+                # the request path on the fast path.
+                from backend.cron.jobs._common import refresh_view_and_warm_pool
+
+                refresh_view_and_warm_pool(
+                    src,
+                    service_id,
+                    log_prefix="",
+                    progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
+                )
+
+                # ── On-demand metadata sync ──
+                # Keep the commit cron's lease and duration scoped to the commit;
+                # metadata sync has its own cron run, telemetry, and follow-up
+                # scheduling if another commit lands while it is already running.
+                try:
+                    from backend.cron.jobs import metadata as _metadata_jobs
+
+                    _metadata_jobs.dispatch_post_commit_metadata_sync(service_id)
+                except Exception as e:
+                    _log_and_add_progress(
+                        run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
+                    )
+
+                # ── Compact-on-sync ──
+                # New parquet files just landed in the local cache. Fire local
+                # compaction immediately to merge them rather than waiting up
+                # to 2 min for the cron tick. Cheap and keeps the small-file
+                # count as low as possible for the next dashboard render.
+                # Wrapped in a fresh thread so a slow merge doesn't extend
+                # the sync cron's wall-clock and risk the watchdog.
+                try:
+                    import threading as _t
+
+                    from backend.core import local_compaction as _lc
+
+                    _t.Thread(
+                        target=lambda: _lc.compact_local_partitions(src),
+                        name=f"local-compact-on-sync:{service_id}",
+                        daemon=True,
+                    ).start()
+                except Exception as e:
+                    logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
+            else:
+                summary_start = "No buffer files committed" if commit_error else "No new data to commit"
+                summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
+                run.record("error" if commit_error else "success", summary=summary, error_message=commit_error or None)
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="commit",
+                    event={"type": "error" if commit_error else "done", "message": summary},
+                )
+        except Exception as e:
+            run.fail("Buffer commit failed", error_message=str(e))
+            _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
+            logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
 
     try:
         from backend.sync_status_publisher import publisher as _sync_status_publisher
