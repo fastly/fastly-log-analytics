@@ -58,3 +58,14 @@ def test_deployment_validation_refuses_a_non_postgres_metadata_dsn(monkeypatch):
     monkeypatch.setenv("METADATA_DSN", "sqlite:///tmp/x.db")
     with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
         config.validate_deployment_mode()
+
+
+def test_usage_log_ddl_still_comes_from_usage_log_db_schema():
+    from backend.core.metadata import pg_schema
+
+    statements = pg_schema.pg_schema_statements()
+    joined = "\n".join(statements)
+    assert "CREATE TABLE IF NOT EXISTS usage_log (" in joined
+    assert "CREATE TABLE IF NOT EXISTS usage_log_hourly_summary (" in joined
+    assert not any(s.strip().startswith("CREATE TRIGGER") for s in statements)
+    assert "AUTOINCREMENT" not in joined

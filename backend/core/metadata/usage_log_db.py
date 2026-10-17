@@ -1,58 +1,32 @@
-"""Dedicated per-service SQLite file for the FOS/CDN usage_log table.
+"""Connection facade for the FOS/CDN ``usage_log`` tables, plus their DDL.
 
-This file used to live as a table inside ``data/services/<sid>.metadata.db``
-alongside ``audit_logs``, ``views``, ``scoring_labels``, etc. Per the
-2026-06-11 perf audit, the cron_sync writer's hot path holds the
-metadata.db WAL writer lock for ~3 s per tick (200+ FOS/CDN rows × per-
-row AFTER trigger maintaining ``usage_log_hourly_summary``), and during
-that window every admin-page reader on the SAME metadata.db blocked on
-``SQLITE_BUSY``-with-30s-timeout retries → 6-56× endpoint slowdown.
+``usage_log`` and its ``usage_log_hourly_summary`` rollup once lived in a dedicated
+per-service SQLite file so the cron writer's hot path never contended with admin
+readers on ``metadata.db``. Metadata is Postgres-only now (ADR-22): every function
+below hands out the same pooled Postgres connections as
+:mod:`backend.core.metadata.base`, and rows are scoped by their ``service_id`` column.
 
-WAL allows concurrent readers + one writer, but only *within a single
-database file*. Moving the high-write surface (``usage_log`` + its
-``usage_log_hourly_summary`` rollup + the 3 triggers wiring them
-together) into its own SQLite file means the cron writer can churn
-freely without ever touching the lock the admin endpoints care about.
+What is still load-bearing here:
 
-Mirrors the pattern in ``backend/utils/rdns_cache.py`` and
-``backend/utils/ngwaf_bot_cache.py`` — both already use dedicated
-SQLite files with the same WAL / NORMAL / cache_size pragmas, and both
-already expose a read-only open helper so reader paths never contend
-with the writer.
-
-Public surface
---------------
-- :func:`get_con` — read-write thread-local connection (write path).
-- :func:`open_readonly` — short-lived read-only connection per call;
-  used by the request hot path. URI ``mode=ro`` means the open call
-  cannot acquire the writer lock under any circumstances, so a slow
-  reader can never block a cron commit.
-- :func:`teardown` — drop the file + WAL/SHM siblings.
-- :func:`close_all_connections` — pytest fixture support.
-
-Cross-table joins
------------------
-None — usage_log and usage_log_hourly_summary only reference each other,
-and the existing SQL in :mod:`backend.core.metadata.usage_log` does not
-join either to ``audit_logs`` / ``views`` / ``scoring_labels`` / etc.
-The split is therefore self-contained.
+- :func:`get_con` / :func:`open_readonly` / :func:`release_thread_connection` /
+  :func:`close_all_connections` — the import surface ``usage_log``, ``ingest_log``,
+  ``reconciliation`` and telemetry call (and tests monkeypatch).
+- :data:`_SCHEMA` — the table/index definitions. ``pg_schema.pg_schema_statements``
+  translates them to Postgres DDL (and drops the SQLite triggers, whose rollup
+  maintenance the Postgres write path does itself), so this list IS the source of
+  the ``usage_log`` tables; deleting it would drop them from the bootstrap.
+- :func:`db_path` — the legacy file path, kept for the contract-backend script.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import threading
 
 from backend.core.metadata import pg_connection
 from backend.core.metadata.base import _DATA_DIR, _validate_service_id_or_raise
 
 logger = logging.getLogger(__name__)
-
-# Kept as module-level attributes for backward compatibility with tests/conftest.py
-_local = threading.local()
-_init_lock = threading.Lock()
-_initialized: set[str] = set()
 
 
 def db_path(service_id: str) -> str:
@@ -93,9 +67,8 @@ def teardown(service_id: str) -> None:
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
-# Exact copies of the table / index / trigger definitions that used to
-# live in backend.core.metadata.base._SCHEMA. Kept identical so the
-# migration is a row-copy with no schema translation.
+# SQLite-dialect table / index / trigger definitions; ``pg_schema`` rewrites them to
+# Postgres DDL (see the module docstring).
 
 _SCHEMA = [
     """CREATE TABLE IF NOT EXISTS usage_log (
