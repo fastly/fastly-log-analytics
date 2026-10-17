@@ -143,7 +143,11 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
         # cache-clearing the operator explicitly asked for.
         run_id = start_cron_run(source, "metadata_sync")
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=make_error("cron_busy", str(e), busy=True)) from e
+        logger.warning("cron_busy service_id=%s: %s", service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("cron_busy", "A sync run is already in progress", busy=True),
+        ) from e
 
     start_progress(run_id, service_id=service_id, task="metadata_sync")
     t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)

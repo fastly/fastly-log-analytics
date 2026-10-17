@@ -118,7 +118,11 @@ def sync_status(
         resp: SyncStatusResponse = SyncStatusResponse.with_telemetry(**status)
         return resp
     except _db.DBBusyError as e:
-        raise HTTPException(status_code=503, detail=make_error("db_busy", str(e), busy=True))
+        logger.warning("db_busy service_id=%s: %s", service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("db_busy", "Database is busy; retry shortly", busy=True),
+        ) from e
     except Exception as e:
         raise_internal(logger, e, code="sync_status_failed")
 

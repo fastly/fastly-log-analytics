@@ -56,7 +56,8 @@ from backend.provision.rum_orchestrator_v2 import (
 )
 from backend.repositories import rum as rum_repo
 from backend.utils.date_utils import iso_z, parse_iso_utc
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, require_fastly_token
+from backend.utils.error_redaction import correlation_id
+from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, make_error, raise_internal, require_fastly_token
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +168,13 @@ async def get_faro_sdk(request: Request, service_id: str | None = None):
                 fallback_ver = list(_FARO_BUNDLE_CACHE.keys())[0]
                 bundle_bytes = _FARO_BUNDLE_CACHE[fallback_ver]
             else:
-                raise HTTPException(
-                    status_code=502, detail=make_error("faro_sdk_fetch_failed", f"Failed to fetch Faro SDK: {e}")
+                raise_internal(
+                    logger,
+                    e,
+                    code="faro_sdk_fetch_failed",
+                    status=502,
+                    message="Failed to fetch Faro SDK",
+                    request=request,
                 )
 
     return Response(
@@ -388,7 +394,13 @@ async def upgrade_rum_handler(
     try:
         available = await fetch_available_faro_versions()
     except ValueError as e:
-        raise HTTPException(status_code=503, detail=make_error("faro_registry_unavailable", str(e))) from e
+        raise_internal(
+            logger,
+            e,
+            code="faro_registry_unavailable",
+            status=503,
+            message="Faro version registry unavailable",
+        )
 
     if body.version not in available:
         raise HTTPException(
@@ -473,7 +485,12 @@ def update_rum_settings(
             svcconfig.save_config(service_id, original_cfg)
         except Exception as rollback_err:
             logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-        raise HTTPException(status_code=500, detail={"error": f"Failed to upload RUM tracker wrapper to FOS: {e}"})
+        raise_internal(
+            logger,
+            e,
+            code="rum_tracker_upload_failed",
+            message="Failed to upload RUM tracker wrapper to FOS",
+        )
 
     # Reconcile VCL state so the new custom condition is deployed to Fastly,
     # but only if RUM was not previously enabled or if the custom condition has changed.
@@ -497,9 +514,11 @@ def update_rum_settings(
                 svcconfig.save_config(service_id, original_cfg)
             except Exception as rollback_err:
                 logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-            raise HTTPException(
-                status_code=500,
-                detail={"error": f"Failed to reconcile and deploy updated RUM conditions to Fastly: {e}"},
+            raise_internal(
+                logger,
+                e,
+                code="rum_reconcile_failed",
+                message="Failed to reconcile and deploy updated RUM conditions to Fastly",
             )
     else:
         logger.info(
@@ -889,15 +908,11 @@ async def rum_analytics(
         )
 
     except Exception as e:
-        logger.error(f"[rum] Analytics query failed for {service_id}: {e}", exc_info=True)
-        from fastapi import HTTPException
-
+        error_id = correlation_id(request)
+        logger.error(f"[rum] Analytics query failed for {service_id} error_id={error_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": "rum_analytics_failed",
-                "message": f"RUM analytics query failed: {str(e)}",
-            },
+            detail=make_error("rum_analytics_failed", "RUM analytics query failed", error_id=error_id),
         )
 
 

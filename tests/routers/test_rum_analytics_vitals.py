@@ -316,6 +316,8 @@ def test_processing_exception_returns_500(setup_temp_rum_db):
         r = client.get(f"/api/services/{service_id}/rum/analytics")
         assert r.status_code == 500
         data = r.json()
-        assert "RUM analytics query failed" in data["detail"]["message"]
+        assert data["detail"]["message"] == "RUM analytics query failed"
+        assert "simulated DB corruption" not in r.text
+        assert data["detail"]["error_id"]
     finally:
         rum_module.execute_with_stale_view_retry = original

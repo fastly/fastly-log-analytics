@@ -19,6 +19,8 @@ from typing import Any, NoReturn, get_args
 
 from fastapi import HTTPException, Request
 
+from backend.utils.error_redaction import redact_error_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,7 +114,11 @@ def start_or_resume_cron(
         for entry in list_active_runs():
             if entry.get("service_id") == service_id and entry.get("task") == task:
                 return {"ok": True, "message": in_progress_msg, "run_id": entry["run_id"]}
-        raise HTTPException(status_code=503, detail=make_error("cron_busy", str(e), busy=True)) from e
+        logger.warning("cron_busy task=%s service_id=%s: %s", task, service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("cron_busy", "A run for this task is already in progress", busy=True),
+        ) from e
 
 
 def load_service_config(service_id: str) -> dict:
@@ -239,6 +245,8 @@ def raise_internal(
     *,
     code: str = "request_failed",
     status: int = 500,
+    message: str | None = None,
+    request: Request | None = None,
 ) -> NoReturn:
     """Log the full exception server-side; raise a generic ``HTTPException``
     that does NOT echo the original exception message to the client.
@@ -248,14 +256,21 @@ def raise_internal(
     that pattern leaks upstream API response bodies (e.g. Fastly error
     text interpolated by ``backend.core.fastly.client.fastly()``) to the
     caller. ``error_id`` lets operators correlate a client report with
-    the matching server-log line.
+    the matching server-log line; ``request_id`` (when the request is known)
+    joins it to the access log. ``message`` must be a static string.
     """
+    from backend.utils.error_redaction import current_request_id
+
     error_id = uuid.uuid4().hex[:8]
-    log.exception("%s [error_id=%s]", code, error_id)
-    raise HTTPException(
-        status_code=status,
-        detail={"error": code, "error_id": error_id},
-    ) from exc
+    request_id = current_request_id(request)
+    log.exception("%s [error_id=%s request_id=%s]", code, error_id, request_id)
+    detail: dict[str, object] = {"error": code}
+    if message is not None:
+        detail["message"] = message
+    detail["error_id"] = error_id
+    if request_id:
+        detail["request_id"] = request_id
+    raise HTTPException(status_code=status, detail=detail) from exc
 
 
 # ── Section-selector validation ───────────────────────────────────────────────
@@ -371,12 +386,12 @@ def query_errors(status_code: int = 400):
 
     Three branches:
 
-    * ``ValueError`` → 400 ``make_error("bad_request", str(e))``. The
+    * ``ValueError`` → 400 ``make_error("bad_request", redact_error_text(e))``. The
       human-readable text rides on ``detail.message`` where
       ``extractApiError`` reads it as the user-facing string. Use
       ``ValueError`` from inside the handler whenever the message is
       safe to echo (validated input, period parsing, etc.).
-    * ``LookupError`` → 404 ``make_error("not_found", str(e))`` — same
+    * ``LookupError`` → 404 ``make_error("not_found", redact_error_text(e))`` — same
       shape, different code.
     * Any other ``Exception`` → ``raise_internal``: logs the full
       traceback server-side (operator triage) and returns ``{"error":
@@ -411,9 +426,9 @@ def query_errors(status_code: int = 400):
                 except HTTPException:
                     raise
                 except ValueError as e:
-                    raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
+                    raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e)))
                 except LookupError as e:
-                    raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
+                    raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
                 except Exception as e:
                     raise_internal(logger, e, code="unhandled_error", status=status_code)
 
@@ -426,9 +441,9 @@ def query_errors(status_code: int = 400):
             except HTTPException:
                 raise
             except ValueError as e:
-                raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
+                raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e)))
             except LookupError as e:
-                raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
+                raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e)))
             except Exception as e:
                 raise_internal(logger, e, code="unhandled_error", status=status_code)
 
