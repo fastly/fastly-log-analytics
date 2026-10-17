@@ -119,6 +119,12 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     cdn_secret: 'mock-cdn-secret',
     access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
+    // Cron-written storage totals (FLA_DEV_NO_CRONS=1 means no cron ever
+    // writes them here). With both present, GET /api/usage/current-storage
+    // uses them instead of falling back to a live FOS ListObjectsV2 scan
+    // against the mock bucket, which only logged `FOS Scan failed ... 400`
+    // on every /usage page load. The sandbox has no committed Iceberg data.
+    status: { iceberg_bytes: 0, iceberg_files: 0 },
     log_fields: {
       schema_version: 2,
       preset: 'recommended',
